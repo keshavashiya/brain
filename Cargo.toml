@@ -1,0 +1,92 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/storage",
+    "crates/hippocampus",
+    "crates/cortex",
+    "crates/thalamus",
+    # Placeholder crates - will be implemented in Phase 3
+    # "crates/amygdala",
+    # "crates/cerebellum",
+    # "crates/ganglia",
+    # "crates/bridge",
+    "crates/cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Keshav Ashiya"]
+license = "MIT"
+repository = "https://github.com/keshavashiya/brain"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Date/time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Configuration
+figment = { version = "0.10", features = ["yaml", "env"] }
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Database
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Vector DB
+lancedb = "0.26"
+
+# Encryption
+aes-gcm = "0.10"
+argon2 = "0.5"
+
+# Hashing (audit log)
+sha2 = "0.10"
+
+# Embeddings
+ort = "2.0.0-rc.11"
+tokenizers = "0.22"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+rustyline = "14"
+
+# Terminal UI
+crossterm = "0.28"
+
+# WebSocket
+tokio-tungstenite = "0.26"
+
+# Utils
+shellexpand = "3"
+
+# Internal crates
+core = { path = "crates/core" }
+storage = { path = "crates/storage" }
+hippocampus = { path = "crates/hippocampus" }
+cortex = { path = "crates/cortex" }
+thalamus = { path = "crates/thalamus" }
+amygdala = { path = "crates/amygdala" }
+cerebellum = { path = "crates/cerebellum" }
+ganglia = { path = "crates/ganglia" }
+bridge = { path = "crates/bridge" }

@@ -1,0 +1,28 @@
+[package]
+name = "storage"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rusqlite = { workspace = true }
+lancedb = { workspace = true }
+aes-gcm = { workspace = true }
+argon2 = { workspace = true }
+sha2 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+base64 = "0.22"
+arrow-schema = "57"
+arrow-array = "57"
+futures = "0.3"
+
+[dev-dependencies]
+tempfile = "3"

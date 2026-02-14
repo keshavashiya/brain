@@ -1,0 +1,62 @@
+# Brain - Default Configuration
+# Override with ~/.brain/config.yaml or environment variables
+
+brain:
+  version: "0.1.0"
+  data_dir: "~/.brain"
+
+llm:
+  provider: "ollama"
+  model: "qwen2.5:14b"
+  base_url: "http://localhost:11434"
+  temperature: 0.7
+  max_tokens: 4096
+
+embedding:
+  model: "bge-small-en-v1.5"
+  dimensions: 384
+  batch_size: 32
+  device: "auto"               # auto | cpu | cuda | coreml
+
+memory:
+  episodic:
+    max_entries: 100000
+    retention_days: 365
+  semantic:
+    similarity_threshold: 0.65
+    max_results: 20
+  search:
+    hybrid_weight: 0.7         # Weight for vector search (1-weight for BM25)
+    rrf_k: 60                  # RRF fusion parameter
+  consolidation:
+    enabled: true
+    interval_hours: 24
+    forgetting_threshold: 0.05 # Memories below this are candidates for pruning
+
+encryption:
+  enabled: true
+
+security:
+  exec_allowlist:
+    - ls
+    - cat
+    - grep
+    - find
+    - git
+    - cargo
+    - rustc
+  exec_timeout_seconds: 30
+
+proactivity:
+  enabled: false               # Opt-in
+  max_per_day: 5
+  min_interval_minutes: 60
+  quiet_hours:
+    start: "22:00"
+    end: "08:00"
+
+openclaw:
+  enabled: false
+  gateway_url: "ws://127.0.0.1:18789"
+  agent_name: "brain"
+  preferred_channel: "whatsapp"
