@@ -1,9 +1,9 @@
-//! Semantic memory — LanceDB-backed vector memory.
+//! Semantic memory — RuVector-backed vector memory.
 //!
 //! Stores extracted facts, user model data, and knowledge
 //! as vector embeddings for similarity-based retrieval.
 
-use storage::{LanceStore, SqlitePool, VectorResult};
+use storage::{RuVectorStore, SqlitePool, VectorResult};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -13,8 +13,8 @@ pub enum SemanticError {
     #[error("SQLite error: {0}")]
     Sqlite(#[from] storage::sqlite::SqliteError),
 
-    #[error("LanceDB error: {0}")]
-    Lance(#[from] storage::lance::LanceError),
+    #[error("RuVector error: {0}")]
+    RuVector(#[from] storage::ruvector::RuVectorError),
 
     #[error("Fact not found: {0}")]
     NotFound(String),
@@ -39,22 +39,22 @@ pub struct SemanticResult {
     pub distance: f32,
 }
 
-/// Semantic memory store — dual-writes to SQLite + LanceDB.
+/// Semantic memory store — dual-writes to SQLite + RuVector.
 ///
 /// SQLite stores the structured fact data (subject-predicate-object),
-/// while LanceDB stores the vector embeddings for similarity search.
+/// while RuVector stores the vector embeddings for similarity search.
 pub struct SemanticStore {
     db: SqlitePool,
-    lance: LanceStore,
+    ruv: RuVectorStore,
 }
 
 impl SemanticStore {
     /// Create a new semantic store.
-    pub fn new(db: SqlitePool, lance: LanceStore) -> Self {
-        Self { db, lance }
+    pub fn new(db: SqlitePool, ruv: RuVectorStore) -> Self {
+        Self { db, ruv }
     }
 
-    /// Store a new fact in both SQLite and LanceDB.
+    /// Store a new fact in both SQLite and RuVector.
     ///
     /// The `vector` should be the embedding of the fact's content
     /// (typically: "{subject} {predicate} {object}").
@@ -82,8 +82,8 @@ impl SemanticStore {
             Ok(())
         })?;
 
-        // Write vector to LanceDB
-        self.lance
+        // Write vector to RuVector
+        self.ruv
             .add_vectors(
                 "facts_vec",
                 vec![id.clone()],
@@ -105,13 +105,13 @@ impl SemanticStore {
         query_vector: Vec<f32>,
         top_k: usize,
     ) -> Result<Vec<SemanticResult>, SemanticError> {
-        let lance_results: Vec<VectorResult> = self
-            .lance
+        let ruv_results: Vec<VectorResult> = self
+            .ruv
             .search("facts_vec", query_vector, top_k)
             .await?;
 
         let mut results = Vec::new();
-        for vr in lance_results {
+        for vr in ruv_results {
             // Look up the full fact from SQLite
             let fact_opt = self.get_fact(&vr.id)?;
             if let Some(fact) = fact_opt {
@@ -243,7 +243,7 @@ impl SemanticStore {
         Ok(new_id)
     }
 
-    /// Count total facts.
+    /// Count total active facts.
     pub fn count(&self) -> Result<i64, SemanticError> {
         Ok(self.db.with_conn(|conn| {
             let count: i64 = conn.query_row(
@@ -262,10 +262,10 @@ mod tests {
 
     async fn test_store() -> (SemanticStore, tempfile::TempDir) {
         let db = SqlitePool::open_memory().unwrap();
-        let lance_dir = tempfile::tempdir().unwrap();
-        let lance = LanceStore::open(lance_dir.path()).await.unwrap();
-        lance.ensure_tables().await.unwrap();
-        (SemanticStore::new(db, lance), lance_dir)
+        let ruv_dir = tempfile::tempdir().unwrap();
+        let ruv = RuVectorStore::open(ruv_dir.path()).await.unwrap();
+        ruv.ensure_tables().await.unwrap();
+        (SemanticStore::new(db, ruv), ruv_dir)
     }
 
     fn dummy_vector() -> Vec<f32> {
@@ -365,7 +365,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Old fact should be superseded
+        // New fact should have the updated value
         let new_fact = store.get_fact(&new_id).unwrap().unwrap();
         assert_eq!(new_fact.object, "SF");
 

@@ -8,8 +8,8 @@
 
 pub mod encryption;
 pub mod sqlite;
-pub mod lance; // TODO: Replace with RuVector integration
+pub mod ruvector;
 
 pub use encryption::Encryptor;
-pub use lance::{LanceStore, VectorResult}; // TODO: Replace with RuVectorStore
+pub use ruvector::{RuVectorStore, VectorResult};
 pub use sqlite::SqlitePool;

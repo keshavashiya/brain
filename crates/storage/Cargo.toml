@@ -7,7 +7,6 @@ license.workspace = true
 
 [dependencies]
 rusqlite = { workspace = true }
-lancedb = { workspace = true }
 aes-gcm = { workspace = true }
 argon2 = { workspace = true }
 sha2 = { workspace = true }
@@ -20,9 +19,6 @@ tracing = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 base64 = "0.22"
-arrow-schema = "57"
-arrow-array = "57"
-futures = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

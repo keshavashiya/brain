@@ -53,9 +53,6 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 # Database
 rusqlite = { version = "0.32", features = ["bundled"] }
 
-# Vector DB
-lancedb = "0.26"
-
 # Encryption
 aes-gcm = "0.10"
 argon2 = "0.5"

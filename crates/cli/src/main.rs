@@ -282,11 +282,11 @@ impl BrainSession {
         // Create stores
         let episodic = hippocampus::EpisodicStore::new(db.clone());
 
-        // Create semantic store (requires RuVector - TODO: refactor for RuVector)
+        // Create semantic store backed by RuVector
         let ruvector_path = config.ruvector_path();
-        let semantic = if let Ok(lance) = storage::LanceStore::open(&ruvector_path).await {
-            lance.ensure_tables().await.ok();
-            Some(hippocampus::SemanticStore::new(db.clone(), lance))
+        let semantic = if let Ok(ruv) = storage::RuVectorStore::open(&ruvector_path).await {
+            ruv.ensure_tables().await.ok();
+            Some(hippocampus::SemanticStore::new(db.clone(), ruv))
         } else {
             None
         };
