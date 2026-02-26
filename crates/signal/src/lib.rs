@@ -479,6 +479,45 @@ impl SignalProcessor {
             Vec::new()
         }
     }
+
+    /// Get all facts about a specific subject.
+    pub fn facts_about(&self, subject: &str) -> Vec<hippocampus::Fact> {
+        if let Some(semantic) = &self.semantic {
+            semantic.get_facts_about(subject).unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Get the most recent episodes across all sessions.
+    pub fn recent_episodes(&self, limit: usize) -> Vec<hippocampus::Episode> {
+        self.episodic.recent(limit).unwrap_or_default()
+    }
+
+    /// Store a semantic fact directly (bypasses intent classification).
+    ///
+    /// Used by the MCP `memory_store` tool to write structured facts.
+    pub async fn store_fact_direct(
+        &self,
+        category: &str,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+    ) -> Result<String, SignalError> {
+        if let Some(semantic) = &self.semantic {
+            let fact_text = format!("{subject} {predicate} {object}");
+            let vector = self.embed_text(&fact_text).await;
+            let id = semantic
+                .store_fact(category, subject, predicate, object, 1.0, None, vector)
+                .await
+                .map_err(|e| SignalError::Storage(e.to_string()))?;
+            Ok(id)
+        } else {
+            Err(SignalError::Storage(
+                "Semantic store unavailable".to_string(),
+            ))
+        }
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

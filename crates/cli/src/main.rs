@@ -190,6 +190,34 @@ async fn show_status(config: &core::BrainConfig) -> anyhow::Result<()> {
     println!("  RuVector:   {}", config.ruvector_path().display());
     println!("  Config:     {}", core::BrainConfig::user_config_path().display());
 
+    // Show adapter status
+    println!("\n  Adapters:");
+    let http = &config.adapters.http;
+    println!(
+        "    HTTP    : {} (port {})",
+        if http.enabled { "enabled " } else { "disabled" },
+        http.port
+    );
+    let ws = &config.adapters.ws;
+    println!(
+        "    WebSocket: {} (port {})",
+        if ws.enabled { "enabled " } else { "disabled" },
+        ws.port
+    );
+    let mcp = &config.adapters.mcp;
+    println!(
+        "    MCP     : {} (stdio={}, http port {})",
+        if mcp.enabled { "enabled " } else { "disabled" },
+        mcp.stdio,
+        mcp.port
+    );
+    let grpc = &config.adapters.grpc;
+    println!(
+        "    gRPC    : {} (port {})",
+        if grpc.enabled { "enabled " } else { "disabled" },
+        grpc.port
+    );
+
     // Check LLM health
     let llm_config = cortex::llm::ProviderConfig {
         provider: config.llm.provider.clone(),
