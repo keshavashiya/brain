@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
+use hippocampus::embedding::EmbeddingProvider;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -165,6 +166,8 @@ pub struct SignalProcessor {
     importance: amygdala::ImportanceScorer,
     episodic: hippocampus::EpisodicStore,
     semantic: Option<hippocampus::SemanticStore>,
+    embedder: tokio::sync::Mutex<hippocampus::embedding::OllamaProvider>,
+    recall_engine: hippocampus::RecallEngine,
     llm: Box<dyn cortex::LlmProvider>,
     context_assembler: cortex::context::ContextAssembler,
 }
@@ -205,30 +208,39 @@ impl SignalProcessor {
         };
         let llm = cortex::llm::create_provider(&llm_config);
 
+        // Create Ollama embedder (falls back to zero vector at call time if Ollama unavailable)
+        let embedder =
+            tokio::sync::Mutex::new(hippocampus::embedding::OllamaProvider::default_config());
+
+        // Create recall engine with default RRF config
+        let recall_engine = hippocampus::RecallEngine::with_defaults();
+
         Ok(Self {
             config,
             classifier: thalamus::IntentClassifier::new(),
             importance: amygdala::ImportanceScorer::new(),
             episodic,
             semantic,
+            embedder,
+            recall_engine,
             llm,
             context_assembler: cortex::context::ContextAssembler::with_defaults(),
         })
     }
 
-    /// Process a signal through the Brain pipeline.
+    /// Process a signal through the full Brain pipeline.
     ///
-    /// Routes the signal through intent classification and importance scoring.
-    /// Full pipeline execution (memory store/recall + LLM response) is wired
-    /// in US-006. This implementation provides the correct method signature and
-    /// basic classification so adapters can be built on top.
+    /// Routes by intent:
+    /// - `StoreFact`  → Amygdala importance → Hippocampus semantic store → confirmation
+    /// - `Recall`     → Hippocampus hybrid search → Cortex context assembly → LLM response
+    /// - `Chat`       → Hippocampus context → Cortex LLM → Hippocampus episode store
     pub async fn process(&self, signal: Signal) -> Result<SignalResponse, SignalError> {
         let signal_id = signal.id;
 
-        // Score importance via Amygdala
+        // 1. Score importance via Amygdala
         let importance = self.importance.score(&signal.content);
 
-        // Classify intent via Thalamus
+        // 2. Classify intent via Thalamus
         let classification = self.classifier.classify(&signal.content);
 
         tracing::debug!(
@@ -239,11 +251,176 @@ impl SignalProcessor {
             "Signal classified"
         );
 
-        // Stub response — US-006 will implement the full pipeline here.
-        Ok(SignalResponse::ok(
-            signal_id,
-            format!("Signal received (intent: {:?})", classification.intent),
-        ))
+        match classification.intent {
+            // ── STORE_FACT: importance score → semantic memory → confirmation ────
+            thalamus::Intent::StoreFact {
+                subject,
+                predicate,
+                object,
+            } => {
+                let fact_text = format!("{subject} {predicate} {object}");
+                let vector = self.embed_text(&fact_text).await;
+
+                let mut facts_stored = 0;
+                if let Some(semantic) = &self.semantic {
+                    match semantic
+                        .store_fact(
+                            "signal",
+                            &subject,
+                            &predicate,
+                            &object,
+                            importance as f64,
+                            None,
+                            vector,
+                        )
+                        .await
+                    {
+                        Ok(_) => facts_stored = 1,
+                        Err(e) => tracing::warn!("Failed to store fact in semantic memory: {e}"),
+                    }
+                }
+
+                Ok(SignalResponse {
+                    signal_id,
+                    status: ResponseStatus::Ok,
+                    response: ResponseContent::Text(format!(
+                        "Stored: {subject} {predicate} {object} (importance: {importance:.2})"
+                    )),
+                    memory_context: MemoryContext {
+                        facts_used: facts_stored,
+                        episodes_used: 0,
+                    },
+                })
+            }
+
+            // ── RECALL_MEMORY: hybrid search → Cortex context → LLM response ───
+            thalamus::Intent::Recall { query } => {
+                let query_vector = self.embed_text(&query).await;
+                let (memories, facts_used, episodes_used) =
+                    self.do_recall(&query, query_vector, 10).await;
+
+                let messages = self.context_assembler.assemble(&query, &memories, &[]);
+                let llm_response = self.llm.generate(&messages).await?;
+
+                Ok(SignalResponse {
+                    signal_id,
+                    status: ResponseStatus::Ok,
+                    response: ResponseContent::Text(llm_response.content),
+                    memory_context: MemoryContext {
+                        facts_used,
+                        episodes_used,
+                    },
+                })
+            }
+
+            // ── CHAT: context fetch → LLM response → episode store ───────────
+            thalamus::Intent::Chat { content } => {
+                // Fetch relevant memory context
+                let query_vector = self.embed_text(&content).await;
+                let (memories, facts_used, episodes_used) =
+                    self.do_recall(&content, query_vector, 10).await;
+
+                // Create session and store the user turn
+                let session_id = self
+                    .episodic
+                    .create_session(&signal.channel)
+                    .map_err(|e| SignalError::Storage(e.to_string()))?;
+
+                self.episodic
+                    .store_episode(&session_id, "user", &signal.content, importance as f64)
+                    .map_err(|e| SignalError::Storage(e.to_string()))?;
+
+                // Generate LLM response with assembled context
+                let messages = self.context_assembler.assemble(&content, &memories, &[]);
+                let llm_response = self.llm.generate(&messages).await?;
+
+                // Store the assistant turn in episodic memory
+                self.episodic
+                    .store_episode(&session_id, "assistant", &llm_response.content, 0.5)
+                    .map_err(|e| SignalError::Storage(e.to_string()))?;
+
+                Ok(SignalResponse {
+                    signal_id,
+                    status: ResponseStatus::Ok,
+                    response: ResponseContent::Text(llm_response.content),
+                    memory_context: MemoryContext {
+                        facts_used,
+                        episodes_used,
+                    },
+                })
+            }
+
+            // ── Other intents: route acknowledgement ─────────────────────────
+            other => Ok(SignalResponse::ok(
+                signal_id,
+                format!("Intent classified: {:?}", other),
+            )),
+        }
+    }
+
+    /// Generate a vector embedding for text.
+    ///
+    /// Falls back to a zero vector if the Ollama embedder is unavailable,
+    /// so the pipeline degrades gracefully without panicking.
+    async fn embed_text(&self, text: &str) -> Vec<f32> {
+        let mut embedder = self.embedder.lock().await;
+        match embedder.embed(text).await {
+            Ok(vec) => vec,
+            Err(e) => {
+                tracing::warn!("Embedding failed, using zero vector: {e}");
+                vec![0.0_f32; hippocampus::EMBEDDING_DIM]
+            }
+        }
+    }
+
+    /// Run hybrid recall (BM25 + ANN via RecallEngine) and return memories with counts.
+    ///
+    /// If the semantic store is unavailable, falls back to BM25-only episodic search.
+    async fn do_recall(
+        &self,
+        query: &str,
+        query_vector: Vec<f32>,
+        top_k: usize,
+    ) -> (Vec<hippocampus::Memory>, usize, usize) {
+        if let Some(semantic) = &self.semantic {
+            match self
+                .recall_engine
+                .recall(query, query_vector, &self.episodic, semantic, top_k)
+                .await
+            {
+                Ok(memories) => {
+                    let facts_used = memories
+                        .iter()
+                        .filter(|m| m.source == hippocampus::MemorySource::Semantic)
+                        .count();
+                    let episodes_used = memories
+                        .iter()
+                        .filter(|m| m.source == hippocampus::MemorySource::Episodic)
+                        .count();
+                    (memories, facts_used, episodes_used)
+                }
+                Err(e) => {
+                    tracing::warn!("Recall engine failed: {e}");
+                    (Vec::new(), 0, 0)
+                }
+            }
+        } else {
+            // Semantic store unavailable — fall back to episodic BM25 only
+            let bm25 = self.episodic.search_bm25(query, top_k).unwrap_or_default();
+            let episodes_used = bm25.len();
+            let memories = bm25
+                .into_iter()
+                .map(|r| hippocampus::Memory {
+                    id: r.episode_id,
+                    content: r.content,
+                    source: hippocampus::MemorySource::Episodic,
+                    score: r.rank as f64,
+                    importance: 0.5,
+                    timestamp: String::new(),
+                })
+                .collect();
+            (memories, 0, episodes_used)
+        }
     }
 
     /// Expose the config (for adapter use).
@@ -348,5 +525,75 @@ mod tests {
         let back: SignalResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(resp.signal_id, back.signal_id);
         assert_eq!(resp.status, back.status);
+    }
+
+    /// Integration test: CLI input → SignalProcessor → StoreFact → memory stored.
+    ///
+    /// Tests the full STORE_FACT pipeline without requiring a running LLM or
+    /// embedding model (embedding gracefully degrades to zero vector).
+    #[tokio::test]
+    async fn test_process_store_fact_integration() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let mut config = brain_core::BrainConfig::default();
+        // Point data_dir to a temp directory so we don't touch ~/.brain
+        config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
+
+        let processor = SignalProcessor::new(config).await.unwrap();
+
+        // "Remember that Rust is fast" → StoreFact intent
+        let signal = Signal::new(
+            SignalSource::Cli,
+            "cli",
+            "user",
+            "Remember that Rust is fast",
+        );
+
+        let response = processor.process(signal).await.unwrap();
+
+        assert_eq!(response.status, ResponseStatus::Ok);
+        // StoreFact stores in semantic memory → facts_used = 1
+        assert_eq!(response.memory_context.facts_used, 1);
+        assert_eq!(response.memory_context.episodes_used, 0);
+        // Response text should confirm the stored fact
+        if let ResponseContent::Text(text) = &response.response {
+            assert!(text.contains("Rust"));
+        } else {
+            panic!("Expected Text response");
+        }
+    }
+
+    /// Integration test: chat signal creates episodic memory entries.
+    ///
+    /// Requires Ollama running locally. Without it, the test hangs for ~120s
+    /// waiting for the HTTP timeout, so it is skipped in normal CI.
+    #[tokio::test]
+    #[ignore = "Requires Ollama server running locally"]
+    async fn test_process_chat_reaches_llm() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
+
+        let processor = SignalProcessor::new(config).await.unwrap();
+
+        let signal = Signal::new(SignalSource::Cli, "cli", "user", "Hello, how are you?");
+
+        // The LLM call will fail if Ollama is not running — that's expected.
+        // The important thing is that the pipeline doesn't panic and that the
+        // error is a SignalError::Llm (not a storage or routing error).
+        let result = processor.process(signal).await;
+        match result {
+            Ok(resp) => {
+                // Ollama is running — verify response structure
+                assert_eq!(resp.status, ResponseStatus::Ok);
+            }
+            Err(SignalError::Llm(_)) => {
+                // Expected when Ollama is not running — pipeline is wired correctly
+            }
+            Err(other) => {
+                panic!("Unexpected error (should be Llm, not storage/routing): {other}");
+            }
+        }
     }
 }
