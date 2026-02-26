@@ -5,6 +5,17 @@ brain:
   version: "0.1.0"
   data_dir: "~/.brain"
 
+storage:
+  ruvector_path: "~/.brain/ruvector/"
+  sqlite_path: "~/.brain/db/brain.db"
+  hnsw:
+    ef_construction: 200
+    m: 16
+    ef_search: 50
+  self_learning:
+    enabled: true
+    gnn_layers: 3
+
 llm:
   provider: "ollama"
   model: "qwen2.5:14b"
@@ -54,6 +65,24 @@ proactivity:
   quiet_hours:
     start: "22:00"
     end: "08:00"
+
+adapters:
+  http:
+    enabled: true
+    host: "127.0.0.1"
+    port: 19789
+    cors: true
+  ws:
+    enabled: true
+    port: 19790
+  mcp:
+    enabled: true
+    stdio: true
+    http: true
+    port: 19791
+  grpc:
+    enabled: true
+    port: 19792
 
 openclaw:
   enabled: false

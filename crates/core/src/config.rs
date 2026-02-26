@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrainConfig {
     pub brain: GeneralConfig,
+    pub storage: StorageConfig,
     pub llm: LlmConfig,
     pub embedding: EmbeddingConfig,
     pub memory: MemoryConfig,
@@ -34,6 +35,27 @@ pub struct BrainConfig {
 pub struct GeneralConfig {
     pub version: String,
     pub data_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StorageConfig {
+    pub ruvector_path: String,
+    pub sqlite_path: String,
+    pub hnsw: HnswConfig,
+    pub self_learning: SelfLearningConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HnswConfig {
+    pub ef_construction: u32,
+    pub m: u32,
+    pub ef_search: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelfLearningConfig {
+    pub enabled: bool,
+    pub gnn_layers: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -261,6 +283,19 @@ impl Default for BrainConfig {
             brain: GeneralConfig {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 data_dir: "~/.brain".to_string(),
+            },
+            storage: StorageConfig {
+                ruvector_path: "~/.brain/ruvector/".to_string(),
+                sqlite_path: "~/.brain/db/brain.db".to_string(),
+                hnsw: HnswConfig {
+                    ef_construction: 200,
+                    m: 16,
+                    ef_search: 50,
+                },
+                self_learning: SelfLearningConfig {
+                    enabled: true,
+                    gnn_layers: 3,
+                },
             },
             llm: LlmConfig {
                 provider: "ollama".to_string(),
