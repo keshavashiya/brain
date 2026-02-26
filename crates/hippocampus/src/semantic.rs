@@ -243,6 +243,33 @@ impl SemanticStore {
         Ok(new_id)
     }
 
+    /// List all active (non-superseded) facts.
+    pub fn list_all(&self) -> Result<Vec<Fact>, SemanticError> {
+        Ok(self.db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, category, subject, predicate, object, confidence, source_episode_id
+                 FROM semantic_facts WHERE superseded_by IS NULL
+                 ORDER BY rowid DESC",
+            )?;
+
+            let facts = stmt
+                .query_map([], |row| {
+                    Ok(Fact {
+                        id: row.get(0)?,
+                        category: row.get(1)?,
+                        subject: row.get(2)?,
+                        predicate: row.get(3)?,
+                        object: row.get(4)?,
+                        confidence: row.get(5)?,
+                        source_episode_id: row.get(6)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            Ok(facts)
+        })?)
+    }
+
     /// Count total active facts.
     pub fn count(&self) -> Result<i64, SemanticError> {
         Ok(self.db.with_conn(|conn| {

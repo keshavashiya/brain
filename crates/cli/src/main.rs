@@ -27,6 +27,15 @@ enum Commands {
     },
     /// Show system status
     Status,
+    /// Start the HTTP REST API server
+    Serve {
+        /// Host to bind to
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port to listen on
+        #[arg(long, default_value_t = 19789)]
+        port: u16,
+    },
     /// Manage the background daemon
     Daemon {
         #[command(subcommand)]
@@ -96,6 +105,11 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Status => {
             show_status(&config).await?;
+        }
+        Commands::Serve { host, port } => {
+            println!("Starting Brain HTTP API server on http://{}:{}", host, port);
+            let processor = signal::SignalProcessor::new(config.clone()).await?;
+            adapters_http::serve(processor, &host, port).await?;
         }
         Commands::Daemon { action } => match action {
             DaemonAction::Start => {

@@ -447,6 +447,38 @@ impl SignalProcessor {
     pub fn context_assembler(&self) -> &cortex::context::ContextAssembler {
         &self.context_assembler
     }
+
+    /// Search semantic facts by text query (embed → vector ANN search).
+    ///
+    /// Returns up to `top_k` facts ranked by similarity. Falls back to an
+    /// empty list if the semantic store is unavailable.
+    pub async fn search_facts(
+        &self,
+        query: &str,
+        top_k: usize,
+    ) -> Vec<hippocampus::SemanticResult> {
+        if let Some(semantic) = &self.semantic {
+            let qv = self.embed_text(query).await;
+            match semantic.search_similar(qv, top_k).await {
+                Ok(results) => results,
+                Err(e) => {
+                    tracing::warn!("search_facts failed: {e}");
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// List all active semantic facts (non-superseded).
+    pub fn list_facts(&self) -> Vec<hippocampus::Fact> {
+        if let Some(semantic) = &self.semantic {
+            semantic.list_all().unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    }
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

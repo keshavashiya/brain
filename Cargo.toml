@@ -8,6 +8,7 @@ members = [
     "crates/thalamus",
     "crates/amygdala",
     "crates/signal",
+    "crates/adapters/http",
     # Placeholder crates - will be implemented in Phase 3
     # "crates/cerebellum",
     # "crates/ganglia",
@@ -72,6 +73,10 @@ rustyline = "14"
 # Terminal UI
 crossterm = "0.28"
 
+# HTTP server
+axum = { version = "0.7", features = ["json"] }
+tower-http = { version = "0.5", features = ["cors"] }
+
 # WebSocket
 tokio-tungstenite = "0.26"
 
@@ -86,5 +91,6 @@ cortex = { path = "crates/cortex" }
 thalamus = { path = "crates/thalamus" }
 amygdala = { path = "crates/amygdala" }
 signal = { path = "crates/signal" }
+adapters-http = { path = "crates/adapters/http" }
 cerebellum = { path = "crates/cerebellum" }
 ganglia = { path = "crates/ganglia" }
