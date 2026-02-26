@@ -7,6 +7,7 @@ members = [
     "crates/cortex",
     "crates/thalamus",
     "crates/amygdala",
+    "crates/signal",
     # Placeholder crates - will be implemented in Phase 3
     # "crates/cerebellum",
     # "crates/ganglia",
@@ -84,5 +85,6 @@ hippocampus = { path = "crates/hippocampus" }
 cortex = { path = "crates/cortex" }
 thalamus = { path = "crates/thalamus" }
 amygdala = { path = "crates/amygdala" }
+signal = { path = "crates/signal" }
 cerebellum = { path = "crates/cerebellum" }
 ganglia = { path = "crates/ganglia" }

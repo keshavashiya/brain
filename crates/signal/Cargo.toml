@@ -1,0 +1,23 @@
+[package]
+name = "signal"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+brain_core = { path = "../core", package = "core" }
+storage = { workspace = true }
+hippocampus = { workspace = true }
+cortex = { workspace = true }
+thalamus = { workspace = true }
+amygdala = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+async-trait = "0.1"
