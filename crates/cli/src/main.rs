@@ -45,6 +45,21 @@ enum Commands {
         #[arg(long, default_value_t = 19790)]
         port: u16,
     },
+    /// Start the MCP (Model Context Protocol) server
+    Mcp {
+        /// Run as stdio MCP server (for Claude Desktop / OpenCode)
+        #[arg(long, conflicts_with = "http")]
+        stdio: bool,
+        /// Run as HTTP MCP server on port 19791
+        #[arg(long, conflicts_with = "stdio")]
+        http: bool,
+        /// Host to bind to (HTTP mode only)
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port to listen on (HTTP mode only)
+        #[arg(long, default_value_t = 19791)]
+        port: u16,
+    },
     /// Manage the background daemon
     Daemon {
         #[command(subcommand)]
@@ -124,6 +139,16 @@ async fn main() -> anyhow::Result<()> {
             println!("Starting Brain WebSocket server on ws://{}:{}", host, port);
             let processor = signal::SignalProcessor::new(config.clone()).await?;
             adapters_ws::serve(processor, &host, port).await?;
+        }
+        Commands::Mcp { stdio, http, host, port } => {
+            let processor = signal::SignalProcessor::new(config.clone()).await?;
+            if stdio || (!stdio && !http) {
+                // Default to stdio when no flag given (or --stdio explicit)
+                mcp::serve_stdio(processor).await?;
+            } else if http {
+                println!("Starting Brain MCP HTTP server on http://{}:{}", host, port);
+                mcp::serve_http(processor, &host, port).await?;
+            }
         }
         Commands::Daemon { action } => match action {
             DaemonAction::Start => {

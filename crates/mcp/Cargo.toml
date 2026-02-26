@@ -1,0 +1,23 @@
+[package]
+name = "mcp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+brain_core = { path = "../core", package = "core" }
+signal = { workspace = true }
+hippocampus = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
