@@ -57,6 +57,13 @@ pub struct Signal {
     pub content: String,
     pub metadata: HashMap<String, String>,
     pub timestamp: DateTime<Utc>,
+    /// Memory namespace for this signal (default: "personal").
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+}
+
+fn default_namespace() -> String {
+    "personal".to_string()
 }
 
 impl Signal {
@@ -75,6 +82,7 @@ impl Signal {
             content: content.into(),
             metadata: HashMap::new(),
             timestamp: Utc::now(),
+            namespace: "personal".to_string(),
         }
     }
 }
@@ -265,6 +273,7 @@ impl SignalProcessor {
                 if let Some(semantic) = &self.semantic {
                     match semantic
                         .store_fact(
+                            &signal.namespace,
                             "signal",
                             &subject,
                             &predicate,
@@ -296,8 +305,9 @@ impl SignalProcessor {
             // ── RECALL_MEMORY: hybrid search → Cortex context → LLM response ───
             thalamus::Intent::Recall { query } => {
                 let query_vector = self.embed_text(&query).await;
-                let (memories, facts_used, episodes_used) =
-                    self.do_recall(&query, query_vector, 10).await;
+                let (memories, facts_used, episodes_used) = self
+                    .do_recall(&query, query_vector, 10, Some(&signal.namespace))
+                    .await;
 
                 let messages = self.context_assembler.assemble(&query, &memories, &[]);
                 let llm_response = self.llm.generate(&messages).await?;
@@ -317,8 +327,9 @@ impl SignalProcessor {
             thalamus::Intent::Chat { content } => {
                 // Fetch relevant memory context
                 let query_vector = self.embed_text(&content).await;
-                let (memories, facts_used, episodes_used) =
-                    self.do_recall(&content, query_vector, 10).await;
+                let (memories, facts_used, episodes_used) = self
+                    .do_recall(&content, query_vector, 10, Some(&signal.namespace))
+                    .await;
 
                 // Create session and store the user turn
                 let session_id = self
@@ -381,11 +392,19 @@ impl SignalProcessor {
         query: &str,
         query_vector: Vec<f32>,
         top_k: usize,
+        namespace: Option<&str>,
     ) -> (Vec<hippocampus::Memory>, usize, usize) {
         if let Some(semantic) = &self.semantic {
             match self
                 .recall_engine
-                .recall(query, query_vector, &self.episodic, semantic, top_k)
+                .recall(
+                    query,
+                    query_vector,
+                    &self.episodic,
+                    semantic,
+                    top_k,
+                    namespace,
+                )
                 .await
             {
                 Ok(memories) => {
@@ -450,16 +469,18 @@ impl SignalProcessor {
 
     /// Search semantic facts by text query (embed → vector ANN search).
     ///
-    /// Returns up to `top_k` facts ranked by similarity. Falls back to an
+    /// Returns up to `top_k` facts ranked by similarity. If `namespace` is
+    /// provided, only facts in that namespace are returned. Falls back to an
     /// empty list if the semantic store is unavailable.
     pub async fn search_facts(
         &self,
         query: &str,
         top_k: usize,
+        namespace: Option<&str>,
     ) -> Vec<hippocampus::SemanticResult> {
         if let Some(semantic) = &self.semantic {
             let qv = self.embed_text(query).await;
-            match semantic.search_similar(qv, top_k).await {
+            match semantic.search_similar(qv, top_k, namespace).await {
                 Ok(results) => results,
                 Err(e) => {
                     tracing::warn!("search_facts failed: {e}");
@@ -471,10 +492,10 @@ impl SignalProcessor {
         }
     }
 
-    /// List all active semantic facts (non-superseded).
-    pub fn list_facts(&self) -> Vec<hippocampus::Fact> {
+    /// List all active semantic facts (non-superseded), optionally scoped to a namespace.
+    pub fn list_facts(&self, namespace: Option<&str>) -> Vec<hippocampus::Fact> {
         if let Some(semantic) = &self.semantic {
-            semantic.list_all().unwrap_or_default()
+            semantic.list_by_namespace(namespace).unwrap_or_default()
         } else {
             Vec::new()
         }
@@ -489,6 +510,15 @@ impl SignalProcessor {
         }
     }
 
+    /// List all namespaces with fact and episode counts.
+    pub fn list_namespaces(&self) -> Vec<hippocampus::NamespaceStats> {
+        if let Some(semantic) = &self.semantic {
+            semantic.list_namespaces().unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    }
+
     /// Get the most recent episodes across all sessions.
     pub fn recent_episodes(&self, limit: usize) -> Vec<hippocampus::Episode> {
         self.episodic.recent(limit).unwrap_or_default()
@@ -497,8 +527,10 @@ impl SignalProcessor {
     /// Store a semantic fact directly (bypasses intent classification).
     ///
     /// Used by the MCP `memory_store` tool to write structured facts.
+    /// The `namespace` scopes the fact (default: "personal").
     pub async fn store_fact_direct(
         &self,
+        namespace: &str,
         category: &str,
         subject: &str,
         predicate: &str,
@@ -508,7 +540,9 @@ impl SignalProcessor {
             let fact_text = format!("{subject} {predicate} {object}");
             let vector = self.embed_text(&fact_text).await;
             let id = semantic
-                .store_fact(category, subject, predicate, object, 1.0, None, vector)
+                .store_fact(
+                    namespace, category, subject, predicate, object, 1.0, None, vector,
+                )
                 .await
                 .map_err(|e| SignalError::Storage(e.to_string()))?;
             Ok(id)

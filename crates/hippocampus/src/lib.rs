@@ -17,9 +17,9 @@ pub mod procedural;
 pub mod search;
 pub mod semantic;
 
-pub use episodic::{EpisodicStore, Episode, Session};
+pub use consolidation::{ConsolidationConfig, ConsolidationReport, Consolidator};
 pub use embedding::{Embedder, EMBEDDING_DIM};
+pub use episodic::{Episode, EpisodicStore, Session};
 pub use importance::{ImportanceScorer, ImportanceSignals};
-pub use semantic::{SemanticStore, Fact, SemanticResult};
-pub use search::{RecallEngine, Memory, MemorySource, RecallConfig};
-pub use consolidation::{Consolidator, ConsolidationConfig, ConsolidationReport};
+pub use search::{Memory, MemorySource, RecallConfig, RecallEngine};
+pub use semantic::{Fact, NamespaceStats, SemanticResult, SemanticStore};

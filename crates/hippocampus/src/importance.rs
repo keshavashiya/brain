@@ -36,23 +36,45 @@ impl ImportanceScorer {
 
     /// Keywords that signal explicit memory intent.
     const EXPLICIT_KEYWORDS: &[&str] = &[
-        "remember", "important", "don't forget", "dont forget",
-        "note that", "keep in mind", "make sure to remember",
-        "never forget", "always remember",
+        "remember",
+        "important",
+        "don't forget",
+        "dont forget",
+        "note that",
+        "keep in mind",
+        "make sure to remember",
+        "never forget",
+        "always remember",
     ];
 
     /// Keywords that signal urgency.
     const URGENCY_KEYWORDS: &[&str] = &[
-        "asap", "urgent", "deadline", "emergency",
-        "immediately", "right now", "time-sensitive",
-        "critical", "due date", "overdue",
+        "asap",
+        "urgent",
+        "deadline",
+        "emergency",
+        "immediately",
+        "right now",
+        "time-sensitive",
+        "critical",
+        "due date",
+        "overdue",
     ];
 
     /// Keywords that signal emotional intensity.
     const EMOTIONAL_KEYWORDS: &[&str] = &[
-        "stressed", "excited", "frustrated", "anxious",
-        "worried", "happy", "angry", "overwhelmed",
-        "thrilled", "exhausted", "passionate", "terrified",
+        "stressed",
+        "excited",
+        "frustrated",
+        "anxious",
+        "worried",
+        "happy",
+        "angry",
+        "overwhelmed",
+        "thrilled",
+        "exhausted",
+        "passionate",
+        "terrified",
     ];
 
     /// Score a piece of text for importance.
@@ -69,15 +91,9 @@ impl ImportanceScorer {
         let lower = text.to_lowercase();
 
         ImportanceSignals {
-            explicit: Self::EXPLICIT_KEYWORDS
-                .iter()
-                .any(|kw| lower.contains(kw)),
-            urgency: Self::URGENCY_KEYWORDS
-                .iter()
-                .any(|kw| lower.contains(kw)),
-            emotional: Self::EMOTIONAL_KEYWORDS
-                .iter()
-                .any(|kw| lower.contains(kw)),
+            explicit: Self::EXPLICIT_KEYWORDS.iter().any(|kw| lower.contains(kw)),
+            urgency: Self::URGENCY_KEYWORDS.iter().any(|kw| lower.contains(kw)),
+            emotional: Self::EMOTIONAL_KEYWORDS.iter().any(|kw| lower.contains(kw)),
             novelty,
         }
     }

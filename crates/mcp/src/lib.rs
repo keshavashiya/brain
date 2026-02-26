@@ -121,7 +121,10 @@ pub struct McpServer {
 
 impl McpServer {
     pub fn new(processor: Arc<signal::SignalProcessor>, api_keys: Vec<ApiKeyConfig>) -> Self {
-        Self { processor, api_keys }
+        Self {
+            processor,
+            api_keys,
+        }
     }
 
     /// Returns true if the given key is valid (or if auth is disabled).
@@ -192,6 +195,10 @@ impl McpServer {
                             "top_k": {
                                 "type": "number",
                                 "description": "Number of results to return (default: 10)"
+                            },
+                            "namespace": {
+                                "type": "string",
+                                "description": "Filter results to this namespace (e.g. 'personal', 'work'). Omit to search all."
                             }
                         },
                         "required": ["query"]
@@ -217,7 +224,11 @@ impl McpServer {
                             },
                             "category": {
                                 "type": "string",
-                                "description": "Namespace/category for the fact (e.g. 'personal', 'work'). Defaults to 'general'."
+                                "description": "Category for the fact (e.g. 'personal', 'work'). Defaults to 'general'."
+                            },
+                            "namespace": {
+                                "type": "string",
+                                "description": "Memory namespace (e.g. 'personal', 'work'). Defaults to 'personal'."
                             }
                         },
                         "required": ["subject", "predicate", "object"]
@@ -232,6 +243,10 @@ impl McpServer {
                             "subject": {
                                 "type": "string",
                                 "description": "The subject to retrieve facts about"
+                            },
+                            "namespace": {
+                                "type": "string",
+                                "description": "Filter to this namespace only (optional)."
                             }
                         },
                         "required": ["subject"]
@@ -293,12 +308,11 @@ impl McpServer {
             .and_then(Value::as_str)
             .ok_or((-32602, "Missing required argument: query".to_string()))?;
 
-        let top_k = args
-            .get("top_k")
-            .and_then(Value::as_u64)
-            .unwrap_or(10) as usize;
+        let top_k = args.get("top_k").and_then(Value::as_u64).unwrap_or(10) as usize;
 
-        let results = self.processor.search_facts(query, top_k).await;
+        let namespace = args.get("namespace").and_then(Value::as_str);
+
+        let results = self.processor.search_facts(query, top_k, namespace).await;
 
         let text = if results.is_empty() {
             "No relevant facts found in memory.".to_string()
@@ -307,7 +321,8 @@ impl McpServer {
                 .iter()
                 .map(|r| {
                     format!(
-                        "[{}] {} {} {} (confidence: {:.2}, distance: {:.3})",
+                        "[{}:{}] {} {} {} (confidence: {:.2}, distance: {:.3})",
+                        r.fact.namespace,
                         r.fact.category,
                         r.fact.subject,
                         r.fact.predicate,
@@ -344,13 +359,18 @@ impl McpServer {
             .and_then(Value::as_str)
             .unwrap_or("general");
 
+        let namespace = args
+            .get("namespace")
+            .and_then(Value::as_str)
+            .unwrap_or("personal");
+
         match self
             .processor
-            .store_fact_direct(category, subject, predicate, object)
+            .store_fact_direct(namespace, category, subject, predicate, object)
             .await
         {
             Ok(id) => Ok(tool_result_text(format!(
-                "Stored fact [{id}]: {subject} {predicate} {object} (category: {category})"
+                "Stored fact [{id}]: {subject} {predicate} {object} (namespace: {namespace}, category: {category})"
             ))),
             Err(e) => Err((-32603, format!("Failed to store fact: {e}"))),
         }
@@ -371,8 +391,8 @@ impl McpServer {
                 .iter()
                 .map(|f| {
                     format!(
-                        "[{}] {} {} {} (confidence: {:.2})",
-                        f.category, f.subject, f.predicate, f.object, f.confidence
+                        "[{}:{}] {} {} {} (confidence: {:.2})",
+                        f.namespace, f.category, f.subject, f.predicate, f.object, f.confidence
                     )
                 })
                 .collect();
@@ -383,10 +403,7 @@ impl McpServer {
     }
 
     fn tool_memory_episodes(&self, args: &Value) -> Result<Value, (i32, String)> {
-        let limit = args
-            .get("limit")
-            .and_then(Value::as_u64)
-            .unwrap_or(20) as usize;
+        let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
 
         let episodes = self.processor.recent_episodes(limit);
 
@@ -417,7 +434,9 @@ impl McpServer {
             "data_dir": config.data_dir().to_string_lossy(),
             "encryption_enabled": config.encryption.enabled
         });
-        Ok(tool_result_text(serde_json::to_string_pretty(&profile).unwrap_or_default()))
+        Ok(tool_result_text(
+            serde_json::to_string_pretty(&profile).unwrap_or_default(),
+        ))
     }
 }
 
@@ -644,10 +663,7 @@ mod tests {
         let resp = server.handle(req).await.unwrap();
         assert!(resp.error.is_none());
         let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
-        let names: Vec<&str> = tools
-            .iter()
-            .map(|t| t["name"].as_str().unwrap())
-            .collect();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"memory_search"));
         assert!(names.contains(&"memory_store"));
         assert!(names.contains(&"memory_facts"));

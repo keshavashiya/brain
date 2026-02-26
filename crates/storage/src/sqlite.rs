@@ -263,6 +263,22 @@ impl SqlitePool {
                 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp DESC);
             ",
             ),
+            (
+                8,
+                "add_namespace_to_semantic_facts",
+                "
+                ALTER TABLE semantic_facts ADD COLUMN namespace TEXT NOT NULL DEFAULT 'personal';
+                CREATE INDEX IF NOT EXISTS idx_facts_namespace ON semantic_facts(namespace);
+            ",
+            ),
+            (
+                9,
+                "add_namespace_to_episodes",
+                "
+                ALTER TABLE episodes ADD COLUMN namespace TEXT NOT NULL DEFAULT 'personal';
+                CREATE INDEX IF NOT EXISTS idx_episodes_namespace ON episodes(namespace);
+            ",
+            ),
         ]
     }
 
@@ -315,7 +331,7 @@ mod tests {
     fn test_open_memory() {
         let pool = SqlitePool::open_memory().unwrap();
         let version = pool.schema_version().unwrap();
-        assert_eq!(version, 7); // All 7 migrations applied
+        assert_eq!(version, 9); // All 9 migrations applied
     }
 
     #[test]
@@ -323,7 +339,7 @@ mod tests {
         let pool = SqlitePool::open_memory().unwrap();
         // Running migrate again should be a no-op
         pool.migrate().unwrap();
-        assert_eq!(pool.schema_version().unwrap(), 7);
+        assert_eq!(pool.schema_version().unwrap(), 9);
     }
 
     #[test]
@@ -411,6 +427,115 @@ mod tests {
                 |row| row.get(0),
             )?;
             assert_eq!(obj, "Keshav");
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_namespace_column_on_semantic_facts() {
+        let pool = SqlitePool::open_memory().unwrap();
+        pool.with_conn(|conn| {
+            // Insert facts in two different namespaces
+            conn.execute(
+                "INSERT INTO semantic_facts (id, category, subject, predicate, object, namespace)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params!["fact-w1", "work", "user", "role_is", "developer", "work"],
+            )?;
+            conn.execute(
+                "INSERT INTO semantic_facts (id, category, subject, predicate, object, namespace)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params!["fact-p1", "personal", "user", "name_is", "Keshav", "personal"],
+            )?;
+
+            // Query work namespace — should only return work fact
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM semantic_facts WHERE namespace = 'work'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(count, 1, "work namespace should have 1 fact");
+
+            // Query personal namespace — should only return personal fact
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM semantic_facts WHERE namespace = 'personal'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(count, 1, "personal namespace should have 1 fact");
+
+            // Namespace isolation: work search should not return personal facts
+            let found: bool = conn
+                .query_row(
+                    "SELECT COUNT(*) > 0 FROM semantic_facts
+                     WHERE namespace = 'work' AND predicate = 'name_is'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap_or(false);
+            assert!(!found, "work namespace must not contain personal facts");
+
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_namespace_default_is_personal() {
+        let pool = SqlitePool::open_memory().unwrap();
+        pool.with_conn(|conn| {
+            // Insert without specifying namespace — should default to 'personal'
+            conn.execute(
+                "INSERT INTO semantic_facts (id, category, subject, predicate, object)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params!["fact-default", "personal", "user", "likes", "Rust"],
+            )?;
+
+            let ns: String = conn.query_row(
+                "SELECT namespace FROM semantic_facts WHERE id = 'fact-default'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(ns, "personal", "default namespace should be 'personal'");
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_list_namespaces_with_counts() {
+        let pool = SqlitePool::open_memory().unwrap();
+        pool.with_conn(|conn| {
+            // Insert facts across three namespaces
+            for i in 0..3 {
+                conn.execute(
+                    "INSERT INTO semantic_facts (id, category, subject, predicate, object, namespace)
+                     VALUES (?1, 'personal', 'user', 'fact', ?2, 'personal')",
+                    rusqlite::params![format!("p{i}"), format!("val{i}")],
+                )?;
+            }
+            conn.execute(
+                "INSERT INTO semantic_facts (id, category, subject, predicate, object, namespace)
+                 VALUES ('w1', 'work', 'user', 'role', 'dev', 'work')",
+                [],
+            )?;
+
+            // Count facts per namespace
+            let mut stmt = conn.prepare(
+                "SELECT namespace, COUNT(*) as cnt FROM semantic_facts
+                 WHERE superseded_by IS NULL
+                 GROUP BY namespace ORDER BY namespace",
+            )?;
+            let rows: Vec<(String, i64)> = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            assert_eq!(rows.len(), 2, "should have 2 namespaces");
+            let personal = rows.iter().find(|(ns, _)| ns == "personal").unwrap();
+            assert_eq!(personal.1, 3, "personal should have 3 facts");
+            let work = rows.iter().find(|(ns, _)| ns == "work").unwrap();
+            assert_eq!(work.1, 1, "work should have 1 fact");
+
             Ok(())
         })
         .unwrap();

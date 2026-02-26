@@ -13,11 +13,7 @@
 //! All `/v1/*` routes require `Authorization: Bearer <api-key>` header.
 //! The demo key `demo-key-123` (read+write) is pre-configured in `default.yaml`.
 
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::Arc,
-};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use axum::{
     extract::{Path, State},
@@ -52,6 +48,8 @@ pub struct SignalRequest {
     pub sender: Option<String>,
     pub content: String,
     pub metadata: Option<HashMap<String, String>>,
+    /// Memory namespace (default: "personal").
+    pub namespace: Option<String>,
 }
 
 /// Search request body (POST /v1/memory/search).
@@ -59,12 +57,23 @@ pub struct SignalRequest {
 pub struct SearchRequest {
     pub query: String,
     pub top_k: Option<usize>,
+    /// Filter results to this namespace only (optional).
+    pub namespace: Option<String>,
+}
+
+/// Namespace statistics (GET /v1/memory/namespaces).
+#[derive(Debug, Serialize)]
+pub struct NamespaceJson {
+    pub namespace: String,
+    pub fact_count: i64,
+    pub episode_count: i64,
 }
 
 /// A single fact in JSON form (GET /v1/memory/facts, search results).
 #[derive(Debug, Serialize)]
 pub struct FactJson {
     pub id: String,
+    pub namespace: String,
     pub category: String,
     pub subject: String,
     pub predicate: String,
@@ -108,8 +117,12 @@ fn check_auth(
     headers: &HeaderMap,
     permission: &str,
 ) -> Result<(), (StatusCode, String)> {
-    let raw_key = extract_bearer(headers)
-        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing Authorization: Bearer <key> header".to_string()))?;
+    let raw_key = extract_bearer(headers).ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            "Missing Authorization: Bearer <key> header".to_string(),
+        )
+    })?;
 
     match state.api_keys.iter().find(|k| k.key == raw_key) {
         None => Err((StatusCode::UNAUTHORIZED, "Invalid API key".to_string())),
@@ -126,7 +139,10 @@ fn check_auth(
 /// Build the axum router with all routes and CORS enabled.
 ///
 /// `api_keys` is taken from `BrainConfig.access.api_keys` by the caller.
-pub fn create_router(processor: Arc<signal::SignalProcessor>, api_keys: Vec<ApiKeyConfig>) -> Router {
+pub fn create_router(
+    processor: Arc<signal::SignalProcessor>,
+    api_keys: Vec<ApiKeyConfig>,
+) -> Router {
     let state = Arc::new(AppState {
         processor,
         cache: Mutex::new(HashMap::new()),
@@ -139,6 +155,7 @@ pub fn create_router(processor: Arc<signal::SignalProcessor>, api_keys: Vec<ApiK
         .route("/v1/signals/:id", get(get_signal_handler))
         .route("/v1/memory/search", post(search_memory_handler))
         .route("/v1/memory/facts", get(get_facts_handler))
+        .route("/v1/memory/namespaces", get(get_namespaces_handler))
         .with_state(state)
         .layer(CorsLayer::permissive())
 }
@@ -188,6 +205,9 @@ async fn post_signal_handler(
     if let Some(meta) = body.metadata {
         signal.metadata = meta;
     }
+    if let Some(ns) = body.namespace {
+        signal.namespace = ns;
+    }
 
     let signal_id = signal.id;
     let response = state
@@ -232,12 +252,17 @@ async fn search_memory_handler(
     check_auth(&state, &headers, "read")?;
 
     let top_k = body.top_k.unwrap_or(10);
-    let results = state.processor.search_facts(&body.query, top_k).await;
+    let namespace = body.namespace.as_deref();
+    let results = state
+        .processor
+        .search_facts(&body.query, top_k, namespace)
+        .await;
 
     let facts = results
         .into_iter()
         .map(|r| FactJson {
             id: r.fact.id,
+            namespace: r.fact.namespace,
             category: r.fact.category,
             subject: r.fact.subject,
             predicate: r.fact.predicate,
@@ -251,18 +276,23 @@ async fn search_memory_handler(
 }
 
 /// GET /v1/memory/facts — requires read permission
+///
+/// Accepts optional `namespace` query parameter to filter results.
 async fn get_facts_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
 ) -> Result<Json<Vec<FactJson>>, (StatusCode, String)> {
     check_auth(&state, &headers, "read")?;
 
+    let namespace = params.get("namespace").map(|s| s.as_str());
     let facts = state
         .processor
-        .list_facts()
+        .list_facts(namespace)
         .into_iter()
         .map(|f| FactJson {
             id: f.id,
+            namespace: f.namespace,
             category: f.category,
             subject: f.subject,
             predicate: f.predicate,
@@ -273,6 +303,27 @@ async fn get_facts_handler(
         .collect();
 
     Ok(Json(facts))
+}
+
+/// GET /v1/memory/namespaces — requires read permission
+async fn get_namespaces_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<NamespaceJson>>, (StatusCode, String)> {
+    check_auth(&state, &headers, "read")?;
+
+    let namespaces = state
+        .processor
+        .list_namespaces()
+        .into_iter()
+        .map(|n| NamespaceJson {
+            namespace: n.namespace,
+            fact_count: n.fact_count,
+            episode_count: n.episode_count,
+        })
+        .collect();
+
+    Ok(Json(namespaces))
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -334,6 +385,7 @@ mod tests {
     fn test_fact_json_serializes() {
         let f = FactJson {
             id: "abc".into(),
+            namespace: "personal".into(),
             category: "personal".into(),
             subject: "user".into(),
             predicate: "likes".into(),
@@ -343,6 +395,7 @@ mod tests {
         };
         let json = serde_json::to_string(&f).unwrap();
         assert!(json.contains("\"subject\":\"user\""));
+        assert!(json.contains("\"namespace\":\"personal\""));
         assert!(json.contains("\"distance\":0.05"));
     }
 

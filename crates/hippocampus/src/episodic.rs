@@ -201,11 +201,7 @@ impl EpisodicStore {
     }
 
     /// Search episodes by full-text query using BM25 ranking.
-    pub fn search_bm25(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<FtsResult>, EpisodicError> {
+    pub fn search_bm25(&self, query: &str, limit: usize) -> Result<Vec<FtsResult>, EpisodicError> {
         Ok(self.db.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT e.id, f.content, f.rank
@@ -233,11 +229,8 @@ impl EpisodicStore {
     /// Get total episode count.
     pub fn count(&self) -> Result<i64, EpisodicError> {
         Ok(self.db.with_conn(|conn| {
-            let count: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM episodes",
-                [],
-                |row| row.get(0),
-            )?;
+            let count: i64 =
+                conn.query_row("SELECT COUNT(*) FROM episodes", [], |row| row.get(0))?;
             Ok(count)
         })?)
     }
@@ -309,9 +302,15 @@ mod tests {
         let store = test_store();
         let session = store.create_session("cli").unwrap();
 
-        store.store_episode(&session, "user", "Hello Brain!", 0.5).unwrap();
-        store.store_episode(&session, "assistant", "Hello! How can I help?", 0.5).unwrap();
-        store.store_episode(&session, "user", "What's the weather?", 0.3).unwrap();
+        store
+            .store_episode(&session, "user", "Hello Brain!", 0.5)
+            .unwrap();
+        store
+            .store_episode(&session, "assistant", "Hello! How can I help?", 0.5)
+            .unwrap();
+        store
+            .store_episode(&session, "user", "What's the weather?", 0.3)
+            .unwrap();
 
         let history = store.get_session_history(&session, 10).unwrap();
         assert_eq!(history.len(), 3);
@@ -326,7 +325,9 @@ mod tests {
         let session = store.create_session("cli").unwrap();
 
         assert_eq!(store.count().unwrap(), 0);
-        store.store_episode(&session, "user", "Test message", 0.5).unwrap();
+        store
+            .store_episode(&session, "user", "Test message", 0.5)
+            .unwrap();
         assert_eq!(store.count().unwrap(), 1);
     }
 
@@ -334,7 +335,9 @@ mod tests {
     fn test_reinforce() {
         let store = test_store();
         let session = store.create_session("cli").unwrap();
-        let ep_id = store.store_episode(&session, "user", "Important fact", 0.8).unwrap();
+        let ep_id = store
+            .store_episode(&session, "user", "Important fact", 0.8)
+            .unwrap();
 
         // Initial reinforcement count is 0
         let history = store.get_session_history(&session, 10).unwrap();
@@ -354,9 +357,15 @@ mod tests {
         let store = test_store();
         let session = store.create_session("cli").unwrap();
 
-        store.store_episode(&session, "user", "I love programming in Rust", 0.7).unwrap();
-        store.store_episode(&session, "user", "Python is great for scripting", 0.5).unwrap();
-        store.store_episode(&session, "user", "Rust has amazing performance", 0.8).unwrap();
+        store
+            .store_episode(&session, "user", "I love programming in Rust", 0.7)
+            .unwrap();
+        store
+            .store_episode(&session, "user", "Python is great for scripting", 0.5)
+            .unwrap();
+        store
+            .store_episode(&session, "user", "Rust has amazing performance", 0.8)
+            .unwrap();
 
         let results = store.search_bm25("Rust", 10).unwrap();
         assert_eq!(results.len(), 2);
@@ -370,8 +379,12 @@ mod tests {
         let s1 = store.create_session("cli").unwrap();
         let s2 = store.create_session("whatsapp").unwrap();
 
-        store.store_episode(&s1, "user", "First message", 0.5).unwrap();
-        store.store_episode(&s2, "user", "Second message", 0.5).unwrap();
+        store
+            .store_episode(&s1, "user", "First message", 0.5)
+            .unwrap();
+        store
+            .store_episode(&s2, "user", "Second message", 0.5)
+            .unwrap();
 
         let recent = store.recent(10).unwrap();
         assert_eq!(recent.len(), 2);

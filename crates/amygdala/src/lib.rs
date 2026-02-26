@@ -162,7 +162,10 @@ mod tests {
 
         // Second call with exactly the same text — no new tokens → no bonus
         let s2 = scorer.score("quantum computing breakthrough");
-        assert!(s2 < 0.15, "Second call with same text should not add novelty bonus: got {s2}");
+        assert!(
+            s2 < 0.15,
+            "Second call with same text should not add novelty bonus: got {s2}"
+        );
     }
 
     #[test]
@@ -194,7 +197,10 @@ mod tests {
     fn test_case_insensitive_explicit() {
         let scorer = ImportanceScorer::new();
         let s = scorer.score("REMEMBER TO DO THIS");
-        assert!(s >= 0.3, "Uppercase 'REMEMBER' should trigger explicit signal");
+        assert!(
+            s >= 0.3,
+            "Uppercase 'REMEMBER' should trigger explicit signal"
+        );
     }
 
     #[test]

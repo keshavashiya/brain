@@ -114,8 +114,10 @@ async fn main() -> anyhow::Result<()> {
             // Write config file
             match core::BrainConfig::write_default_config(force)? {
                 Some(path) => println!("  Config:    {} (created)", path.display()),
-                None => println!("  Config:    {} (already exists, use --force to overwrite)",
-                    core::BrainConfig::user_config_path().display()),
+                None => println!(
+                    "  Config:    {} (already exists, use --force to overwrite)",
+                    core::BrainConfig::user_config_path().display()
+                ),
             }
 
             // List created directories
@@ -124,8 +126,10 @@ async fn main() -> anyhow::Result<()> {
                 println!("  Dir:       {}", data_dir.join(sub).display());
             }
 
-            println!("\nBrain initialized. Edit {} to customize.",
-                core::BrainConfig::user_config_path().display());
+            println!(
+                "\nBrain initialized. Edit {} to customize.",
+                core::BrainConfig::user_config_path().display()
+            );
         }
         Commands::Chat { message } => {
             if let Some(msg) = message {
@@ -149,7 +153,12 @@ async fn main() -> anyhow::Result<()> {
             let processor = signal::SignalProcessor::new(config.clone()).await?;
             adapters_ws::serve(processor, &host, port).await?;
         }
-        Commands::Mcp { stdio, http, host, port } => {
+        Commands::Mcp {
+            stdio,
+            http,
+            host,
+            port,
+        } => {
             let processor = signal::SignalProcessor::new(config.clone()).await?;
             if stdio || !http {
                 // Default to stdio when no flag given (or --stdio explicit)
@@ -183,12 +192,28 @@ async fn show_status(config: &core::BrainConfig) -> anyhow::Result<()> {
     println!("Brain Status");
     println!("  Version:    {}", env!("CARGO_PKG_VERSION"));
     println!("  Data dir:   {}", config.data_dir().display());
-    println!("  LLM:        {} ({})", config.llm.model, config.llm.provider);
-    println!("  Embedding:  {} ({}d)", config.embedding.model, config.embedding.dimensions);
-    println!("  Encryption: {}", if config.encryption.enabled { "enabled" } else { "disabled" });
+    println!(
+        "  LLM:        {} ({})",
+        config.llm.model, config.llm.provider
+    );
+    println!(
+        "  Embedding:  {} ({}d)",
+        config.embedding.model, config.embedding.dimensions
+    );
+    println!(
+        "  Encryption: {}",
+        if config.encryption.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     println!("  SQLite:     {}", config.sqlite_path().display());
     println!("  RuVector:   {}", config.ruvector_path().display());
-    println!("  Config:     {}", core::BrainConfig::user_config_path().display());
+    println!(
+        "  Config:     {}",
+        core::BrainConfig::user_config_path().display()
+    );
 
     // Show adapter status
     println!("\n  Adapters:");
@@ -229,22 +254,27 @@ async fn show_status(config: &core::BrainConfig) -> anyhow::Result<()> {
     };
     let provider = cortex::llm::create_provider(&llm_config);
     let llm_healthy = provider.health_check().await;
-    println!("  LLM Health: {}", if llm_healthy { "connected" } else { "disconnected" });
+    println!(
+        "  LLM Health: {}",
+        if llm_healthy {
+            "connected"
+        } else {
+            "disconnected"
+        }
+    );
 
     // Check database
     let db_path = config.sqlite_path();
     match storage::SqlitePool::open(&db_path) {
-        Ok(pool) => {
-            match pool.table_stats() {
-                Ok(stats) => {
-                    println!("\n  Database Tables:");
-                    for (table, count) in stats {
-                        println!("    {}: {} rows", table, count);
-                    }
+        Ok(pool) => match pool.table_stats() {
+            Ok(stats) => {
+                println!("\n  Database Tables:");
+                for (table, count) in stats {
+                    println!("    {}: {} rows", table, count);
                 }
-                Err(e) => println!("\n  Database: error reading stats - {}", e),
             }
-        }
+            Err(e) => println!("\n  Database: error reading stats - {}", e),
+        },
         Err(e) => println!("\n  Database: error opening - {}", e),
     }
 
@@ -267,7 +297,10 @@ async fn chat_non_interactive(config: &core::BrainConfig, message: &str) -> anyh
 async fn chat_interactive(config: &core::BrainConfig) -> anyhow::Result<()> {
     // Print welcome message
     println!("╔═══════════════════════════════════════╗");
-    println!("║  Brain v{}                          ║", env!("CARGO_PKG_VERSION"));
+    println!(
+        "║  Brain v{}                          ║",
+        env!("CARGO_PKG_VERSION")
+    );
     println!("║  A personal AI that remembers you     ║");
     println!("╚═══════════════════════════════════════╝");
     println!();
@@ -424,7 +457,8 @@ impl BrainSession {
 
         // Store user message in episodic memory
         let importance = hippocampus::ImportanceScorer::score(message, true);
-        self.episodic.store_episode(&self.session_id, "user", message, importance)?;
+        self.episodic
+            .store_episode(&self.session_id, "user", message, importance)?;
 
         // Route the message through thalamus
         let thalamus = thalamus::SignalRouter::new();
@@ -471,22 +505,16 @@ impl BrainSession {
         }
 
         // 2. Assemble context
-        let messages = self.context_assembler.assemble(
-            message,
-            &memories,
-            &self.conversation_history,
-        );
+        let messages =
+            self.context_assembler
+                .assemble(message, &memories, &self.conversation_history);
 
         // 3. Generate LLM response
         let response = self.llm.generate(&messages).await?;
 
         // 4. Store assistant response in episodic memory
-        self.episodic.store_episode(
-            &self.session_id,
-            "assistant",
-            &response.content,
-            0.5,
-        )?;
+        self.episodic
+            .store_episode(&self.session_id, "assistant", &response.content, 0.5)?;
 
         // 5. Update conversation history
         self.conversation_history.push(Message {

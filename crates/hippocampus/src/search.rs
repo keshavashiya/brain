@@ -58,10 +58,7 @@ impl Default for RecallConfig {
 ///
 /// Given multiple ranked lists, produces a single fused ranking.
 /// Score for item i = Σ (1 / (k + rank_i)) across all lists.
-pub fn rrf_fuse(
-    ranked_lists: &[Vec<(String, f64)>],
-    k: f64,
-) -> Vec<(String, f64)> {
+pub fn rrf_fuse(ranked_lists: &[Vec<(String, f64)>], k: f64) -> Vec<(String, f64)> {
     let mut scores: HashMap<String, f64> = HashMap::new();
 
     for list in ranked_lists {
@@ -104,7 +101,7 @@ impl RecallEngine {
     ///
     /// Pipeline:
     /// 1. Query episodic store (BM25 full-text search)
-    /// 2. Query semantic store (ANN vector search)
+    /// 2. Query semantic store (ANN vector search, optionally scoped to namespace)
     /// 3. Fuse with Reciprocal Rank Fusion (k=60)
     /// 4. Rerank by importance × recency (forgetting curve)
     /// 5. Return top_k results
@@ -115,6 +112,7 @@ impl RecallEngine {
         episodic: &EpisodicStore,
         semantic: &SemanticStore,
         top_k: usize,
+        namespace: Option<&str>,
     ) -> Result<Vec<Memory>, RecallError> {
         let limit = self.config.pre_fusion_limit;
 
@@ -128,9 +126,9 @@ impl RecallEngine {
             .map(|r| (r.episode_id.clone(), r.rank))
             .collect();
 
-        // 2. ANN search on semantic store
+        // 2. ANN search on semantic store (filtered by namespace if provided)
         let ann_results = semantic
-            .search_similar(query_vector, limit)
+            .search_similar(query_vector, limit, namespace)
             .await
             .map_err(RecallError::Semantic)?;
 
@@ -193,7 +191,11 @@ impl RecallEngine {
         }
 
         // Sort by final score descending
-        memories.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        memories.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         memories.truncate(top_k);
 
         Ok(memories)
@@ -216,13 +218,11 @@ mod tests {
 
     #[test]
     fn test_rrf_single_list() {
-        let lists = vec![
-            vec![
-                ("a".to_string(), 10.0),
-                ("b".to_string(), 5.0),
-                ("c".to_string(), 1.0),
-            ],
-        ];
+        let lists = vec![vec![
+            ("a".to_string(), 10.0),
+            ("b".to_string(), 5.0),
+            ("c".to_string(), 1.0),
+        ]];
 
         let fused = rrf_fuse(&lists, 60.0);
         assert_eq!(fused[0].0, "a");
@@ -236,14 +236,8 @@ mod tests {
     #[test]
     fn test_rrf_two_lists() {
         let lists = vec![
-            vec![
-                ("a".to_string(), 10.0),
-                ("b".to_string(), 5.0),
-            ],
-            vec![
-                ("b".to_string(), 10.0),
-                ("a".to_string(), 5.0),
-            ],
+            vec![("a".to_string(), 10.0), ("b".to_string(), 5.0)],
+            vec![("b".to_string(), 10.0), ("a".to_string(), 5.0)],
         ];
 
         let fused = rrf_fuse(&lists, 60.0);
@@ -258,10 +252,7 @@ mod tests {
 
     #[test]
     fn test_rrf_disjoint_lists() {
-        let lists = vec![
-            vec![("a".to_string(), 10.0)],
-            vec![("b".to_string(), 10.0)],
-        ];
+        let lists = vec![vec![("a".to_string(), 10.0)], vec![("b".to_string(), 10.0)]];
 
         let fused = rrf_fuse(&lists, 60.0);
         assert_eq!(fused.len(), 2);
@@ -279,10 +270,7 @@ mod tests {
                 ("b".to_string(), 5.0),
                 ("c".to_string(), 1.0),
             ],
-            vec![
-                ("a".to_string(), 10.0),
-                ("c".to_string(), 5.0),
-            ],
+            vec![("a".to_string(), 10.0), ("c".to_string(), 5.0)],
         ];
 
         let fused = rrf_fuse(&lists, 60.0);

@@ -36,13 +36,24 @@ pub enum Action {
     /// Search the web.
     WebSearch { query: String },
     /// Schedule a task.
-    ScheduleTask { description: String, cron: Option<String> },
+    ScheduleTask {
+        description: String,
+        cron: Option<String>,
+    },
     /// Store a fact in semantic memory.
-    StoreFact { subject: String, predicate: String, object: String },
+    StoreFact {
+        subject: String,
+        predicate: String,
+        object: String,
+    },
     /// Recall from memory.
     Recall { query: String },
     /// Send a message to an external endpoint (via protocol adapters).
-    SendMessage { channel: String, recipient: String, content: String },
+    SendMessage {
+        channel: String,
+        recipient: String,
+        content: String,
+    },
 }
 
 /// Result of an action execution.
@@ -133,35 +144,30 @@ impl ActionDispatcher {
     /// Execute an action.
     pub async fn dispatch(&self, action: &Action) -> ActionResult {
         match action {
-            Action::ExecuteCommand { command, args } => {
-                self.execute_command(command, args).await
-            }
+            Action::ExecuteCommand { command, args } => self.execute_command(command, args).await,
             Action::WebSearch { query } => self.web_search(query).await,
             Action::ScheduleTask { description, cron } => {
                 self.schedule_task(description, cron.as_deref()).await
             }
-            Action::StoreFact { subject, predicate, object } => {
-                self.store_fact(subject, predicate, object).await
-            }
+            Action::StoreFact {
+                subject,
+                predicate,
+                object,
+            } => self.store_fact(subject, predicate, object).await,
             Action::Recall { query } => self.recall(query).await,
-            Action::SendMessage { channel, recipient, content } => {
-                self.send_message(channel, recipient, content).await
-            }
+            Action::SendMessage {
+                channel,
+                recipient,
+                content,
+            } => self.send_message(channel, recipient, content).await,
         }
     }
 
     /// Execute a sandboxed command.
-    async fn execute_command(
-        &self,
-        command: &str,
-        args: &[String],
-    ) -> ActionResult {
+    async fn execute_command(&self, command: &str, args: &[String]) -> ActionResult {
         // Check allowlist
         if !self.config.command_allowlist.contains(&command.to_string()) {
-            return ActionResult::failure(format!(
-                "Command '{}' is not in the allowlist",
-                command
-            ));
+            return ActionResult::failure(format!("Command '{}' is not in the allowlist", command));
         }
 
         // Build command
@@ -225,19 +231,11 @@ impl ActionDispatcher {
     }
 
     /// Store a fact in semantic memory.
-    async fn store_fact(
-        &self,
-        subject: &str,
-        predicate: &str,
-        object: &str,
-    ) -> ActionResult {
+    async fn store_fact(&self, subject: &str, predicate: &str, object: &str) -> ActionResult {
         tracing::info!("Store fact: {} {} {}", subject, predicate, object);
         // This would integrate with SemanticStore
         // For now, return success
-        ActionResult::success(format!(
-            "Fact stored: {} {} {}",
-            subject, predicate, object
-        ))
+        ActionResult::success(format!("Fact stored: {} {} {}", subject, predicate, object))
     }
 
     /// Recall from memory.
@@ -252,12 +250,7 @@ impl ActionDispatcher {
     }
 
     /// Send a message via channel.
-    async fn send_message(
-        &self,
-        channel: &str,
-        recipient: &str,
-        content: &str,
-    ) -> ActionResult {
+    async fn send_message(&self, channel: &str, recipient: &str, content: &str) -> ActionResult {
         if !self.config.enable_channel_send {
             return ActionResult::failure("Channel sending is disabled");
         }
@@ -398,7 +391,11 @@ mod tests {
 
         let result = dispatcher.dispatch(&action).await;
         assert!(!result.success);
-        assert!(result.error.as_ref().unwrap().contains("not in the allowlist"));
+        assert!(result
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("not in the allowlist"));
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! 2. Promote frequently reinforced episodes to semantic facts
 //! 3. Update statistics for memory health monitoring
 
-use crate::episodic::{EpisodicStore, EpisodicError};
+use crate::episodic::{EpisodicError, EpisodicStore};
 use crate::search::forgetting_curve;
 use thiserror::Error;
 
@@ -115,19 +115,12 @@ impl Consolidator {
             let hours = parse_hours_since(&candidate.last_accessed, &now);
 
             // Calculate retention
-            let retention = forgetting_curve(
-                candidate.importance,
-                hours,
-                candidate.decay_rate,
-            );
+            let retention = forgetting_curve(candidate.importance, hours, candidate.decay_rate);
 
             if retention < self.config.prune_threshold {
                 // Prune this episode
                 db.with_conn(|conn| {
-                    conn.execute(
-                        "DELETE FROM episodes WHERE id = ?1",
-                        [&candidate.id],
-                    )?;
+                    conn.execute("DELETE FROM episodes WHERE id = ?1", [&candidate.id])?;
                     // Also clean up FTS entry
                     conn.execute(
                         "DELETE FROM episodes_fts WHERE rowid IN (
@@ -206,7 +199,10 @@ mod tests {
             .format("%Y-%m-%d %H:%M:%S")
             .to_string();
         let hours = parse_hours_since(&two_hours_ago, &now);
-        assert!((hours - 2.0).abs() < 0.1, "Expected ~2.0 hours, got {hours}");
+        assert!(
+            (hours - 2.0).abs() < 0.1,
+            "Expected ~2.0 hours, got {hours}"
+        );
     }
 
     #[test]
@@ -233,7 +229,9 @@ mod tests {
         let session_id = store.create_session("test").unwrap();
 
         // Store a low-importance episode
-        store.store_episode(&session_id, "user", "trivial message", 0.01).unwrap();
+        store
+            .store_episode(&session_id, "user", "trivial message", 0.01)
+            .unwrap();
         assert_eq!(store.count().unwrap(), 1);
 
         // Run consolidation — episode should be pruned (low importance)
@@ -245,7 +243,10 @@ mod tests {
         let consolidator = Consolidator::new(config);
         let report = consolidator.consolidate(&store).unwrap();
 
-        assert!(report.episodes_pruned > 0, "Should have pruned the low-importance episode");
+        assert!(
+            report.episodes_pruned > 0,
+            "Should have pruned the low-importance episode"
+        );
     }
 
     #[test]
@@ -256,14 +257,19 @@ mod tests {
         let session_id = store.create_session("test").unwrap();
 
         // Store a high-importance episode
-        store.store_episode(&session_id, "user", "critical: remember this forever", 1.0).unwrap();
+        store
+            .store_episode(&session_id, "user", "critical: remember this forever", 1.0)
+            .unwrap();
         assert_eq!(store.count().unwrap(), 1);
 
         // Run with default config — high importance + recent = high retention
         let consolidator = Consolidator::with_defaults();
         let report = consolidator.consolidate(&store).unwrap();
 
-        assert_eq!(report.episodes_pruned, 0, "Should not prune high-importance recent episode");
+        assert_eq!(
+            report.episodes_pruned, 0,
+            "Should not prune high-importance recent episode"
+        );
         assert_eq!(report.episodes_remaining, 1);
     }
 
@@ -273,7 +279,9 @@ mod tests {
         let store = EpisodicStore::new(db);
 
         let session_id = store.create_session("test").unwrap();
-        store.store_episode(&session_id, "user", "I love Rust programming", 0.8).unwrap();
+        store
+            .store_episode(&session_id, "user", "I love Rust programming", 0.8)
+            .unwrap();
 
         // Reinforce multiple times to cross promotion threshold
         let episodes = store.get_session_history(&session_id, 1).unwrap();
@@ -290,6 +298,9 @@ mod tests {
         let consolidator = Consolidator::new(config);
         let report = consolidator.consolidate(&store).unwrap();
 
-        assert!(report.episodes_promoted > 0, "Reinforced episode should be a promotion candidate");
+        assert!(
+            report.episodes_promoted > 0,
+            "Reinforced episode should be a promotion candidate"
+        );
     }
 }

@@ -265,7 +265,13 @@ impl RuVectorStore {
 
         let mut scored: Vec<(f32, String, String)> = entries
             .iter()
-            .map(|e| (cosine_distance(&query_vector, &e.vector), e.id.clone(), e.content.clone()))
+            .map(|e| {
+                (
+                    cosine_distance(&query_vector, &e.vector),
+                    e.id.clone(),
+                    e.content.clone(),
+                )
+            })
             .collect();
 
         scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
@@ -273,7 +279,11 @@ impl RuVectorStore {
         Ok(scored
             .into_iter()
             .take(top_k)
-            .map(|(dist, id, content)| VectorResult { id, content, distance: dist })
+            .map(|(dist, id, content)| VectorResult {
+                id,
+                content,
+                distance: dist,
+            })
             .collect())
     }
 

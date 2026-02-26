@@ -58,10 +58,16 @@ pub enum EmbeddingError {
 /// - Batch operations amortize HTTP overhead for Ollama
 pub trait EmbeddingProvider: Send + Sync {
     /// Embed a single text string.
-    fn embed(&mut self, text: &str) -> impl std::future::Future<Output = Result<Vec<f32>, EmbeddingError>> + Send;
+    fn embed(
+        &mut self,
+        text: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<f32>, EmbeddingError>> + Send;
 
     /// Embed a batch of texts. Implementations should optimize for throughput.
-    fn embed_batch(&mut self, texts: &[&str]) -> impl std::future::Future<Output = Result<Vec<Vec<f32>>, EmbeddingError>> + Send;
+    fn embed_batch(
+        &mut self,
+        texts: &[&str],
+    ) -> impl std::future::Future<Output = Result<Vec<Vec<f32>>, EmbeddingError>> + Send;
 
     /// Vector dimension this provider produces.
     fn dimension(&self) -> usize;
@@ -156,9 +162,7 @@ impl EmbeddingProvider for OllamaProvider {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(EmbeddingError::Ollama(format!(
-                "HTTP {status}: {body}"
-            )));
+            return Err(EmbeddingError::Ollama(format!("HTTP {status}: {body}")));
         }
 
         let response: OllamaEmbedResponse = resp
@@ -252,7 +256,11 @@ impl LocalProvider {
             .encode_batch(texts.to_vec(), true)
             .map_err(|e| EmbeddingError::Tokenizer(e.to_string()))?;
 
-        let max_len = encodings.iter().map(|e| e.get_ids().len()).max().unwrap_or(0);
+        let max_len = encodings
+            .iter()
+            .map(|e| e.get_ids().len())
+            .max()
+            .unwrap_or(0);
 
         // Build padded input tensors
         let mut input_ids = vec![0i64; batch_size * max_len];
@@ -284,11 +292,9 @@ impl LocalProvider {
         let mask_tensor = ort::value::TensorRef::from_array_view(&mask_array)?;
         let types_tensor = ort::value::TensorRef::from_array_view(&types_array)?;
 
-        let outputs = self.session.run(ort::inputs![
-            ids_tensor,
-            mask_tensor,
-            types_tensor
-        ])?;
+        let outputs = self
+            .session
+            .run(ort::inputs![ids_tensor, mask_tensor, types_tensor])?;
 
         // Extract output: (batch_size, seq_len, EMBEDDING_DIM)
         let (output_shape, output_data) = outputs[0]
@@ -361,20 +367,28 @@ impl LocalProvider {
             let url = format!("{HF_BASE}/{HF_REPO}/resolve/main/{filename}");
             info!("Downloading {filename} from {url}...");
 
-            let resp = client.get(&url).send().await
-                .map_err(|e| EmbeddingError::Download(format!("Failed to download {filename}: {e}")))?;
+            let resp = client.get(&url).send().await.map_err(|e| {
+                EmbeddingError::Download(format!("Failed to download {filename}: {e}"))
+            })?;
 
             if !resp.status().is_success() {
                 return Err(EmbeddingError::Download(format!(
-                    "HTTP {} downloading {filename}", resp.status()
+                    "HTTP {} downloading {filename}",
+                    resp.status()
                 )));
             }
 
-            let bytes = resp.bytes().await
+            let bytes = resp
+                .bytes()
+                .await
                 .map_err(|e| EmbeddingError::Download(format!("Failed to read {filename}: {e}")))?;
 
             std::fs::write(&target_path, &bytes)?;
-            info!("Downloaded {} ({} bytes)", target_path.display(), bytes.len());
+            info!(
+                "Downloaded {} ({} bytes)",
+                target_path.display(),
+                bytes.len()
+            );
         }
 
         Ok(target_dir.to_path_buf())
@@ -432,10 +446,18 @@ pub struct EmbeddingConfig {
     pub dimensions: usize,
 }
 
-fn default_ollama_url() -> String { "http://localhost:11434".into() }
-fn default_ollama_model() -> String { "nomic-embed-text".into() }
-fn default_model_dir() -> String { "~/.brain/models/bge-small-en-v1.5".into() }
-fn default_dim() -> usize { EMBEDDING_DIM }
+fn default_ollama_url() -> String {
+    "http://localhost:11434".into()
+}
+fn default_ollama_model() -> String {
+    "nomic-embed-text".into()
+}
+fn default_model_dir() -> String {
+    "~/.brain/models/bge-small-en-v1.5".into()
+}
+fn default_dim() -> usize {
+    EMBEDDING_DIM
+}
 
 impl Default for EmbeddingConfig {
     fn default() -> Self {
@@ -481,11 +503,15 @@ impl Embedder {
                     config.dimensions,
                 );
                 if !provider.health_check().await {
-                    return Err(EmbeddingError::ProviderUnavailable(
-                        format!("Ollama not reachable at {}", config.ollama_url)
-                    ));
+                    return Err(EmbeddingError::ProviderUnavailable(format!(
+                        "Ollama not reachable at {}",
+                        config.ollama_url
+                    )));
                 }
-                info!("Using Ollama embedding provider (model: {})", config.ollama_model);
+                info!(
+                    "Using Ollama embedding provider (model: {})",
+                    config.ollama_model
+                );
                 Ok(Self::Ollama(provider))
             }
             ProviderType::Local => {
@@ -502,7 +528,10 @@ impl Embedder {
                     config.dimensions,
                 );
                 if ollama.health_check().await {
-                    info!("Auto-detected Ollama at {} — using for embeddings", config.ollama_url);
+                    info!(
+                        "Auto-detected Ollama at {} — using for embeddings",
+                        config.ollama_url
+                    );
                     return Ok(Self::Ollama(ollama));
                 }
 
@@ -623,7 +652,11 @@ mod tests {
         let dir = model_dir();
         let mut provider = LocalProvider::load(&dir).unwrap();
 
-        let texts = vec!["Hello world", "Goodbye world", "Something completely different"];
+        let texts = vec![
+            "Hello world",
+            "Goodbye world",
+            "Something completely different",
+        ];
         let vecs = provider.embed_batch_sync(&texts).unwrap();
         assert_eq!(vecs.len(), 3);
         for vec in &vecs {
@@ -632,7 +665,10 @@ mod tests {
 
         let sim_close = cosine_sim(&vecs[0], &vecs[1]);
         let sim_far = cosine_sim(&vecs[0], &vecs[2]);
-        assert!(sim_close > sim_far, "Similar texts should have higher similarity");
+        assert!(
+            sim_close > sim_far,
+            "Similar texts should have higher similarity"
+        );
     }
 
     /// Tests Ollama provider. Requires Ollama running locally.

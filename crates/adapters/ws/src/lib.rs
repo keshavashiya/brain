@@ -113,13 +113,10 @@ pub async fn serve(
         let keys = Arc::clone(&api_keys);
 
         // Register connection before spawning so the count is accurate
-        conns.lock().await.insert(
-            conn_id,
-            ConnectionInfo {
-                id: conn_id,
-                peer,
-            },
-        );
+        conns
+            .lock()
+            .await
+            .insert(conn_id, ConnectionInfo { id: conn_id, peer });
 
         tokio::spawn(async move {
             match accept_async(tcp_stream).await {
@@ -257,11 +254,8 @@ async fn handle_connection(
 }
 
 /// Send a JSON-serialisable value as a text frame; log errors but don't panic.
-async fn send_json_frame<S, T>(
-    ws_tx: &mut S,
-    value: &T,
-    conn_id: Uuid,
-) where
+async fn send_json_frame<S, T>(ws_tx: &mut S, value: &T, conn_id: Uuid)
+where
     S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
     T: Serialize,
 {

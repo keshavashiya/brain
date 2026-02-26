@@ -7,8 +7,8 @@
 //! - Schema migrations
 
 pub mod encryption;
-pub mod sqlite;
 pub mod ruvector;
+pub mod sqlite;
 
 pub use encryption::Encryptor;
 pub use ruvector::{RuVectorStore, VectorResult};

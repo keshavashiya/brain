@@ -29,15 +29,15 @@ pub mod agent_proto {
     tonic::include_proto!("brain.agent");
 }
 
+use agent_proto::{
+    agent_service_server::{AgentService, AgentServiceServer},
+    ConnectRequest, ConnectResponse, ReceiveRequest, SignalRequest as AgentSignalRequest,
+    SignalResponse as AgentSignalResponse, SignalUpdate,
+};
 use memory_proto::{
     memory_service_server::{MemoryService, MemoryServiceServer},
     Fact, GetFactsRequest, GetFactsResponse, SearchRequest, SearchResponse, SignalEvent,
     SignalRequest as MemorySignalRequest, StoreRequest, StoreResponse,
-};
-use agent_proto::{
-    agent_service_server::{AgentService, AgentServiceServer},
-    ConnectRequest, ConnectResponse, ReceiveRequest,
-    SignalRequest as AgentSignalRequest, SignalResponse as AgentSignalResponse, SignalUpdate,
 };
 
 // ── Error type ────────────────────────────────────────────────────────────────
@@ -72,9 +72,13 @@ impl MemoryService for MemoryServiceImpl {
         request: Request<SearchRequest>,
     ) -> Result<Response<SearchResponse>, Status> {
         let req = request.into_inner();
-        let top_k = if req.top_k == 0 { 10 } else { req.top_k as usize };
+        let top_k = if req.top_k == 0 {
+            10
+        } else {
+            req.top_k as usize
+        };
 
-        let results = self.processor.search_facts(&req.query, top_k).await;
+        let results = self.processor.search_facts(&req.query, top_k, None).await;
 
         let facts = results
             .into_iter()
@@ -106,7 +110,13 @@ impl MemoryService for MemoryServiceImpl {
 
         match self
             .processor
-            .store_fact_direct(category, &req.subject, &req.predicate, &req.object)
+            .store_fact_direct(
+                "personal",
+                category,
+                &req.subject,
+                &req.predicate,
+                &req.object,
+            )
             .await
         {
             Ok(fact_id) => Ok(Response::new(StoreResponse {
@@ -126,7 +136,7 @@ impl MemoryService for MemoryServiceImpl {
         let req = request.into_inner();
 
         let raw_facts = if req.subject.is_empty() {
-            self.processor.list_facts()
+            self.processor.list_facts(None)
         } else {
             self.processor.facts_about(&req.subject)
         };
@@ -159,8 +169,16 @@ impl MemoryService for MemoryServiceImpl {
 
         let mut sig = Signal::new(
             source,
-            if req.channel.is_empty() { "grpc" } else { &req.channel },
-            if req.sender.is_empty() { "grpc-client" } else { &req.sender },
+            if req.channel.is_empty() {
+                "grpc"
+            } else {
+                &req.channel
+            },
+            if req.sender.is_empty() {
+                "grpc-client"
+            } else {
+                &req.sender
+            },
             req.content.clone(),
         );
         sig.metadata = req.metadata;
@@ -245,8 +263,16 @@ impl AgentService for AgentServiceImpl {
 
         let mut sig = Signal::new(
             source,
-            if req.channel.is_empty() { "grpc" } else { &req.channel },
-            if req.sender.is_empty() { "agent" } else { &req.sender },
+            if req.channel.is_empty() {
+                "grpc"
+            } else {
+                &req.channel
+            },
+            if req.sender.is_empty() {
+                "agent"
+            } else {
+                &req.sender
+            },
             req.content.clone(),
         );
         sig.metadata = req.metadata;
@@ -293,8 +319,7 @@ impl AgentService for AgentServiceImpl {
             // Stream ends naturally when tx is dropped
         });
 
-        let stream: SignalUpdateStream =
-            Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx));
+        let stream: SignalUpdateStream = Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx));
         Ok(Response::new(stream))
     }
 }
