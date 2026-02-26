@@ -60,6 +60,15 @@ enum Commands {
         #[arg(long, default_value_t = 19791)]
         port: u16,
     },
+    /// Start the gRPC server (MemoryService + AgentService)
+    ServeGrpc {
+        /// Host to bind to
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port to listen on
+        #[arg(long, default_value_t = 19792)]
+        port: u16,
+    },
     /// Manage the background daemon
     Daemon {
         #[command(subcommand)]
@@ -149,6 +158,11 @@ async fn main() -> anyhow::Result<()> {
                 println!("Starting Brain MCP HTTP server on http://{}:{}", host, port);
                 mcp::serve_http(processor, &host, port).await?;
             }
+        }
+        Commands::ServeGrpc { host, port } => {
+            println!("Starting Brain gRPC server on {}:{}", host, port);
+            let processor = signal::SignalProcessor::new(config.clone()).await?;
+            adapters_grpc::serve(processor, &host, port).await?;
         }
         Commands::Daemon { action } => match action {
             DaemonAction::Start => {

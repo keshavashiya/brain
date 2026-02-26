@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package brain.agent;
+
+// AgentService allows AI agents (Claude Code, OpenCode, etc.) to connect
+// to Brain and exchange signals over a persistent gRPC connection.
+service AgentService {
+  // Establish an agent session and receive a session ID.
+  rpc Connect(ConnectRequest) returns (ConnectResponse);
+
+  // Send a signal and receive a single response.
+  rpc SendSignal(SignalRequest) returns (SignalResponse);
+
+  // Subscribe to a stream of updates for a session.
+  rpc ReceiveSignals(ReceiveRequest) returns (stream SignalUpdate);
+}
+
+// ── Connect ───────────────────────────────────────────────────────────────────
+
+message ConnectRequest {
+  string agent_id   = 1;
+  string agent_type = 2;
+}
+
+message ConnectResponse {
+  string session_id = 1;
+  bool   accepted   = 2;
+  string message    = 3;
+}
+
+// ── SendSignal ────────────────────────────────────────────────────────────────
+
+message SignalRequest {
+  string source  = 1;
+  string channel = 2;
+  string sender  = 3;
+  string content = 4;
+  map<string, string> metadata = 5;
+}
+
+message SignalResponse {
+  string signal_id     = 1;
+  string status        = 2;
+  string response      = 3;
+  uint32 facts_used    = 4;
+  uint32 episodes_used = 5;
+}
+
+// ── ReceiveSignals ────────────────────────────────────────────────────────────
+
+message ReceiveRequest {
+  string session_id = 1;
+}
+
+message SignalUpdate {
+  string event_type = 1;
+  string content    = 2;
+  string timestamp  = 3;
+}

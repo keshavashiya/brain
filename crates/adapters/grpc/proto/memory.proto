@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package brain.memory;
+
+// MemoryService exposes Brain's semantic memory over gRPC.
+service MemoryService {
+  // Search semantic memory using a text query.
+  rpc Search(SearchRequest) returns (SearchResponse);
+
+  // Store a structured fact in semantic memory.
+  rpc Store(StoreRequest) returns (StoreResponse);
+
+  // List all active facts, optionally filtered by subject.
+  rpc GetFacts(GetFactsRequest) returns (GetFactsResponse);
+
+  // Process a signal and stream the response events.
+  rpc StreamSignals(SignalRequest) returns (stream SignalEvent);
+}
+
+// ── Search ────────────────────────────────────────────────────────────────────
+
+message SearchRequest {
+  string query = 1;
+  // Maximum number of results to return (default: 10).
+  uint32 top_k = 2;
+}
+
+message SearchResponse {
+  repeated Fact facts = 1;
+}
+
+// ── Store ─────────────────────────────────────────────────────────────────────
+
+message StoreRequest {
+  string subject   = 1;
+  string predicate = 2;
+  string object    = 3;
+  // Optional category (default: "general").
+  string category  = 4;
+}
+
+message StoreResponse {
+  string fact_id = 1;
+  bool   success = 2;
+  string message = 3;
+}
+
+// ── GetFacts ──────────────────────────────────────────────────────────────────
+
+message GetFactsRequest {
+  // Optional subject filter; empty string returns all facts.
+  string subject = 1;
+}
+
+message GetFactsResponse {
+  repeated Fact facts = 1;
+}
+
+// ── StreamSignals ─────────────────────────────────────────────────────────────
+
+message SignalRequest {
+  string source  = 1;
+  string channel = 2;
+  string sender  = 3;
+  string content = 4;
+  map<string, string> metadata = 5;
+}
+
+message SignalEvent {
+  string signal_id    = 1;
+  string status       = 2;
+  string response     = 3;
+  uint32 facts_used   = 4;
+  uint32 episodes_used = 5;
+}
+
+// ── Shared ────────────────────────────────────────────────────────────────────
+
+message Fact {
+  string id         = 1;
+  string category   = 2;
+  string subject    = 3;
+  string predicate  = 4;
+  string object     = 5;
+  double confidence = 6;
+  float  distance   = 7;
+}

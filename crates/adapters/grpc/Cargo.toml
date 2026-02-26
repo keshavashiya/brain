@@ -1,0 +1,28 @@
+[package]
+name = "adapters-grpc"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+brain_core = { path = "../../core", package = "core" }
+signal       = { workspace = true }
+tonic        = { version = "0.14", features = ["transport"] }
+tonic-prost  = "0.14"
+prost        = "0.14"
+tokio        = { workspace = true }
+tokio-stream = "0.1"
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+anyhow       = { workspace = true }
+tracing      = { workspace = true }
+uuid         = { workspace = true }
+chrono       = { workspace = true }
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+
+[dev-dependencies]
+tempfile = "3"
