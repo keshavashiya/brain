@@ -36,6 +36,15 @@ enum Commands {
         #[arg(long, default_value_t = 19789)]
         port: u16,
     },
+    /// Start the WebSocket server
+    ServeWs {
+        /// Host to bind to
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        /// Port to listen on
+        #[arg(long, default_value_t = 19790)]
+        port: u16,
+    },
     /// Manage the background daemon
     Daemon {
         #[command(subcommand)]
@@ -110,6 +119,11 @@ async fn main() -> anyhow::Result<()> {
             println!("Starting Brain HTTP API server on http://{}:{}", host, port);
             let processor = signal::SignalProcessor::new(config.clone()).await?;
             adapters_http::serve(processor, &host, port).await?;
+        }
+        Commands::ServeWs { host, port } => {
+            println!("Starting Brain WebSocket server on ws://{}:{}", host, port);
+            let processor = signal::SignalProcessor::new(config.clone()).await?;
+            adapters_ws::serve(processor, &host, port).await?;
         }
         Commands::Daemon { action } => match action {
             DaemonAction::Start => {

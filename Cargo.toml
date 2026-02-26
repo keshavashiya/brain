@@ -9,6 +9,7 @@ members = [
     "crates/amygdala",
     "crates/signal",
     "crates/adapters/http",
+    "crates/adapters/ws",
     # Placeholder crates - will be implemented in Phase 3
     # "crates/cerebellum",
     # "crates/ganglia",
@@ -92,5 +93,6 @@ thalamus = { path = "crates/thalamus" }
 amygdala = { path = "crates/amygdala" }
 signal = { path = "crates/signal" }
 adapters-http = { path = "crates/adapters/http" }
+adapters-ws = { path = "crates/adapters/ws" }
 cerebellum = { path = "crates/cerebellum" }
 ganglia = { path = "crates/ganglia" }

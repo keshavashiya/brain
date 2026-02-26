@@ -17,6 +17,7 @@ cortex = { workspace = true }
 thalamus = { workspace = true }
 signal = { workspace = true }
 adapters-http = { workspace = true }
+adapters-ws = { workspace = true }
 clap = { workspace = true }
 rustyline = { workspace = true }
 crossterm = { workspace = true }
