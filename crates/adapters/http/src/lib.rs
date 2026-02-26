@@ -3,11 +3,15 @@
 //! Exposes Brain's signal processing pipeline over HTTP using axum.
 //!
 //! ## Routes
-//! - `GET  /health`             — health check
-//! - `POST /v1/signals`         — submit a signal, get a response
-//! - `GET  /v1/signals/:id`     — retrieve cached signal response by UUID
-//! - `POST /v1/memory/search`   — semantic search over stored facts
-//! - `GET  /v1/memory/facts`    — list all semantic facts
+//! - `GET  /health`             — health check (no auth required)
+//! - `POST /v1/signals`         — submit a signal (requires write)
+//! - `GET  /v1/signals/:id`     — retrieve cached signal response (requires read)
+//! - `POST /v1/memory/search`   — semantic search over stored facts (requires read)
+//! - `GET  /v1/memory/facts`    — list all semantic facts (requires read)
+//!
+//! ## Authentication
+//! All `/v1/*` routes require `Authorization: Bearer <api-key>` header.
+//! The demo key `demo-key-123` (read+write) is pre-configured in `default.yaml`.
 
 use std::{
     collections::HashMap,
@@ -17,11 +21,12 @@ use std::{
 
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::Json,
     routing::{get, post},
     Router,
 };
+use brain_core::ApiKeyConfig;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
@@ -82,15 +87,50 @@ pub struct AppState {
     processor: Arc<signal::SignalProcessor>,
     /// In-memory cache: signal_id → SignalResponse.
     cache: Mutex<HashMap<Uuid, SignalResponse>>,
+    /// Configured API keys (loaded from BrainConfig).
+    api_keys: Vec<ApiKeyConfig>,
+}
+
+// ─── Auth helpers ─────────────────────────────────────────────────────────────
+
+/// Extract the raw key from `Authorization: Bearer <key>`.
+fn extract_bearer(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+}
+
+/// Check that the request carries a valid key with the given permission.
+/// Returns `Err((StatusCode::UNAUTHORIZED, message))` on failure.
+fn check_auth(
+    state: &AppState,
+    headers: &HeaderMap,
+    permission: &str,
+) -> Result<(), (StatusCode, String)> {
+    let raw_key = extract_bearer(headers)
+        .ok_or_else(|| (StatusCode::UNAUTHORIZED, "Missing Authorization: Bearer <key> header".to_string()))?;
+
+    match state.api_keys.iter().find(|k| k.key == raw_key) {
+        None => Err((StatusCode::UNAUTHORIZED, "Invalid API key".to_string())),
+        Some(k) if !k.has_permission(permission) => Err((
+            StatusCode::UNAUTHORIZED,
+            format!("API key does not have '{}' permission", permission),
+        )),
+        Some(_) => Ok(()),
+    }
 }
 
 // ─── Router builder ──────────────────────────────────────────────────────────
 
 /// Build the axum router with all routes and CORS enabled.
-pub fn create_router(processor: Arc<signal::SignalProcessor>) -> Router {
+///
+/// `api_keys` is taken from `BrainConfig.access.api_keys` by the caller.
+pub fn create_router(processor: Arc<signal::SignalProcessor>, api_keys: Vec<ApiKeyConfig>) -> Router {
     let state = Arc::new(AppState {
         processor,
         cache: Mutex::new(HashMap::new()),
+        api_keys,
     });
 
     Router::new()
@@ -111,7 +151,8 @@ pub async fn serve(
     host: &str,
     port: u16,
 ) -> anyhow::Result<()> {
-    let router = create_router(Arc::new(processor));
+    let api_keys = processor.config().access.api_keys.clone();
+    let router = create_router(Arc::new(processor), api_keys);
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     tracing::info!("Brain HTTP API listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
@@ -121,7 +162,7 @@ pub async fn serve(
 
 // ─── Handlers ────────────────────────────────────────────────────────────────
 
-/// GET /health
+/// GET /health — no authentication required
 async fn health_handler() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok",
@@ -129,14 +170,14 @@ async fn health_handler() -> Json<HealthResponse> {
     })
 }
 
-/// POST /v1/signals
-///
-/// Accepts a JSON `SignalRequest`, processes it through `SignalProcessor`,
-/// caches the response by signal UUID, and returns it.
+/// POST /v1/signals — requires write permission
 async fn post_signal_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<SignalRequest>,
 ) -> Result<Json<SignalResponse>, (StatusCode, String)> {
+    check_auth(&state, &headers, "write")?;
+
     let source = parse_source(body.source.as_deref());
     let mut signal = Signal::new(
         source,
@@ -161,13 +202,14 @@ async fn post_signal_handler(
     Ok(Json(response))
 }
 
-/// GET /v1/signals/:id
-///
-/// Returns a previously-cached `SignalResponse` by UUID.
+/// GET /v1/signals/:id — requires read permission
 async fn get_signal_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<SignalResponse>, (StatusCode, String)> {
+    check_auth(&state, &headers, "read")?;
+
     let uuid = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, format!("Invalid UUID: {id}")))?;
 
@@ -181,13 +223,14 @@ async fn get_signal_handler(
     }
 }
 
-/// POST /v1/memory/search
-///
-/// Accepts `{query, top_k}` and returns ranked semantic facts.
+/// POST /v1/memory/search — requires read permission
 async fn search_memory_handler(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<SearchRequest>,
-) -> Json<Vec<FactJson>> {
+) -> Result<Json<Vec<FactJson>>, (StatusCode, String)> {
+    check_auth(&state, &headers, "read")?;
+
     let top_k = body.top_k.unwrap_or(10);
     let results = state.processor.search_facts(&body.query, top_k).await;
 
@@ -204,13 +247,16 @@ async fn search_memory_handler(
         })
         .collect();
 
-    Json(facts)
+    Ok(Json(facts))
 }
 
-/// GET /v1/memory/facts
-///
-/// Returns all active (non-superseded) semantic facts.
-async fn get_facts_handler(State(state): State<Arc<AppState>>) -> Json<Vec<FactJson>> {
+/// GET /v1/memory/facts — requires read permission
+async fn get_facts_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<FactJson>>, (StatusCode, String)> {
+    check_auth(&state, &headers, "read")?;
+
     let facts = state
         .processor
         .list_facts()
@@ -226,7 +272,7 @@ async fn get_facts_handler(State(state): State<Arc<AppState>>) -> Json<Vec<FactJ
         })
         .collect();
 
-    Json(facts)
+    Ok(Json(facts))
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -247,6 +293,17 @@ fn parse_source(s: Option<&str>) -> SignalSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a test router with the demo key pre-loaded.
+    async fn make_router() -> (Router, tempfile::TempDir) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let api_keys = config.access.api_keys.clone();
+        let processor = signal::SignalProcessor::new(config).await.unwrap();
+        let router = create_router(Arc::new(processor), api_keys);
+        (router, temp)
+    }
 
     #[test]
     fn test_parse_source_defaults_to_http() {
@@ -289,54 +346,14 @@ mod tests {
         assert!(json.contains("\"distance\":0.05"));
     }
 
-    /// Integration test: POST /v1/signals → StoreFact intent → cached response.
-    ///
-    /// Spins up an in-process router against a temp SignalProcessor.
-    #[tokio::test]
-    async fn test_post_signal_store_fact() {
-        use axum::body::Body;
-        use axum::http::{self, Request};
-        use tower::util::ServiceExt;
-
-        let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
-        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
-        let processor = signal::SignalProcessor::new(config).await.unwrap();
-        let router = create_router(Arc::new(processor));
-
-        let payload = serde_json::json!({
-            "content": "Remember that Rust is fast"
-        });
-
-        let request = Request::builder()
-            .method(http::Method::POST)
-            .uri("/v1/signals")
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&payload).unwrap()))
-            .unwrap();
-
-        let response = router.oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(resp["status"], "Ok");
-    }
-
-    /// Integration test: GET /health returns {"status":"ok"}.
+    /// GET /health — no auth required, always returns 200.
     #[tokio::test]
     async fn test_health_endpoint() {
         use axum::body::Body;
         use axum::http::{self, Request};
         use tower::util::ServiceExt;
 
-        let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
-        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
-        let processor = signal::SignalProcessor::new(config).await.unwrap();
-        let router = create_router(Arc::new(processor));
+        let (router, _tmp) = make_router().await;
 
         let request = Request::builder()
             .method(http::Method::GET)
@@ -354,22 +371,109 @@ mod tests {
         assert_eq!(body["status"], "ok");
     }
 
-    /// Integration test: GET /v1/memory/facts returns an array.
+    /// POST /v1/signals without auth → 401.
     #[tokio::test]
-    async fn test_get_facts_endpoint() {
+    async fn test_post_signal_no_auth_returns_401() {
         use axum::body::Body;
         use axum::http::{self, Request};
         use tower::util::ServiceExt;
 
-        let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
-        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
-        let processor = signal::SignalProcessor::new(config).await.unwrap();
-        let router = create_router(Arc::new(processor));
+        let (router, _tmp) = make_router().await;
+
+        let payload = serde_json::json!({"content": "Remember Rust is fast"});
+        let request = Request::builder()
+            .method(http::Method::POST)
+            .uri("/v1/signals")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// POST /v1/signals with invalid key → 401.
+    #[tokio::test]
+    async fn test_post_signal_invalid_key_returns_401() {
+        use axum::body::Body;
+        use axum::http::{self, Request};
+        use tower::util::ServiceExt;
+
+        let (router, _tmp) = make_router().await;
+
+        let payload = serde_json::json!({"content": "Remember Rust is fast"});
+        let request = Request::builder()
+            .method(http::Method::POST)
+            .uri("/v1/signals")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer wrong-key")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// POST /v1/signals with valid demo key → 200.
+    #[tokio::test]
+    async fn test_post_signal_store_fact_with_auth() {
+        use axum::body::Body;
+        use axum::http::{self, Request};
+        use tower::util::ServiceExt;
+
+        let (router, _tmp) = make_router().await;
+
+        let payload = serde_json::json!({"content": "Remember that Rust is fast"});
+        let request = Request::builder()
+            .method(http::Method::POST)
+            .uri("/v1/signals")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer demo-key-123")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(resp["status"], "Ok");
+    }
+
+    /// GET /v1/memory/facts with no auth → 401.
+    #[tokio::test]
+    async fn test_get_facts_no_auth_returns_401() {
+        use axum::body::Body;
+        use axum::http::{self, Request};
+        use tower::util::ServiceExt;
+
+        let (router, _tmp) = make_router().await;
 
         let request = Request::builder()
             .method(http::Method::GET)
             .uri("/v1/memory/facts")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// GET /v1/memory/facts with valid demo key → 200.
+    #[tokio::test]
+    async fn test_get_facts_endpoint_with_auth() {
+        use axum::body::Body;
+        use axum::http::{self, Request};
+        use tower::util::ServiceExt;
+
+        let (router, _tmp) = make_router().await;
+
+        let request = Request::builder()
+            .method(http::Method::GET)
+            .uri("/v1/memory/facts")
+            .header("authorization", "Bearer demo-key-123")
             .body(Body::empty())
             .unwrap();
 
@@ -383,9 +487,9 @@ mod tests {
         assert!(body.is_array());
     }
 
-    /// Integration test: cached signal can be retrieved by GET /v1/signals/:id.
+    /// POST /v1/memory/search with valid read-only key → 200.
     #[tokio::test]
-    async fn test_get_cached_signal() {
+    async fn test_search_with_read_only_key() {
         use axum::body::Body;
         use axum::http::{self, Request};
         use tower::util::ServiceExt;
@@ -393,10 +497,77 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut config = brain_core::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        // Add a read-only key
+        config.access.api_keys.push(ApiKeyConfig {
+            key: "read-only-key".to_string(),
+            name: "Read Only".to_string(),
+            permissions: vec!["read".to_string()],
+        });
+        let api_keys = config.access.api_keys.clone();
+        let processor = signal::SignalProcessor::new(config).await.unwrap();
+        let router = create_router(Arc::new(processor), api_keys);
+
+        let payload = serde_json::json!({"query": "Rust", "top_k": 5});
+        let request = Request::builder()
+            .method(http::Method::POST)
+            .uri("/v1/memory/search")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer read-only-key")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// POST /v1/signals with read-only key → 401 (missing write permission).
+    #[tokio::test]
+    async fn test_post_signal_read_only_key_returns_401() {
+        use axum::body::Body;
+        use axum::http::{self, Request};
+        use tower::util::ServiceExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        config.access.api_keys.push(ApiKeyConfig {
+            key: "read-only-key".to_string(),
+            name: "Read Only".to_string(),
+            permissions: vec!["read".to_string()],
+        });
+        let api_keys = config.access.api_keys.clone();
+        let processor = signal::SignalProcessor::new(config).await.unwrap();
+        let router = create_router(Arc::new(processor), api_keys);
+
+        let payload = serde_json::json!({"content": "Remember something"});
+        let request = Request::builder()
+            .method(http::Method::POST)
+            .uri("/v1/signals")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer read-only-key")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Integration test: cached signal can be retrieved by GET /v1/signals/:id.
+    #[tokio::test]
+    async fn test_get_cached_signal_with_auth() {
+        use axum::body::Body;
+        use axum::http::{self, Request};
+        use tower::util::ServiceExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let api_keys = config.access.api_keys.clone();
         let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
         let state = Arc::new(AppState {
             processor,
             cache: Mutex::new(HashMap::new()),
+            api_keys,
         });
 
         // Manually insert a response into the cache
@@ -411,6 +582,7 @@ mod tests {
         let request = Request::builder()
             .method(http::Method::GET)
             .uri(format!("/v1/signals/{id}"))
+            .header("authorization", "Bearer demo-key-123")
             .body(Body::empty())
             .unwrap();
 

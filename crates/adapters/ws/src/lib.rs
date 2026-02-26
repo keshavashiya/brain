@@ -3,19 +3,22 @@
 //! Exposes Brain's signal processing pipeline over WebSocket using tokio-tungstenite.
 //!
 //! ## Protocol
-//! - Client sends a JSON text frame: `{"source":"ws","content":"...","sender":"user-1"}`
-//! - Server responds with a `SignalResponse` JSON text frame
+//! 1. Client connects (WebSocket handshake).
+//! 2. Client sends first text frame: `{"api_key":"demo-key-123"}` — authentication.
+//! 3. Server replies with `{"status":"authenticated","conn_id":"<uuid>"}` or
+//!    `{"status":"error","message":"..."}` then closes.
+//! 4. Subsequent text frames are `SignalRequest` JSON; server replies with
+//!    `SignalResponse` JSON.
 //!
-//! ## Connection lifecycle
-//! 1. Client connects → assigned a UUID session ID
-//! 2. Client sends Signal JSON frames
-//! 3. Server processes each frame and replies with a `SignalResponse` JSON frame
-//! 4. On disconnect (Close frame or TCP error), connection is removed gracefully
+//! ## Authentication
+//! The initial handshake message MUST contain a valid `api_key`.
+//! If the key is absent or invalid the server sends an error frame and closes.
 
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
+use brain_core::ApiKeyConfig;
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 use uuid::Uuid;
@@ -34,10 +37,14 @@ pub enum WsAdapterError {
 
 // ─── DTOs ─────────────────────────────────────────────────────────────────────
 
-/// JSON frame sent by a WebSocket client.
-///
-/// The `source`, `sender`, and `metadata` fields are optional — the adapter
-/// fills in sensible defaults.
+/// First frame sent by a WebSocket client — authentication handshake.
+#[derive(Debug, Deserialize)]
+pub struct AuthMessage {
+    /// The API key for this session.
+    pub api_key: String,
+}
+
+/// Subsequent frames sent by a WebSocket client — signal payload.
 #[derive(Debug, Deserialize)]
 pub struct ClientMessage {
     /// Signal source (default: `"ws"`).
@@ -48,6 +55,16 @@ pub struct ClientMessage {
     pub sender: Option<String>,
     /// Optional key-value metadata to attach to the signal.
     pub metadata: Option<HashMap<String, String>>,
+}
+
+/// Server-to-client auth result frame.
+#[derive(Debug, Serialize)]
+pub struct AuthResponse {
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conn_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 // ─── Connection tracking ──────────────────────────────────────────────────────
@@ -68,6 +85,10 @@ pub type Connections = Arc<Mutex<HashMap<Uuid, ConnectionInfo>>>;
 
 /// Start the WebSocket server, binding to `host:port`.
 ///
+/// The configured `api_keys` are used to authenticate each new connection's
+/// initial handshake message.  Pass an empty `Vec` to disable auth (not
+/// recommended in production).
+///
 /// Accepts concurrent connections. Each connection is handled in its own
 /// tokio task. Blocks until the listener errors.
 pub async fn serve(
@@ -75,6 +96,7 @@ pub async fn serve(
     host: &str,
     port: u16,
 ) -> anyhow::Result<()> {
+    let api_keys: Arc<Vec<ApiKeyConfig>> = Arc::new(processor.config().access.api_keys.clone());
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("Brain WebSocket server listening on ws://{addr}");
@@ -88,6 +110,7 @@ pub async fn serve(
 
         let proc = Arc::clone(&processor);
         let conns = Arc::clone(&connections);
+        let keys = Arc::clone(&api_keys);
 
         // Register connection before spawning so the count is accurate
         conns.lock().await.insert(
@@ -106,7 +129,7 @@ pub async fn serve(
                         peer = %peer,
                         "WebSocket connection established"
                     );
-                    handle_connection(ws_stream, conn_id, proc).await;
+                    handle_connection(ws_stream, conn_id, proc, &keys).await;
                 }
                 Err(e) => {
                     tracing::warn!(
@@ -128,21 +151,80 @@ pub async fn serve(
 
 /// Drive a single WebSocket connection to completion.
 ///
-/// Reads text frames, converts them to `Signal`s, processes them through the
-/// `SignalProcessor`, and sends `SignalResponse` JSON frames back. Non-text
-/// frames (ping, binary, close) are handled gracefully without panicking.
+/// Phase 1: read the first text frame as an `AuthMessage` and validate it.
+/// Phase 2: process subsequent `ClientMessage` frames as signals.
 async fn handle_connection(
     ws_stream: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     conn_id: Uuid,
     processor: Arc<signal::SignalProcessor>,
+    api_keys: &[ApiKeyConfig],
 ) {
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
+    // ── Phase 1: authenticate ────────────────────────────────────────────────
+    let authed = match ws_rx.next().await {
+        None => {
+            // Client disconnected before sending auth frame
+            return;
+        }
+        Some(Err(e)) => {
+            tracing::debug!(conn_id = %conn_id, "WS recv error during auth: {e}");
+            return;
+        }
+        Some(Ok(Message::Text(text))) => {
+            match serde_json::from_str::<AuthMessage>(text.as_str()) {
+                Err(e) => {
+                    let resp = AuthResponse {
+                        status: "error",
+                        conn_id: None,
+                        message: Some(format!("Expected auth message: {e}")),
+                    };
+                    send_json_frame(&mut ws_tx, &resp, conn_id).await;
+                    return;
+                }
+                Ok(auth) => {
+                    if !validate_key(api_keys, &auth.api_key) {
+                        let resp = AuthResponse {
+                            status: "error",
+                            conn_id: None,
+                            message: Some("Invalid or missing API key".to_string()),
+                        };
+                        send_json_frame(&mut ws_tx, &resp, conn_id).await;
+                        return;
+                    }
+                    // Auth OK — send confirmation
+                    let resp = AuthResponse {
+                        status: "authenticated",
+                        conn_id: Some(conn_id.to_string()),
+                        message: None,
+                    };
+                    send_json_frame(&mut ws_tx, &resp, conn_id).await;
+                    true
+                }
+            }
+        }
+        Some(Ok(Message::Close(_))) => return,
+        Some(Ok(_)) => {
+            // Non-text frames before auth are rejected
+            let resp = AuthResponse {
+                status: "error",
+                conn_id: None,
+                message: Some("First frame must be a text auth message".to_string()),
+            };
+            send_json_frame(&mut ws_tx, &resp, conn_id).await;
+            return;
+        }
+    };
+
+    if !authed {
+        return;
+    }
+
+    // ── Phase 2: process signal frames ───────────────────────────────────────
     while let Some(result) = ws_rx.next().await {
         let msg = match result {
             Ok(m) => m,
             Err(e) => {
-                // Network-level error — close gracefully
                 tracing::debug!(conn_id = %conn_id, "WebSocket receive error: {e}");
                 break;
             }
@@ -163,24 +245,42 @@ async fn handle_connection(
                 }
             }
             Message::Ping(data) => {
-                // Respond to ping to keep connection alive
                 let _ = ws_tx.send(Message::Pong(data)).await;
             }
             Message::Close(_) => {
                 tracing::debug!(conn_id = %conn_id, "Client sent Close frame");
                 break;
             }
-            _ => {
-                // Binary, pong, and other frames are silently ignored
-            }
+            _ => {}
         }
     }
 }
 
+/// Send a JSON-serialisable value as a text frame; log errors but don't panic.
+async fn send_json_frame<S, T>(
+    ws_tx: &mut S,
+    value: &T,
+    conn_id: Uuid,
+) where
+    S: futures_util::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    T: Serialize,
+{
+    match serde_json::to_string(value) {
+        Ok(json) => {
+            let _ = ws_tx.send(Message::Text(json.into())).await;
+        }
+        Err(e) => {
+            tracing::error!(conn_id = %conn_id, "Failed to serialize frame: {e}");
+        }
+    }
+}
+
+/// Returns true if `key` is present in `api_keys` (any permission).
+fn validate_key(api_keys: &[ApiKeyConfig], key: &str) -> bool {
+    api_keys.iter().any(|k| k.key == key)
+}
+
 /// Parse a text frame and run it through the signal pipeline.
-///
-/// Returns an error `SignalResponse` if parsing fails so the client
-/// can see the error without the server panicking.
 async fn process_text_frame(
     text: &str,
     conn_id: Uuid,
@@ -234,6 +334,10 @@ fn parse_source(s: Option<&str>) -> SignalSource {
 mod tests {
     use super::*;
 
+    fn demo_keys() -> Vec<ApiKeyConfig> {
+        brain_core::BrainConfig::default().access.api_keys
+    }
+
     #[test]
     fn test_parse_source_defaults_to_websocket() {
         assert_eq!(parse_source(None), SignalSource::WebSocket);
@@ -277,6 +381,60 @@ mod tests {
         };
         let cloned = info.clone();
         assert_eq!(info.id, cloned.id);
+    }
+
+    #[test]
+    fn test_validate_key_valid() {
+        let keys = demo_keys();
+        assert!(validate_key(&keys, "demo-key-123"));
+    }
+
+    #[test]
+    fn test_validate_key_invalid() {
+        let keys = demo_keys();
+        assert!(!validate_key(&keys, "bad-key"));
+        assert!(!validate_key(&keys, ""));
+    }
+
+    #[test]
+    fn test_validate_key_empty_list() {
+        // With empty key list, no key is valid
+        assert!(!validate_key(&[], "demo-key-123"));
+    }
+
+    #[test]
+    fn test_auth_message_deserialize() {
+        let json = r#"{"api_key":"demo-key-123"}"#;
+        let msg: AuthMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.api_key, "demo-key-123");
+    }
+
+    #[test]
+    fn test_auth_response_serializes_ok() {
+        let resp = AuthResponse {
+            status: "authenticated",
+            conn_id: Some("some-uuid".to_string()),
+            message: None,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"status\":\"authenticated\""));
+        assert!(json.contains("\"conn_id\""));
+        // `message` should be skipped when None
+        assert!(!json.contains("message"));
+    }
+
+    #[test]
+    fn test_auth_response_serializes_error() {
+        let resp = AuthResponse {
+            status: "error",
+            conn_id: None,
+            message: Some("Invalid API key".to_string()),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"status\":\"error\""));
+        assert!(json.contains("\"message\":\"Invalid API key\""));
+        // `conn_id` should be skipped when None
+        assert!(!json.contains("conn_id"));
     }
 
     /// Integration test: process_text_frame with invalid JSON returns error response.

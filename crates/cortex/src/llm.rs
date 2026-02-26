@@ -388,7 +388,7 @@ impl LlmProvider for OpenAiProvider {
         let data: OpenAiResponse = resp.json().await?;
         let content = data
             .choices
-            .get(0)
+            .first()
             .map(|c| c.message.content.clone())
             .unwrap_or_default();
 

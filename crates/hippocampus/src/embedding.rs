@@ -402,21 +402,16 @@ impl EmbeddingProvider for LocalProvider {
 // ─── Embedder (auto-selecting wrapper) ───────────────────────────────────────
 
 /// Which embedding provider to use.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderType {
     /// Try Ollama first, fall back to Local ONNX.
+    #[default]
     Auto,
     /// Always use Ollama.
     Ollama,
     /// Always use local ONNX model.
     Local,
-}
-
-impl Default for ProviderType {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 /// Configuration for the embedding system.
@@ -460,6 +455,7 @@ impl Default for EmbeddingConfig {
 /// - In `Auto` mode, probes Ollama first (fast health check). If Ollama is
 ///   running, uses it (zero model download, GPU-accelerated).
 /// - Falls back to local ONNX if Ollama is unavailable and model files exist.
+#[allow(clippy::large_enum_variant)]
 pub enum Embedder {
     Ollama(OllamaProvider),
     Local(LocalProvider),

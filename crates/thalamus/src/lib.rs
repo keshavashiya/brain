@@ -114,6 +114,7 @@ struct IntentPattern {
 
 impl IntentClassifier {
     /// Create a new classifier with built-in patterns.
+    #[allow(clippy::vec_init_then_push)]
     pub fn new() -> Self {
         let mut patterns = Vec::new();
 

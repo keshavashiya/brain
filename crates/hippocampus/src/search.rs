@@ -125,7 +125,7 @@ impl RecallEngine {
 
         let bm25_ranked: Vec<(String, f64)> = bm25_results
             .iter()
-            .map(|r| (r.episode_id.clone(), r.rank as f64))
+            .map(|r| (r.episode_id.clone(), r.rank))
             .collect();
 
         // 2. ANN search on semantic store

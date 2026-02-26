@@ -29,6 +29,7 @@ pub struct BrainConfig {
     pub security: SecurityConfig,
     pub proactivity: ProactivityConfig,
     pub adapters: AdaptersConfig,
+    pub access: AccessConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +134,44 @@ pub struct QuietHoursConfig {
     pub end: String,
 }
 
+/// A single API key entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyConfig {
+    /// The raw API key string.
+    pub key: String,
+    /// Human-readable name for this key (for display/audit purposes).
+    pub name: String,
+    /// Granted permissions: `"read"` and/or `"write"`.
+    pub permissions: Vec<String>,
+}
+
+impl ApiKeyConfig {
+    /// Returns true if this key grants the requested permission.
+    pub fn has_permission(&self, perm: &str) -> bool {
+        self.permissions.iter().any(|p| p == perm)
+    }
+}
+
+/// Access-control configuration (API keys).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessConfig {
+    pub api_keys: Vec<ApiKeyConfig>,
+}
+
+impl AccessConfig {
+    /// Returns true if `key` is valid and has the given `permission`.
+    pub fn validate(&self, key: &str, permission: &str) -> bool {
+        self.api_keys
+            .iter()
+            .any(|k| k.key == key && k.has_permission(permission))
+    }
+
+    /// Find a key entry by its raw key string.
+    pub fn find_key(&self, key: &str) -> Option<&ApiKeyConfig> {
+        self.api_keys.iter().find(|k| k.key == key)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdaptersConfig {
     pub http: HttpAdapterConfig,
@@ -176,11 +215,13 @@ impl BrainConfig {
     /// 1. Environment variables (`BRAIN_LLM__MODEL=...`)
     /// 2. User config (`~/.brain/config.yaml`)
     /// 3. Embedded defaults (compiled into binary)
+    #[allow(clippy::result_large_err)]
     pub fn load() -> Result<Self, figment::Error> {
         Self::load_from(None)
     }
 
     /// Load configuration with an optional explicit config path.
+    #[allow(clippy::result_large_err)]
     pub fn load_from(config_path: Option<&Path>) -> Result<Self, figment::Error> {
         // Layer 1: Embedded defaults (always available, no file needed)
         let mut figment = Figment::new().merge(Yaml::string(DEFAULT_CONFIG));
@@ -372,6 +413,13 @@ impl Default for BrainConfig {
                     enabled: true,
                     port: 19792,
                 },
+            },
+            access: AccessConfig {
+                api_keys: vec![ApiKeyConfig {
+                    key: "demo-key-123".to_string(),
+                    name: "Demo Key".to_string(),
+                    permissions: vec!["read".to_string(), "write".to_string()],
+                }],
             },
         }
     }

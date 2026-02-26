@@ -58,6 +58,7 @@ impl SemanticStore {
     ///
     /// The `vector` should be the embedding of the fact's content
     /// (typically: "{subject} {predicate} {object}").
+    #[allow(clippy::too_many_arguments)]
     pub async fn store_fact(
         &self,
         category: &str,

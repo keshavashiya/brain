@@ -6,6 +6,11 @@
 //! - **stdio** (`brain mcp --stdio`): line-delimited JSON-RPC on stdin/stdout
 //! - **HTTP** (`brain mcp --http`): JSON-RPC over HTTP POST on port 19791
 //!
+//! ## Authentication
+//! - **HTTP**: `x-api-key: <key>` HTTP header on every request.
+//! - **stdio**: `{"x-api-key": "<key>"}` inside `params._meta` of each JSON-RPC
+//!   request.  If no API keys are configured, auth is skipped.
+//!
 //! ## Tools
 //! - `memory_search`   — semantic search over stored facts/episodes
 //! - `memory_store`    — store a structured fact (subject predicate object)
@@ -29,11 +34,12 @@ use std::sync::Arc;
 
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::Json as AxumJson,
     routing::post,
     Router,
 };
+use brain_core::ApiKeyConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
@@ -109,11 +115,21 @@ impl JsonRpcResponse {
 /// The MCP server — handles JSON-RPC requests against Brain memory tools.
 pub struct McpServer {
     processor: Arc<signal::SignalProcessor>,
+    /// Configured API keys; empty means auth is disabled.
+    pub api_keys: Vec<ApiKeyConfig>,
 }
 
 impl McpServer {
-    pub fn new(processor: Arc<signal::SignalProcessor>) -> Self {
-        Self { processor }
+    pub fn new(processor: Arc<signal::SignalProcessor>, api_keys: Vec<ApiKeyConfig>) -> Self {
+        Self { processor, api_keys }
+    }
+
+    /// Returns true if the given key is valid (or if auth is disabled).
+    pub fn validate_key(&self, key: &str) -> bool {
+        if self.api_keys.is_empty() {
+            return true; // auth disabled
+        }
+        self.api_keys.iter().any(|k| k.key == key)
     }
 
     /// Handle a single JSON-RPC request and return a response.
@@ -419,16 +435,28 @@ fn tool_result_text(text: impl Into<String>) -> Value {
     })
 }
 
+// ─── Auth helpers ─────────────────────────────────────────────────────────────
+
+/// Extract `x-api-key` from `params._meta` of a JSON-RPC request.
+fn extract_meta_key(req: &JsonRpcRequest) -> Option<&str> {
+    req.params
+        .as_ref()
+        .and_then(|p| p.get("_meta"))
+        .and_then(|m| m.get("x-api-key"))
+        .and_then(Value::as_str)
+}
+
 // ─── Stdio Transport ──────────────────────────────────────────────────────────
 
 /// Run the MCP server over stdio (line-delimited JSON-RPC).
 ///
-/// Reads JSON-RPC requests from stdin, writes responses to stdout.
-/// This is the standard MCP transport used by Claude Desktop.
+/// Auth: if API keys are configured, each request must include
+/// `params._meta["x-api-key"]` with a valid key.
 pub async fn serve_stdio(processor: signal::SignalProcessor) -> anyhow::Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let server = Arc::new(McpServer::new(Arc::new(processor)));
+    let api_keys = processor.config().access.api_keys.clone();
+    let server = Arc::new(McpServer::new(Arc::new(processor), api_keys));
     let stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
     let mut reader = BufReader::new(stdin);
@@ -438,8 +466,7 @@ pub async fn serve_stdio(processor: signal::SignalProcessor) -> anyhow::Result<(
         line.clear();
         let n = reader.read_line(&mut line).await?;
         if n == 0 {
-            // EOF — client closed the connection
-            break;
+            break; // EOF
         }
 
         let trimmed = line.trim();
@@ -450,7 +477,6 @@ pub async fn serve_stdio(processor: signal::SignalProcessor) -> anyhow::Result<(
         let req: JsonRpcRequest = match serde_json::from_str(trimmed) {
             Ok(r) => r,
             Err(e) => {
-                // Return a parse error
                 let resp = JsonRpcResponse::err(Value::Null, -32700, format!("Parse error: {e}"));
                 let json = serde_json::to_string(&resp)?;
                 stdout.write_all(json.as_bytes()).await?;
@@ -459,6 +485,25 @@ pub async fn serve_stdio(processor: signal::SignalProcessor) -> anyhow::Result<(
                 continue;
             }
         };
+
+        // Auth check for requests (not notifications)
+        if !server.api_keys.is_empty() && req.id.is_some() {
+            let meta_key = extract_meta_key(&req);
+            let key_ok = meta_key.is_some_and(|k| server.validate_key(k));
+            if !key_ok {
+                let id = req.id.clone().unwrap_or(Value::Null);
+                let resp = JsonRpcResponse::err(
+                    id,
+                    -32600,
+                    "Unauthorized: provide valid x-api-key in params._meta",
+                );
+                let json = serde_json::to_string(&resp)?;
+                stdout.write_all(json.as_bytes()).await?;
+                stdout.write_all(b"\n").await?;
+                stdout.flush().await?;
+                continue;
+            }
+        }
 
         if let Some(resp) = server.handle(req).await {
             let json = serde_json::to_string(&resp)?;
@@ -480,15 +525,16 @@ struct HttpState {
 
 /// Run the MCP server over HTTP (JSON-RPC POST endpoint).
 ///
-/// All requests POST to `/` with a JSON-RPC body.
-/// Returns JSON-RPC responses. Port defaults to 19791.
+/// Auth: `x-api-key: <key>` HTTP header required on every request when API keys
+/// are configured.
 pub async fn serve_http(
     processor: signal::SignalProcessor,
     host: &str,
     port: u16,
 ) -> anyhow::Result<()> {
+    let api_keys = processor.config().access.api_keys.clone();
     let state = Arc::new(HttpState {
-        server: Arc::new(McpServer::new(Arc::new(processor))),
+        server: Arc::new(McpServer::new(Arc::new(processor), api_keys)),
     });
 
     let router = Router::new()
@@ -505,10 +551,28 @@ pub async fn serve_http(
 }
 
 /// POST / or POST /mcp — JSON-RPC over HTTP handler.
+///
+/// Validates `x-api-key` HTTP header before dispatching to the MCP server.
 async fn http_handler(
     State(state): State<Arc<HttpState>>,
+    headers: HeaderMap,
     AxumJson(req): AxumJson<JsonRpcRequest>,
 ) -> Result<AxumJson<Value>, (StatusCode, String)> {
+    // Auth via x-api-key HTTP header
+    if !state.server.api_keys.is_empty() {
+        let key = headers
+            .get("x-api-key")
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| {
+                (
+                    StatusCode::UNAUTHORIZED,
+                    "Missing x-api-key header".to_string(),
+                )
+            })?;
+        if !state.server.validate_key(key) {
+            return Err((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()));
+        }
+    }
 
     match state.server.handle(req).await {
         Some(resp) => {
@@ -529,12 +593,24 @@ async fn http_handler(
 mod tests {
     use super::*;
 
+    /// Create a test server with no API keys (auth disabled).
     async fn make_server() -> (McpServer, tempfile::TempDir) {
         let temp = tempfile::tempdir().unwrap();
         let mut config = brain_core::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let processor = signal::SignalProcessor::new(config).await.unwrap();
-        (McpServer::new(Arc::new(processor)), temp)
+        // No api_keys → auth disabled for unit tests
+        (McpServer::new(Arc::new(processor), vec![]), temp)
+    }
+
+    /// Create a test server WITH the demo API key (auth enabled).
+    async fn make_server_with_auth() -> (McpServer, tempfile::TempDir) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let api_keys = config.access.api_keys.clone();
+        let processor = signal::SignalProcessor::new(config).await.unwrap();
+        (McpServer::new(Arc::new(processor), api_keys), temp)
     }
 
     #[tokio::test]
@@ -641,7 +717,6 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        // Empty memory → "No relevant facts found"
         assert!(text.contains("No relevant") || !text.is_empty());
     }
 
@@ -729,5 +804,184 @@ mod tests {
         let resp = server.handle(req).await.unwrap();
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, -32602);
+    }
+
+    // ── Auth tests ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_validate_key_with_valid_key() {
+        let keys = brain_core::BrainConfig::default().access.api_keys;
+        let server_keys = keys.clone();
+        // Simulate McpServer.validate_key() logic
+        assert!(server_keys.iter().any(|k| k.key == "demo-key-123"));
+    }
+
+    /// validate_key() with bad key returns false — covered by async integration tests below.
+
+    /// MCP HTTP: missing x-api-key header → 401.
+    #[tokio::test]
+    async fn test_http_mcp_no_auth_returns_401() {
+        use axum::body::Body;
+        use axum::http::{self, Request};
+        use tower::util::ServiceExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let api_keys = config.access.api_keys.clone();
+        let processor = signal::SignalProcessor::new(config).await.unwrap();
+
+        let state = Arc::new(HttpState {
+            server: Arc::new(McpServer::new(Arc::new(processor), api_keys)),
+        });
+        let router = Router::new()
+            .route("/mcp", post(http_handler))
+            .with_state(state)
+            .layer(CorsLayer::permissive());
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": null
+        });
+        let request = Request::builder()
+            .method(http::Method::POST)
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            // No x-api-key header
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// MCP HTTP: invalid x-api-key header → 401.
+    #[tokio::test]
+    async fn test_http_mcp_invalid_key_returns_401() {
+        use axum::body::Body;
+        use axum::http::{self, Request};
+        use tower::util::ServiceExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let api_keys = config.access.api_keys.clone();
+        let processor = signal::SignalProcessor::new(config).await.unwrap();
+
+        let state = Arc::new(HttpState {
+            server: Arc::new(McpServer::new(Arc::new(processor), api_keys)),
+        });
+        let router = Router::new()
+            .route("/mcp", post(http_handler))
+            .with_state(state)
+            .layer(CorsLayer::permissive());
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": null
+        });
+        let request = Request::builder()
+            .method(http::Method::POST)
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .header("x-api-key", "wrong-key")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// MCP HTTP: valid x-api-key header → 200.
+    #[tokio::test]
+    async fn test_http_mcp_valid_key_succeeds() {
+        use axum::body::Body;
+        use axum::http::{self, Request};
+        use tower::util::ServiceExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let api_keys = config.access.api_keys.clone();
+        let processor = signal::SignalProcessor::new(config).await.unwrap();
+
+        let state = Arc::new(HttpState {
+            server: Arc::new(McpServer::new(Arc::new(processor), api_keys)),
+        });
+        let router = Router::new()
+            .route("/mcp", post(http_handler))
+            .with_state(state)
+            .layer(CorsLayer::permissive());
+
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": null
+        });
+        let request = Request::builder()
+            .method(http::Method::POST)
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .header("x-api-key", "demo-key-123")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // Should have a tools list in the result
+        assert!(val["result"]["tools"].is_array());
+    }
+
+    /// validate_key() returns true when api_keys is empty (auth disabled).
+    #[tokio::test]
+    async fn test_validate_key_empty_keys_always_ok() {
+        let (server, _tmp) = make_server().await;
+        // api_keys is empty → always valid
+        assert!(server.validate_key("any-key"));
+        assert!(server.validate_key(""));
+    }
+
+    /// validate_key() returns true for demo key when auth is enabled.
+    #[tokio::test]
+    async fn test_validate_key_demo_key_ok() {
+        let (server, _tmp) = make_server_with_auth().await;
+        assert!(server.validate_key("demo-key-123"));
+        assert!(!server.validate_key("wrong-key"));
+    }
+
+    /// extract_meta_key extracts x-api-key from params._meta.
+    #[test]
+    fn test_extract_meta_key() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tools/list".to_string(),
+            params: Some(json!({
+                "_meta": {"x-api-key": "demo-key-123"},
+                "other": "field"
+            })),
+        };
+        assert_eq!(extract_meta_key(&req), Some("demo-key-123"));
+    }
+
+    #[test]
+    fn test_extract_meta_key_missing() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tools/list".to_string(),
+            params: Some(json!({"other": "field"})),
+        };
+        assert_eq!(extract_meta_key(&req), None);
     }
 }

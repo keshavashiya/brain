@@ -151,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Commands::Mcp { stdio, http, host, port } => {
             let processor = signal::SignalProcessor::new(config.clone()).await?;
-            if stdio || (!stdio && !http) {
+            if stdio || !http {
                 // Default to stdio when no flag given (or --stdio explicit)
                 mcp::serve_stdio(processor).await?;
             } else if http {

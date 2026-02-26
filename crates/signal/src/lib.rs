@@ -414,7 +414,7 @@ impl SignalProcessor {
                     id: r.episode_id,
                     content: r.content,
                     source: hippocampus::MemorySource::Episodic,
-                    score: r.rank as f64,
+                    score: r.rank,
                     importance: 0.5,
                     timestamp: String::new(),
                 })

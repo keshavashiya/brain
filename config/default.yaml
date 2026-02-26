@@ -84,6 +84,14 @@ adapters:
     enabled: true
     port: 19792
 
+access:
+  api_keys:
+    - key: "demo-key-123"
+      name: "Demo Key"
+      permissions:
+        - read
+        - write
+
 openclaw:
   enabled: false
   gateway_url: "ws://127.0.0.1:18789"
