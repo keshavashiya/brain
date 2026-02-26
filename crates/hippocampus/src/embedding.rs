@@ -3,7 +3,6 @@
 //! Supports multiple embedding backends:
 //! - `OllamaProvider` — calls Ollama's `/api/embed` endpoint (default, zero setup)
 //! - `LocalProvider` — ONNX Runtime inference with BGE-small-en-v1.5 (offline, fastest)
-//! - `OpenClawProvider` — future: via OpenClaw WS gateway
 //!
 //! Provider selection strategy:
 //! 1. Config: user can explicitly set `embedding.provider`

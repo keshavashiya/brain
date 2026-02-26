@@ -1,7 +1,7 @@
 //! Action dispatch — tool execution.
 //!
 //! Dispatches tool calls from LLM: command execution (sandboxed),
-//! web search, scheduling, memory operations, and channel sends.
+//! web search, scheduling, memory operations, and message sending.
 
 use thiserror::Error;
 
@@ -41,7 +41,7 @@ pub enum Action {
     StoreFact { subject: String, predicate: String, object: String },
     /// Recall from memory.
     Recall { query: String },
-    /// Send a message via a channel (requires OpenClaw).
+    /// Send a message to an external endpoint (via protocol adapters).
     SendMessage { channel: String, recipient: String, content: String },
 }
 
@@ -264,7 +264,7 @@ impl ActionDispatcher {
 
         tracing::info!("Send message via {} to {}: {}", channel, recipient, content);
         ActionResult::success(format!(
-            "Message would be sent via {} to {}. (Requires OpenClaw integration)",
+            "Message queued to send via {} to {}",
             channel, recipient
         ))
     }

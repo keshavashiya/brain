@@ -1,7 +1,7 @@
 //! # Brain Cortex
 //!
 //! Reasoning core providing:
-//! - LLM client (Ollama, OpenAI, OpenClaw gateway)
+//! - LLM client (Ollama, OpenAI compatible)
 //! - Hybrid provider with trait-based adapter pattern
 //! - Context assembly from memory + user model
 //! - Token budget management

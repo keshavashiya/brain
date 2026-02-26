@@ -12,8 +12,8 @@ const DEFAULT_CONFIG: &str = include_str!("../../../config/default.yaml");
 use std::path::{Path, PathBuf};
 
 use figment::{
-    Figment,
     providers::{Env, Format, Yaml},
+    Figment,
 };
 use serde::{Deserialize, Serialize};
 
@@ -27,7 +27,7 @@ pub struct BrainConfig {
     pub encryption: EncryptionConfig,
     pub security: SecurityConfig,
     pub proactivity: ProactivityConfig,
-    pub openclaw: OpenClawConfig,
+    pub adapters: AdaptersConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,11 +112,39 @@ pub struct QuietHoursConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenClawConfig {
+pub struct AdaptersConfig {
+    pub http: HttpAdapterConfig,
+    pub ws: WebSocketAdapterConfig,
+    pub mcp: McpAdapterConfig,
+    pub grpc: GrpcAdapterConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpAdapterConfig {
     pub enabled: bool,
-    pub gateway_url: String,
-    pub agent_name: String,
-    pub preferred_channel: String,
+    pub host: String,
+    pub port: u16,
+    pub cors: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSocketAdapterConfig {
+    pub enabled: bool,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct McpAdapterConfig {
+    pub enabled: bool,
+    pub stdio: bool,
+    pub http: bool,
+    pub port: u16,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GrpcAdapterConfig {
+    pub enabled: bool,
+    pub port: u16,
 }
 
 impl BrainConfig {
@@ -133,8 +161,7 @@ impl BrainConfig {
     /// Load configuration with an optional explicit config path.
     pub fn load_from(config_path: Option<&Path>) -> Result<Self, figment::Error> {
         // Layer 1: Embedded defaults (always available, no file needed)
-        let mut figment = Figment::new()
-            .merge(Yaml::string(DEFAULT_CONFIG));
+        let mut figment = Figment::new().merge(Yaml::string(DEFAULT_CONFIG));
 
         // Layer 2: User config (~/.brain/config.yaml)
         let user_config = Self::user_config_path();
@@ -163,11 +190,11 @@ impl BrainConfig {
         let data_dir = self.data_dir();
         let dirs = [
             data_dir.clone(),
-            data_dir.join("db"),        // SQLite databases
-            data_dir.join("lance"),     // LanceDB vector tables
-            data_dir.join("models"),    // ONNX models
-            data_dir.join("logs"),      // Log files
-            data_dir.join("exports"),   // Memory exports
+            data_dir.join("db"),       // SQLite databases
+            data_dir.join("ruvector"), // RuVector vector tables
+            data_dir.join("models"),   // ONNX models
+            data_dir.join("logs"),     // Log files
+            data_dir.join("exports"),  // Memory exports
         ];
 
         for dir in &dirs {
@@ -182,9 +209,9 @@ impl BrainConfig {
         self.data_dir().join("db").join("brain.db")
     }
 
-    /// Path to the LanceDB directory.
-    pub fn lance_path(&self) -> PathBuf {
-        self.data_dir().join("lance")
+    /// Path to the RuVector directory.
+    pub fn ruvector_path(&self) -> PathBuf {
+        self.data_dir().join("ruvector")
     }
 
     /// Path to the ONNX models directory.
@@ -267,7 +294,7 @@ impl Default for BrainConfig {
                     forgetting_threshold: 0.05,
                 },
             },
-            encryption: EncryptionConfig { enabled: true },
+            encryption: EncryptionConfig { enabled: false }, // Deferred to v1.1
             security: SecurityConfig {
                 exec_allowlist: vec![
                     "ls".into(),
@@ -289,11 +316,27 @@ impl Default for BrainConfig {
                     end: "08:00".to_string(),
                 },
             },
-            openclaw: OpenClawConfig {
-                enabled: false,
-                gateway_url: "ws://127.0.0.1:18789".to_string(),
-                agent_name: "brain".to_string(),
-                preferred_channel: "whatsapp".to_string(),
+            adapters: AdaptersConfig {
+                http: HttpAdapterConfig {
+                    enabled: true,
+                    host: "127.0.0.1".to_string(),
+                    port: 19789,
+                    cors: true,
+                },
+                ws: WebSocketAdapterConfig {
+                    enabled: true,
+                    port: 19790,
+                },
+                mcp: McpAdapterConfig {
+                    enabled: true,
+                    stdio: true,
+                    http: true,
+                    port: 19791,
+                },
+                grpc: GrpcAdapterConfig {
+                    enabled: true,
+                    port: 19792,
+                },
             },
         }
     }
@@ -324,9 +367,9 @@ mod tests {
         assert_eq!(config.brain.data_dir, "~/.brain");
         assert_eq!(config.llm.provider, "ollama");
         assert_eq!(config.embedding.dimensions, 384);
-        assert!(config.encryption.enabled);
+        assert!(!config.encryption.enabled); // Deferred to v1.1
         assert!(!config.proactivity.enabled);
-        assert!(!config.openclaw.enabled);
+        assert!(config.adapters.http.enabled);
     }
 
     #[test]
@@ -342,7 +385,11 @@ mod tests {
         let data = config.data_dir();
         assert!(data.to_str().unwrap().ends_with(".brain"));
         assert!(config.sqlite_path().to_str().unwrap().ends_with("brain.db"));
-        assert!(config.lance_path().to_str().unwrap().ends_with("lance"));
+        assert!(config
+            .ruvector_path()
+            .to_str()
+            .unwrap()
+            .ends_with("ruvector"));
     }
 
     #[test]

@@ -4,7 +4,7 @@ use crossterm::ExecutableCommand;
 use rustyline::DefaultEditor;
 use std::io::stdout;
 
-/// Brain -- A personal AI that remembers, learns, and acts.
+/// Brain OS -- Central AI Operating System
 #[derive(Parser)]
 #[command(name = "brain", version, about, long_about = None)]
 struct Cli {
@@ -77,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             // List created directories
-            let subdirs = ["db", "lance", "models", "logs", "exports"];
+            let subdirs = ["db", "ruvector", "models", "logs", "exports"];
             for sub in &subdirs {
                 println!("  Dir:       {}", data_dir.join(sub).display());
             }
@@ -120,7 +120,7 @@ async fn show_status(config: &core::BrainConfig) -> anyhow::Result<()> {
     println!("  Embedding:  {} ({}d)", config.embedding.model, config.embedding.dimensions);
     println!("  Encryption: {}", if config.encryption.enabled { "enabled" } else { "disabled" });
     println!("  SQLite:     {}", config.sqlite_path().display());
-    println!("  LanceDB:    {}", config.lance_path().display());
+    println!("  RuVector:   {}", config.ruvector_path().display());
     println!("  Config:     {}", core::BrainConfig::user_config_path().display());
 
     // Check LLM health
@@ -282,9 +282,9 @@ impl BrainSession {
         // Create stores
         let episodic = hippocampus::EpisodicStore::new(db.clone());
 
-        // Create semantic store (requires LanceDB)
-        let lance_path = config.lance_path();
-        let semantic = if let Ok(lance) = storage::LanceStore::open(&lance_path).await {
+        // Create semantic store (requires RuVector - TODO: refactor for RuVector)
+        let ruvector_path = config.ruvector_path();
+        let semantic = if let Ok(lance) = storage::LanceStore::open(&ruvector_path).await {
             lance.ensure_tables().await.ok();
             Some(hippocampus::SemanticStore::new(db.clone(), lance))
         } else {

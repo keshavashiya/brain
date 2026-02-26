@@ -1,8 +1,8 @@
 //! LLM client — hybrid provider with trait-based adapter.
 //!
-//! `LlmProvider` trait with:
-//! - `DirectProvider` (Ollama/OpenAI/Anthropic via reqwest)
-//! - `OpenClawProvider` (via WebSocket gateway)
+//! `LlmProvider` trait with multiple implementations:
+//! - `OllamaProvider` — local Ollama server
+//! - `OpenAiProvider` — OpenAI compatible APIs
 
 use std::pin::Pin;
 

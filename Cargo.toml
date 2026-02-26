@@ -89,4 +89,3 @@ thalamus = { path = "crates/thalamus" }
 amygdala = { path = "crates/amygdala" }
 cerebellum = { path = "crates/cerebellum" }
 ganglia = { path = "crates/ganglia" }
-bridge = { path = "crates/bridge" }

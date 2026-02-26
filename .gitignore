@@ -31,7 +31,9 @@ logs/
 # Config (secrets)
 *.local.yaml
 *.secrets.yaml
+.codesage
 
 # Models
 *.onnx
 *.gguf
+.chief/

@@ -1,37 +1,108 @@
-# Brain
+# Brain OS
 
-A personal AI that remembers, learns, and acts — inspired by the human brain's architecture.
+A **Central AI Operating System** that provides unified memory and multi-protocol access for AI applications.
 
-Brain is a local-first AI assistant that stores all your conversations, extracts facts, learns your preferences, and proactively helps you — while keeping everything encrypted on your machine.
+## Vision
+
+Brain OS serves as the central memory hub for AI tools via standard protocols:
+- **HTTP** - REST API access
+- **WebSocket** - Real-time bidirectional communication
+- **MCP** - Claude Code, OpenCode, and other MCP clients
+- **CLI** - Interactive terminal interface
+- **gRPC** - Programmatic access
+
+All AI tools connect through protocol adapters - the SignalProcessor is agnostic to the source.
 
 ## Architecture
 
 ```
-┌─────────────┐
-│   CLI / API  │  ← You talk here
-├─────────────┤
-│  Thalamus    │  ← Routes signals (intent classification)
-├──────┬──────┤
-│Cortex│Amyg. │  ← Thinks (LLM) + Feels (importance scoring)
-├──────┴──────┤
-│ Hippocampus  │  ← Remembers (episodic + semantic memory)
-├─────────────┤
-│   Storage    │  ← SQLite + LanceDB + AES-256-GCM encryption
-└─────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                  ADAPTERS (Sensors - like ears/eyes)           │
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐        │
+│  │   CLI   │  │  HTTP   │  │   WS   │  │   MCP   │        │
+│  └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘        │
+│       │            │            │            │               │
+│       └────────────┴────────────┴────────────┴────────────    │
+│                             │                                 │
+│                    Unified Signal Pipeline                     │
+│                             │                                 │
+│       ┌─────────────────────┴─────────────────────┐          │
+│       │           Thalamus (Intent Router)        │          │
+│       └─────────────────────┬─────────────────────┘          │
+│                             │                                 │
+│  ┌──────────────────────────┼────────────────────────────────┤
+│  │ Cortex + Amygdala        │  (Reasoning + Importance)    │
+│  └──────────────────────────┼────────────────────────────────┤
+│                             │                                 │
+│  ┌──────────────────────────┼────────────────────────────────┤
+│  │     Hippocampus (Memory) │                                │
+│  │  Episodic + Semantic + Recall Engine                     │
+│  └──────────────────────────┬────────────────────────────────┤
+│                             │                                 │
+│  ┌──────────────────────────┼────────────────────────────────┤
+│  │ Storage: SQLite + RuVector (HNSW + GNN + Self-Learning)   │
+└─────────────────────────────────────────────────────────────────┘
 ```
+┌─────────────────────────────────────────────────────────────────┐
+│                    SignalProcessor (Hub)                        │
+│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐        │
+│  │   CLI   │  │  HTTP   │  │   WS   │  │   MCP   │        │
+│  │ Adapter │  │ Adapter │  │ Adapter │  │ Adapter │        │
+│  └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘        │
+│       │            │            │            │               │
+│       └────────────┴────────────┴────────────┴────────────    │
+│                             │                                 │
+│                    Unified Signal Pipeline                     │
+│                             │                                 │
+│       ┌─────────────────────┴─────────────────────┐          │
+│       │           Thalamus (Intent Router)        │          │
+│       └─────────────────────┬─────────────────────┘          │
+│                             │                                 │
+│  ┌──────────────────────────┼────────────────────────────────┤
+│  │ Cortex + Amygdala        │  (Reasoning + Importance)    │
+│  └──────────────────────────┼────────────────────────────────┤
+│                             │                                 │
+│  ┌──────────────────────────┼────────────────────────────────┤
+│  │     Hippocampus (Memory) │                                │
+│  │  Episodic + Semantic + Recall Engine                     │
+│  └──────────────────────────┬────────────────────────────────┤
+│                             │                                 │
+│  ┌──────────────────────────┼────────────────────────────────┤
+│  │ Storage: SQLite + RuVector (HNSW + GNN + Self-Learning)   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+## Key Features
+
+| Feature | Description |
+|---------|-------------|
+| **Central Memory** | Unified memory accessible from all AI tools |
+| **Self-Learning** | Memory improves over time via RuVector GNN |
+| **Multi-Protocol** | HTTP, WebSocket, MCP, gRPC, CLI |
+| **Local-First** | All data stays on your machine |
+
+## Protocol Ports
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| HTTP API | 19789 | REST API |
+| WebSocket | 19790 | Real-time |
+| MCP HTTP | 19791 | Remote MCP |
+| gRPC | 19792 | Programmatic |
+
+## Crate Structure
 
 | Crate | Role |
 |-------|------|
-| `cli` | Binary — `brain chat`, `brain status`, `brain daemon` |
-| `core` | Orchestrator — config, subsystem wiring |
-| `thalamus` | Signal router — intent classification |
-| `cortex` | LLM client — Ollama/OpenAI, context assembly, tool dispatch |
-| `amygdala` | Importance scoring — keyword-based for v1 |
-| `hippocampus` | Memory engine — episodic, semantic, procedural, hybrid search |
-| `cerebellum` | Procedure store — learned workflows (Phase 3) |
-| `ganglia` | Habit engine — pattern detection, proactive triggers (Phase 3) |
-| `bridge` | OpenClaw integration — multi-channel messaging (Phase 3) |
-| `storage` | SQLite + LanceDB + encryption |
+| `core` | Orchestration and config |
+| `signal` | SignalProcessor hub |
+| `adapters/cli` | CLI input adapter (like ears) |
+| `adapters/*` | Protocol adapters (HTTP, WS, MCP, gRPC) |
+| `thalamus` | Intent classification |
+| `cortex` | LLM reasoning |
+| `amygdala` | Importance scoring |
+| `hippocampus` | Memory engine |
+| `storage` | SQLite + RuVector |
 
 ## Quick Start
 
@@ -39,8 +110,13 @@ Brain is a local-first AI assistant that stores all your conversations, extracts
 # Build
 cargo build --workspace
 
-# Run
-cargo run --bin brain -- status
+# Run HTTP server
+cargo run --bin brain -- serve
+
+# Run MCP (for Claude Code)
+cargo run --bin brain -- mcp --stdio
+
+# CLI chat
 cargo run --bin brain -- chat
 
 # Test
@@ -48,7 +124,7 @@ cargo test --workspace
 
 # Install globally
 cargo install --path crates/cli
-brain status
+brain serve
 ```
 
 ## Configuration
@@ -68,7 +144,7 @@ All data lives in `~/.brain/`:
 ```
 ~/.brain/
 ├── db/brain.db     # SQLite (episodes, facts, profile)
-├── lance/          # LanceDB (vector embeddings)
+├── ruvector/       # RuVector (vector embeddings + HNSW index)
 ├── models/         # ONNX models (downloaded on first run)
 ├── logs/           # Log files
 └── exports/        # Memory exports
@@ -76,8 +152,8 @@ All data lives in `~/.brain/`:
 
 ## Documentation
 
+- [`docs/IMPLEMENTATION_PLAN_V2.md`](docs/IMPLEMENTATION_PLAN_V2.md) — Central AI OS implementation plan
 - [`docs/TECHNICAL_SPECS.md`](docs/TECHNICAL_SPECS.md) — Architecture, schemas, security
-- [`docs/IMPLEMENTATION_PLAN.md`](docs/IMPLEMENTATION_PLAN.md) — 12-week build plan
 - [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — Development setup and commands
 
 ## License

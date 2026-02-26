@@ -5,8 +5,8 @@
 //! - Per-record unique nonce generation
 
 use aes_gcm::{
-    Aes256Gcm, Key, Nonce,
     aead::{Aead, KeyInit, OsRng},
+    Aes256Gcm, Key, Nonce,
 };
 use argon2::Argon2;
 use thiserror::Error;

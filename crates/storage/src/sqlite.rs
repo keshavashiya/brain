@@ -152,7 +152,10 @@ impl SqlitePool {
     /// All schema migrations in order.
     fn migrations() -> Vec<(i64, &'static str, &'static str)> {
         vec![
-            (1, "create_sessions", "
+            (
+                1,
+                "create_sessions",
+                "
                 CREATE TABLE IF NOT EXISTS sessions (
                     id TEXT PRIMARY KEY,
                     started_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -160,8 +163,12 @@ impl SqlitePool {
                     channel TEXT NOT NULL DEFAULT 'cli',
                     metadata TEXT
                 );
-            "),
-            (2, "create_episodes", "
+            ",
+            ),
+            (
+                2,
+                "create_episodes",
+                "
                 CREATE TABLE IF NOT EXISTS episodes (
                     id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL REFERENCES sessions(id),
@@ -178,15 +185,23 @@ impl SqlitePool {
                 CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
                 CREATE INDEX IF NOT EXISTS idx_episodes_timestamp ON episodes(timestamp DESC);
                 CREATE INDEX IF NOT EXISTS idx_episodes_importance ON episodes(importance DESC);
-            "),
-            (3, "create_episodes_fts", "
+            ",
+            ),
+            (
+                3,
+                "create_episodes_fts",
+                "
                 CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts USING fts5(
                     content,
                     content_rowid='rowid',
                     tokenize='porter unicode61'
                 );
-            "),
-            (4, "create_semantic_facts", "
+            ",
+            ),
+            (
+                4,
+                "create_semantic_facts",
+                "
                 CREATE TABLE IF NOT EXISTS semantic_facts (
                     id TEXT PRIMARY KEY,
                     category TEXT NOT NULL,
@@ -202,16 +217,24 @@ impl SqlitePool {
 
                 CREATE INDEX IF NOT EXISTS idx_facts_category ON semantic_facts(category);
                 CREATE INDEX IF NOT EXISTS idx_facts_subject ON semantic_facts(subject);
-            "),
-            (5, "create_user_profile", "
+            ",
+            ),
+            (
+                5,
+                "create_user_profile",
+                "
                 CREATE TABLE IF NOT EXISTS user_profile (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL,
                     source TEXT,
                     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
                 );
-            "),
-            (6, "create_procedures", "
+            ",
+            ),
+            (
+                6,
+                "create_procedures",
+                "
                 CREATE TABLE IF NOT EXISTS procedures (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -222,8 +245,12 @@ impl SqlitePool {
                     last_executed TEXT,
                     created_at TEXT NOT NULL DEFAULT (datetime('now'))
                 );
-            "),
-            (7, "create_audit_log", "
+            ",
+            ),
+            (
+                7,
+                "create_audit_log",
+                "
                 CREATE TABLE IF NOT EXISTS audit_log (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     timestamp TEXT NOT NULL DEFAULT (datetime('now')),
@@ -234,7 +261,8 @@ impl SqlitePool {
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_audit_timestamp ON audit_log(timestamp DESC);
-            "),
+            ",
+            ),
         ]
     }
 
@@ -333,10 +361,7 @@ mod tests {
         let pool = SqlitePool::open_memory().unwrap();
         pool.with_conn(|conn| {
             // Insert session first (FK constraint)
-            conn.execute(
-                "INSERT INTO sessions (id) VALUES (?1)",
-                ["sess-001"],
-            )?;
+            conn.execute("INSERT INTO sessions (id) VALUES (?1)", ["sess-001"])?;
 
             conn.execute(
                 "INSERT INTO episodes (id, session_id, role, content)
