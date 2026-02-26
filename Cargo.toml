@@ -6,8 +6,8 @@ members = [
     "crates/hippocampus",
     "crates/cortex",
     "crates/thalamus",
+    "crates/amygdala",
     # Placeholder crates - will be implemented in Phase 3
-    # "crates/amygdala",
     # "crates/cerebellum",
     # "crates/ganglia",
     # "crates/bridge",
