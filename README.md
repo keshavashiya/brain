@@ -46,7 +46,7 @@ Any MCP-compatible client can connect to Brain by adding it as a server. Run `br
 ```json
 {
   "mcpServers": {
-    "brain-memory": {
+    "brain": {
       "command": "brain",
       "args": ["mcp"]
     }

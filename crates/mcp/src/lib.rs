@@ -22,7 +22,7 @@
 //! ```json
 //! {
 //!   "mcpServers": {
-//!     "brain-memory": {
+//!     "brain": {
 //!       "command": "brain",
 //!       "args": ["mcp"]
 //!     }
@@ -173,7 +173,7 @@ impl McpServer {
                 "tools": {}
             },
             "serverInfo": {
-                "name": "brain-memory",
+                "name": "brain",
                 "version": env!("CARGO_PKG_VERSION")
             }
         }))
