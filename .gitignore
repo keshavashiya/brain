@@ -37,3 +37,7 @@ logs/
 *.onnx
 *.gguf
 .chief/
+
+# Development references (not for version control)
+progress.md
+docs/
