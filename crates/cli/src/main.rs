@@ -69,7 +69,7 @@ enum Commands {
         host: String,
     },
 
-    /// Start the MCP stdio server (for Claude Desktop / Claude Code).
+    /// Start the MCP stdio server.
     ///
     /// Used when an MCP client spawns Brain as a subprocess and communicates
     /// over stdin/stdout. This runs in the foreground by design.

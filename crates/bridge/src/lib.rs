@@ -1,5 +1,5 @@
 //! # Brain Bridge
 //!
-//! OpenClaw integration layer (Phase 3).
-//! WebSocket client connecting to OpenClaw gateway,
+//! External service relay (planned).
+//! WebSocket client for connecting Brain to external messaging gateways,
 //! bidirectional message relay, and agent registration.

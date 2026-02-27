@@ -92,8 +92,3 @@ access:
         - read
         - write
 
-openclaw:
-  enabled: false
-  gateway_url: "ws://127.0.0.1:18789"
-  agent_name: "brain"
-  preferred_channel: "whatsapp"

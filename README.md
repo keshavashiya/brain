@@ -2,7 +2,7 @@
 
 A **Central AI Operating System** written in pure Rust — a unified memory hub that any AI tool can connect to via HTTP, WebSocket, MCP, gRPC, or CLI.
 
-Instead of each AI tool keeping its own isolated context, Brain OS acts as a single source of truth. Claude Code, custom scripts, and any HTTP-capable tool all read and write to one shared memory that grows smarter over time.
+Instead of each tool maintaining isolated context, Brain OS acts as a single source of truth. Any application — scripts, agents, coding tools, chat interfaces — can read from and write to one shared memory that grows smarter over time.
 
 ## How It Works
 
@@ -39,33 +39,22 @@ brain status
 brain chat
 ```
 
-## Claude Desktop / Claude Code
+## MCP Integration
 
-Add to Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
-
-```json
-{
-  "mcpServers": {
-    "brain-memory": {
-      "command": "brain",
-      "args": ["mcp", "--stdio"]
-    }
-  }
-}
-```
-
-For Claude Code, add to `.claude/settings.json`:
+Any MCP-compatible client can connect to Brain by adding it as a server. Run `brain mcp` and register it as a stdio server in your client's config:
 
 ```json
 {
   "mcpServers": {
     "brain-memory": {
       "command": "brain",
-      "args": ["mcp", "--stdio"]
+      "args": ["mcp"]
     }
   }
 }
 ```
+
+Brain also exposes MCP over HTTP (`brain serve --mcp`) for clients that prefer HTTP transport instead of stdio.
 
 ### MCP Tools
 
@@ -123,7 +112,7 @@ curl http://localhost:19789/v1/memory/facts \
 | WebSocket | 19790 | |
 | MCP HTTP | 19791 | |
 | gRPC | 19792 | |
-| MCP stdio | stdin/stdout | `brain mcp` — invoked by Claude Desktop |
+| MCP stdio | stdin/stdout | `brain mcp` — stdio transport for MCP clients |
 
 **For development**, `brain serve` runs everything in the foreground with optional adapter flags:
 

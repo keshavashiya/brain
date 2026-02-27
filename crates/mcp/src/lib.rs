@@ -18,13 +18,13 @@
 //! - `memory_episodes` — get recent conversation episodes
 //! - `user_profile`    — return user profile / config data
 //!
-//! ## Claude Desktop config snippet
+//! ## MCP client config (stdio transport)
 //! ```json
 //! {
 //!   "mcpServers": {
 //!     "brain-memory": {
 //!       "command": "brain",
-//!       "args": ["mcp", "--stdio"]
+//!       "args": ["mcp"]
 //!     }
 //!   }
 //! }

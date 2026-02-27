@@ -448,8 +448,8 @@ mod tests {
         let svc = AgentServiceImpl::new(processor);
 
         let req = Request::new(ConnectRequest {
-            agent_id: "claude-code".to_string(),
-            agent_type: "coding-assistant".to_string(),
+            agent_id: "test-agent".to_string(),
+            agent_type: "assistant".to_string(),
         });
         let resp = svc.connect(req).await.unwrap();
         let inner = resp.into_inner();
