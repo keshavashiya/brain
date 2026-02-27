@@ -197,6 +197,15 @@ async fn main() -> anyhow::Result<()> {
                 println!("  Dir:       {}", data_dir.join(sub).display());
             }
 
+            // Download local ONNX embedding model (BGE-small-en-v1.5, ~24MB).
+            // This enables offline semantic search without Ollama.
+            let model_dir = config.models_path().join("bge-small-en-v1.5");
+            println!("\n  Downloading embedding model to {}...", model_dir.display());
+            match hippocampus::embedding::LocalProvider::download_model(&model_dir).await {
+                Ok(_) => println!("  Embedding model ready."),
+                Err(e) => println!("  Embedding model download failed (non-fatal): {e}"),
+            }
+
             println!(
                 "\nBrain initialized. Edit {} to customize.",
                 core::BrainConfig::user_config_path().display()
@@ -310,6 +319,44 @@ async fn main() -> anyhow::Result<()> {
                 let port = config.adapters.mcp.port;
                 println!("  MCP   → http://{}:{}", h, port);
                 set.spawn(async move { mcp::serve_http(p, &h, port).await });
+            }
+
+            // ── Memory consolidation background task ──────────────────────────
+            // Runs the forgetting-curve pruner on a schedule (default: every 24h).
+            // Aborted cleanly alongside adapters on shutdown.
+            if config.memory.consolidation.enabled {
+                let p = processor.clone();
+                let interval_hours = config.memory.consolidation.interval_hours;
+                let prune_threshold = config.memory.consolidation.forgetting_threshold;
+                set.spawn(async move {
+                    let consolidator = hippocampus::Consolidator::new(
+                        hippocampus::ConsolidationConfig {
+                            prune_threshold,
+                            ..Default::default()
+                        },
+                    );
+                    // Skip the first tick so consolidation doesn't run at startup.
+                    let mut ticker = tokio::time::interval(
+                        tokio::time::Duration::from_secs(interval_hours as u64 * 3600),
+                    );
+                    ticker.tick().await;
+                    loop {
+                        ticker.tick().await;
+                        match consolidator.consolidate(p.episodic()) {
+                            Ok(r) => tracing::info!(
+                                pruned = r.episodes_pruned,
+                                promoted = r.episodes_promoted,
+                                remaining = r.episodes_remaining,
+                                "Memory consolidation complete"
+                            ),
+                            Err(e) => tracing::warn!("Memory consolidation error: {e}"),
+                        }
+                    }
+                });
+                tracing::info!(
+                    interval_hours,
+                    "Memory consolidation scheduled"
+                );
             }
 
             println!("\nPress Ctrl+C to stop.\n");

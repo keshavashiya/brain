@@ -12,7 +12,6 @@
 use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
-use hippocampus::embedding::EmbeddingProvider;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -174,7 +173,7 @@ pub struct SignalProcessor {
     importance: amygdala::ImportanceScorer,
     episodic: hippocampus::EpisodicStore,
     semantic: Option<hippocampus::SemanticStore>,
-    embedder: tokio::sync::Mutex<hippocampus::embedding::OllamaProvider>,
+    embedder: tokio::sync::Mutex<Option<hippocampus::Embedder>>,
     recall_engine: hippocampus::RecallEngine,
     llm: Box<dyn cortex::LlmProvider>,
     context_assembler: cortex::context::ContextAssembler,
@@ -216,9 +215,31 @@ impl SignalProcessor {
         };
         let llm = cortex::llm::create_provider(&llm_config);
 
-        // Create Ollama embedder (falls back to zero vector at call time if Ollama unavailable)
-        let embedder =
-            tokio::sync::Mutex::new(hippocampus::embedding::OllamaProvider::default_config());
+        // Create embedder — auto-detects Ollama first, falls back to local ONNX.
+        // If neither is available (no Ollama, no model files), gracefully degrades
+        // to zero vectors so the rest of the pipeline still works.
+        let embed_cfg = hippocampus::embedding::EmbeddingConfig {
+            provider: hippocampus::embedding::ProviderType::Auto,
+            ollama_url: config.llm.base_url.clone(),
+            ollama_model: "nomic-embed-text".to_string(),
+            model_dir: config
+                .models_path()
+                .join("bge-small-en-v1.5")
+                .to_string_lossy()
+                .to_string(),
+            dimensions: config.embedding.dimensions as usize,
+        };
+        let embedder_inner = match hippocampus::Embedder::from_config(&embed_cfg).await {
+            Ok(e) => {
+                tracing::info!(provider = e.provider_name(), "Embedder initialized");
+                Some(e)
+            }
+            Err(e) => {
+                tracing::warn!("Embedder unavailable, semantic search will use zero vectors: {e}");
+                None
+            }
+        };
+        let embedder = tokio::sync::Mutex::new(embedder_inner);
 
         // Create recall engine with default RRF config
         let recall_engine = hippocampus::RecallEngine::with_defaults();
@@ -371,16 +392,20 @@ impl SignalProcessor {
 
     /// Generate a vector embedding for text.
     ///
-    /// Falls back to a zero vector if the Ollama embedder is unavailable,
-    /// so the pipeline degrades gracefully without panicking.
+    /// Uses whichever provider was selected at startup (Ollama or local ONNX).
+    /// Falls back to a zero vector if no provider is available or if the call
+    /// fails, so the pipeline degrades gracefully without panicking.
     async fn embed_text(&self, text: &str) -> Vec<f32> {
-        let mut embedder = self.embedder.lock().await;
-        match embedder.embed(text).await {
-            Ok(vec) => vec,
-            Err(e) => {
-                tracing::warn!("Embedding failed, using zero vector: {e}");
-                vec![0.0_f32; hippocampus::EMBEDDING_DIM]
-            }
+        let mut guard = self.embedder.lock().await;
+        match &mut *guard {
+            Some(embedder) => match embedder.embed(text).await {
+                Ok(vec) => vec,
+                Err(e) => {
+                    tracing::warn!("Embedding failed, using zero vector: {e}");
+                    vec![0.0_f32; hippocampus::EMBEDDING_DIM]
+                }
+            },
+            None => vec![0.0_f32; hippocampus::EMBEDDING_DIM],
         }
     }
 
