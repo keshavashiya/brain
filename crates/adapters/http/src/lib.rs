@@ -605,6 +605,133 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
+    /// Integration test: HTTP POST /v1/signals (store intent) → fact persisted in DB.
+    ///
+    /// Stores a fact via the HTTP signal endpoint, then verifies it appears in
+    /// GET /v1/memory/facts. Uses shared AppState so both requests hit the same
+    /// SignalProcessor and SQLite database.
+    #[tokio::test]
+    async fn test_http_store_signal_fact_persisted_in_db() {
+        use axum::body::Body;
+        use axum::http::{self, Request};
+        use tower::util::ServiceExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let api_keys = config.access.api_keys.clone();
+        let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
+        let state = Arc::new(AppState {
+            processor,
+            cache: Mutex::new(HashMap::new()),
+            api_keys,
+        });
+
+        // POST /v1/signals with a store-fact intent
+        let payload = serde_json::json!({"content": "Remember that Rust is fast"});
+        let post_req = Request::builder()
+            .method(http::Method::POST)
+            .uri("/v1/signals")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer demo-key-123")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let router = Router::new()
+            .route("/v1/signals", post(post_signal_handler))
+            .route("/v1/memory/facts", get(get_facts_handler))
+            .with_state(state.clone());
+
+        let post_resp = router.clone().oneshot(post_req).await.unwrap();
+        assert_eq!(post_resp.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(post_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let resp_json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(resp_json["status"], "Ok");
+        // StoreFact response includes facts_used = 1
+        assert_eq!(resp_json["memory_context"]["facts_used"], 1);
+
+        // GET /v1/memory/facts → fact should now be persisted in DB
+        let get_req = Request::builder()
+            .method(http::Method::GET)
+            .uri("/v1/memory/facts")
+            .header("authorization", "Bearer demo-key-123")
+            .body(Body::empty())
+            .unwrap();
+
+        let get_resp = router.oneshot(get_req).await.unwrap();
+        assert_eq!(get_resp.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(get_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let facts: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(facts.is_array(), "Expected array of facts");
+        assert!(
+            !facts.as_array().unwrap().is_empty(),
+            "Stored fact should appear in GET /v1/memory/facts"
+        );
+    }
+
+    /// Integration test: HTTP POST /v1/memory/search → returns relevant fact.
+    ///
+    /// Stores a fact via the SignalProcessor directly (bypassing HTTP for setup),
+    /// then calls POST /v1/memory/search and verifies the fact is returned.
+    #[tokio::test]
+    async fn test_http_memory_search_returns_stored_fact() {
+        use axum::body::Body;
+        use axum::http::{self, Request};
+        use tower::util::ServiceExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let api_keys = config.access.api_keys.clone();
+        let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
+
+        // Pre-store a fact directly so search has something to find
+        let _ = processor
+            .store_fact_direct("personal", "test", "Ferris", "is", "the Rust mascot")
+            .await
+            .unwrap();
+
+        let state = Arc::new(AppState {
+            processor,
+            cache: Mutex::new(HashMap::new()),
+            api_keys,
+        });
+
+        let router = Router::new()
+            .route("/v1/memory/search", post(search_memory_handler))
+            .with_state(state);
+
+        // Search for the stored fact
+        let payload = serde_json::json!({"query": "Ferris Rust mascot", "top_k": 5});
+        let request = Request::builder()
+            .method(http::Method::POST)
+            .uri("/v1/memory/search")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer demo-key-123")
+            .body(Body::from(serde_json::to_string(&payload).unwrap()))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let results: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(results.is_array(), "Expected array of search results");
+        // With zero-vector fallback, all stored facts are returned at distance 1.0
+        assert!(
+            !results.as_array().unwrap().is_empty(),
+            "POST /v1/memory/search should return the stored fact"
+        );
+    }
+
     /// Integration test: cached signal can be retrieved by GET /v1/signals/:id.
     #[tokio::test]
     async fn test_get_cached_signal_with_auth() {

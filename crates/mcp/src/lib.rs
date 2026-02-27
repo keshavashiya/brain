@@ -975,6 +975,67 @@ mod tests {
         assert!(!server.validate_key("wrong-key"));
     }
 
+    /// Integration test: MCP memory_store tool → fact persisted, then memory_search finds it.
+    ///
+    /// Stores a structured fact via the `memory_store` MCP tool, then immediately
+    /// calls `memory_search` and verifies the stored fact appears in the results.
+    /// Zero-vector fallback (no Ollama) ensures all stored facts are returned.
+    #[tokio::test]
+    async fn test_mcp_memory_store_then_search_roundtrip() {
+        let (server, _tmp) = make_server().await;
+
+        // Step 1: Store a fact via MCP memory_store
+        let store_req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(20)),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "memory_store",
+                "arguments": {
+                    "subject": "Ferris",
+                    "predicate": "is",
+                    "object": "the Rust mascot",
+                    "category": "programming"
+                }
+            })),
+        };
+        let store_resp = server.handle(store_req).await.unwrap();
+        assert!(store_resp.error.is_none(), "memory_store should not error");
+        let store_text = store_resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            store_text.contains("Stored fact"),
+            "memory_store response should confirm storage"
+        );
+
+        // Step 2: Search for the stored fact via MCP memory_search
+        let search_req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(21)),
+            method: "tools/call".to_string(),
+            params: Some(json!({
+                "name": "memory_search",
+                "arguments": {"query": "Ferris Rust mascot", "top_k": 5}
+            })),
+        };
+        let search_resp = server.handle(search_req).await.unwrap();
+        assert!(
+            search_resp.error.is_none(),
+            "memory_search should not error"
+        );
+        let search_text = search_resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // With zero-vector fallback, stored facts are returned; result should not be "No relevant"
+        assert!(
+            !search_text.contains("No relevant"),
+            "memory_search should return the stored fact, got: {search_text}"
+        );
+    }
+
     /// extract_meta_key extracts x-api-key from params._meta.
     #[test]
     fn test_extract_meta_key() {

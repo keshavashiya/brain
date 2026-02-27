@@ -668,6 +668,52 @@ mod tests {
         }
     }
 
+    /// Integration test: CLI signal → SignalProcessor → store fact → search fact → verify result.
+    ///
+    /// Tests the full round-trip: process() stores a fact via the StoreFact pipeline,
+    /// list_facts() confirms persistence, and search_facts() confirms the fact is
+    /// retrievable via the vector search API. Zero-vector fallback (no Ollama) is used,
+    /// which returns all stored facts at distance 1.0.
+    #[tokio::test]
+    async fn test_store_fact_then_search_roundtrip() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
+
+        let processor = SignalProcessor::new(config).await.unwrap();
+
+        // Store a fact via the CLI signal pipeline
+        let signal = Signal::new(
+            SignalSource::Cli,
+            "cli",
+            "user",
+            "Remember that Rust is fast",
+        );
+        let resp = processor.process(signal).await.unwrap();
+        assert_eq!(resp.status, ResponseStatus::Ok);
+        assert_eq!(
+            resp.memory_context.facts_used, 1,
+            "StoreFact should persist 1 fact"
+        );
+
+        // Verify persistence: list_facts returns the stored fact
+        let facts = processor.list_facts(None);
+        assert!(
+            !facts.is_empty(),
+            "Stored fact should appear in list_facts()"
+        );
+
+        // Verify search: search_facts returns results
+        // (zero-vector fallback returns all stored facts at distance 1.0)
+        let results = processor
+            .search_facts("Rust programming language", 5, None)
+            .await;
+        assert!(
+            !results.is_empty(),
+            "search_facts() should return the stored fact"
+        );
+    }
+
     /// Integration test: chat signal creates episodic memory entries.
     ///
     /// Requires Ollama running locally. Without it, the test hangs for ~120s
