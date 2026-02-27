@@ -102,6 +102,18 @@ impl SqlitePool {
         f(&conn)
     }
 
+    /// Flush the WAL file into the main database file.
+    ///
+    /// Should be called on graceful shutdown to ensure all committed writes are
+    /// fully persisted and the WAL file is clean. Uses `TRUNCATE` mode which
+    /// also resets the WAL to zero size.
+    pub fn wal_checkpoint(&self) -> Result<(), SqliteError> {
+        self.with_conn(|conn| {
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+            Ok(())
+        })
+    }
+
     /// Run all schema migrations.
     fn migrate(&self) -> Result<(), SqliteError> {
         self.with_conn(|conn| {
@@ -492,7 +504,7 @@ mod tests {
             )?;
 
             let ns: String = conn.query_row(
-                "SELECT namespace FROM semantic_facts WHERE id = 'fact-default'",
+                "SELECT namespace FROM semantic_facts WHERE id = 'factdefault'",
                 [],
                 |row| row.get(0),
             )?;

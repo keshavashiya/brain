@@ -314,13 +314,59 @@ async fn main() -> anyhow::Result<()> {
 
             println!("\nPress Ctrl+C to stop.\n");
 
-            while let Some(result) = set.join_next().await {
-                match result {
-                    Ok(Err(e)) => eprintln!("Adapter error: {e}"),
-                    Err(e) => eprintln!("Task panicked: {e}"),
-                    Ok(Ok(())) => {}
+            // ── Graceful shutdown ─────────────────────────────────────────────
+            // Race between: any adapter task finishing (error path) or a
+            // shutdown signal arriving (SIGTERM from `brain stop`, or Ctrl+C).
+            // On signal we abort all remaining adapter tasks, then flush the
+            // SQLite WAL so no committed writes are lost.
+
+            // Build a SIGTERM future: resolves on Unix, pends forever elsewhere.
+            #[cfg(unix)]
+            let mut sigterm_listener = {
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to register SIGTERM handler")
+            };
+            // Wrap in a named async block so both branches have the same type.
+            let sigterm_fut = async {
+                #[cfg(unix)]
+                {
+                    sigterm_listener.recv().await;
+                }
+                #[cfg(not(unix))]
+                {
+                    std::future::pending::<()>().await;
+                }
+            };
+
+            tokio::select! {
+                // An adapter task returned — usually an error
+                result = set.join_next() => {
+                    if let Some(r) = result {
+                        match r {
+                            Ok(Err(e)) => eprintln!("Adapter error: {e}"),
+                            Err(e) => eprintln!("Task panicked: {e}"),
+                            Ok(Ok(())) => {}
+                        }
+                    }
+                }
+
+                // Ctrl+C (interactive terminal)
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("Received Ctrl+C — shutting down");
+                }
+
+                // SIGTERM (sent by `brain stop` on Unix)
+                _ = sigterm_fut => {
+                    tracing::info!("Received SIGTERM — shutting down");
                 }
             }
+
+            // Abort any adapters still running
+            set.abort_all();
+
+            // Flush SQLite WAL before exit
+            processor.shutdown();
+            tracing::info!("Brain OS stopped cleanly");
         }
 
         // ── mcp stdio ─────────────────────────────────────────────────────────

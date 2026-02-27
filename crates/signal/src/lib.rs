@@ -524,6 +524,19 @@ impl SignalProcessor {
         self.episodic.recent(limit).unwrap_or_default()
     }
 
+    /// Flush all in-flight writes and checkpoint the SQLite WAL.
+    ///
+    /// Call this on graceful shutdown to ensure no committed data is lost.
+    /// Safe to call from any async context; completes synchronously on the
+    /// calling thread (WAL checkpoint is a fast O(WAL-size) operation).
+    pub fn shutdown(&self) {
+        if let Err(e) = self.episodic.pool().wal_checkpoint() {
+            tracing::warn!("WAL checkpoint on shutdown failed: {e}");
+        } else {
+            tracing::info!("SQLite WAL checkpoint complete");
+        }
+    }
+
     /// Store a semantic fact directly (bypasses intent classification).
     ///
     /// Used by the MCP `memory_store` tool to write structured facts.
