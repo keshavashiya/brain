@@ -22,11 +22,13 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::info;
+
+use crate::encryption::Encryptor;
 
 /// Default vector dimension (BGE-small-en-v1.5).
 pub const VECTOR_DIM: usize = 384;
@@ -116,11 +118,17 @@ struct VectorEntry {
 /// Each logical table maps to a subdirectory under `root`.  Vectors are stored
 /// as individual JSON files.  An in-memory index (rebuilt on `open`) enables
 /// fast cosine-similarity search without an external database.
+///
+/// When an `Encryptor` is set via `with_encryptor`, the `content` field of
+/// every vector entry is AES-256-GCM encrypted before being written to disk.
+/// On search, content is decrypted transparently before being returned.
+/// The vector floats themselves are stored as-is.
 pub struct RuVectorStore {
     root: PathBuf,
     config: RuVectorConfig,
     /// table_name → vector entries.
     indices: Mutex<HashMap<String, Vec<VectorEntry>>>,
+    encryptor: Option<Arc<Encryptor>>,
 }
 
 impl RuVectorStore {
@@ -150,6 +158,7 @@ impl RuVectorStore {
             root: path.to_path_buf(),
             config,
             indices: Mutex::new(indices),
+            encryptor: None,
         })
     }
 
@@ -181,6 +190,16 @@ impl RuVectorStore {
         }
 
         Ok(map)
+    }
+
+    /// Attach an encryptor (builder pattern).
+    ///
+    /// Must be called before any writes. Existing unencrypted entries on disk
+    /// will be read back as plaintext gracefully (decryption falls back on
+    /// error, so mixing encrypted and unencrypted files is safe during migration).
+    pub fn with_encryptor(mut self, enc: Encryptor) -> Self {
+        self.encryptor = Some(Arc::new(enc));
+        self
     }
 
     /// Resolve logical table name to a filesystem directory.
@@ -230,9 +249,16 @@ impl RuVectorStore {
         let entries = indices.entry(table_name.to_string()).or_default();
 
         for (i, (id, content)) in ids.iter().zip(contents.iter()).enumerate() {
+            // Encrypt content field if encryptor is active.
+            let stored_content = if let Some(enc) = &self.encryptor {
+                enc.encrypt_string(content)
+                    .unwrap_or_else(|_| content.clone())
+            } else {
+                content.clone()
+            };
             let entry = VectorEntry {
                 id: id.clone(),
-                content: content.clone(),
+                content: stored_content,
                 vector: vectors[i].clone(),
                 timestamp: timestamps[i].clone(),
                 source_type: source_type.to_string(),
@@ -266,11 +292,15 @@ impl RuVectorStore {
         let mut scored: Vec<(f32, String, String)> = entries
             .iter()
             .map(|e| {
-                (
-                    cosine_distance(&query_vector, &e.vector),
-                    e.id.clone(),
-                    e.content.clone(),
-                )
+                // Decrypt content transparently; fall back to raw value on error
+                // (handles legacy plaintext entries written before encryption).
+                let content = if let Some(enc) = &self.encryptor {
+                    enc.decrypt_string(&e.content)
+                        .unwrap_or_else(|_| e.content.clone())
+                } else {
+                    e.content.clone()
+                };
+                (cosine_distance(&query_vector, &e.vector), e.id.clone(), content)
             })
             .collect();
 

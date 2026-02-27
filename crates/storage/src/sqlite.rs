@@ -13,6 +13,8 @@ use rusqlite::Connection;
 use thiserror::Error;
 use tracing::info;
 
+use crate::encryption::Encryptor;
+
 /// Errors from the SQLite storage layer.
 #[derive(Debug, Error)]
 pub enum SqliteError {
@@ -31,9 +33,13 @@ pub enum SqliteError {
 /// Uses a `Mutex<Connection>` — sufficient for our single-process,
 /// moderate-write workload. If we ever need concurrent writers,
 /// switch to `r2d2` or WAL mode (already enabled).
+///
+/// When an `Encryptor` is set, `content` columns are transparently
+/// encrypted on write and decrypted on read by the store layers.
 #[derive(Clone)]
 pub struct SqlitePool {
     conn: Arc<Mutex<Connection>>,
+    encryptor: Option<Arc<Encryptor>>,
 }
 
 impl SqlitePool {
@@ -66,6 +72,7 @@ impl SqlitePool {
 
         let pool = Self {
             conn: Arc::new(Mutex::new(conn)),
+            encryptor: None,
         };
 
         // Run migrations
@@ -87,6 +94,7 @@ impl SqlitePool {
 
         let pool = Self {
             conn: Arc::new(Mutex::new(conn)),
+            encryptor: None,
         };
 
         pool.migrate()?;
@@ -100,6 +108,43 @@ impl SqlitePool {
     {
         let conn = self.conn.lock().map_err(|_| SqliteError::LockPoisoned)?;
         f(&conn)
+    }
+
+    /// Attach an encryptor to this pool (builder pattern).
+    ///
+    /// Once set, `encrypt_content` / `decrypt_content` are active on all
+    /// store layers that use this pool.
+    pub fn with_encryptor(mut self, enc: Encryptor) -> Self {
+        self.encryptor = Some(Arc::new(enc));
+        self
+    }
+
+    /// Returns true if an encryptor is active.
+    pub fn is_encrypted(&self) -> bool {
+        self.encryptor.is_some()
+    }
+
+    /// Encrypt a string if encryption is enabled, otherwise return as-is.
+    pub fn encrypt_content(&self, plaintext: &str) -> String {
+        if let Some(enc) = &self.encryptor {
+            enc.encrypt_string(plaintext)
+                .unwrap_or_else(|_| plaintext.to_string())
+        } else {
+            plaintext.to_string()
+        }
+    }
+
+    /// Decrypt a string if encryption is enabled.
+    ///
+    /// Falls back to returning the input unchanged if decryption fails
+    /// (e.g. legacy plaintext rows written before encryption was enabled).
+    pub fn decrypt_content(&self, maybe_ciphertext: &str) -> String {
+        if let Some(enc) = &self.encryptor {
+            enc.decrypt_string(maybe_ciphertext)
+                .unwrap_or_else(|_| maybe_ciphertext.to_string())
+        } else {
+            maybe_ciphertext.to_string()
+        }
     }
 
     /// Flush the WAL file into the main database file.

@@ -185,9 +185,29 @@ impl SignalProcessor {
     /// Opens the SQLite database, connects to RuVector, creates the LLM provider,
     /// and wires the intent classifier, importance scorer, and context assembler.
     pub async fn new(config: brain_core::BrainConfig) -> Result<Self, SignalError> {
-        // Open SQLite pool
-        let db = storage::SqlitePool::open(&config.sqlite_path())
-            .map_err(|e| SignalError::Init(format!("SQLite: {e}")))?;
+        Self::new_with_encryptor(config, None).await
+    }
+
+    /// Like `new`, but wires an `Encryptor` into all storage backends.
+    ///
+    /// When provided, `episodes.content` and `semantic_facts.object` are
+    /// AES-256-GCM encrypted at rest; RuVector `content` fields are also
+    /// encrypted in their JSON files on disk.
+    pub async fn new_with_encryptor(
+        config: brain_core::BrainConfig,
+        encryptor: Option<storage::Encryptor>,
+    ) -> Result<Self, SignalError> {
+        // Open SQLite pool — attach encryptor if provided
+        let db = {
+            let pool = storage::SqlitePool::open(&config.sqlite_path())
+                .map_err(|e| SignalError::Init(format!("SQLite: {e}")))?;
+            if let Some(enc) = encryptor.clone() {
+                tracing::info!("Encryption enabled: SQLite content columns will be encrypted");
+                pool.with_encryptor(enc)
+            } else {
+                pool
+            }
+        };
 
         // Create episodic store
         let episodic = hippocampus::EpisodicStore::new(db.clone());
@@ -195,6 +215,12 @@ impl SignalProcessor {
         // Create semantic store (optional — fails gracefully if RuVector unavailable)
         let semantic = match storage::RuVectorStore::open(&config.ruvector_path()).await {
             Ok(ruv) => {
+                let ruv = if let Some(enc) = encryptor {
+                    tracing::info!("Encryption enabled: RuVector content fields will be encrypted");
+                    ruv.with_encryptor(enc)
+                } else {
+                    ruv
+                };
                 ruv.ensure_tables().await.ok();
                 Some(hippocampus::SemanticStore::new(db.clone(), ruv))
             }

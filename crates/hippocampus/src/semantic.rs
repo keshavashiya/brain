@@ -76,12 +76,15 @@ impl SemanticStore {
         let content = format!("{subject} {predicate} {object}");
         let now = chrono::Utc::now().to_rfc3339();
 
+        // Encrypt the object field (the main content) if encryption is enabled.
+        let stored_object = self.db.encrypt_content(object);
+
         // Write to SQLite
         self.db.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO semantic_facts (id, namespace, category, subject, predicate, object, confidence, source_episode_id)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                rusqlite::params![id, namespace, category, subject, predicate, object, confidence, source_episode_id],
+                rusqlite::params![id, namespace, category, subject, predicate, stored_object, confidence, source_episode_id],
             )?;
             Ok(())
         })?;
@@ -144,19 +147,21 @@ impl SemanticStore {
 
     /// Get a fact by ID from SQLite.
     pub fn get_fact(&self, fact_id: &str) -> Result<Option<Fact>, SemanticError> {
+        let pool = &self.db;
         Ok(self.db.with_conn(|conn| {
             let result = conn.query_row(
                 "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id
                  FROM semantic_facts WHERE id = ?1",
                 [fact_id],
                 |row| {
+                    let raw_object: String = row.get(5)?;
                     Ok(Fact {
                         id: row.get(0)?,
                         namespace: row.get(1)?,
                         category: row.get(2)?,
                         subject: row.get(3)?,
                         predicate: row.get(4)?,
-                        object: row.get(5)?,
+                        object: pool.decrypt_content(&raw_object),
                         confidence: row.get(6)?,
                         source_episode_id: row.get(7)?,
                     })
@@ -172,6 +177,7 @@ impl SemanticStore {
 
     /// Get all facts by category.
     pub fn get_facts_by_category(&self, category: &str) -> Result<Vec<Fact>, SemanticError> {
+        let pool = &self.db;
         Ok(self.db.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id
@@ -181,13 +187,14 @@ impl SemanticStore {
 
             let facts = stmt
                 .query_map([category], |row| {
+                    let raw_object: String = row.get(5)?;
                     Ok(Fact {
                         id: row.get(0)?,
                         namespace: row.get(1)?,
                         category: row.get(2)?,
                         subject: row.get(3)?,
                         predicate: row.get(4)?,
-                        object: row.get(5)?,
+                        object: pool.decrypt_content(&raw_object),
                         confidence: row.get(6)?,
                         source_episode_id: row.get(7)?,
                     })
@@ -200,6 +207,7 @@ impl SemanticStore {
 
     /// Get all facts about a specific subject.
     pub fn get_facts_about(&self, subject: &str) -> Result<Vec<Fact>, SemanticError> {
+        let pool = &self.db;
         Ok(self.db.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id
@@ -209,13 +217,14 @@ impl SemanticStore {
 
             let facts = stmt
                 .query_map([subject], |row| {
+                    let raw_object: String = row.get(5)?;
                     Ok(Fact {
                         id: row.get(0)?,
                         namespace: row.get(1)?,
                         category: row.get(2)?,
                         subject: row.get(3)?,
                         predicate: row.get(4)?,
-                        object: row.get(5)?,
+                        object: pool.decrypt_content(&raw_object),
                         confidence: row.get(6)?,
                         source_episode_id: row.get(7)?,
                     })
@@ -271,15 +280,17 @@ impl SemanticStore {
 
     /// List all active facts in a specific namespace.
     pub fn list_by_namespace(&self, namespace: Option<&str>) -> Result<Vec<Fact>, SemanticError> {
+        let pool = &self.db;
         Ok(self.db.with_conn(|conn| {
             let row_to_fact = |row: &rusqlite::Row<'_>| -> rusqlite::Result<Fact> {
+                let raw_object: String = row.get(5)?;
                 Ok(Fact {
                     id: row.get(0)?,
                     namespace: row.get(1)?,
                     category: row.get(2)?,
                     subject: row.get(3)?,
                     predicate: row.get(4)?,
-                    object: row.get(5)?,
+                    object: pool.decrypt_content(&raw_object),
                     confidence: row.get(6)?,
                     source_episode_id: row.get(7)?,
                 })

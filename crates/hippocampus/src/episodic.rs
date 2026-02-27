@@ -126,18 +126,24 @@ impl EpisodicStore {
         importance: f64,
     ) -> Result<String, EpisodicError> {
         let id = Uuid::new_v4().to_string();
+        let encrypted_content = self.db.encrypt_content(content);
+        let is_encrypted = self.db.is_encrypted();
         self.db.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO episodes (id, session_id, role, content, importance)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![id, session_id, role, content, importance],
+                rusqlite::params![id, session_id, role, encrypted_content, importance],
             )?;
 
-            // Also index in FTS5 for BM25 search
-            conn.execute(
-                "INSERT INTO episodes_fts (rowid, content) VALUES (last_insert_rowid(), ?1)",
-                [content],
-            )?;
+            // FTS5 indexes plaintext for BM25 search.
+            // When encryption is enabled, skip FTS indexing — BM25 falls back
+            // to empty results while vector search continues to work.
+            if !is_encrypted {
+                conn.execute(
+                    "INSERT INTO episodes_fts (rowid, content) VALUES (last_insert_rowid(), ?1)",
+                    [content],
+                )?;
+            }
 
             Ok(id.clone())
         })?;
@@ -150,6 +156,7 @@ impl EpisodicStore {
         session_id: &str,
         limit: usize,
     ) -> Result<Vec<Episode>, EpisodicError> {
+        let pool = &self.db;
         Ok(self.db.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, session_id, role, content, timestamp,
@@ -162,11 +169,12 @@ impl EpisodicStore {
 
             let episodes = stmt
                 .query_map(rusqlite::params![session_id, limit as i64], |row| {
+                    let raw: String = row.get(3)?;
                     Ok(Episode {
                         id: row.get(0)?,
                         session_id: row.get(1)?,
                         role: row.get(2)?,
-                        content: row.get(3)?,
+                        content: pool.decrypt_content(&raw),
                         timestamp: row.get(4)?,
                         importance: row.get(5)?,
                         decay_rate: row.get(6)?,
@@ -237,6 +245,7 @@ impl EpisodicStore {
 
     /// Get recent episodes across all sessions.
     pub fn recent(&self, limit: usize) -> Result<Vec<Episode>, EpisodicError> {
+        let pool = &self.db;
         Ok(self.db.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, session_id, role, content, timestamp,
@@ -248,11 +257,12 @@ impl EpisodicStore {
 
             let episodes = stmt
                 .query_map([limit as i64], |row| {
+                    let raw: String = row.get(3)?;
                     Ok(Episode {
                         id: row.get(0)?,
                         session_id: row.get(1)?,
                         role: row.get(2)?,
-                        content: row.get(3)?,
+                        content: pool.decrypt_content(&raw),
                         timestamp: row.get(4)?,
                         importance: row.get(5)?,
                         decay_rate: row.get(6)?,

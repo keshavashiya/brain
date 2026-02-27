@@ -21,6 +21,11 @@ enum Commands {
         /// Overwrite existing config file
         #[arg(long)]
         force: bool,
+        /// Enable encryption at rest (AES-256-GCM). Generates a salt and
+        /// prompts for a passphrase. Requires `encryption.enabled: true`
+        /// in config to activate on subsequent runs.
+        #[arg(long)]
+        encrypt: bool,
     },
 
     /// Start an interactive chat session
@@ -157,6 +162,65 @@ fn spawn_daemon(log_path: &std::path::Path) -> anyhow::Result<u32> {
     Ok(child.id())
 }
 
+// ─── Encryption helpers ───────────────────────────────────────────────────────
+
+fn salt_path(config: &core::BrainConfig) -> std::path::PathBuf {
+    config.data_dir().join("db/salt")
+}
+
+fn load_salt(config: &core::BrainConfig) -> Option<[u8; 16]> {
+    let bytes = std::fs::read(salt_path(config)).ok()?;
+    if bytes.len() == 16 {
+        let mut arr = [0u8; 16];
+        arr.copy_from_slice(&bytes);
+        Some(arr)
+    } else {
+        None
+    }
+}
+
+fn write_salt(config: &core::BrainConfig, salt: &[u8; 16]) -> anyhow::Result<()> {
+    let path = salt_path(config);
+    std::fs::write(&path, salt.as_slice())?;
+    // Restrict to owner-read/write only so the salt is not world-readable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// Build an `Encryptor` from config + passphrase, or `None` when encryption is disabled.
+///
+/// Passphrase is read from `BRAIN_PASSPHRASE` env var (daemon/CI) or prompted
+/// interactively via `rpassword`.
+fn resolve_encryptor(config: &core::BrainConfig) -> anyhow::Result<Option<storage::Encryptor>> {
+    if !config.encryption.enabled {
+        return Ok(None);
+    }
+
+    let salt = load_salt(config).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Encryption is enabled but no salt file found at {}.\n\
+             Run `brain init --encrypt` to generate one.",
+            salt_path(config).display()
+        )
+    })?;
+
+    let passphrase = if let Ok(p) = std::env::var("BRAIN_PASSPHRASE") {
+        p
+    } else {
+        rpassword::prompt_password("Brain passphrase: ")
+            .map_err(|e| anyhow::anyhow!("Failed to read passphrase: {e}"))?
+    };
+
+    let encryptor = storage::Encryptor::from_passphrase(&passphrase, &salt)
+        .map_err(|e| anyhow::anyhow!("Key derivation failed: {e}"))?;
+
+    Ok(Some(encryptor))
+}
+
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -179,7 +243,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         // ── init ──────────────────────────────────────────────────────────────
-        Commands::Init { force } => {
+        Commands::Init { force, encrypt } => {
             let data_dir = config.data_dir();
             println!("Initializing Brain...");
             println!("  Data dir:  {}", data_dir.display());
@@ -204,6 +268,17 @@ async fn main() -> anyhow::Result<()> {
             match hippocampus::embedding::LocalProvider::download_model(&model_dir).await {
                 Ok(_) => println!("  Embedding model ready."),
                 Err(e) => println!("  Embedding model download failed (non-fatal): {e}"),
+            }
+
+            // ── Encryption setup ──────────────────────────────────────────────
+            if encrypt {
+                let salt = storage::Encryptor::generate_salt();
+                write_salt(&config, &salt)?;
+                println!("\n  Encryption: salt generated → {}", salt_path(&config).display());
+                println!("  Next steps:");
+                println!("    1. Set 'encryption.enabled: true' in your config.");
+                println!("    2. Set BRAIN_PASSPHRASE env var for the daemon, or");
+                println!("       Brain will prompt you for a passphrase on startup.");
             }
 
             println!(
@@ -283,7 +358,9 @@ async fn main() -> anyhow::Result<()> {
             host,
         } => {
             let run_all = !http && !ws && !grpc && !mcp;
-            let processor = Arc::new(signal::SignalProcessor::new(config.clone()).await?);
+            let encryptor = resolve_encryptor(&config)?;
+            let processor =
+                Arc::new(signal::SignalProcessor::new_with_encryptor(config.clone(), encryptor).await?);
 
             println!("Starting Brain OS...");
 
@@ -418,7 +495,9 @@ async fn main() -> anyhow::Result<()> {
 
         // ── mcp stdio ─────────────────────────────────────────────────────────
         Commands::Mcp => {
-            let processor = signal::SignalProcessor::new(config.clone()).await?;
+            let encryptor = resolve_encryptor(&config)?;
+            let processor =
+                signal::SignalProcessor::new_with_encryptor(config.clone(), encryptor).await?;
             mcp::serve_stdio(processor).await?;
         }
     }

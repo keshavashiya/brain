@@ -23,6 +23,7 @@ mcp = { workspace = true }
 clap = { workspace = true }
 rustyline = { workspace = true }
 crossterm = { workspace = true }
+rpassword = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
