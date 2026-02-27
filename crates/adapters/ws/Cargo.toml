@@ -1,5 +1,5 @@
 [package]
-name = "adapters-ws"
+name = "wsadapter"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

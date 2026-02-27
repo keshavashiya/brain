@@ -4,7 +4,7 @@
 //!
 //! ## Protocol
 //! 1. Client connects (WebSocket handshake).
-//! 2. Client sends first text frame: `{"api_key":"demo-key-123"}` — authentication.
+//! 2. Client sends first text frame: `{"api_key":"demokey123"}` — authentication.
 //! 3. Server replies with `{"status":"authenticated","conn_id":"<uuid>"}` or
 //!    `{"status":"error","message":"..."}` then closes.
 //! 4. Subsequent text frames are `SignalRequest` JSON; server replies with
@@ -51,7 +51,7 @@ pub struct ClientMessage {
     pub source: Option<String>,
     /// Message text / command.
     pub content: String,
-    /// Sender identifier (default: `"ws-client"`).
+    /// Sender identifier (default: `"wsclient"`).
     pub sender: Option<String>,
     /// Optional key-value metadata to attach to the signal.
     pub metadata: Option<HashMap<String, String>>,
@@ -290,7 +290,7 @@ async fn process_text_frame(
     let mut signal = Signal::new(
         source,
         format!("ws:{conn_id}"),
-        client_msg.sender.unwrap_or_else(|| "ws-client".to_string()),
+        client_msg.sender.unwrap_or_else(|| "wsclient".to_string()),
         client_msg.content,
     );
     if let Some(meta) = client_msg.metadata {
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn test_validate_key_valid() {
         let keys = demo_keys();
-        assert!(validate_key(&keys, "demo-key-123"));
+        assert!(validate_key(&keys, "demokey123"));
     }
 
     #[test]
@@ -391,14 +391,14 @@ mod tests {
     #[test]
     fn test_validate_key_empty_list() {
         // With empty key list, no key is valid
-        assert!(!validate_key(&[], "demo-key-123"));
+        assert!(!validate_key(&[], "demokey123"));
     }
 
     #[test]
     fn test_auth_message_deserialize() {
-        let json = r#"{"api_key":"demo-key-123"}"#;
+        let json = r#"{"api_key":"demokey123"}"#;
         let msg: AuthMessage = serde_json::from_str(json).unwrap();
-        assert_eq!(msg.api_key, "demo-key-123");
+        assert_eq!(msg.api_key, "demokey123");
     }
 
     #[test]

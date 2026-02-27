@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     fn test_signal_serde() {
-        let signal = Signal::new(SignalSource::Http, "http", "api-client", "Remember coffee");
+        let signal = Signal::new(SignalSource::Http, "http", "apiclient", "Remember coffee");
         let json = serde_json::to_string(&signal).unwrap();
         let back: Signal = serde_json::from_str(&json).unwrap();
         assert_eq!(signal.id, back.id);

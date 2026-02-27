@@ -1,5 +1,5 @@
 [package]
-name = "adapters-grpc"
+name = "grpcadapter"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

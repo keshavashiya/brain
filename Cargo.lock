@@ -3,67 +3,6 @@
 version = 4
 
 [[package]]
-name = "adapters-grpc"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "core",
- "prost",
- "serde",
- "serde_json",
- "signal",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-stream",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "adapters-http"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum 0.7.9",
- "chrono",
- "core",
- "hippocampus",
- "serde",
- "serde_json",
- "signal",
- "tempfile",
- "thiserror",
- "tokio",
- "tower",
- "tower-http 0.5.2",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "adapters-ws"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "core",
- "futures-util",
- "serde",
- "serde_json",
- "signal",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "aead"
 version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -502,16 +441,15 @@ checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 name = "cli"
 version = "0.1.0"
 dependencies = [
- "adapters-grpc",
- "adapters-http",
- "adapters-ws",
  "anyhow",
  "chrono",
  "clap",
  "core",
  "cortex",
  "crossterm",
+ "grpcadapter",
  "hippocampus",
+ "httpadapter",
  "mcp",
  "rustyline",
  "serde_json",
@@ -521,6 +459,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "wsadapter",
 ]
 
 [[package]]
@@ -1118,6 +1057,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "grpcadapter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "core",
+ "prost",
+ "serde",
+ "serde_json",
+ "signal",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1243,6 +1204,27 @@ dependencies = [
  "http",
  "http-body",
  "pin-project-lite",
+]
+
+[[package]]
+name = "httpadapter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum 0.7.9",
+ "chrono",
+ "core",
+ "hippocampus",
+ "serde",
+ "serde_json",
+ "signal",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tower-http 0.5.2",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -4060,6 +4042,24 @@ name = "writeable"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
+
+[[package]]
+name = "wsadapter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "core",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "signal",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "uuid",
+]
 
 [[package]]
 name = "yansi"

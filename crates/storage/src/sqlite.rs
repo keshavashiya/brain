@@ -358,12 +358,12 @@ mod tests {
         pool.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO sessions (id, channel) VALUES (?1, ?2)",
-                rusqlite::params!["sess-001", "cli"],
+                rusqlite::params!["sess001", "cli"],
             )?;
 
             let channel: String = conn.query_row(
                 "SELECT channel FROM sessions WHERE id = ?1",
-                ["sess-001"],
+                ["sess001"],
                 |row| row.get(0),
             )?;
             assert_eq!(channel, "cli");
@@ -377,17 +377,17 @@ mod tests {
         let pool = SqlitePool::open_memory().unwrap();
         pool.with_conn(|conn| {
             // Insert session first (FK constraint)
-            conn.execute("INSERT INTO sessions (id) VALUES (?1)", ["sess-001"])?;
+            conn.execute("INSERT INTO sessions (id) VALUES (?1)", ["sess001"])?;
 
             conn.execute(
                 "INSERT INTO episodes (id, session_id, role, content)
                  VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params!["ep-001", "sess-001", "user", "Hello Brain!"],
+                rusqlite::params!["ep001", "sess001", "user", "Hello Brain!"],
             )?;
 
             let content: String = conn.query_row(
                 "SELECT content FROM episodes WHERE id = ?1",
-                ["ep-001"],
+                ["ep001"],
                 |row| row.get(0),
             )?;
             assert_eq!(content, "Hello Brain!");
@@ -404,7 +404,7 @@ mod tests {
             conn.execute(
                 "INSERT INTO episodes (id, session_id, role, content)
                  VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params!["ep-001", "nonexistent", "user", "Hello"],
+                rusqlite::params!["ep001", "nonexistent", "user", "Hello"],
             )?;
             Ok(())
         });
@@ -418,7 +418,7 @@ mod tests {
             conn.execute(
                 "INSERT INTO semantic_facts (id, category, subject, predicate, object)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params!["fact-001", "personal", "user", "name_is", "Keshav"],
+                rusqlite::params!["fact001", "personal", "user", "name_is", "Keshav"],
             )?;
 
             let obj: String = conn.query_row(
@@ -440,12 +440,12 @@ mod tests {
             conn.execute(
                 "INSERT INTO semantic_facts (id, category, subject, predicate, object, namespace)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params!["fact-w1", "work", "user", "role_is", "developer", "work"],
+                rusqlite::params!["factw1", "work", "user", "role_is", "developer", "work"],
             )?;
             conn.execute(
                 "INSERT INTO semantic_facts (id, category, subject, predicate, object, namespace)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params!["fact-p1", "personal", "user", "name_is", "Keshav", "personal"],
+                rusqlite::params!["factp1", "personal", "user", "name_is", "Keshav", "personal"],
             )?;
 
             // Query work namespace — should only return work fact
@@ -488,7 +488,7 @@ mod tests {
             conn.execute(
                 "INSERT INTO semantic_facts (id, category, subject, predicate, object)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params!["fact-default", "personal", "user", "likes", "Rust"],
+                rusqlite::params!["factdefault", "personal", "user", "likes", "Rust"],
             )?;
 
             let ns: String = conn.query_row(

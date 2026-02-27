@@ -241,7 +241,7 @@ mod tests {
 
         store.add_vectors(
             "episodes_vec",
-            vec!["ep-001".into()],
+            vec!["ep001".into()],
             vec!["Hello world".into()],
             vec![dummy_vector()],
             vec!["2026-01-01T00:00:00".into()],

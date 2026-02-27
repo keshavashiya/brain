@@ -86,7 +86,7 @@ adapters:
 
 access:
   api_keys:
-    - key: "demo-key-123"
+    - key: "demokey123"
       name: "Demo Key"
       permissions:
         - read

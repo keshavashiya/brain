@@ -416,7 +416,7 @@ impl Default for BrainConfig {
             },
             access: AccessConfig {
                 api_keys: vec![ApiKeyConfig {
-                    key: "demo-key-123".to_string(),
+                    key: "demokey123".to_string(),
                     name: "Demo Key".to_string(),
                     permissions: vec!["read".to_string(), "write".to_string()],
                 }],

@@ -829,7 +829,7 @@ mod tests {
         let keys = brain_core::BrainConfig::default().access.api_keys;
         let server_keys = keys.clone();
         // Simulate McpServer.validate_key() logic
-        assert!(server_keys.iter().any(|k| k.key == "demo-key-123"));
+        assert!(server_keys.iter().any(|k| k.key == "demokey123"));
     }
 
     /// validate_key() with bad key returns false — covered by async integration tests below.
@@ -904,7 +904,7 @@ mod tests {
             .method(http::Method::POST)
             .uri("/mcp")
             .header("content-type", "application/json")
-            .header("x-api-key", "wrong-key")
+            .header("x-api-key", "wrongkey")
             .body(Body::from(serde_json::to_string(&body).unwrap()))
             .unwrap();
 
@@ -943,7 +943,7 @@ mod tests {
             .method(http::Method::POST)
             .uri("/mcp")
             .header("content-type", "application/json")
-            .header("x-api-key", "demo-key-123")
+            .header("x-api-key", "demokey123")
             .body(Body::from(serde_json::to_string(&body).unwrap()))
             .unwrap();
 
@@ -963,7 +963,7 @@ mod tests {
     async fn test_validate_key_empty_keys_always_ok() {
         let (server, _tmp) = make_server().await;
         // api_keys is empty → always valid
-        assert!(server.validate_key("any-key"));
+        assert!(server.validate_key("anykey"));
         assert!(server.validate_key(""));
     }
 
@@ -971,8 +971,8 @@ mod tests {
     #[tokio::test]
     async fn test_validate_key_demo_key_ok() {
         let (server, _tmp) = make_server_with_auth().await;
-        assert!(server.validate_key("demo-key-123"));
-        assert!(!server.validate_key("wrong-key"));
+        assert!(server.validate_key("demokey123"));
+        assert!(!server.validate_key("wrongkey"));
     }
 
     /// Integration test: MCP memory_store tool → fact persisted, then memory_search finds it.
@@ -1044,11 +1044,11 @@ mod tests {
             id: Some(json!(1)),
             method: "tools/list".to_string(),
             params: Some(json!({
-                "_meta": {"x-api-key": "demo-key-123"},
+                "_meta": {"x-api-key": "demokey123"},
                 "other": "field"
             })),
         };
-        assert_eq!(extract_meta_key(&req), Some("demo-key-123"));
+        assert_eq!(extract_meta_key(&req), Some("demokey123"));
     }
 
     #[test]

@@ -409,7 +409,7 @@ impl EmbeddingProvider for LocalProvider {
     }
 
     fn name(&self) -> &str {
-        "local-onnx"
+        "localonnx"
     }
 }
 

@@ -76,19 +76,19 @@ curl http://localhost:19789/health
 
 # Store a fact via signal
 curl -X POST http://localhost:19789/v1/signals \
-  -H "Authorization: Bearer demo-key-123" \
+  -H "Authorization: Bearer demokey123" \
   -H "Content-Type: application/json" \
   -d '{"source":"http","sender":"user","content":"remember that I prefer dark mode"}'
 
 # Search memory
 curl -X POST http://localhost:19789/v1/memory/search \
-  -H "Authorization: Bearer demo-key-123" \
+  -H "Authorization: Bearer demokey123" \
   -H "Content-Type: application/json" \
   -d '{"query":"UI preferences","top_k":5}'
 
 # List all facts
 curl http://localhost:19789/v1/memory/facts \
-  -H "Authorization: Bearer demo-key-123"
+  -H "Authorization: Bearer demokey123"
 ```
 
 ### Routes
@@ -129,13 +129,13 @@ Scope facts and episodes to a specific context. The default namespace is `"perso
 ```bash
 # Store in a project namespace
 curl -X POST http://localhost:19789/v1/signals \
-  -H "Authorization: Bearer demo-key-123" \
+  -H "Authorization: Bearer demokey123" \
   -H "Content-Type: application/json" \
   -d '{"source":"http","sender":"user","content":"use bun not npm","namespace":"my-project"}'
 
 # Search within that namespace
 curl -X POST http://localhost:19789/v1/memory/search \
-  -H "Authorization: Bearer demo-key-123" \
+  -H "Authorization: Bearer demokey123" \
   -H "Content-Type: application/json" \
   -d '{"query":"package manager","namespace":"my-project"}'
 ```
@@ -162,7 +162,7 @@ access:
       permissions: [read, write]
 ```
 
-The default key shipped for local use is `demo-key-123`.
+The default key shipped for local use is `demokey123`.
 
 ## Configuration
 

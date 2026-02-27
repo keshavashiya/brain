@@ -175,7 +175,7 @@ impl MemoryService for MemoryServiceImpl {
                 &req.channel
             },
             if req.sender.is_empty() {
-                "grpc-client"
+                "grpcclient"
             } else {
                 &req.sender
             },
@@ -448,7 +448,7 @@ mod tests {
         let svc = AgentServiceImpl::new(processor);
 
         let req = Request::new(ConnectRequest {
-            agent_id: "test-agent".to_string(),
+            agent_id: "testagent".to_string(),
             agent_type: "assistant".to_string(),
         });
         let resp = svc.connect(req).await.unwrap();
@@ -467,7 +467,7 @@ mod tests {
         let req = Request::new(AgentSignalRequest {
             source: "grpc".to_string(),
             channel: "test".to_string(),
-            sender: "test-agent".to_string(),
+            sender: "testagent".to_string(),
             content: "Remember that Rust is fast".to_string(),
             metadata: std::collections::HashMap::new(),
         });
@@ -487,7 +487,7 @@ mod tests {
         let req = Request::new(MemorySignalRequest {
             source: "grpc".to_string(),
             channel: "test".to_string(),
-            sender: "test-client".to_string(),
+            sender: "testclient".to_string(),
             content: "Remember that Brain is the central AI OS".to_string(),
             metadata: std::collections::HashMap::new(),
         });

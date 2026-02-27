@@ -285,7 +285,7 @@ async fn main() -> anyhow::Result<()> {
                 let h = host.clone();
                 let port = config.adapters.http.port;
                 println!("  HTTP  → http://{}:{}", h, port);
-                set.spawn(async move { adapters_http::serve(p, &h, port).await });
+                set.spawn(async move { httpadapter::serve(p, &h, port).await });
             }
 
             if run_all || ws {
@@ -293,7 +293,7 @@ async fn main() -> anyhow::Result<()> {
                 let h = host.clone();
                 let port = config.adapters.ws.port;
                 println!("  WS    → ws://{}:{}", h, port);
-                set.spawn(async move { adapters_ws::serve(p, &h, port).await });
+                set.spawn(async move { wsadapter::serve(p, &h, port).await });
             }
 
             if run_all || grpc {
@@ -301,7 +301,7 @@ async fn main() -> anyhow::Result<()> {
                 let h = host.clone();
                 let port = config.adapters.grpc.port;
                 println!("  gRPC  → {}:{}", h, port);
-                set.spawn(async move { adapters_grpc::serve(p, &h, port).await });
+                set.spawn(async move { grpcadapter::serve(p, &h, port).await });
             }
 
             if run_all || mcp {

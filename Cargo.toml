@@ -94,9 +94,9 @@ cortex = { path = "crates/cortex" }
 thalamus = { path = "crates/thalamus" }
 amygdala = { path = "crates/amygdala" }
 signal = { path = "crates/signal" }
-adapters-http = { path = "crates/adapters/http" }
-adapters-ws = { path = "crates/adapters/ws" }
-adapters-grpc = { path = "crates/adapters/grpc" }
+httpadapter = { path = "crates/adapters/http" }
+wsadapter = { path = "crates/adapters/ws" }
+grpcadapter = { path = "crates/adapters/grpc" }
 mcp = { path = "crates/mcp" }
 cerebellum = { path = "crates/cerebellum" }
 ganglia = { path = "crates/ganglia" }

@@ -1,15 +1,15 @@
 # Brain — Task Runner
 
 default:
-    @echo "🧠 Brain Development Tasks"
+    @echo "Brain Development Tasks"
     @echo ""
     @echo "Build:"
     @echo "  build          - Build workspace (debug)"
-    @echo "  build-release  - Build workspace (release)"
+    @echo "  buildrelease   - Build workspace (release)"
     @echo ""
     @echo "Test:"
     @echo "  test           - Run all tests"
-    @echo "  test-crate     - Run tests for a specific crate"
+    @echo "  testcrate      - Run tests for a specific crate"
     @echo ""
     @echo "Dev:"
     @echo "  run            - Run brain CLI"
@@ -20,7 +20,7 @@ default:
     @echo "  check          - Check without building"
     @echo ""
     @echo "Setup:"
-    @echo "  download-models - Download ONNX embedding model"
+    @echo "  downloadmodels - Download ONNX embedding model"
     @echo ""
     @echo "Clean:"
     @echo "  clean          - Clean build artifacts"
@@ -29,7 +29,7 @@ default:
 build:
     cargo build --workspace
 
-build-release:
+buildrelease:
     cargo build --release --workspace
 
 check:
@@ -39,7 +39,7 @@ check:
 test:
     cargo test --workspace
 
-test-crate crate:
+testcrate crate:
     cargo test -p {{crate}}
 
 # Run
@@ -59,11 +59,11 @@ fmt:
 lint:
     cargo clippy --workspace -- -D warnings
 
-fmt-check:
+fmtcheck:
     cargo fmt --all -- --check
 
 # Setup
-download-models:
+downloadmodels:
     #!/usr/bin/env bash
     set -e
     mkdir -p models
@@ -71,9 +71,9 @@ download-models:
         echo "Downloading BGE-small-en-v1.5 ONNX model..."
         curl -L -o models/bge-small-en-v1.5.onnx \
             "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/onnx/model.onnx"
-        echo "✓ Model downloaded"
+        echo "Model downloaded"
     else
-        echo "✓ Model already exists"
+        echo "Model already exists"
     fi
 
 # Clean

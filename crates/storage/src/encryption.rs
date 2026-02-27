@@ -192,7 +192,7 @@ mod tests {
         assert_eq!(enc2.decrypt(&ciphertext).unwrap(), b"test data");
 
         // Different passphrase → different key → fails
-        let enc3 = Encryptor::from_passphrase("wrong-passphrase", &salt).unwrap();
+        let enc3 = Encryptor::from_passphrase("wrongpassphrase", &salt).unwrap();
         assert!(enc3.decrypt(&ciphertext).is_err());
     }
 }

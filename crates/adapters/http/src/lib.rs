@@ -11,7 +11,7 @@
 //!
 //! ## Authentication
 //! All `/v1/*` routes require `Authorization: Bearer <api-key>` header.
-//! The demo key `demo-key-123` (read+write) is pre-configured in `default.yaml`.
+//! The demo key `demokey123` (read+write) is pre-configured in `default.yaml`.
 
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
@@ -199,7 +199,7 @@ async fn post_signal_handler(
     let mut signal = Signal::new(
         source,
         body.channel.unwrap_or_else(|| "http".to_string()),
-        body.sender.unwrap_or_else(|| "api-client".to_string()),
+        body.sender.unwrap_or_else(|| "apiclient".to_string()),
         body.content,
     );
     if let Some(meta) = body.metadata {
@@ -481,7 +481,7 @@ mod tests {
             .method(http::Method::POST)
             .uri("/v1/signals")
             .header("content-type", "application/json")
-            .header("authorization", "Bearer demo-key-123")
+            .header("authorization", "Bearer demokey123")
             .body(Body::from(serde_json::to_string(&payload).unwrap()))
             .unwrap();
 
@@ -526,7 +526,7 @@ mod tests {
         let request = Request::builder()
             .method(http::Method::GET)
             .uri("/v1/memory/facts")
-            .header("authorization", "Bearer demo-key-123")
+            .header("authorization", "Bearer demokey123")
             .body(Body::empty())
             .unwrap();
 
@@ -633,7 +633,7 @@ mod tests {
             .method(http::Method::POST)
             .uri("/v1/signals")
             .header("content-type", "application/json")
-            .header("authorization", "Bearer demo-key-123")
+            .header("authorization", "Bearer demokey123")
             .body(Body::from(serde_json::to_string(&payload).unwrap()))
             .unwrap();
 
@@ -657,7 +657,7 @@ mod tests {
         let get_req = Request::builder()
             .method(http::Method::GET)
             .uri("/v1/memory/facts")
-            .header("authorization", "Bearer demo-key-123")
+            .header("authorization", "Bearer demokey123")
             .body(Body::empty())
             .unwrap();
 
@@ -713,7 +713,7 @@ mod tests {
             .method(http::Method::POST)
             .uri("/v1/memory/search")
             .header("content-type", "application/json")
-            .header("authorization", "Bearer demo-key-123")
+            .header("authorization", "Bearer demokey123")
             .body(Body::from(serde_json::to_string(&payload).unwrap()))
             .unwrap();
 
@@ -762,7 +762,7 @@ mod tests {
         let request = Request::builder()
             .method(http::Method::GET)
             .uri(format!("/v1/signals/{id}"))
-            .header("authorization", "Bearer demo-key-123")
+            .header("authorization", "Bearer demokey123")
             .body(Body::empty())
             .unwrap();
 

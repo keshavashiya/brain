@@ -55,7 +55,7 @@ impl ImportanceScorer {
         "emergency",
         "immediately",
         "right now",
-        "time-sensitive",
+        "timesensitive",
         "critical",
         "due date",
         "overdue",
