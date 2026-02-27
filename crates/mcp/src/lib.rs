@@ -547,13 +547,13 @@ struct HttpState {
 /// Auth: `x-api-key: <key>` HTTP header required on every request when API keys
 /// are configured.
 pub async fn serve_http(
-    processor: signal::SignalProcessor,
+    processor: Arc<signal::SignalProcessor>,
     host: &str,
     port: u16,
 ) -> anyhow::Result<()> {
     let api_keys = processor.config().access.api_keys.clone();
     let state = Arc::new(HttpState {
-        server: Arc::new(McpServer::new(Arc::new(processor), api_keys)),
+        server: Arc::new(McpServer::new(processor, api_keys)),
     });
 
     let router = Router::new()

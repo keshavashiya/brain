@@ -164,12 +164,12 @@ pub fn create_router(
 ///
 /// Blocks until the server shuts down.
 pub async fn serve(
-    processor: signal::SignalProcessor,
+    processor: Arc<signal::SignalProcessor>,
     host: &str,
     port: u16,
 ) -> anyhow::Result<()> {
     let api_keys = processor.config().access.api_keys.clone();
-    let router = create_router(Arc::new(processor), api_keys);
+    let router = create_router(processor, api_keys);
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     tracing::info!("Brain HTTP API listening on http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;

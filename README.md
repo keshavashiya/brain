@@ -1,160 +1,211 @@
 # Brain OS
 
-A **Central AI Operating System** that provides unified memory and multi-protocol access for AI applications.
+A **Central AI Operating System** written in pure Rust — a unified memory hub that any AI tool can connect to via HTTP, WebSocket, MCP, gRPC, or CLI.
 
-## Vision
+Instead of each AI tool keeping its own isolated context, Brain OS acts as a single source of truth. Claude Code, custom scripts, and any HTTP-capable tool all read and write to one shared memory that grows smarter over time.
 
-Brain OS serves as the central memory hub for AI tools via standard protocols:
-- **HTTP** - REST API access
-- **WebSocket** - Real-time bidirectional communication
-- **MCP** - Claude Code, OpenCode, and other MCP clients
-- **CLI** - Interactive terminal interface
-- **gRPC** - Programmatic access
+## How It Works
 
-All AI tools connect through protocol adapters - the SignalProcessor is agnostic to the source.
-
-## Architecture
+Every input — regardless of protocol — flows through the same pipeline:
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                  ADAPTERS (Sensors - like ears/eyes)           │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐        │
-│  │   CLI   │  │  HTTP   │  │   WS   │  │   MCP   │        │
-│  └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘        │
-│       │            │            │            │               │
-│       └────────────┴────────────┴────────────┴────────────    │
-│                             │                                 │
-│                    Unified Signal Pipeline                     │
-│                             │                                 │
-│       ┌─────────────────────┴─────────────────────┐          │
-│       │           Thalamus (Intent Router)        │          │
-│       └─────────────────────┬─────────────────────┘          │
-│                             │                                 │
-│  ┌──────────────────────────┼────────────────────────────────┤
-│  │ Cortex + Amygdala        │  (Reasoning + Importance)    │
-│  └──────────────────────────┼────────────────────────────────┤
-│                             │                                 │
-│  ┌──────────────────────────┼────────────────────────────────┤
-│  │     Hippocampus (Memory) │                                │
-│  │  Episodic + Semantic + Recall Engine                     │
-│  └──────────────────────────┬────────────────────────────────┤
-│                             │                                 │
-│  ┌──────────────────────────┼────────────────────────────────┤
-│  │ Storage: SQLite + RuVector (HNSW + GNN + Self-Learning)   │
-└─────────────────────────────────────────────────────────────────┘
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    SignalProcessor (Hub)                        │
-│  ┌─────────┐  ┌─────────┐  ┌─────────┐  ┌─────────┐        │
-│  │   CLI   │  │  HTTP   │  │   WS   │  │   MCP   │        │
-│  │ Adapter │  │ Adapter │  │ Adapter │  │ Adapter │        │
-│  └────┬────┘  └────┬────┘  └────┬────┘  └────┬────┘        │
-│       │            │            │            │               │
-│       └────────────┴────────────┴────────────┴────────────    │
-│                             │                                 │
-│                    Unified Signal Pipeline                     │
-│                             │                                 │
-│       ┌─────────────────────┴─────────────────────┐          │
-│       │           Thalamus (Intent Router)        │          │
-│       └─────────────────────┬─────────────────────┘          │
-│                             │                                 │
-│  ┌──────────────────────────┼────────────────────────────────┤
-│  │ Cortex + Amygdala        │  (Reasoning + Importance)    │
-│  └──────────────────────────┼────────────────────────────────┤
-│                             │                                 │
-│  ┌──────────────────────────┼────────────────────────────────┤
-│  │     Hippocampus (Memory) │                                │
-│  │  Episodic + Semantic + Recall Engine                     │
-│  └──────────────────────────┬────────────────────────────────┤
-│                             │                                 │
-│  ┌──────────────────────────┼────────────────────────────────┤
-│  │ Storage: SQLite + RuVector (HNSW + GNN + Self-Learning)   │
-└─────────────────────────────────────────────────────────────────┘
+Input → Intent Classification → Importance Scoring → Memory Store/Recall → LLM Response
 ```
 
-## Key Features
+The memory engine combines vector search (HNSW) with full-text search (BM25), fuses results via RRF, and reranks by importance and recency.
 
-| Feature | Description |
-|---------|-------------|
-| **Central Memory** | Unified memory accessible from all AI tools |
-| **Self-Learning** | Memory improves over time via RuVector GNN |
-| **Multi-Protocol** | HTTP, WebSocket, MCP, gRPC, CLI |
-| **Local-First** | All data stays on your machine |
-
-## Protocol Ports
-
-| Service | Port | Purpose |
-|---------|------|---------|
-| HTTP API | 19789 | REST API |
-| WebSocket | 19790 | Real-time |
-| MCP HTTP | 19791 | Remote MCP |
-| gRPC | 19792 | Programmatic |
-
-## Crate Structure
-
-| Crate | Role |
-|-------|------|
-| `core` | Orchestration and config |
-| `signal` | SignalProcessor hub |
-| `adapters/cli` | CLI input adapter (like ears) |
-| `adapters/*` | Protocol adapters (HTTP, WS, MCP, gRPC) |
-| `thalamus` | Intent classification |
-| `cortex` | LLM reasoning |
-| `amygdala` | Importance scoring |
-| `hippocampus` | Memory engine |
-| `storage` | SQLite + RuVector |
-
-## Quick Start
+## Install
 
 ```bash
-# Build
-cargo build --workspace
-
-# Run HTTP server
-cargo run --bin brain -- serve
-
-# Run MCP (for Claude Code)
-cargo run --bin brain -- mcp --stdio
-
-# CLI chat
-cargo run --bin brain -- chat
-
-# Test
-cargo test --workspace
-
-# Install globally
 cargo install --path crates/cli
-brain serve
+brain init
 ```
+
+`brain init` creates `~/.brain/` with the default config and data directories.
+
+## Usage
+
+```bash
+# Start Brain as a background daemon (all adapters, survives terminal close)
+brain start
+
+# Stop the daemon
+brain stop
+
+# System status (shows whether daemon is running)
+brain status
+
+# Interactive chat with memory
+brain chat
+```
+
+## Claude Desktop / Claude Code
+
+Add to Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "brain-memory": {
+      "command": "brain",
+      "args": ["mcp", "--stdio"]
+    }
+  }
+}
+```
+
+For Claude Code, add to `.claude/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "brain-memory": {
+      "command": "brain",
+      "args": ["mcp", "--stdio"]
+    }
+  }
+}
+```
+
+### MCP Tools
+
+| Tool | Arguments | Description |
+|------|-----------|-------------|
+| `memory_search` | `query`, `top_k?`, `namespace?` | Semantic + full-text hybrid search |
+| `memory_store` | `subject`, `predicate`, `object`, `category`, `namespace?` | Store a fact |
+| `memory_facts` | `subject` | All facts about a subject |
+| `memory_episodes` | `limit?` | Recent conversation history |
+| `user_profile` | — | Current user configuration |
+
+## HTTP API
+
+Default port: `19789`. All `/v1/*` routes require `Authorization: Bearer <key>`.
+
+```bash
+# Health (no auth)
+curl http://localhost:19789/health
+
+# Store a fact via signal
+curl -X POST http://localhost:19789/v1/signals \
+  -H "Authorization: Bearer demo-key-123" \
+  -H "Content-Type: application/json" \
+  -d '{"source":"http","sender":"user","content":"remember that I prefer dark mode"}'
+
+# Search memory
+curl -X POST http://localhost:19789/v1/memory/search \
+  -H "Authorization: Bearer demo-key-123" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"UI preferences","top_k":5}'
+
+# List all facts
+curl http://localhost:19789/v1/memory/facts \
+  -H "Authorization: Bearer demo-key-123"
+```
+
+### Routes
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Health check |
+| `POST` | `/v1/signals` | Submit a signal |
+| `GET` | `/v1/signals/:id` | Get cached response |
+| `POST` | `/v1/memory/search` | Semantic search |
+| `GET` | `/v1/memory/facts` | List all facts |
+| `GET` | `/v1/memory/namespaces` | Namespace stats |
+
+## Services & Ports
+
+`brain start` launches all adapters together in the background. They share a single processor so memory is consistent across all protocols.
+
+| Adapter | Default Port | Notes |
+|---------|-------------|-------|
+| HTTP REST API | 19789 | |
+| WebSocket | 19790 | |
+| MCP HTTP | 19791 | |
+| gRPC | 19792 | |
+| MCP stdio | stdin/stdout | `brain mcp` — invoked by Claude Desktop |
+
+**For development**, `brain serve` runs everything in the foreground with optional adapter flags:
+
+```bash
+brain serve               # all adapters (foreground)
+brain serve --http        # HTTP only
+brain serve --http --ws   # HTTP + WebSocket
+```
+
+## Memory Namespaces
+
+Scope facts and episodes to a specific context. The default namespace is `"personal"`.
+
+```bash
+# Store in a project namespace
+curl -X POST http://localhost:19789/v1/signals \
+  -H "Authorization: Bearer demo-key-123" \
+  -H "Content-Type: application/json" \
+  -d '{"source":"http","sender":"user","content":"use bun not npm","namespace":"my-project"}'
+
+# Search within that namespace
+curl -X POST http://localhost:19789/v1/memory/search \
+  -H "Authorization: Bearer demo-key-123" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"package manager","namespace":"my-project"}'
+```
+
+## Authentication
+
+Each adapter uses a different auth mechanism:
+
+| Adapter | Method |
+|---------|--------|
+| HTTP | `Authorization: Bearer <key>` |
+| WebSocket | First frame: `{"api_key":"<key>"}` |
+| MCP HTTP | `x-api-key: <key>` header |
+| MCP stdio | `params._meta["x-api-key"]` |
+| gRPC | gRPC metadata |
+
+Configure keys in `~/.brain/config.yaml`:
+
+```yaml
+access:
+  api_keys:
+    - key: "your-secret-key"
+      name: "My Key"
+      permissions: [read, write]
+```
+
+The default key shipped for local use is `demo-key-123`.
 
 ## Configuration
 
-Brain loads config from multiple sources (highest priority wins):
+Config is loaded from three sources (highest priority wins):
 
-1. **Environment variables**: `BRAIN_LLM__MODEL=gpt-4o`
-2. **User config**: `~/.brain/config.yaml`
-3. **Default config**: `config/default.yaml`
+1. Environment variables — `BRAIN_LLM__MODEL=gpt-4o`
+2. User config — `~/.brain/config.yaml`
+3. Defaults — [`config/default.yaml`](config/default.yaml)
 
-See [`config/default.yaml`](config/default.yaml) for all available options.
+Key settings:
+
+```yaml
+llm:
+  provider: "ollama"       # ollama | openai
+  model: "qwen2.5:14b"
+  base_url: "http://localhost:11434"
+
+embedding:
+  model: "bge-small-en-v1.5"
+  device: "auto"           # auto | cpu | cuda | coreml
+```
 
 ## Data Directory
 
-All data lives in `~/.brain/`:
-
 ```
 ~/.brain/
-├── db/brain.db     # SQLite (episodes, facts, profile)
-├── ruvector/       # RuVector (vector embeddings + HNSW index)
-├── models/         # ONNX models (downloaded on first run)
-├── logs/           # Log files
-└── exports/        # Memory exports
+├── db/brain.db        # SQLite — facts, episodes, profiles, FTS5 index
+├── ruvector/          # Vector index (HNSW)
+├── models/            # ONNX embedding models
+├── logs/
+└── exports/
 ```
-
-## Documentation
-
-- [`docs/IMPLEMENTATION_PLAN_V2.md`](docs/IMPLEMENTATION_PLAN_V2.md) — Central AI OS implementation plan
-- [`docs/TECHNICAL_SPECS.md`](docs/TECHNICAL_SPECS.md) — Architecture, schemas, security
-- [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) — Development setup and commands
 
 ## License
 

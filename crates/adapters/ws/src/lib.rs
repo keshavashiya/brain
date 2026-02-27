@@ -92,7 +92,7 @@ pub type Connections = Arc<Mutex<HashMap<Uuid, ConnectionInfo>>>;
 /// Accepts concurrent connections. Each connection is handled in its own
 /// tokio task. Blocks until the listener errors.
 pub async fn serve(
-    processor: signal::SignalProcessor,
+    processor: Arc<signal::SignalProcessor>,
     host: &str,
     port: u16,
 ) -> anyhow::Result<()> {
@@ -100,8 +100,6 @@ pub async fn serve(
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!("Brain WebSocket server listening on ws://{addr}");
-
-    let processor: Arc<signal::SignalProcessor> = Arc::new(processor);
     let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
 
     loop {

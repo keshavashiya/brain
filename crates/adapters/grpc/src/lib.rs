@@ -331,12 +331,11 @@ impl AgentService for AgentServiceImpl {
 /// Registers both `MemoryService` and `AgentService`.
 /// Blocks until the server shuts down.
 pub async fn serve(
-    processor: signal::SignalProcessor,
+    processor: Arc<signal::SignalProcessor>,
     host: &str,
     port: u16,
 ) -> anyhow::Result<()> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
-    let processor = Arc::new(processor);
 
     let memory_svc = MemoryServiceServer::new(MemoryServiceImpl::new(processor.clone()));
     let agent_svc = AgentServiceServer::new(AgentServiceImpl::new(processor));
