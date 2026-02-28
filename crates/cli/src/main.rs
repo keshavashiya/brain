@@ -370,14 +370,11 @@ async fn main() -> anyhow::Result<()> {
                 println!("  Dir:       {}", data_dir.join(sub).display());
             }
 
-            // Download local ONNX embedding model (BGE-small-en-v1.5, ~24MB).
-            // This enables offline semantic search without Ollama.
-            let model_dir = config.models_path().join("bge-small-en-v1.5");
-            println!("\n  Downloading embedding model to {}...", model_dir.display());
-            match hippocampus::embedding::LocalProvider::download_model(&model_dir).await {
-                Ok(_) => println!("  Embedding model ready."),
-                Err(e) => println!("  Embedding model download failed (non-fatal): {e}"),
-            }
+            println!(
+                "\n  Embedding:  {} (pull with `ollama pull {}`)",
+                config.embedding.model,
+                config.embedding.model
+            );
 
             // ── Encryption setup ──────────────────────────────────────────────
             if encrypt {

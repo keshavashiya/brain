@@ -70,10 +70,13 @@ pub struct LlmConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingConfig {
+    /// Embedding model name (e.g. "nomic-embed-text" for Ollama,
+    /// "text-embedding-3-small" for OpenAI). Must be available in
+    /// the same service configured under `llm`.
     pub model: String,
+    /// Output vector dimension — must exactly match the model's output size.
+    /// Ollama nomic-embed-text → 768, OpenAI text-embedding-3-small → 1536.
     pub dimensions: u32,
-    pub batch_size: u32,
-    pub device: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -416,10 +419,8 @@ impl Default for BrainConfig {
                 max_tokens: 4096,
             },
             embedding: EmbeddingConfig {
-                model: "bge-small-en-v1.5".to_string(),
-                dimensions: 384,
-                batch_size: 32,
-                device: "auto".to_string(),
+                model: "nomic-embed-text".to_string(),
+                dimensions: 768,
             },
             memory: MemoryConfig {
                 episodic: EpisodicConfig {
@@ -519,7 +520,7 @@ mod tests {
         let config = BrainConfig::default();
         assert_eq!(config.brain.data_dir, "~/.brain");
         assert_eq!(config.llm.provider, "ollama");
-        assert_eq!(config.embedding.dimensions, 384);
+        assert_eq!(config.embedding.dimensions, 768); // nomic-embed-text default
         assert!(!config.encryption.enabled); // Deferred to v1.1
         assert!(!config.proactivity.enabled);
         assert!(config.adapters.http.enabled);

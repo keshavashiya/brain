@@ -24,10 +24,8 @@ llm:
   max_tokens: 4096
 
 embedding:
-  model: "bge-small-en-v1.5"
-  dimensions: 384
-  batch_size: 32
-  device: "auto"               # auto | cpu | cuda | coreml
+  model: "nomic-embed-text"    # must be pulled: `ollama pull nomic-embed-text`
+  dimensions: 768              # must match the model output size (nomic-embed-text → 768)
 
 memory:
   episodic:

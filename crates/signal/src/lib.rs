@@ -232,53 +232,37 @@ impl SignalProcessor {
         };
         let llm = cortex::llm::create_provider(&llm_config);
 
-        // Create embedder — auto-detects Ollama first, falls back to local ONNX.
-        // If neither is available (no Ollama, no model files), gracefully degrades
-        // to zero vectors so the rest of the pipeline still works.
-        let embed_cfg = hippocampus::embedding::EmbeddingConfig {
-            provider: hippocampus::embedding::ProviderType::Auto,
-            ollama_url: config.llm.base_url.clone(),
-            ollama_model: "nomic-embed-text".to_string(),
-            model_dir: config
-                .models_path()
-                .join("bge-small-en-v1.5")
-                .to_string_lossy()
-                .to_string(),
-            dimensions: config.embedding.dimensions as usize,
-        };
-        let mut embedder_inner = match hippocampus::Embedder::from_config(&embed_cfg).await {
-            Ok(e) => Some(e),
-            Err(e) => {
-                tracing::warn!("Embedder unavailable, semantic search will use zero vectors: {e}");
-                None
+        // Create embedder — provider is selected from llm.provider config.
+        // The model and dimension come from the embedding config section.
+        // embedding.dimensions MUST match the model's actual output size.
+        let embedding_dim = config.embedding.dimensions as usize;
+        let embedder_inner = match config.llm.provider.as_str() {
+            "openai" => {
+                let api_key = std::env::var("BRAIN_LLM__API_KEY")
+                    .unwrap_or_else(|_| String::new());
+                tracing::info!(
+                    model = config.embedding.model,
+                    dim = embedding_dim,
+                    "Embedding provider: OpenAI-compatible"
+                );
+                Some(hippocampus::Embedder::for_openai(
+                    &config.llm.base_url,
+                    &config.embedding.model,
+                    &api_key,
+                ))
             }
-        };
-
-        // Probe the active provider to discover its real output dimension.
-        // Different models return different sizes (e.g. nomic-embed-text → 768,
-        // bge-small-en-v1.5 → 384) and the VectorDB must be initialised with the
-        // exact matching dimension — otherwise inserts will fail at runtime.
-        let embedding_dim = if let Some(ref mut e) = embedder_inner {
-            match e.embed("probe").await {
-                Ok(v) => {
-                    let d = v.len();
-                    tracing::info!(
-                        provider = e.provider_name(),
-                        dim = d,
-                        "Embedder initialized"
-                    );
-                    d
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        "Embedder probe failed, using default dim {}: {err}",
-                        hippocampus::EMBEDDING_DIM
-                    );
-                    hippocampus::EMBEDDING_DIM
-                }
+            _ => {
+                // Default: Ollama (covers "ollama" and any custom provider name)
+                tracing::info!(
+                    model = config.embedding.model,
+                    dim = embedding_dim,
+                    "Embedding provider: Ollama"
+                );
+                Some(hippocampus::Embedder::for_ollama(
+                    &config.llm.base_url,
+                    &config.embedding.model,
+                ))
             }
-        } else {
-            hippocampus::EMBEDDING_DIM
         };
         let embedder = tokio::sync::Mutex::new(embedder_inner);
 
