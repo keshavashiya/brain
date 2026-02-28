@@ -103,6 +103,27 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// Manage Brain as a system service (auto-start on login).
+    ///
+    /// On macOS: installs a launchd agent in ~/Library/LaunchAgents/.
+    /// On Linux:  installs a systemd user service in ~/.config/systemd/user/.
+    ///
+    /// Examples:
+    ///   brain service install    # register + enable auto-start
+    ///   brain service uninstall  # remove the service registration
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ServiceAction {
+    /// Register Brain as a login service and start it immediately.
+    Install,
+    /// Remove the Brain login service registration.
+    Uninstall,
 }
 
 // ─── Daemon helpers ───────────────────────────────────────────────────────────
@@ -724,6 +745,12 @@ async fn main() -> anyhow::Result<()> {
         Commands::Import { file, dry_run } => {
             cmd_import(&config, &file, dry_run)?;
         }
+
+        // ── service ───────────────────────────────────────────────────────────
+        Commands::Service { action } => match action {
+            ServiceAction::Install => cmd_service_install()?,
+            ServiceAction::Uninstall => cmd_service_uninstall()?,
+        },
     }
 
     Ok(())
@@ -829,6 +856,213 @@ async fn show_status(config: &core::BrainConfig) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+// ─── Service install / uninstall ──────────────────────────────────────────────
+
+/// Install Brain as a login service so it auto-starts on every login.
+///
+/// • macOS  — creates `~/Library/LaunchAgents/com.brain.plist` and loads it
+///            with `launchctl load`.
+/// • Linux  — creates `~/.config/systemd/user/brain.service`, runs
+///            `systemctl --user daemon-reload` and `systemctl --user enable`.
+fn cmd_service_install() -> anyhow::Result<()> {
+    let exe = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("Cannot determine Brain binary path: {e}"))?;
+    let exe_str = exe
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Binary path contains non-UTF-8 characters"))?;
+
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("$HOME is not set"))?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let agents_dir = home.join("Library").join("LaunchAgents");
+        std::fs::create_dir_all(&agents_dir)?;
+        let plist_path = agents_dir.join("com.brain.plist");
+
+        let log_dir = home.join(".brain").join("logs");
+        std::fs::create_dir_all(&log_dir)?;
+
+        let plist = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.brain</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{exe}</string>
+        <string>serve</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>{log}/brain.log</string>
+    <key>StandardErrorPath</key>
+    <string>{log}/brain.log</string>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>
+"#,
+            exe = exe_str,
+            log = log_dir.display(),
+        );
+
+        std::fs::write(&plist_path, &plist)?;
+
+        // Unload first (ignore error if not loaded yet) then load
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", plist_path.to_str().unwrap()])
+            .output();
+        let out = std::process::Command::new("launchctl")
+            .args(["load", "-w", plist_path.to_str().unwrap()])
+            .output()
+            .map_err(|e| anyhow::anyhow!("launchctl load failed: {e}"))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            anyhow::bail!("launchctl load failed: {stderr}");
+        }
+
+        println!("Brain service installed (launchd).");
+        println!("  Plist:  {}", plist_path.display());
+        println!("  Log:    {}/brain.log", log_dir.display());
+        println!("  Brain will now start automatically on every login.");
+        println!("  To stop auto-start: brain service uninstall");
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let service_dir = home.join(".config").join("systemd").join("user");
+        std::fs::create_dir_all(&service_dir)?;
+        let service_path = service_dir.join("brain.service");
+
+        let log_dir = home.join(".brain").join("logs");
+        std::fs::create_dir_all(&log_dir)?;
+
+        let unit = format!(
+            r#"[Unit]
+Description=Brain OS — Personal AI Memory System
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={exe} serve
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:{log}/brain.log
+StandardError=append:{log}/brain.log
+
+[Install]
+WantedBy=default.target
+"#,
+            exe = exe_str,
+            log = log_dir.display(),
+        );
+
+        std::fs::write(&service_path, &unit)?;
+
+        let reload = std::process::Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .status();
+        let enable = std::process::Command::new("systemctl")
+            .args(["--user", "enable", "--now", "brain.service"])
+            .status();
+
+        if reload.is_err() || enable.is_err() {
+            println!("Brain service file written to {}.", service_path.display());
+            println!("  Run manually:");
+            println!("    systemctl --user daemon-reload");
+            println!("    systemctl --user enable --now brain.service");
+        } else {
+            println!("Brain service installed (systemd user).");
+            println!("  Unit:   {}", service_path.display());
+            println!("  Log:    {}/brain.log", log_dir.display());
+            println!("  Brain will now start automatically on every login.");
+            println!("  To stop auto-start: brain service uninstall");
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        anyhow::bail!(
+            "brain service install is not supported on this OS.\n\
+             Manually configure your system's service manager to run: {exe} serve",
+        )
+    }
+}
+
+/// Remove the Brain login service.
+fn cmd_service_uninstall() -> anyhow::Result<()> {
+    let home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("$HOME is not set"))?;
+
+    #[cfg(target_os = "macos")]
+    {
+        let plist_path = home
+            .join("Library")
+            .join("LaunchAgents")
+            .join("com.brain.plist");
+
+        if !plist_path.exists() {
+            println!("Brain service is not installed (no plist found).");
+            return Ok(());
+        }
+
+        let _ = std::process::Command::new("launchctl")
+            .args(["unload", "-w", plist_path.to_str().unwrap()])
+            .output();
+
+        std::fs::remove_file(&plist_path)?;
+        println!("Brain service uninstalled.");
+        println!("  Removed: {}", plist_path.display());
+        println!("  Brain will no longer start automatically on login.");
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let service_path = home
+            .join(".config")
+            .join("systemd")
+            .join("user")
+            .join("brain.service");
+
+        if !service_path.exists() {
+            println!("Brain service is not installed (no unit file found).");
+            return Ok(());
+        }
+
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "disable", "--now", "brain.service"])
+            .output();
+
+        std::fs::remove_file(&service_path)?;
+
+        let _ = std::process::Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .output();
+
+        println!("Brain service uninstalled.");
+        println!("  Removed: {}", service_path.display());
+        println!("  Brain will no longer start automatically on login.");
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        anyhow::bail!("brain service uninstall is not supported on this OS.")
+    }
 }
 
 // ─── Export / Import ──────────────────────────────────────────────────────────

@@ -210,6 +210,13 @@ const TOKENIZER_FILENAME: &str = "tokenizer.json";
 const HF_REPO: &str = "BAAI/bge-small-en-v1.5";
 const HF_BASE: &str = "https://huggingface.co";
 
+/// Remote paths within the HF repo for each local file.
+/// The ONNX model lives under the `onnx/` subdirectory on HF.
+const HF_REMOTE_PATHS: &[(&str, &str)] = &[
+    (MODEL_FILENAME, "onnx/model.onnx"),
+    (TOKENIZER_FILENAME, "tokenizer.json"),
+];
+
 impl LocalProvider {
     /// Load the ONNX model and tokenizer from a directory.
     pub fn load(model_dir: &Path) -> Result<Self, EmbeddingError> {
@@ -357,14 +364,14 @@ impl LocalProvider {
             .build()
             .map_err(|e| EmbeddingError::Download(e.to_string()))?;
 
-        for filename in [MODEL_FILENAME, TOKENIZER_FILENAME] {
+        for (filename, remote_path) in HF_REMOTE_PATHS {
             let target_path = target_dir.join(filename);
             if target_path.exists() {
                 info!("Model file already exists: {}", target_path.display());
                 continue;
             }
 
-            let url = format!("{HF_BASE}/{HF_REPO}/resolve/main/{filename}");
+            let url = format!("{HF_BASE}/{HF_REPO}/resolve/main/{remote_path}");
             info!("Downloading {filename} from {url}...");
 
             let resp = client.get(&url).send().await.map_err(|e| {
@@ -373,7 +380,7 @@ impl LocalProvider {
 
             if !resp.status().is_success() {
                 return Err(EmbeddingError::Download(format!(
-                    "HTTP {} downloading {filename}",
+                    "HTTP {} downloading {filename} from {url}",
                     resp.status()
                 )));
             }

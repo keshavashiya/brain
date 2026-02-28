@@ -321,7 +321,7 @@ impl SqlitePool {
             ",
             ),
             (
-                8,
+                10,
                 "add_namespace_to_semantic_facts",
                 "
                 ALTER TABLE semantic_facts ADD COLUMN namespace TEXT NOT NULL DEFAULT 'personal';
@@ -329,11 +329,28 @@ impl SqlitePool {
             ",
             ),
             (
-                9,
+                11,
                 "add_namespace_to_episodes",
                 "
                 ALTER TABLE episodes ADD COLUMN namespace TEXT NOT NULL DEFAULT 'personal';
                 CREATE INDEX IF NOT EXISTS idx_episodes_namespace ON episodes(namespace);
+            ",
+            ),
+            (
+                12,
+                "rebuild_procedures_table",
+                "
+                DROP TABLE IF EXISTS procedures;
+                CREATE TABLE IF NOT EXISTS procedures (
+                    id              TEXT PRIMARY KEY,
+                    trigger_pattern TEXT NOT NULL,
+                    steps_json      TEXT NOT NULL DEFAULT '[]',
+                    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                    use_count       INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_procedures_trigger
+                    ON procedures(trigger_pattern);
             ",
             ),
         ]
@@ -388,7 +405,7 @@ mod tests {
     fn test_open_memory() {
         let pool = SqlitePool::open_memory().unwrap();
         let version = pool.schema_version().unwrap();
-        assert_eq!(version, 9); // All 9 migrations applied
+        assert_eq!(version, 12); // All migrations applied (last: rebuild_procedures_table)
     }
 
     #[test]
@@ -396,7 +413,7 @@ mod tests {
         let pool = SqlitePool::open_memory().unwrap();
         // Running migrate again should be a no-op
         pool.migrate().unwrap();
-        assert_eq!(pool.schema_version().unwrap(), 9);
+        assert_eq!(pool.schema_version().unwrap(), 12);
     }
 
     #[test]
