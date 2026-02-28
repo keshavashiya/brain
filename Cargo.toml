@@ -14,7 +14,7 @@ members = [
     "crates/mcp",
     "crates/cerebellum",
     "crates/ganglia",
-    # "crates/bridge",  -- Phase 3
+    "crates/bridge",
     "crates/cli",
 ]
 
@@ -100,3 +100,4 @@ grpcadapter = { path = "crates/adapters/grpc" }
 mcp = { path = "crates/mcp" }
 cerebellum = { path = "crates/cerebellum" }
 ganglia = { path = "crates/ganglia" }
+bridge = { path = "crates/bridge" }
