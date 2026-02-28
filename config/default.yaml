@@ -45,7 +45,7 @@ memory:
     forgetting_threshold: 0.05 # Memories below this are candidates for pruning
 
 encryption:
-  enabled: true
+  enabled: false               # Run `brain init --encrypt` to generate a salt and enable
 
 security:
   exec_allowlist:
