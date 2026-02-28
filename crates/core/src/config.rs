@@ -30,7 +30,6 @@ pub struct BrainConfig {
     pub proactivity: ProactivityConfig,
     pub adapters: AdaptersConfig,
     pub access: AccessConfig,
-    pub bridge: BridgeRelayConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,18 +208,6 @@ pub struct GrpcAdapterConfig {
     pub port: u16,
 }
 
-/// External WebSocket relay bridge configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BridgeRelayConfig {
-    /// Whether to start the bridge relay on `brain serve`.
-    pub enabled: bool,
-    /// Remote WebSocket URL to connect to (e.g. `ws://gateway.example.com/brain`).
-    pub url: String,
-    /// Initial reconnect backoff in milliseconds.
-    pub initial_backoff_ms: u64,
-    /// Maximum reconnect backoff in milliseconds.
-    pub max_backoff_ms: u64,
-}
 
 impl BrainConfig {
     /// Load configuration from all sources.
@@ -503,12 +490,6 @@ impl Default for BrainConfig {
                     name: "Demo Key".to_string(),
                     permissions: vec!["read".to_string(), "write".to_string()],
                 }],
-            },
-            bridge: BridgeRelayConfig {
-                enabled: false,
-                url: String::new(),
-                initial_backoff_ms: 1_000,
-                max_backoff_ms: 60_000,
             },
         }
     }

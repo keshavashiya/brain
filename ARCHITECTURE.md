@@ -20,9 +20,8 @@ brain/
 │   │                     ContextAssembler (builds prompts from recall results)
 │   ├── cerebellum/     # ProcedureStore — trigger-pattern → steps automation
 │   ├── ganglia/        # Proactivity engine (scheduled reminders)
-│   ├── ruvector/       # HNSW vector index (pure Rust, no external deps)
-│   ├── storage/        # SQLite migrations + raw DB helpers
-│   ├── bridge/         # WebSocket bridge for multi-device/cloud sync
+│   ├── ruvector/       # (not a crate — ruvector-core is used as an external dep)
+│   ├── storage/        # SQLite migrations + ruvector-core wrapper + encryption
 │   ├── mcp/            # MCP adapter (stdio + HTTP transports)
 │   └── adapters/
 │       ├── http/       # Axum REST API (port 19789)
@@ -48,6 +47,8 @@ adapters/http ──► signal::SignalProcessor (Arc<>)
 adapters/ws   ──► signal::SignalProcessor (Arc<>)
 adapters/grpc ──► signal::SignalProcessor (Arc<>)
 mcp           ──► signal::SignalProcessor (Arc<>)
+
+External apps ──► Brain's HTTP / WS / MCP / gRPC API  (not inside this repo)
 ```
 
 All adapters share **one** `Arc<SignalProcessor>`. There are no per-adapter memory stores.
@@ -172,11 +173,14 @@ Tables:
 - `procedures` — trigger_pattern → steps_json automation rules
 - FTS5 virtual tables for BM25 full-text search
 
-### Vector Index (`crates/ruvector`)
+### Vector Index (`ruvector-core`)
 
-Pure-Rust HNSW index persisted to `~/.brain/ruvector/`. No external native dependencies. Supports:
-- `insert(id, vector)`
-- `search(query_vector, k, ef_search) -> Vec<(id, distance)>`
+Brain uses [`ruvector-core`](https://github.com/ruvnet/ruvector) (crates.io: `ruvector-core`) as an external dependency rather than implementing HNSW from scratch.
+
+`storage/src/ruvector.rs` wraps `ruvector_core::VectorDB` with Brain's multi-table interface. Each logical table (e.g. `facts_vec`, `episodes_vec`) maps to one `VectorDB` persisted at `~/.brain/ruvector/<table>.db`. Supports:
+- `insert(VectorEntry { id, vector })` — HNSW insert, file-backed
+- `search(SearchQuery { vector, k })` → `Vec<SearchResult { id, score }>`
+- `delete(id)` — remove by ID
 
 ### Hybrid Search
 
@@ -204,6 +208,82 @@ Every fact and episode carries a `namespace: TEXT NOT NULL DEFAULT 'personal'`. 
 | Shell execution | Allowlist (`security.exec_allowlist` in config); configurable timeout |
 | Encryption at rest | AES-256-GCM via `brain init --encrypt`; opt-in |
 | LLM client failures | Constructors return `Result<>` — TLS failures surface as errors, not panics |
+
+---
+
+## Integrating External Applications
+
+Brain is local and protocol-agnostic. External applications (OpenClaw, coding agents, shell scripts, chat UIs) connect to Brain via its standard interfaces — they do not live inside this repository.
+
+### Where integration code lives
+
+```
+Brain OS (this repo)          External App (separate repo / process)
+─────────────────────         ──────────────────────────────────────
+  brain serve                   OpenClaw, agent, script, etc.
+       │                              │
+       │  HTTP REST / WS / MCP /      │
+       │◄─────────── gRPC ───────────►│
+       │                              │
+  SignalProcessor               app-specific logic
+  hippocampus                   thin Brain client (HTTP calls)
+```
+
+### Integration patterns
+
+**1. HTTP REST (simplest)**
+
+Any app that can make HTTP requests can use Brain immediately:
+
+```bash
+# From any shell script, Python script, or app
+curl -X POST http://localhost:19789/v1/signals \
+  -H "Authorization: Bearer your-key" \
+  -H "Content-Type: application/json" \
+  -d '{"source":"openclaw","sender":"agent","content":"user prefers tabs over spaces"}'
+```
+
+**2. MCP (for AI agents)**
+
+AI agents that speak MCP can declare Brain as a server and call `memory_search`, `memory_store`, etc. as native tools — no HTTP client code needed.
+
+**3. WebSocket (for real-time / streaming)**
+
+Apps that need push notifications or streaming responses connect to `ws://localhost:19790` and authenticate with the first frame:
+```json
+{"api_key": "your-key"}
+```
+
+**4. gRPC (for high-throughput or typed clients)**
+
+Generate client stubs from Brain's proto files in `crates/adapters/grpc/proto/` for any language. The `MemoryService` and `AgentService` RPCs map 1-to-1 with the HTTP routes.
+
+### SDK / client library
+
+There is no official Brain client SDK yet. The simplest integration is a thin HTTP wrapper in your language of choice:
+
+```python
+# Minimal Python client — no SDK needed
+import requests
+
+class BrainClient:
+    def __init__(self, api_key, base="http://localhost:19789"):
+        self.s = requests.Session()
+        self.s.headers["Authorization"] = f"Bearer {api_key}"
+        self.base = base
+
+    def remember(self, text, namespace="personal"):
+        self.s.post(f"{self.base}/v1/signals",
+            json={"source": "python", "content": text, "namespace": namespace})
+
+    def search(self, query, top_k=5, namespace=None):
+        body = {"query": query, "top_k": top_k}
+        if namespace:
+            body["namespace"] = namespace
+        return self.s.post(f"{self.base}/v1/memory/search", json=body).json()
+```
+
+A Rust client crate or Python/JS SDK can be published separately as the API stabilises.
 
 ---
 
@@ -381,6 +461,3 @@ An optional background loop that fires scheduled suggestions based on memory pat
 
 ---
 
-## Bridge (`crates/bridge`)
-
-A WebSocket client that forwards signals to a remote Brain gateway for multi-device sync. Includes exponential backoff reconnect (`initial_backoff_ms` → `max_backoff_ms`). Disabled by default.

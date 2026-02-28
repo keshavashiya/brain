@@ -26,7 +26,7 @@ When something is worth remembering, any tool can store it. When any tool needs 
 
 ### 1. Local first, always
 
-Brain runs on your machine. Your data never leaves unless you explicitly configure a bridge. There is no account, no cloud sync by default, no telemetry. The database lives at `~/.brain/` and you own it entirely.
+Brain runs on your machine. Your data never leaves. There is no account, no cloud, no telemetry. The database lives at `~/.brain/` and you own it entirely.
 
 Privacy is not a feature — it is the architecture.
 
@@ -122,7 +122,7 @@ When evaluating what to build next, apply this order of priority:
 2. **Core memory quality** — embedding accuracy, search relevance, forgetting curve tuning
 3. **Protocol completeness** — streaming responses, richer MCP tool set, stable gRPC contract
 4. **Intelligence features** — proactivity (ganglia), consolidation, pattern detection
-5. **Connectivity** — bridge for multi-device sync, relay for external gateways
+5. **Connectivity** — external app integration via existing protocols (HTTP, WS, MCP, gRPC)
 6. **Developer experience** — better error messages, metrics, config validation
 
 Features that require baking in a specific platform (Slack, Telegram, GitHub, etc.) belong in external adapters built by users — not in this codebase.

@@ -630,50 +630,6 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
 
-            // ── Bridge relay background task ──────────────────────────────────
-            // Connects to an external WebSocket gateway when bridge.enabled = true
-            // and relays inbound messages through the signal processor.
-            if config.bridge.enabled && !config.bridge.url.is_empty() {
-                let p = processor.clone();
-                let bridge_url = config.bridge.url.clone();
-                let bridge_cfg = bridge::BridgeConfig {
-                    initial_backoff_ms: config.bridge.initial_backoff_ms,
-                    max_backoff_ms: config.bridge.max_backoff_ms,
-                    max_reconnect_attempts: None,
-                };
-                println!("  Bridge → {}", bridge_url);
-                set.spawn(async move {
-                    let client = bridge::BridgeClient::new(bridge_url, bridge_cfg);
-                    let _ = client
-                        .connect_and_relay(|msg| {
-                            let proc = p.clone();
-                            async move {
-                                let source = msg.source.as_deref().unwrap_or("bridge");
-                                let mut signal = signal::Signal::new(
-                                    signal::SignalSource::WebSocket,
-                                    source.to_string(),
-                                    msg.id.clone(),
-                                    msg.content.clone(),
-                                );
-                                if let Some(meta) = &msg.metadata {
-                                    signal.metadata = meta.clone();
-                                }
-                                let response_text = match proc.process(signal).await {
-                                    Ok(r) => match r.response {
-                                        signal::ResponseContent::Text(t) => t,
-                                        signal::ResponseContent::Json(v) => v.to_string(),
-                                        signal::ResponseContent::Error(e) => format!("Error: {e}"),
-                                    },
-                                    Err(e) => format!("Error: {e}"),
-                                };
-                                bridge::BridgeMessage::reply(&msg, response_text)
-                            }
-                        })
-                        .await;
-                    Ok(())
-                });
-                tracing::info!(url = %config.bridge.url, "Bridge relay started");
-            }
 
             println!("\nPress Ctrl+C to stop.\n");
 
@@ -1442,7 +1398,7 @@ impl BrainSession {
         let episodic = hippocampus::EpisodicStore::new(db.clone());
 
         let semantic = if let Ok(ruv) =
-            storage::RuVectorStore::open(&config.ruvector_path()).await
+            storage::RuVectorStore::open(&config.ruvector_path(), config.embedding.dimensions as usize).await
         {
             ruv.ensure_tables().await.ok();
             Some(hippocampus::SemanticStore::new(db.clone(), ruv))

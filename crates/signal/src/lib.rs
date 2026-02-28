@@ -174,6 +174,8 @@ pub struct SignalProcessor {
     episodic: hippocampus::EpisodicStore,
     semantic: Option<hippocampus::SemanticStore>,
     embedder: tokio::sync::Mutex<Option<hippocampus::Embedder>>,
+    /// Actual output dimension of the active embedding provider (probed at startup).
+    embedding_dim: usize,
     recall_engine: hippocampus::RecallEngine,
     llm: Box<dyn cortex::LlmProvider>,
     context_assembler: cortex::context::ContextAssembler,
@@ -219,24 +221,6 @@ impl SignalProcessor {
             tracing::warn!("ProcedureStore table init failed (non-fatal): {e}");
         }
 
-        // Create semantic store (optional — fails gracefully if RuVector unavailable)
-        let semantic = match storage::RuVectorStore::open(&config.ruvector_path()).await {
-            Ok(ruv) => {
-                let ruv = if let Some(enc) = encryptor {
-                    tracing::info!("Encryption enabled: RuVector content fields will be encrypted");
-                    ruv.with_encryptor(enc)
-                } else {
-                    ruv
-                };
-                ruv.ensure_tables().await.ok();
-                Some(hippocampus::SemanticStore::new(db.clone(), ruv))
-            }
-            Err(e) => {
-                tracing::warn!("RuVector unavailable, semantic memory disabled: {e}");
-                None
-            }
-        };
-
         // Create LLM provider
         let llm_config = cortex::llm::ProviderConfig {
             provider: config.llm.provider.clone(),
@@ -262,17 +246,59 @@ impl SignalProcessor {
                 .to_string(),
             dimensions: config.embedding.dimensions as usize,
         };
-        let embedder_inner = match hippocampus::Embedder::from_config(&embed_cfg).await {
-            Ok(e) => {
-                tracing::info!(provider = e.provider_name(), "Embedder initialized");
-                Some(e)
-            }
+        let mut embedder_inner = match hippocampus::Embedder::from_config(&embed_cfg).await {
+            Ok(e) => Some(e),
             Err(e) => {
                 tracing::warn!("Embedder unavailable, semantic search will use zero vectors: {e}");
                 None
             }
         };
+
+        // Probe the active provider to discover its real output dimension.
+        // Different models return different sizes (e.g. nomic-embed-text → 768,
+        // bge-small-en-v1.5 → 384) and the VectorDB must be initialised with the
+        // exact matching dimension — otherwise inserts will fail at runtime.
+        let embedding_dim = if let Some(ref mut e) = embedder_inner {
+            match e.embed("probe").await {
+                Ok(v) => {
+                    let d = v.len();
+                    tracing::info!(
+                        provider = e.provider_name(),
+                        dim = d,
+                        "Embedder initialized"
+                    );
+                    d
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "Embedder probe failed, using default dim {}: {err}",
+                        hippocampus::EMBEDDING_DIM
+                    );
+                    hippocampus::EMBEDDING_DIM
+                }
+            }
+        } else {
+            hippocampus::EMBEDDING_DIM
+        };
         let embedder = tokio::sync::Mutex::new(embedder_inner);
+
+        // Create semantic store (optional — fails gracefully if RuVector unavailable).
+        // Pass the probed embedding_dim so VectorDB is sized to match the provider.
+        // Note: ruvector-core stores only IDs; content encryption is handled by SQLite.
+        let semantic =
+            match storage::RuVectorStore::open(&config.ruvector_path(), embedding_dim).await {
+                Ok(ruv) => {
+                    if encryptor.is_some() {
+                        tracing::info!("Encryption enabled: vector IDs stored in ruvector-core, content encrypted in SQLite");
+                    }
+                    let _ = ruv.ensure_tables().await;
+                    Some(hippocampus::SemanticStore::new(db.clone(), ruv))
+                }
+                Err(e) => {
+                    tracing::warn!("RuVector unavailable, semantic memory disabled: {e}");
+                    None
+                }
+            };
 
         // Create recall engine with default RRF config
         let recall_engine = hippocampus::RecallEngine::with_defaults();
@@ -284,6 +310,7 @@ impl SignalProcessor {
             episodic,
             semantic,
             embedder,
+            embedding_dim,
             recall_engine,
             llm,
             context_assembler: cortex::context::ContextAssembler::with_defaults(),
@@ -483,10 +510,10 @@ impl SignalProcessor {
                 Ok(vec) => vec,
                 Err(e) => {
                     tracing::warn!("Embedding failed, using zero vector: {e}");
-                    vec![0.0_f32; hippocampus::EMBEDDING_DIM]
+                    vec![0.0_f32; self.embedding_dim]
                 }
             },
-            None => vec![0.0_f32; hippocampus::EMBEDDING_DIM],
+            None => vec![0.0_f32; self.embedding_dim],
         }
     }
 

@@ -390,7 +390,7 @@ mod tests {
     async fn test_store() -> (SemanticStore, tempfile::TempDir) {
         let db = SqlitePool::open_memory().unwrap();
         let ruv_dir = tempfile::tempdir().unwrap();
-        let ruv = RuVectorStore::open(ruv_dir.path()).await.unwrap();
+        let ruv = RuVectorStore::open(ruv_dir.path(), 384).await.unwrap();
         ruv.ensure_tables().await.unwrap();
         (SemanticStore::new(db, ruv), ruv_dir)
     }

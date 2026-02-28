@@ -92,9 +92,3 @@ access:
         - read
         - write
 
-bridge:
-  enabled: false               # Set to true and configure url to connect to a gateway
-  url: ""                      # ws://your-gateway.example.com/brain
-  initial_backoff_ms: 1000
-  max_backoff_ms: 60000
-

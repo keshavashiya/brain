@@ -1,273 +1,170 @@
-//! RuVector — pure-Rust, file-backed vector database.
+//! RuVector — backed by ruvector-core HNSW vector database.
 //!
-//! Replaces LanceDB with a self-contained, dependency-free vector store.
-//! Uses cosine similarity for ANN search and stores vectors as JSON files.
+//! Wraps [`ruvector_core::VectorDB`] with the multi-table interface that the
+//! rest of Brain uses.  Each logical table maps to one `VectorDB` persisted at
+//! `<root>/<table_name>.db`.
 //!
 //! # Storage layout
 //! ```text
 //! ~/.brain/ruvector/
-//!   facts/       -- semantic fact vector files ({id}.json)
-//!   episodes/    -- episode vector files ({id}.json)
-//!   index/       -- reserved for future HNSW index persistence
+//!   facts_vec.db     -- semantic fact vectors (HNSW)
+//!   episodes_vec.db  -- episode vectors (HNSW)
 //! ```
-//!
-//! # HNSW configuration (stored, applied in future HNSW implementation)
-//! - ef_construction = 200
-//! - m               = 16
-//! - ef_search       = 50
-//!
-//! # Self-learning GNN
-//! - enabled    = true
-//! - gnn_layers = 3
 
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::{Arc, RwLock},
+};
 
-use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::info;
 
-use crate::encryption::Encryptor;
+use ruvector_core::{
+    types::{DbOptions, HnswConfig as RuvHnswConfig},
+    DistanceMetric, SearchQuery, VectorDB, VectorEntry,
+};
 
-/// Default vector dimension (BGE-small-en-v1.5).
+/// Default vector dimension (BGE-small-en-v1.5 / bge-base / all-minilm).
+/// Override by passing the actual embedding model dimension to [`RuVectorStore::open`].
 pub const VECTOR_DIM: usize = 384;
 
 // ─── Errors ──────────────────────────────────────────────────────────────────
 
-/// Errors from the RuVector layer.
 #[derive(Debug, Error)]
 pub enum RuVectorError {
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-
-    #[error("Serialization error: {0}")]
-    Serde(#[from] serde_json::Error),
+    #[error("Vector DB error: {0}")]
+    Db(String),
 
     #[error("Table not found: {0}")]
     TableNotFound(String),
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
 
     #[error("Lock poisoned")]
     LockPoisoned,
 }
 
-// ─── Configuration ───────────────────────────────────────────────────────────
-
-/// HNSW index configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HnswConfig {
-    /// Number of candidates during index construction.
-    pub ef_construction: usize,
-    /// Number of bi-directional links per node.
-    pub m: usize,
-    /// Number of candidates during search.
-    pub ef_search: usize,
-}
-
-impl Default for HnswConfig {
-    fn default() -> Self {
-        Self {
-            ef_construction: 200,
-            m: 16,
-            ef_search: 50,
-        }
+impl From<ruvector_core::error::RuvectorError> for RuVectorError {
+    fn from(e: ruvector_core::error::RuvectorError) -> Self {
+        RuVectorError::Db(e.to_string())
     }
 }
 
-/// Self-learning GNN configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SelfLearningConfig {
-    /// Whether the GNN self-learning pass is active.
-    pub enabled: bool,
-    /// Number of GNN layers applied during self-learning.
-    pub gnn_layers: usize,
-}
+// ─── Public result type ───────────────────────────────────────────────────────
 
-impl Default for SelfLearningConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            gnn_layers: 3,
-        }
-    }
-}
-
-/// Top-level RuVector configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct RuVectorConfig {
-    pub hnsw: HnswConfig,
-    pub self_learning: SelfLearningConfig,
-}
-
-// ─── Internal storage ────────────────────────────────────────────────────────
-
-/// A stored vector entry (serialised to disk as JSON).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct VectorEntry {
-    id: String,
-    content: String,
-    vector: Vec<f32>,
-    timestamp: String,
-    source_type: String,
+/// A single vector search result.
+#[derive(Debug, Clone)]
+pub struct VectorResult {
+    /// ID of the stored vector (matches the fact/episode ID in SQLite).
+    pub id: String,
+    /// Cosine distance (lower = more similar).
+    pub distance: f32,
 }
 
 // ─── Store ───────────────────────────────────────────────────────────────────
 
-/// RuVector store — file-backed vector database with in-memory search index.
-///
-/// Each logical table maps to a subdirectory under `root`.  Vectors are stored
-/// as individual JSON files.  An in-memory index (rebuilt on `open`) enables
-/// fast cosine-similarity search without an external database.
-///
-/// When an `Encryptor` is set via `with_encryptor`, the `content` field of
-/// every vector entry is AES-256-GCM encrypted before being written to disk.
-/// On search, content is decrypted transparently before being returned.
-/// The vector floats themselves are stored as-is.
+/// RuVector store — manages multiple per-table `VectorDB` instances.
 pub struct RuVectorStore {
     root: PathBuf,
-    config: RuVectorConfig,
-    /// table_name → vector entries.
-    indices: Mutex<HashMap<String, Vec<VectorEntry>>>,
-    encryptor: Option<Arc<Encryptor>>,
+    /// Dimension of the embedding vectors (must match the active embedding model).
+    dimensions: usize,
+    tables: Arc<RwLock<HashMap<String, VectorDB>>>,
 }
 
 impl RuVectorStore {
-    /// Open (or create) a RuVector store at the given path.
+    /// Open (or create) a RuVector store at the given directory.
     ///
-    /// Creates the required subdirectories and loads existing vectors into
-    /// the in-memory index.
-    pub async fn open(path: &Path) -> Result<Self, RuVectorError> {
-        std::fs::create_dir_all(path.join("facts"))?;
-        std::fs::create_dir_all(path.join("episodes"))?;
-        std::fs::create_dir_all(path.join("index"))?;
-
-        let config = RuVectorConfig::default();
-        let indices = Self::load_from_disk(path)?;
-
+    /// `dimensions` must equal the output dimension of the embedding model in use.
+    /// Passing the wrong dimension will cause `Dimension mismatch` errors on insert.
+    /// Use [`VECTOR_DIM`] as the default (384) when the embedding provider is not
+    /// yet known, and prefer probing the actual embedder output at startup.
+    pub async fn open(path: &Path, dimensions: usize) -> Result<Self, RuVectorError> {
+        std::fs::create_dir_all(path)?;
         info!(
-            "RuVector opened at {} \
-             (ef_construction={}, m={}, ef_search={}, gnn_layers={})",
+            "RuVector store opened at {} (dim={})",
             path.display(),
-            config.hnsw.ef_construction,
-            config.hnsw.m,
-            config.hnsw.ef_search,
-            config.self_learning.gnn_layers
+            dimensions
         );
-
         Ok(Self {
             root: path.to_path_buf(),
-            config,
-            indices: Mutex::new(indices),
-            encryptor: None,
+            dimensions,
+            tables: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
-    /// Load all known tables from disk into memory.
-    fn load_from_disk(root: &Path) -> Result<HashMap<String, Vec<VectorEntry>>, RuVectorError> {
-        let mut map: HashMap<String, Vec<VectorEntry>> = HashMap::new();
-
-        for (table_name, subdir) in [("facts_vec", "facts"), ("episodes_vec", "episodes")] {
-            let dir = root.join(subdir);
-            let mut entries = Vec::new();
-            if dir.exists() {
-                for de in std::fs::read_dir(&dir)? {
-                    let de = de?;
-                    let p = de.path();
-                    if p.extension().and_then(|e| e.to_str()) == Some("json") {
-                        match serde_json::from_str::<VectorEntry>(&std::fs::read_to_string(&p)?) {
-                            Ok(ve) => entries.push(ve),
-                            Err(e) => {
-                                tracing::warn!("Skipping corrupt vector file {}: {e}", p.display())
-                            }
-                        }
-                    }
-                }
-            }
-            if !entries.is_empty() {
-                info!("Loaded {} vectors into '{table_name}'", entries.len());
-            }
-            map.insert(table_name.to_string(), entries);
-        }
-
-        Ok(map)
+    fn make_db(&self, table_name: &str) -> Result<VectorDB, RuVectorError> {
+        let db_path = self.root.join(format!("{table_name}.db"));
+        let options = DbOptions {
+            dimensions: self.dimensions,
+            distance_metric: DistanceMetric::Cosine,
+            storage_path: db_path.to_string_lossy().into_owned(),
+            hnsw_config: Some(RuvHnswConfig {
+                m: 16,
+                ef_construction: 200,
+                ef_search: 50,
+                max_elements: 10_000_000,
+            }),
+            quantization: None,
+        };
+        VectorDB::new(options).map_err(Into::into)
     }
 
-    /// Attach an encryptor (builder pattern).
-    ///
-    /// Must be called before any writes. Existing unencrypted entries on disk
-    /// will be read back as plaintext gracefully (decryption falls back on
-    /// error, so mixing encrypted and unencrypted files is safe during migration).
-    pub fn with_encryptor(mut self, enc: Encryptor) -> Self {
-        self.encryptor = Some(Arc::new(enc));
-        self
-    }
+    fn get_or_create_db(&self, table_name: &str) -> Result<(), RuVectorError> {
+        let has = self
+            .tables
+            .read()
+            .map_err(|_| RuVectorError::LockPoisoned)?
+            .contains_key(table_name);
 
-    /// Resolve logical table name to a filesystem directory.
-    fn table_dir(&self, table_name: &str) -> PathBuf {
-        match table_name {
-            "facts_vec" | "facts" => self.root.join("facts"),
-            "episodes_vec" | "episodes" => self.root.join("episodes"),
-            other => self.root.join(other),
-        }
-    }
-
-    /// Ensure the required vector tables exist (idempotent).
-    pub async fn ensure_tables(&self) -> Result<(), RuVectorError> {
-        let mut indices = self
-            .indices
-            .lock()
-            .map_err(|_| RuVectorError::LockPoisoned)?;
-        for table_name in &["episodes_vec", "facts_vec"] {
-            let dir = self.table_dir(table_name);
-            std::fs::create_dir_all(&dir)?;
-            indices.entry(table_name.to_string()).or_default();
-            info!("Ensured RuVector table: {table_name}");
+        if !has {
+            let db = self.make_db(table_name)?;
+            self.tables
+                .write()
+                .map_err(|_| RuVectorError::LockPoisoned)?
+                .insert(table_name.to_string(), db);
         }
         Ok(())
     }
 
-    /// Add vectors to a table.
-    ///
-    /// All slices must have the same length.
+    /// Ensure the standard vector tables exist (idempotent).
+    pub async fn ensure_tables(&self) -> Result<(), RuVectorError> {
+        for name in &["facts_vec", "episodes_vec"] {
+            self.get_or_create_db(name)?;
+            info!("Ensured RuVector table: {name}");
+        }
+        Ok(())
+    }
+
+    /// Add vectors to a table. `ids` and `vectors` must have the same length.
     pub async fn add_vectors(
         &self,
         table_name: &str,
         ids: Vec<String>,
-        contents: Vec<String>,
+        _contents: Vec<String>,
         vectors: Vec<Vec<f32>>,
-        timestamps: Vec<String>,
-        source_type: &str,
+        _timestamps: Vec<String>,
+        _source_type: &str,
     ) -> Result<(), RuVectorError> {
-        let dir = self.table_dir(table_name);
-        std::fs::create_dir_all(&dir)?;
+        self.get_or_create_db(table_name)?;
+        let tables = self
+            .tables
+            .read()
+            .map_err(|_| RuVectorError::LockPoisoned)?;
+        let db = tables
+            .get(table_name)
+            .ok_or_else(|| RuVectorError::TableNotFound(table_name.to_string()))?;
 
         let count = ids.len();
-        let mut indices = self
-            .indices
-            .lock()
-            .map_err(|_| RuVectorError::LockPoisoned)?;
-        let entries = indices.entry(table_name.to_string()).or_default();
-
-        for (i, (id, content)) in ids.iter().zip(contents.iter()).enumerate() {
-            // Encrypt content field if encryptor is active.
-            let stored_content = if let Some(enc) = &self.encryptor {
-                enc.encrypt_string(content)
-                    .unwrap_or_else(|_| content.clone())
-            } else {
-                content.clone()
-            };
+        for (id, vector) in ids.into_iter().zip(vectors.into_iter()) {
             let entry = VectorEntry {
-                id: id.clone(),
-                content: stored_content,
-                vector: vectors[i].clone(),
-                timestamp: timestamps[i].clone(),
-                source_type: source_type.to_string(),
+                id: Some(id),
+                vector,
+                metadata: None,
             };
-            let json = serde_json::to_string(&entry)?;
-            std::fs::write(dir.join(format!("{id}.json")), json)?;
-            entries.push(entry);
+            db.insert(entry)?;
         }
-
         info!("Added {count} vectors to '{table_name}'");
         Ok(())
     }
@@ -281,108 +178,64 @@ impl RuVectorStore {
         query_vector: Vec<f32>,
         top_k: usize,
     ) -> Result<Vec<VectorResult>, RuVectorError> {
-        let indices = self
-            .indices
-            .lock()
+        let tables = self
+            .tables
+            .read()
             .map_err(|_| RuVectorError::LockPoisoned)?;
-        let entries = indices
+        let db = tables
             .get(table_name)
             .ok_or_else(|| RuVectorError::TableNotFound(table_name.to_string()))?;
 
-        let mut scored: Vec<(f32, String, String)> = entries
-            .iter()
-            .map(|e| {
-                // Decrypt content transparently; fall back to raw value on error
-                // (handles legacy plaintext entries written before encryption).
-                let content = if let Some(enc) = &self.encryptor {
-                    enc.decrypt_string(&e.content)
-                        .unwrap_or_else(|_| e.content.clone())
-                } else {
-                    e.content.clone()
-                };
-                (cosine_distance(&query_vector, &e.vector), e.id.clone(), content)
-            })
-            .collect();
+        let results = db.search(SearchQuery {
+            vector: query_vector,
+            k: top_k,
+            filter: None,
+            ef_search: None,
+        })?;
 
-        scored.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-
-        Ok(scored
+        Ok(results
             .into_iter()
-            .take(top_k)
-            .map(|(dist, id, content)| VectorResult {
-                id,
-                content,
-                distance: dist,
+            .map(|r| VectorResult {
+                id: r.id,
+                distance: r.score,
             })
             .collect())
     }
 
     /// Delete a vector by ID from a table.
     pub async fn delete(&self, table_name: &str, id: &str) -> Result<(), RuVectorError> {
-        let file_path = self.table_dir(table_name).join(format!("{id}.json"));
-        if file_path.exists() {
-            std::fs::remove_file(&file_path)?;
-        }
-        let mut indices = self
-            .indices
-            .lock()
+        let tables = self
+            .tables
+            .read()
             .map_err(|_| RuVectorError::LockPoisoned)?;
-        if let Some(entries) = indices.get_mut(table_name) {
-            entries.retain(|e| e.id != id);
+        if let Some(db) = tables.get(table_name) {
+            db.delete(id)?;
         }
         Ok(())
     }
 
     /// Get the row count for a table.
     pub async fn table_count(&self, table_name: &str) -> Result<usize, RuVectorError> {
-        let indices = self
-            .indices
-            .lock()
+        let tables = self
+            .tables
+            .read()
             .map_err(|_| RuVectorError::LockPoisoned)?;
-        Ok(indices.get(table_name).map_or(0, |e| e.len()))
+        Ok(tables
+            .get(table_name)
+            .map(|db| db.len().unwrap_or(0))
+            .unwrap_or(0))
     }
 
-    /// List all table names in the store.
+    /// List all open table names.
     pub async fn table_names(&self) -> Result<Vec<String>, RuVectorError> {
-        let indices = self
-            .indices
-            .lock()
-            .map_err(|_| RuVectorError::LockPoisoned)?;
-        Ok(indices.keys().cloned().collect())
+        Ok(self
+            .tables
+            .read()
+            .map_err(|_| RuVectorError::LockPoisoned)?
+            .keys()
+            .cloned()
+            .collect())
     }
-
-    /// Get the HNSW configuration.
-    pub fn hnsw_config(&self) -> &HnswConfig {
-        &self.config.hnsw
-    }
-
-    /// Get the self-learning GNN configuration.
-    pub fn self_learning_config(&self) -> &SelfLearningConfig {
-        &self.config.self_learning
-    }
-}
-
-// ─── Math ────────────────────────────────────────────────────────────────────
-
-/// Cosine distance = 1 − cosine_similarity.  Returns 1.0 for zero vectors.
-fn cosine_distance(a: &[f32], b: &[f32]) -> f32 {
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return 1.0;
-    }
-    1.0 - (dot / (norm_a * norm_b))
-}
-
-// ─── Public result type ───────────────────────────────────────────────────────
-
-/// A single vector search result.
-#[derive(Debug, Clone)]
-pub struct VectorResult {
-    pub id: String,
-    pub content: String,
-    pub distance: f32,
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -393,12 +246,14 @@ mod tests {
 
     async fn temp_store() -> (RuVectorStore, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        let store = RuVectorStore::open(dir.path()).await.unwrap();
+        let store = RuVectorStore::open(dir.path(), VECTOR_DIM).await.unwrap();
         (store, dir)
     }
 
-    fn dummy_vector() -> Vec<f32> {
-        vec![0.1; VECTOR_DIM]
+    fn unit_vec(axis: usize) -> Vec<f32> {
+        let mut v = vec![0.0f32; VECTOR_DIM];
+        v[axis] = 1.0;
+        v
     }
 
     #[tokio::test]
@@ -416,7 +271,7 @@ mod tests {
     async fn test_ensure_tables_idempotent() {
         let (store, _dir) = temp_store().await;
         store.ensure_tables().await.unwrap();
-        store.ensure_tables().await.unwrap(); // Must not fail
+        store.ensure_tables().await.unwrap();
     }
 
     #[tokio::test]
@@ -428,16 +283,15 @@ mod tests {
             .add_vectors(
                 "episodes_vec",
                 vec!["ep001".into()],
-                vec!["Hello world".into()],
-                vec![dummy_vector()],
-                vec!["2026-01-01T00:00:00".into()],
+                vec![],
+                vec![unit_vec(0)],
+                vec![],
                 "episodic",
             )
             .await
             .unwrap();
 
-        let count = store.table_count("episodes_vec").await.unwrap();
-        assert_eq!(count, 1);
+        assert_eq!(store.table_count("episodes_vec").await.unwrap(), 1);
     }
 
     #[tokio::test]
@@ -445,11 +299,8 @@ mod tests {
         let (store, _dir) = temp_store().await;
         store.ensure_tables().await.unwrap();
 
-        // Three vectors with distinct directions
-        let mut v1 = vec![0.0f32; VECTOR_DIM];
-        v1[0] = 1.0;
-        let mut v2 = vec![0.0f32; VECTOR_DIM];
-        v2[1] = 1.0;
+        let v1 = unit_vec(0);
+        let v2 = unit_vec(1);
         let mut v3 = vec![0.0f32; VECTOR_DIM];
         v3[0] = 0.9;
         v3[1] = 0.1;
@@ -458,23 +309,14 @@ mod tests {
             .add_vectors(
                 "facts_vec",
                 vec!["f1".into(), "f2".into(), "f3".into()],
-                vec![
-                    "Rust is great".into(),
-                    "Python is popular".into(),
-                    "Rust is fast".into(),
-                ],
+                vec![],
                 vec![v1.clone(), v2, v3],
-                vec![
-                    "2026-01-01".into(),
-                    "2026-01-02".into(),
-                    "2026-01-03".into(),
-                ],
+                vec![],
                 "semantic",
             )
             .await
             .unwrap();
 
-        // Query with v1 — f1 is the identical vector (distance = 0)
         let results = store.search("facts_vec", v1, 2).await.unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].id, "f1");
@@ -489,9 +331,9 @@ mod tests {
             .add_vectors(
                 "facts_vec",
                 vec!["f1".into()],
-                vec!["test fact".into()],
-                vec![dummy_vector()],
-                vec!["2026-01-01".into()],
+                vec![],
+                vec![unit_vec(0)],
+                vec![],
                 "semantic",
             )
             .await
@@ -500,22 +342,5 @@ mod tests {
         assert_eq!(store.table_count("facts_vec").await.unwrap(), 1);
         store.delete("facts_vec", "f1").await.unwrap();
         assert_eq!(store.table_count("facts_vec").await.unwrap(), 0);
-    }
-
-    #[tokio::test]
-    async fn test_hnsw_config() {
-        let (store, _dir) = temp_store().await;
-        let h = store.hnsw_config();
-        assert_eq!(h.ef_construction, 200);
-        assert_eq!(h.m, 16);
-        assert_eq!(h.ef_search, 50);
-    }
-
-    #[tokio::test]
-    async fn test_self_learning_config() {
-        let (store, _dir) = temp_store().await;
-        let sl = store.self_learning_config();
-        assert!(sl.enabled);
-        assert_eq!(sl.gnn_layers, 3);
     }
 }
