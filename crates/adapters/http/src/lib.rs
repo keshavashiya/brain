@@ -5,6 +5,7 @@
 //! ## Routes
 //! - `GET  /health`             — health check (no auth required)
 //! - `GET  /metrics`            — Prometheus-format counters (no auth required)
+//! - `GET  /ui`                 — embedded memory explorer web UI (no auth required)
 //! - `POST /v1/signals`         — submit a signal (requires write)
 //! - `GET  /v1/signals/:id`     — retrieve cached signal response (requires read)
 //! - `POST /v1/memory/search`   — semantic search over stored facts (requires read)
@@ -216,6 +217,7 @@ pub fn create_router(
     Router::new()
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
+        .route("/ui", get(ui_handler))
         .route("/v1/signals", post(post_signal_handler))
         .route("/v1/signals/:id", get(get_signal_handler))
         .route("/v1/memory/search", post(search_memory_handler))
@@ -257,6 +259,140 @@ async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoRespons
     (
         [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
         state.metrics.render(),
+    )
+}
+
+/// Embedded single-page memory explorer UI.
+const UI_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Brain Memory Explorer</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;min-height:100vh}
+  header{background:#1e293b;border-bottom:1px solid #334155;padding:1rem 2rem;display:flex;align-items:center;gap:1rem}
+  header h1{font-size:1.25rem;font-weight:700;color:#38bdf8}
+  header span{color:#94a3b8;font-size:.875rem}
+  main{max-width:1200px;margin:0 auto;padding:2rem}
+  .search-bar{display:flex;gap:.5rem;margin-bottom:2rem}
+  .search-bar input{flex:1;background:#1e293b;border:1px solid #334155;border-radius:.5rem;padding:.75rem 1rem;color:#e2e8f0;font-size:1rem;outline:none}
+  .search-bar input:focus{border-color:#38bdf8}
+  .search-bar button{background:#0ea5e9;border:none;border-radius:.5rem;padding:.75rem 1.5rem;color:#fff;font-size:1rem;cursor:pointer}
+  .search-bar button:hover{background:#0284c7}
+  .tabs{display:flex;gap:.5rem;margin-bottom:1.5rem}
+  .tab{background:#1e293b;border:1px solid #334155;border-radius:.5rem;padding:.5rem 1rem;cursor:pointer;font-size:.875rem;color:#94a3b8}
+  .tab.active{background:#0ea5e9;border-color:#0ea5e9;color:#fff}
+  #status{color:#94a3b8;font-size:.875rem;margin-bottom:1rem;min-height:1.25rem}
+  #status.error{color:#f87171}
+  .grid{display:grid;gap:1rem}
+  .card{background:#1e293b;border:1px solid #334155;border-radius:.75rem;padding:1.25rem}
+  .card .meta{font-size:.75rem;color:#64748b;margin-bottom:.5rem}
+  .card .subject{font-weight:600;color:#38bdf8;margin-bottom:.25rem}
+  .card .predicate{color:#94a3b8;font-size:.875rem;margin-bottom:.25rem}
+  .card .object{color:#e2e8f0}
+  .card .badge{display:inline-block;background:#0f172a;border:1px solid #334155;border-radius:.25rem;padding:.15rem .4rem;font-size:.7rem;color:#64748b;margin-right:.25rem}
+  .card .conf{color:#4ade80;font-size:.75rem}
+  .empty{color:#475569;text-align:center;padding:3rem;font-size:.9rem}
+</style>
+</head>
+<body>
+<header>
+  <h1>🧠 Brain</h1>
+  <span>Memory Explorer</span>
+  <span id="api-status" style="margin-left:auto;font-size:.75rem"></span>
+</header>
+<main>
+  <div class="search-bar">
+    <input id="q" type="search" placeholder="Search memory… (e.g. Rust, project goals)" autofocus>
+    <button onclick="search()">Search</button>
+  </div>
+  <div class="tabs">
+    <div class="tab active" id="tab-search" onclick="switchTab('search')">Search Results</div>
+    <div class="tab" id="tab-facts" onclick="switchTab('facts')">All Facts</div>
+  </div>
+  <div id="status"></div>
+  <div id="results" class="grid"></div>
+</main>
+<script>
+const API = '';
+let apiKey = localStorage.getItem('brain_api_key') || 'demokey123';
+
+function hdr(){ return {'Authorization':'Bearer '+apiKey,'Content-Type':'application/json'} }
+
+async function checkHealth(){
+  try{
+    const r=await fetch(API+'/health');
+    const d=await r.json();
+    document.getElementById('api-status').textContent='● '+d.status+' v'+d.version;
+    document.getElementById('api-status').style.color='#4ade80';
+  }catch(e){
+    document.getElementById('api-status').textContent='● unreachable';
+    document.getElementById('api-status').style.color='#f87171';
+  }
+}
+
+function setStatus(msg,err){
+  const el=document.getElementById('status');
+  el.textContent=msg;
+  el.className=err?'error':'';
+}
+
+function renderFact(f){
+  const dist=f.distance!=null?' · dist '+f.distance.toFixed(3):'';
+  return `<div class="card">
+    <div class="meta"><span class="badge">${f.namespace}</span><span class="badge">${f.category}</span><span class="conf">conf ${f.confidence.toFixed(2)}</span>${dist}</div>
+    <div class="subject">${esc(f.subject)}</div>
+    <div class="predicate">${esc(f.predicate)}</div>
+    <div class="object">${esc(f.object)}</div>
+  </div>`;
+}
+
+function esc(s){ const d=document.createElement('div');d.textContent=s;return d.innerHTML; }
+
+async function search(){
+  const q=document.getElementById('q').value.trim();
+  if(!q){await loadFacts();return;}
+  setStatus('Searching…');
+  try{
+    const r=await fetch(API+'/v1/memory/search',{method:'POST',headers:hdr(),body:JSON.stringify({query:q,top_k:20})});
+    if(!r.ok){setStatus('Search failed: '+r.status,true);return;}
+    const facts=await r.json();
+    setStatus(facts.length+' result'+(facts.length!==1?'s':''));
+    document.getElementById('results').innerHTML=facts.length?facts.map(renderFact).join(''):'<p class="empty">No matching facts found.</p>';
+  }catch(e){setStatus('Error: '+e.message,true);}
+}
+
+async function loadFacts(){
+  setStatus('Loading…');
+  try{
+    const r=await fetch(API+'/v1/memory/facts',{headers:hdr()});
+    if(!r.ok){setStatus('Failed to load facts: '+r.status,true);return;}
+    const facts=await r.json();
+    setStatus(facts.length+' stored fact'+(facts.length!==1?'s':''));
+    document.getElementById('results').innerHTML=facts.length?facts.map(renderFact).join(''):'<p class="empty">No facts stored yet. Send a "Remember…" signal to add some.</p>';
+  }catch(e){setStatus('Error: '+e.message,true);}
+}
+
+function switchTab(t){
+  document.querySelectorAll('.tab').forEach(el=>el.classList.remove('active'));
+  document.getElementById('tab-'+t).classList.add('active');
+  if(t==='facts')loadFacts();
+  else{document.getElementById('results').innerHTML='';setStatus('');}
+}
+
+document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter')search();});
+checkHealth();
+</script>
+</body>
+</html>"#;
+
+/// GET /ui — embedded single-page memory explorer (no auth required)
+async fn ui_handler() -> impl IntoResponse {
+    (
+        [("content-type", "text/html; charset=utf-8")],
+        UI_HTML,
     )
 }
 
@@ -501,6 +637,40 @@ mod tests {
         assert!(json.contains("\"subject\":\"user\""));
         assert!(json.contains("\"namespace\":\"personal\""));
         assert!(json.contains("\"distance\":0.05"));
+    }
+
+    /// GET /ui — no auth required, returns HTML page.
+    #[tokio::test]
+    async fn test_ui_endpoint() {
+        use axum::body::Body;
+        use axum::http::{self, Request};
+        use tower::util::ServiceExt;
+
+        let (router, _tmp) = make_router().await;
+
+        let request = Request::builder()
+            .method(http::Method::GET)
+            .uri("/ui")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let ct = response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ct.contains("text/html"), "expected text/html, got: {ct}");
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        assert!(body.contains("Brain Memory Explorer"), "missing page title");
+        assert!(body.contains("/v1/memory/search"), "missing API endpoint reference");
     }
 
     /// GET /metrics — no auth required, returns Prometheus text.
