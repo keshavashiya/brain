@@ -327,6 +327,16 @@ async fn main() -> anyhow::Result<()> {
 
         // ── start (daemon) ────────────────────────────────────────────────────
         Commands::Start => {
+            // Validate config before launching daemon — fail fast on hard errors.
+            match config.validate() {
+                Err(hard_err) => anyhow::bail!("Configuration error: {}", hard_err),
+                Ok(warnings) => {
+                    for w in &warnings {
+                        eprintln!("WARNING: {w}");
+                    }
+                }
+            }
+
             // Prevent double-start
             if let Some(pid) = read_pid(&config) {
                 if is_process_running(pid) {
@@ -381,6 +391,17 @@ async fn main() -> anyhow::Result<()> {
             mcp,
             host,
         } => {
+            // Validate config before starting — bail on hard errors, print soft warnings.
+            match config.validate() {
+                Err(hard_err) => anyhow::bail!("Configuration error: {}", hard_err),
+                Ok(warnings) => {
+                    for w in &warnings {
+                        tracing::warn!(warning = %w, "config warning");
+                        eprintln!("WARNING: {w}");
+                    }
+                }
+            }
+
             let run_all = !http && !ws && !grpc && !mcp;
             let encryptor = resolve_encryptor(&config)?;
             let processor =

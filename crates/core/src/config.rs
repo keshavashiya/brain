@@ -316,6 +316,75 @@ impl BrainConfig {
     pub fn default_config_content() -> &'static str {
         DEFAULT_CONFIG
     }
+
+    /// Validate configuration and return a list of warnings.
+    ///
+    /// Returns `Err` for hard errors (invalid config that will prevent startup),
+    /// and a `Vec<String>` of soft warnings for things that are unusual but
+    /// won't prevent the process from running.
+    pub fn validate(&self) -> Result<Vec<String>, String> {
+        let mut warnings: Vec<String> = Vec::new();
+
+        // ── Port conflict detection ───────────────────────────────────────────
+        let mut ports: std::collections::HashMap<u16, &str> = std::collections::HashMap::new();
+        let adapter_ports = [
+            (self.adapters.http.port, "http"),
+            (self.adapters.ws.port, "ws"),
+            (self.adapters.mcp.port, "mcp"),
+            (self.adapters.grpc.port, "grpc"),
+        ];
+        for (port, name) in &adapter_ports {
+            if let Some(existing) = ports.insert(*port, name) {
+                return Err(format!(
+                    "Port conflict: adapters '{}' and '{}' both use port {}",
+                    existing, name, port
+                ));
+            }
+        }
+
+        // ── LLM URL format ────────────────────────────────────────────────────
+        let url = &self.llm.base_url;
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Err(format!(
+                "Invalid LLM base_url '{}': must start with http:// or https://",
+                url
+            ));
+        }
+
+        // ── Data directory writability ────────────────────────────────────────
+        let data_dir = self.data_dir();
+        if data_dir.exists() {
+            // Check we can create a file inside it
+            let probe = data_dir.join(".brain_write_probe");
+            if std::fs::write(&probe, b"").is_err() {
+                return Err(format!(
+                    "Data directory '{}' is not writable",
+                    data_dir.display()
+                ));
+            }
+            let _ = std::fs::remove_file(&probe);
+        }
+
+        // ── Soft warnings ─────────────────────────────────────────────────────
+        if self.access.api_keys.is_empty() {
+            warnings.push("No API keys configured — all adapters will reject authenticated requests. Add at least one key under 'access.api_keys'.".to_string());
+        } else if self.access.api_keys.iter().any(|k| k.key == "demokey123") {
+            warnings.push("Demo API key 'demokey123' is still active. Replace it with a strong key in production.".to_string());
+        }
+
+        if self.llm.temperature > 1.5 {
+            warnings.push(format!(
+                "LLM temperature {:.1} is very high — responses may be unpredictable.",
+                self.llm.temperature
+            ));
+        }
+
+        if self.memory.consolidation.enabled && self.memory.consolidation.interval_hours == 0 {
+            warnings.push("Consolidation interval_hours is 0 — consolidation will run immediately on every daemon wake-up, which may impact performance.".to_string());
+        }
+
+        Ok(warnings)
+    }
 }
 
 impl Default for BrainConfig {
@@ -483,5 +552,101 @@ mod tests {
         let config: BrainConfig = figment.extract().unwrap();
         assert_eq!(config.llm.model, "qwen2.5:14b");
         assert_eq!(config.memory.search.rrf_k, 60);
+    }
+
+    // ── validate() ────────────────────────────────────────────────────────────
+
+    /// Helper: default config with no API keys (to keep warnings deterministic).
+    fn validated_config() -> BrainConfig {
+        let mut c = BrainConfig::default();
+        c.access.api_keys.clear();
+        c
+    }
+
+    #[test]
+    fn test_validate_default_has_demo_key_warning() {
+        let config = BrainConfig::default();
+        let warnings = config.validate().expect("default config should be valid");
+        assert!(
+            warnings.iter().any(|w| w.contains("demokey123")),
+            "expected demo-key warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_validate_no_api_keys_warning() {
+        let config = validated_config();
+        let warnings = config.validate().expect("should be valid");
+        assert!(
+            warnings.iter().any(|w| w.contains("No API keys")),
+            "expected no-api-keys warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_validate_port_conflict_is_hard_error() {
+        let mut config = validated_config();
+        // Make HTTP and WS share the same port
+        config.adapters.ws.port = config.adapters.http.port;
+        let err = config.validate().expect_err("should fail with port conflict");
+        assert!(
+            err.contains("Port conflict"),
+            "unexpected error message: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_bad_llm_url_is_hard_error() {
+        let mut config = validated_config();
+        config.llm.base_url = "ftp://invalid.example.com".to_string();
+        let err = config.validate().expect_err("should fail with bad URL");
+        assert!(
+            err.contains("Invalid LLM base_url"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_high_temperature_warning() {
+        let mut config = validated_config();
+        config.llm.temperature = 2.0;
+        let warnings = config.validate().expect("should be valid");
+        assert!(
+            warnings.iter().any(|w| w.contains("temperature")),
+            "expected temperature warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_validate_consolidation_interval_zero_warning() {
+        let mut config = validated_config();
+        config.memory.consolidation.enabled = true;
+        config.memory.consolidation.interval_hours = 0;
+        let warnings = config.validate().expect("should be valid");
+        assert!(
+            warnings.iter().any(|w| w.contains("interval_hours")),
+            "expected interval warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_validate_http_and_https_urls_accepted() {
+        let mut config = validated_config();
+        config.llm.base_url = "https://api.example.com/v1".to_string();
+        assert!(config.validate().is_ok());
+
+        config.llm.base_url = "http://localhost:11434".to_string();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_all_unique_ports_ok() {
+        let config = validated_config();
+        // Default config has unique ports — should not error
+        assert!(config.validate().is_ok());
     }
 }
