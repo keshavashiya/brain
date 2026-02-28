@@ -7,7 +7,7 @@
 //! - `GET  /metrics`            — Prometheus-format counters (no auth required)
 //! - `GET  /ui`                 — embedded memory explorer web UI (no auth required)
 //! - `GET  /openapi.json`       — OpenAPI 3.0 specification (no auth required)
-//! - `GET  /swagger-ui`         — Swagger UI (no auth required)
+//! - `GET  /api`                 — Swagger UI (no auth required)
 //! - `POST /v1/signals`         — submit a signal (requires write)
 //! - `GET  /v1/signals/:id`     — retrieve cached signal response (requires read)
 //! - `POST /v1/memory/search`   — semantic search over stored facts (requires read)
@@ -221,7 +221,7 @@ pub fn create_router(
         .route("/metrics", get(metrics_handler))
         .route("/ui", get(ui_handler))
         .route("/openapi.json", get(openapi_handler))
-        .route("/swagger-ui", get(swagger_ui_handler))
+        .route("/api", get(swagger_ui_handler))
         .route("/v1/signals", post(post_signal_handler))
         .route("/v1/signals/:id", get(get_signal_handler))
         .route("/v1/memory/search", post(search_memory_handler))
@@ -603,7 +603,7 @@ const SWAGGER_UI_HTML: &str = r#"<!DOCTYPE html>
 </body>
 </html>"#;
 
-/// GET /swagger-ui — Swagger UI for interactive API exploration (no auth required)
+/// GET /api — Swagger UI for interactive API exploration (no auth required)
 async fn swagger_ui_handler() -> impl IntoResponse {
     (
         [("content-type", "text/html; charset=utf-8")],
@@ -881,7 +881,7 @@ mod tests {
         assert!(spec["components"]["schemas"]["FactJson"].is_object(), "missing FactJson schema");
     }
 
-    /// GET /swagger-ui — no auth required, returns HTML.
+    /// GET /api — no auth required, returns Swagger UI HTML.
     #[tokio::test]
     async fn test_swagger_ui_endpoint() {
         use axum::body::Body;
@@ -892,7 +892,7 @@ mod tests {
 
         let request = Request::builder()
             .method(http::Method::GET)
-            .uri("/swagger-ui")
+            .uri("/api")
             .body(Body::empty())
             .unwrap();
 

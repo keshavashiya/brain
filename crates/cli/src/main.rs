@@ -129,33 +129,86 @@ fn remove_pid(config: &core::BrainConfig) {
 }
 
 /// Check whether a process with the given PID is still alive.
-/// Uses `kill -0` on Unix which sends no signal but validates the PID.
+///
+/// - Unix: uses `kill -0 <pid>` (sends no signal, just validates the PID exists)
+/// - Windows: opens the process handle with `OpenProcess`; success means alive
 fn is_process_running(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    #[cfg(unix)]
+    {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    #[cfg(windows)]
+    {
+        // `tasklist /FI "PID eq <pid>" /NH` prints a line for each matching process.
+        // If nothing matches, output is the "No tasks are running..." message.
+        // We consider the process alive when tasklist exits 0 and the PID appears.
+        let out = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output();
+        match out {
+            Ok(o) => {
+                let text = String::from_utf8_lossy(&o.stdout);
+                text.contains(&pid.to_string())
+            }
+            Err(_) => false,
+        }
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
-/// Send SIGTERM to a process.
+/// Terminate a running Brain daemon process.
+///
+/// - Unix: sends SIGTERM via the `kill` command
+/// - Windows: uses `taskkill /PID <pid>` for a graceful termination request
 fn stop_process(pid: u32) -> anyhow::Result<()> {
-    let status = std::process::Command::new("kill")
-        .arg(pid.to_string())
-        .status()?;
-    if !status.success() {
-        anyhow::bail!("Failed to send SIGTERM to PID {}", pid);
+    #[cfg(unix)]
+    {
+        let status = std::process::Command::new("kill")
+            .arg(pid.to_string())
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("Failed to send SIGTERM to PID {}", pid);
+        }
+        Ok(())
     }
-    Ok(())
+
+    #[cfg(windows)]
+    {
+        let status = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string()])
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("taskkill failed for PID {}", pid);
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        anyhow::bail!("stop_process not supported on this platform (PID {})", pid)
+    }
 }
 
 /// Spawn `brain serve` as a detached background process and return its PID.
 ///
 /// stdout and stderr are redirected to the log file.
-/// On Unix the child is placed in its own process group so it survives
-/// terminal close / SIGHUP.
+///
+/// - Unix: child is placed in its own process group so it survives terminal close / SIGHUP
+/// - Windows: `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` flags achieve the same
 fn spawn_daemon(log_path: &std::path::Path) -> anyhow::Result<u32> {
     // Ensure log directory exists
     if let Some(parent) = log_path.parent() {
@@ -175,11 +228,18 @@ fn spawn_daemon(log_path: &std::path::Path) -> anyhow::Result<u32> {
         .stderr(log_file)
         .stdin(std::process::Stdio::null());
 
-    // Detach from the terminal's process group so Brain survives terminal close
+    // Unix: detach from the terminal's process group
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
+    }
+
+    // Windows: CREATE_NEW_PROCESS_GROUP (0x00000200) | DETACHED_PROCESS (0x00000008)
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x00000208);
     }
 
     let child = cmd.spawn()?;
