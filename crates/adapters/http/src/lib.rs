@@ -6,6 +6,8 @@
 //! - `GET  /health`             — health check (no auth required)
 //! - `GET  /metrics`            — Prometheus-format counters (no auth required)
 //! - `GET  /ui`                 — embedded memory explorer web UI (no auth required)
+//! - `GET  /openapi.json`       — OpenAPI 3.0 specification (no auth required)
+//! - `GET  /swagger-ui`         — Swagger UI (no auth required)
 //! - `POST /v1/signals`         — submit a signal (requires write)
 //! - `GET  /v1/signals/:id`     — retrieve cached signal response (requires read)
 //! - `POST /v1/memory/search`   — semantic search over stored facts (requires read)
@@ -218,6 +220,8 @@ pub fn create_router(
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
         .route("/ui", get(ui_handler))
+        .route("/openapi.json", get(openapi_handler))
+        .route("/swagger-ui", get(swagger_ui_handler))
         .route("/v1/signals", post(post_signal_handler))
         .route("/v1/signals/:id", get(get_signal_handler))
         .route("/v1/memory/search", post(search_memory_handler))
@@ -393,6 +397,217 @@ async fn ui_handler() -> impl IntoResponse {
     (
         [("content-type", "text/html; charset=utf-8")],
         UI_HTML,
+    )
+}
+
+// ─── OpenAPI spec ─────────────────────────────────────────────────────────────
+
+/// Build the OpenAPI 3.0 document for the Brain HTTP API.
+fn build_openapi() -> serde_json::Value {
+    serde_json::json!({
+        "openapi": "3.0.3",
+        "info": {
+            "title": "Brain OS HTTP API",
+            "description": "Central AI operating system — signal processing, semantic memory search, and episodic memory management.",
+            "version": env!("CARGO_PKG_VERSION"),
+            "contact": { "name": "Brain OS", "url": "https://github.com/keshavashiya/brain" }
+        },
+        "servers": [{ "url": "/", "description": "Local Brain instance" }],
+        "components": {
+            "securitySchemes": {
+                "BearerAuth": { "type": "http", "scheme": "bearer", "bearerFormat": "APIKey" }
+            },
+            "schemas": {
+                "HealthResponse": {
+                    "type": "object", "required": ["status","version"],
+                    "properties": {
+                        "status": { "type": "string", "example": "ok" },
+                        "version": { "type": "string", "example": "0.1.0" }
+                    }
+                },
+                "SignalRequest": {
+                    "type": "object", "required": ["content"],
+                    "properties": {
+                        "content": { "type": "string", "example": "Remember that Rust is memory-safe" },
+                        "source": { "type": "string", "enum": ["http","cli","ws","mcp","grpc"] },
+                        "channel": { "type": "string" },
+                        "sender": { "type": "string" },
+                        "namespace": { "type": "string", "default": "personal" },
+                        "metadata": { "type": "object", "additionalProperties": { "type": "string" } }
+                    }
+                },
+                "SignalResponse": {
+                    "type": "object", "required": ["signal_id","status","response","memory_context"],
+                    "properties": {
+                        "signal_id": { "type": "string", "format": "uuid" },
+                        "status": { "type": "string", "enum": ["Ok","Error"] },
+                        "response": {
+                            "type": "object",
+                            "properties": {
+                                "type": { "type": "string", "enum": ["Text","Json","Error"] },
+                                "value": {}
+                            }
+                        },
+                        "memory_context": {
+                            "type": "object",
+                            "properties": {
+                                "facts_used": { "type": "integer" },
+                                "episodes_used": { "type": "integer" }
+                            }
+                        }
+                    }
+                },
+                "SearchRequest": {
+                    "type": "object", "required": ["query"],
+                    "properties": {
+                        "query": { "type": "string", "example": "Rust programming" },
+                        "top_k": { "type": "integer", "default": 10 },
+                        "namespace": { "type": "string" }
+                    }
+                },
+                "FactJson": {
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" },
+                        "namespace": { "type": "string" },
+                        "category": { "type": "string" },
+                        "subject": { "type": "string" },
+                        "predicate": { "type": "string" },
+                        "object": { "type": "string" },
+                        "confidence": { "type": "number", "format": "double" },
+                        "distance": { "type": "number", "format": "float", "nullable": true }
+                    }
+                },
+                "NamespaceJson": {
+                    "type": "object",
+                    "properties": {
+                        "namespace": { "type": "string" },
+                        "fact_count": { "type": "integer" },
+                        "episode_count": { "type": "integer" }
+                    }
+                }
+            }
+        },
+        "paths": {
+            "/health": {
+                "get": {
+                    "summary": "Health check",
+                    "operationId": "getHealth",
+                    "responses": {
+                        "200": { "description": "Service is healthy", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HealthResponse" } } } }
+                    }
+                }
+            },
+            "/metrics": {
+                "get": {
+                    "summary": "Prometheus metrics",
+                    "operationId": "getMetrics",
+                    "responses": {
+                        "200": { "description": "Prometheus text format metrics", "content": { "text/plain": { "schema": { "type": "string" } } } }
+                    }
+                }
+            },
+            "/v1/signals": {
+                "post": {
+                    "summary": "Submit a signal for processing",
+                    "operationId": "postSignal",
+                    "security": [{ "BearerAuth": [] }],
+                    "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SignalRequest" } } } },
+                    "responses": {
+                        "200": { "description": "Signal processed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SignalResponse" } } } },
+                        "401": { "description": "Unauthorized — missing or invalid API key" },
+                        "500": { "description": "Internal server error" }
+                    }
+                }
+            },
+            "/v1/signals/{id}": {
+                "get": {
+                    "summary": "Retrieve a cached signal response by ID",
+                    "operationId": "getSignalById",
+                    "security": [{ "BearerAuth": [] }],
+                    "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+                    "responses": {
+                        "200": { "description": "Signal response found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SignalResponse" } } } },
+                        "401": { "description": "Unauthorized" },
+                        "404": { "description": "Signal not found in cache" }
+                    }
+                }
+            },
+            "/v1/memory/search": {
+                "post": {
+                    "summary": "Semantic search over stored facts",
+                    "operationId": "searchMemory",
+                    "security": [{ "BearerAuth": [] }],
+                    "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SearchRequest" } } } },
+                    "responses": {
+                        "200": { "description": "Matching facts", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/FactJson" } } } } },
+                        "401": { "description": "Unauthorized" }
+                    }
+                }
+            },
+            "/v1/memory/facts": {
+                "get": {
+                    "summary": "List all stored semantic facts",
+                    "operationId": "listFacts",
+                    "security": [{ "BearerAuth": [] }],
+                    "parameters": [{ "name": "namespace", "in": "query", "schema": { "type": "string" } }],
+                    "responses": {
+                        "200": { "description": "List of facts", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/FactJson" } } } } },
+                        "401": { "description": "Unauthorized" }
+                    }
+                }
+            },
+            "/v1/memory/namespaces": {
+                "get": {
+                    "summary": "List memory namespaces with statistics",
+                    "operationId": "listNamespaces",
+                    "security": [{ "BearerAuth": [] }],
+                    "responses": {
+                        "200": { "description": "List of namespaces", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/NamespaceJson" } } } } },
+                        "401": { "description": "Unauthorized" }
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// GET /openapi.json — OpenAPI 3.0 specification (no auth required)
+async fn openapi_handler() -> impl IntoResponse {
+    (
+        [("content-type", "application/json")],
+        build_openapi().to_string(),
+    )
+}
+
+/// Swagger UI HTML that loads the spec from /openapi.json (CDN assets).
+const SWAGGER_UI_HTML: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Brain OS API — Swagger UI</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script>
+    SwaggerUIBundle({
+      url: '/openapi.json',
+      dom_id: '#swagger-ui',
+      presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+      layout: 'StandaloneLayout'
+    });
+  </script>
+</body>
+</html>"#;
+
+/// GET /swagger-ui — Swagger UI for interactive API exploration (no auth required)
+async fn swagger_ui_handler() -> impl IntoResponse {
+    (
+        [("content-type", "text/html; charset=utf-8")],
+        SWAGGER_UI_HTML,
     )
 }
 
@@ -637,6 +852,59 @@ mod tests {
         assert!(json.contains("\"subject\":\"user\""));
         assert!(json.contains("\"namespace\":\"personal\""));
         assert!(json.contains("\"distance\":0.05"));
+    }
+
+    /// GET /openapi.json — no auth required, returns valid OpenAPI spec.
+    #[tokio::test]
+    async fn test_openapi_endpoint() {
+        use axum::body::Body;
+        use axum::http::{self, Request};
+        use tower::util::ServiceExt;
+
+        let (router, _tmp) = make_router().await;
+
+        let request = Request::builder()
+            .method(http::Method::GET)
+            .uri("/openapi.json")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let spec: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+        assert_eq!(spec["openapi"], "3.0.3");
+        assert!(spec["paths"]["/v1/signals"].is_object(), "missing /v1/signals path");
+        assert!(spec["components"]["schemas"]["FactJson"].is_object(), "missing FactJson schema");
+    }
+
+    /// GET /swagger-ui — no auth required, returns HTML.
+    #[tokio::test]
+    async fn test_swagger_ui_endpoint() {
+        use axum::body::Body;
+        use axum::http::{self, Request};
+        use tower::util::ServiceExt;
+
+        let (router, _tmp) = make_router().await;
+
+        let request = Request::builder()
+            .method(http::Method::GET)
+            .uri("/swagger-ui")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        assert!(body.contains("swagger-ui"), "missing Swagger UI element");
+        assert!(body.contains("/openapi.json"), "missing spec URL reference");
     }
 
     /// GET /ui — no auth required, returns HTML page.
