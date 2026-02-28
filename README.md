@@ -72,7 +72,7 @@ After installation the daemon starts immediately and will restart after crashes.
 
 ## MCP Integration
 
-Any MCP-compatible client (Claude Desktop, Cursor, etc.) can connect to Brain as a stdio MCP server:
+Any MCP-compatible client can connect to Brain as a stdio MCP server:
 
 ```json
 {

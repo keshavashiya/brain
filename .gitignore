@@ -40,7 +40,8 @@ logs/
 
 # Development references (not for version control)
 progress.md
-docs/
+docs/*
+!docs/VISION.md
 .claude*
 .mcp.json
 CLAUDE.md

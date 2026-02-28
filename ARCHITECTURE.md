@@ -207,124 +207,132 @@ Every fact and episode carries a `namespace: TEXT NOT NULL DEFAULT 'personal'`. 
 
 ---
 
-## Building a New Adapter
+## Building a New Protocol Adapter
 
-An adapter:
-1. Holds an `Arc<SignalProcessor>` received at startup.
-2. Authenticates incoming requests against the configured API keys.
-3. Translates the protocol-specific input into a `Signal`.
-4. Calls `processor.process(&signal).await`.
-5. Translates the `SignalResponse` back into the protocol-specific output.
+### What an adapter is
 
-### Step-by-step: Telegram Bot Adapter
+An adapter is a **protocol transport layer** — it listens on a socket (or stdin/stdout), authenticates the caller, translates the wire format into a `Signal`, calls the shared `SignalProcessor`, and sends `SignalResponse` back in the protocol-appropriate format.
+
+Brain ships four protocol adapters: HTTP REST, WebSocket, gRPC, and MCP (stdio + HTTP). Adding a new adapter means adding a new _transport_, not a new platform integration.
+
+```
+External apps never live inside Brain.
+They connect to Brain using an existing protocol:
+
+  Your script      ──── HTTP ────► Brain
+  Your agent       ──── MCP  ────► Brain
+  Any chat UI      ──── WS   ────► Brain
+  Any gRPC client  ──── gRPC ────► Brain
+```
+
+If you want to connect a messaging app, CLI tool, or AI agent to Brain, call Brain's existing HTTP/WS/MCP/gRPC API from that app — you do not add a "Slack adapter" or "Telegram adapter" inside Brain.
+
+### When to add a new protocol adapter
+
+Add a new adapter when you need a transport that Brain doesn't yet speak — for example Server-Sent Events, Unix domain sockets, AMQP, or a custom binary protocol.
+
+### Step-by-step: SSE (Server-Sent Events) Adapter
+
+SSE is a good example: it's one-directional (server pushes, client reads), so it suits streaming responses to browser clients.
 
 **1. Create the crate**
 
-```bash
-mkdir -p crates/adapters/telegram/src
+```
+crates/adapters/sse/
+├── Cargo.toml
+└── src/lib.rs
 ```
 
-`crates/adapters/telegram/Cargo.toml`:
+`Cargo.toml`:
 
 ```toml
 [package]
-name = "telegramadapter"
+name = "sseadapter"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-signal = { workspace = true }
-tokio = { workspace = true }
-serde = { workspace = true }
-teloxide = "0.13"   # Telegram bot framework
+signal  = { workspace = true }
+brain-core = { workspace = true }
+tokio   = { workspace = true }
+axum    = { workspace = true }
+serde   = { workspace = true }
+serde_json = { workspace = true }
 ```
 
-Add to workspace `Cargo.toml`:
-
-```toml
-[workspace]
-members = [
-    ...
-    "crates/adapters/telegram",
-]
-```
+Add to workspace `Cargo.toml` `members` list and `[workspace.dependencies]`.
 
 **2. Implement the adapter**
 
 ```rust
-// crates/adapters/telegram/src/lib.rs
+// crates/adapters/sse/src/lib.rs
 
 use std::sync::Arc;
+use axum::{
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::sse::{Event, Sse},
+    routing::get,
+    Router,
+};
 use signal::{Signal, SignalSource};
-use teloxide::prelude::*;
+use tokio_stream::StreamExt as _;
 
-pub async fn run(
-    processor: Arc<signal::SignalProcessor>,
-    bot_token: &str,
-) {
-    let bot = Bot::new(bot_token);
+pub struct SseAdapterState {
+    pub processor: Arc<signal::SignalProcessor>,
+    pub api_keys: Vec<brain_core::ApiKeyConfig>,
+}
 
-    teloxide::repl(bot, move |bot: Bot, msg: Message| {
-        let processor = Arc::clone(&processor);
-        async move {
-            // 1. Authenticate — check if user is allowed
-            //    (e.g. check config for telegram_allowed_users)
+pub fn router(state: Arc<SseAdapterState>) -> Router {
+    Router::new()
+        .route("/v1/stream", get(stream_handler))
+        .with_state(state)
+}
 
-            // 2. Build a Signal
-            let text = msg.text().unwrap_or("").to_string();
-            let signal = Signal::new(
-                SignalSource::Http,            // use Http or add a Telegram variant
-                Some(msg.chat.id.to_string()), // channel
-                Some(msg.from().unwrap().username.clone().unwrap_or_default()),
-                text,
-                None, // namespace — default "personal"
-            );
+async fn stream_handler(
+    State(state): State<Arc<SseAdapterState>>,
+    headers: HeaderMap,
+) -> Result<Sse<impl tokio_stream::Stream<Item = Result<Event, std::convert::Infallible>>>, StatusCode> {
+    // 1. Authenticate
+    let key = headers.get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !state.api_keys.iter().any(|k| k.key == key) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
 
-            // 3. Process
-            match processor.process(&signal).await {
-                Ok(response) => {
-                    let text = match &response.content {
-                        signal::ResponseContent::Text(t) => t.clone(),
-                        _ => "Done.".to_string(),
-                    };
-                    bot.send_message(msg.chat.id, text).await?;
-                }
-                Err(e) => {
-                    bot.send_message(msg.chat.id, "Something went wrong.").await?;
-                    tracing::error!("Telegram adapter error: {e}");
-                }
-            }
+    // 2. Build a stream that replays recent episodes as SSE events
+    let episodes = state.processor.recent_episodes(50);
+    let stream = tokio_stream::iter(episodes)
+        .map(|ep| {
+            let data = serde_json::json!({ "role": ep.role, "content": ep.content });
+            Ok(Event::default().data(data.to_string()))
+        });
 
-            respond(())
-        }
-    })
-    .await;
+    Ok(Sse::new(stream))
 }
 ```
 
-**3. Wire into the CLI**
+**3. Wire into `brain serve`**
 
-In `crates/cli/src/main.rs`, add a `--telegram` flag to the `serve` command and spawn the adapter task alongside the existing adapters:
+In `crates/cli/src/main.rs`, add a `--sse` flag to `ServeArgs` and spawn the adapter:
 
 ```rust
-if cfg.serve_telegram {
-    let token = std::env::var("TELEGRAM_BOT_TOKEN")
-        .expect("TELEGRAM_BOT_TOKEN not set");
-    let p = Arc::clone(&processor);
+if args.sse {
+    let sse_state = Arc::new(sseadapter::SseAdapterState {
+        processor: Arc::clone(&processor),
+        api_keys: config.access.api_keys.clone(),
+    });
+    let port = 19793u16;
     tokio::spawn(async move {
-        telegramadapter::run(p, &token).await;
+        let app = sseadapter::router(sse_state);
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+        axum::serve(listener, app).await.unwrap();
     });
 }
 ```
 
-**4. Add to config**
-
-```yaml
-adapters:
-  telegram:
-    enabled: false
-    # Set TELEGRAM_BOT_TOKEN env var
-```
+The key insight is that all adapters follow the same contract: receive input → build `Signal` → call `processor.process()` → return output. The `SignalProcessor` is shared by reference (`Arc`) so memory is always consistent regardless of which adapter handled the request.
 
 ---
 
