@@ -79,6 +79,30 @@ enum Commands {
     /// Used when an MCP client spawns Brain as a subprocess and communicates
     /// over stdin/stdout. This runs in the foreground by design.
     Mcp,
+
+    /// Export all memory (facts + episodes) to a JSON backup file.
+    ///
+    /// Examples:
+    ///   brain export                      # print JSON to stdout
+    ///   brain export --output backup.json # write to file
+    Export {
+        /// Output file path (default: stdout)
+        #[arg(long, short)]
+        output: Option<String>,
+    },
+
+    /// Import memory from a JSON backup file produced by `brain export`.
+    ///
+    /// Examples:
+    ///   brain import backup.json
+    ///   brain import backup.json --dry-run
+    Import {
+        /// Path to the backup JSON file
+        file: String,
+        /// Preview what would be imported without writing to the database
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 // ─── Daemon helpers ───────────────────────────────────────────────────────────
@@ -564,6 +588,16 @@ async fn main() -> anyhow::Result<()> {
                 signal::SignalProcessor::new_with_encryptor(config.clone(), encryptor).await?;
             mcp::serve_stdio(processor).await?;
         }
+
+        // ── export ────────────────────────────────────────────────────────────
+        Commands::Export { output } => {
+            cmd_export(&config, output.as_deref())?;
+        }
+
+        // ── import ────────────────────────────────────────────────────────────
+        Commands::Import { file, dry_run } => {
+            cmd_import(&config, &file, dry_run)?;
+        }
     }
 
     Ok(())
@@ -667,6 +701,209 @@ async fn show_status(config: &core::BrainConfig) -> anyhow::Result<()> {
         },
         Err(e) => println!("\n  Database: error opening — {}", e),
     }
+
+    Ok(())
+}
+
+// ─── Export / Import ──────────────────────────────────────────────────────────
+
+/// JSON envelope written / read by `brain export` / `brain import`.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct MemoryExport {
+    version: String,
+    exported_at: String,
+    facts: Vec<ExportFact>,
+    episodes: Vec<ExportEpisode>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ExportFact {
+    id: String,
+    namespace: String,
+    category: String,
+    subject: String,
+    predicate: String,
+    object: String,
+    confidence: f64,
+    source_episode_id: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ExportEpisode {
+    id: String,
+    session_id: String,
+    session_channel: String,
+    role: String,
+    content: String,
+    timestamp: String,
+    importance: f64,
+    reinforcement_count: i32,
+}
+
+fn cmd_export(config: &core::BrainConfig, output: Option<&str>) -> anyhow::Result<()> {
+    let db = storage::SqlitePool::open(&config.sqlite_path())?;
+
+    // Query all semantic facts
+    let facts: Vec<ExportFact> = db.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT id, namespace, category, subject, predicate, object,
+                    confidence, source_episode_id
+             FROM semantic_facts
+             ORDER BY id ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ExportFact {
+                    id: row.get(0)?,
+                    namespace: row.get(1)?,
+                    category: row.get(2)?,
+                    subject: row.get(3)?,
+                    predicate: row.get(4)?,
+                    object: row.get(5)?,
+                    confidence: row.get(6)?,
+                    source_episode_id: row.get(7)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })?;
+
+    // Query all episodes with their session channel
+    let episodes: Vec<ExportEpisode> = db.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT e.id, e.session_id, COALESCE(s.channel, 'cli'),
+                    e.role, e.content, e.timestamp,
+                    e.importance, e.reinforcement_count
+             FROM episodes e
+             LEFT JOIN sessions s ON s.id = e.session_id
+             ORDER BY e.timestamp ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ExportEpisode {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    session_channel: row.get(2)?,
+                    role: row.get(3)?,
+                    content: row.get(4)?,
+                    timestamp: row.get(5)?,
+                    importance: row.get(6)?,
+                    reinforcement_count: row.get(7)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    })?;
+
+    let n_facts = facts.len();
+    let n_episodes = episodes.len();
+
+    let export = MemoryExport {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        exported_at: chrono::Utc::now().to_rfc3339(),
+        facts,
+        episodes,
+    };
+
+    let json = serde_json::to_string_pretty(&export)?;
+
+    match output {
+        Some(path) => {
+            std::fs::write(path, &json)?;
+            println!("Exported {n_facts} facts and {n_episodes} episodes to {path}");
+        }
+        None => {
+            println!("{}", json);
+        }
+    }
+
+    Ok(())
+}
+
+fn cmd_import(config: &core::BrainConfig, file: &str, dry_run: bool) -> anyhow::Result<()> {
+    let raw = std::fs::read_to_string(file)
+        .map_err(|e| anyhow::anyhow!("Cannot read {file}: {e}"))?;
+    let export: MemoryExport =
+        serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("Invalid export file: {e}"))?;
+
+    println!(
+        "Import preview: {} facts, {} episodes (exported at {})",
+        export.facts.len(),
+        export.episodes.len(),
+        export.exported_at,
+    );
+
+    if dry_run {
+        println!("Dry-run: no changes written.");
+        return Ok(());
+    }
+
+    let db = storage::SqlitePool::open(&config.sqlite_path())?;
+
+    // Collect unique sessions needed for episodes
+    let mut sessions: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for ep in &export.episodes {
+        sessions
+            .entry(ep.session_id.clone())
+            .or_insert_with(|| ep.session_channel.clone());
+    }
+
+    let mut facts_imported = 0usize;
+    let mut episodes_imported = 0usize;
+
+    db.with_conn(|conn| {
+        // Insert sessions (skip if already exist)
+        for (sid, channel) in &sessions {
+            conn.execute(
+                "INSERT INTO sessions (id, channel) VALUES (?1, ?2)
+                 ON CONFLICT(id) DO NOTHING",
+                rusqlite::params![sid, channel],
+            )?;
+        }
+
+        // Insert facts (skip duplicates by id)
+        for f in &export.facts {
+            let n = conn.execute(
+                "INSERT INTO semantic_facts
+                    (id, namespace, category, subject, predicate, object,
+                     confidence, source_episode_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(id) DO NOTHING",
+                rusqlite::params![
+                    f.id, f.namespace, f.category, f.subject,
+                    f.predicate, f.object, f.confidence, f.source_episode_id
+                ],
+            )?;
+            facts_imported += n;
+        }
+
+        // Insert episodes (skip duplicates by id)
+        for e in &export.episodes {
+            let n = conn.execute(
+                "INSERT INTO episodes
+                    (id, session_id, role, content, timestamp,
+                     importance, reinforcement_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 ON CONFLICT(id) DO NOTHING",
+                rusqlite::params![
+                    e.id, e.session_id, e.role, e.content,
+                    e.timestamp, e.importance, e.reinforcement_count
+                ],
+            )?;
+            episodes_imported += n;
+        }
+
+        Ok(())
+    })?;
+
+    println!(
+        "Imported: {} new facts, {} new episodes ({} facts and {} episodes already existed).",
+        facts_imported,
+        episodes_imported,
+        export.facts.len() - facts_imported,
+        export.episodes.len() - episodes_imported,
+    );
 
     Ok(())
 }
