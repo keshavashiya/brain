@@ -106,8 +106,9 @@ enum Commands {
 
     /// Manage Brain as a system service (auto-start on login).
     ///
-    /// On macOS: installs a launchd agent in ~/Library/LaunchAgents/.
-    /// On Linux:  installs a systemd user service in ~/.config/systemd/user/.
+    /// On macOS:   installs a launchd agent in ~/Library/LaunchAgents/.
+    /// On Linux:   installs a systemd user service in ~/.config/systemd/user/.
+    /// On Windows: registers a Task Scheduler task (no admin required).
     ///
     /// Examples:
     ///   brain service install    # register + enable auto-start
@@ -121,8 +122,11 @@ enum Commands {
 #[derive(Subcommand)]
 enum ServiceAction {
     /// Register Brain as a login service and start it immediately.
+    ///
+    /// macOS: launchd plist with KeepAlive. Linux: systemd user unit.
+    /// Windows: Task Scheduler task at ONLOGON (no admin required).
     Install,
-    /// Remove the Brain login service registration.
+    /// Remove the Brain login service registration and stop auto-start.
     Uninstall,
 }
 
@@ -862,10 +866,12 @@ async fn show_status(config: &core::BrainConfig) -> anyhow::Result<()> {
 
 /// Install Brain as a login service so it auto-starts on every login.
 ///
-/// • macOS  — creates `~/Library/LaunchAgents/com.brain.plist` and loads it
-///            with `launchctl load`.
-/// • Linux  — creates `~/.config/systemd/user/brain.service`, runs
-///            `systemctl --user daemon-reload` and `systemctl --user enable`.
+/// • macOS   — creates `~/Library/LaunchAgents/com.brain.plist` and loads it
+///             with `launchctl load`.
+/// • Linux   — creates `~/.config/systemd/user/brain.service`, runs
+///             `systemctl --user daemon-reload` and `systemctl --user enable`.
+/// • Windows — registers a Task Scheduler task (`schtasks`) that runs
+///             `brain serve` at every user login, no admin required.
 fn cmd_service_install() -> anyhow::Result<()> {
     let exe = std::env::current_exe()
         .map_err(|e| anyhow::anyhow!("Cannot determine Brain binary path: {e}"))?;
@@ -992,11 +998,48 @@ WantedBy=default.target
         return Ok(());
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        // Windows Task Scheduler — runs brain serve at every user login.
+        // No admin rights required for /SC ONLOGON tasks in the current user's account.
+        let task_name = "Brain OS";
+        let cmd = format!("{exe_str} serve");
+
+        // /F overwrites any existing task with the same name (idempotent)
+        let out = std::process::Command::new("schtasks")
+            .args([
+                "/Create",
+                "/TN", task_name,
+                "/TR", &cmd,
+                "/SC", "ONLOGON",
+                "/RL", "HIGHEST",   // run with the highest privileges the user has
+                "/F",               // overwrite if already exists
+            ])
+            .output()
+            .map_err(|e| anyhow::anyhow!("schtasks not found: {e}"))?;
+
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            anyhow::bail!("schtasks /Create failed: {stderr}");
+        }
+
+        // Start immediately so the user doesn't have to log out and back in
+        let _ = std::process::Command::new("schtasks")
+            .args(["/Run", "/TN", task_name])
+            .output();
+
+        println!("Brain service installed (Windows Task Scheduler).");
+        println!("  Task:   {task_name}");
+        println!("  Brain will now start automatically on every login.");
+        println!("  To stop auto-start: brain service uninstall");
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         anyhow::bail!(
             "brain service install is not supported on this OS.\n\
-             Manually configure your system's service manager to run: {exe} serve",
+             Manually configure your system's service manager to run: {exe_str} serve",
         )
     }
 }
@@ -1059,7 +1102,37 @@ fn cmd_service_uninstall() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    {
+        let task_name = "Brain OS";
+
+        // Stop the running task first (ignore error if not running)
+        let _ = std::process::Command::new("schtasks")
+            .args(["/End", "/TN", task_name])
+            .output();
+
+        let out = std::process::Command::new("schtasks")
+            .args(["/Delete", "/TN", task_name, "/F"])
+            .output()
+            .map_err(|e| anyhow::anyhow!("schtasks not found: {e}"))?;
+
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            // Treat "task not found" as a no-op so uninstall is idempotent
+            if stderr.contains("cannot find") || stderr.contains("not exist") {
+                println!("Brain service is not installed (no task found).");
+                return Ok(());
+            }
+            anyhow::bail!("schtasks /Delete failed: {stderr}");
+        }
+
+        println!("Brain service uninstalled.");
+        println!("  Task '{task_name}' removed from Windows Task Scheduler.");
+        println!("  Brain will no longer start automatically on login.");
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         anyhow::bail!("brain service uninstall is not supported on this OS.")
     }
