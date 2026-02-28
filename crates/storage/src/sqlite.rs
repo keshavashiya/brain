@@ -293,15 +293,15 @@ impl SqlitePool {
                 "create_procedures",
                 "
                 CREATE TABLE IF NOT EXISTS procedures (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    description TEXT,
-                    steps TEXT NOT NULL,
-                    trigger_pattern TEXT,
-                    repetition_count INTEGER NOT NULL DEFAULT 0,
-                    last_executed TEXT,
-                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                    id              TEXT PRIMARY KEY,
+                    trigger_pattern TEXT NOT NULL,
+                    steps_json      TEXT NOT NULL DEFAULT '[]',
+                    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                    use_count       INTEGER NOT NULL DEFAULT 0
                 );
+                CREATE INDEX IF NOT EXISTS idx_procedures_trigger
+                    ON procedures(trigger_pattern);
             ",
             ),
             (

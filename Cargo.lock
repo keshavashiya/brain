@@ -362,6 +362,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cerebellum"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "storage",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -447,6 +462,7 @@ dependencies = [
  "core",
  "cortex",
  "crossterm",
+ "ganglia",
  "grpcadapter",
  "hippocampus",
  "httpadapter",
@@ -999,6 +1015,20 @@ dependencies = [
  "pin-project-lite",
  "pin-utils",
  "slab",
+]
+
+[[package]]
+name = "ganglia"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "storage",
+ "tempfile",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -2761,6 +2791,7 @@ dependencies = [
  "amygdala",
  "anyhow",
  "async-trait",
+ "cerebellum",
  "chrono",
  "core",
  "cortex",

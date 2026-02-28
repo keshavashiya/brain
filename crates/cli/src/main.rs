@@ -398,6 +398,70 @@ async fn main() -> anyhow::Result<()> {
                 set.spawn(async move { mcp::serve_http(p, &h, port).await });
             }
 
+            // ── Proactivity / habit engine background task ────────────────────
+            // Runs the HabitEngine on a schedule (default: every 60 min).
+            // When a recurring pattern is detected at the current time slot
+            // and all rate limits are met, a proactive message is logged and
+            // written to ~/.brain/logs/proactive.log.
+            if config.proactivity.enabled {
+                let p = processor.clone();
+                let habit_cfg = ganglia::HabitConfig {
+                    max_per_day: config.proactivity.max_per_day,
+                    min_interval_minutes: config.proactivity.min_interval_minutes,
+                    quiet_start: config.proactivity.quiet_hours.start.clone(),
+                    quiet_end: config.proactivity.quiet_hours.end.clone(),
+                    ..Default::default()
+                };
+                let log_path = config.data_dir().join("logs/proactive.log");
+                set.spawn(async move {
+                    let engine = ganglia::HabitEngine::new(
+                        p.episodic().pool().clone(),
+                        habit_cfg.clone(),
+                    );
+                    if let Err(e) = engine.ensure_tables() {
+                        tracing::warn!("HabitEngine table init failed: {e}");
+                        return Ok(());
+                    }
+                    let check_interval = tokio::time::Duration::from_secs(
+                        habit_cfg.min_interval_minutes as u64 * 60,
+                    );
+                    let mut ticker = tokio::time::interval(check_interval);
+                    ticker.tick().await; // skip first tick
+                    loop {
+                        ticker.tick().await;
+                        match engine.generate_proactive() {
+                            Ok(Some(msg)) => {
+                                tracing::info!(
+                                    triggered_by = %msg.triggered_by,
+                                    "Proactive: {}",
+                                    msg.content
+                                );
+                                // Append to proactive log file
+                                let line = format!(
+                                    "[{}] {}\n",
+                                    msg.created_at.to_rfc3339(),
+                                    msg.content
+                                );
+                                let _ = std::fs::OpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open(&log_path)
+                                    .and_then(|mut f| {
+                                        use std::io::Write;
+                                        f.write_all(line.as_bytes())
+                                    });
+                            }
+                            Ok(None) => {}
+                            Err(e) => tracing::warn!("HabitEngine error: {e}"),
+                        }
+                    }
+                });
+                tracing::info!(
+                    interval_minutes = config.proactivity.min_interval_minutes,
+                    "Proactivity engine scheduled"
+                );
+            }
+
             // ── Memory consolidation background task ──────────────────────────
             // Runs the forgetting-curve pruner on a schedule (default: every 24h).
             // Aborted cleanly alongside adapters on shutdown.

@@ -16,6 +16,7 @@ hippocampus = { workspace = true }
 cortex = { workspace = true }
 thalamus = { workspace = true }
 signal = { workspace = true }
+ganglia = { workspace = true }
 httpadapter = { workspace = true }
 wsadapter = { workspace = true }
 grpcadapter = { workspace = true }

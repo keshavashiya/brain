@@ -177,6 +177,7 @@ pub struct SignalProcessor {
     recall_engine: hippocampus::RecallEngine,
     llm: Box<dyn cortex::LlmProvider>,
     context_assembler: cortex::context::ContextAssembler,
+    procedures: cerebellum::ProcedureStore,
 }
 
 impl SignalProcessor {
@@ -211,6 +212,12 @@ impl SignalProcessor {
 
         // Create episodic store
         let episodic = hippocampus::EpisodicStore::new(db.clone());
+
+        // Create procedure store (cerebellum) — initialises its own table
+        let procedures = cerebellum::ProcedureStore::new(db.clone());
+        if let Err(e) = procedures.ensure_tables() {
+            tracing::warn!("ProcedureStore table init failed (non-fatal): {e}");
+        }
 
         // Create semantic store (optional — fails gracefully if RuVector unavailable)
         let semantic = match storage::RuVectorStore::open(&config.ruvector_path()).await {
@@ -280,6 +287,7 @@ impl SignalProcessor {
             recall_engine,
             llm,
             context_assembler: cortex::context::ContextAssembler::with_defaults(),
+            procedures,
         })
     }
 
@@ -305,6 +313,30 @@ impl SignalProcessor {
             importance = importance,
             "Signal classified"
         );
+
+        // ── Cerebellum: match stored procedures ───────────────────────────────
+        // Check whether any learned procedures match this signal.  Matching
+        // procedures contribute their steps as additional context injected into
+        // the LLM prompt, and their use counters are bumped.
+        let procedure_context: Vec<String> = match self.procedures.match_trigger(&signal.content) {
+            Ok(procs) if !procs.is_empty() => {
+                tracing::debug!(
+                    count = procs.len(),
+                    "Procedure(s) matched — injecting steps into context"
+                );
+                let mut steps: Vec<String> = Vec::new();
+                for proc in &procs {
+                    let _ = self.procedures.record_execution(&proc.id);
+                    steps.extend(proc.steps.clone());
+                }
+                steps
+            }
+            Ok(_) => Vec::new(),
+            Err(e) => {
+                tracing::warn!("Procedure match failed (non-fatal): {e}");
+                Vec::new()
+            }
+        };
 
         match classification.intent {
             // ── STORE_FACT: importance score → semantic memory → confirmation ────
@@ -356,7 +388,19 @@ impl SignalProcessor {
                     .do_recall(&query, query_vector, 10, Some(&signal.namespace))
                     .await;
 
-                let messages = self.context_assembler.assemble(&query, &memories, &[]);
+                // Build procedure hints as synthetic prior messages so the LLM
+                // knows about automated steps without polluting the memory context.
+                let proc_history: Vec<cortex::llm::Message> = procedure_context
+                    .iter()
+                    .map(|step| cortex::llm::Message {
+                        role: cortex::llm::Role::User,
+                        content: format!("[procedure step] {step}"),
+                    })
+                    .collect();
+
+                let messages = self
+                    .context_assembler
+                    .assemble(&query, &memories, &proc_history);
                 let llm_response = self.llm.generate(&messages).await?;
 
                 Ok(SignalResponse {
@@ -388,8 +432,19 @@ impl SignalProcessor {
                     .store_episode(&session_id, "user", &signal.content, importance as f64)
                     .map_err(|e| SignalError::Storage(e.to_string()))?;
 
+                // Build procedure hints as synthetic prior messages
+                let proc_history: Vec<cortex::llm::Message> = procedure_context
+                    .iter()
+                    .map(|step| cortex::llm::Message {
+                        role: cortex::llm::Role::User,
+                        content: format!("[procedure step] {step}"),
+                    })
+                    .collect();
+
                 // Generate LLM response with assembled context
-                let messages = self.context_assembler.assemble(&content, &memories, &[]);
+                let messages = self
+                    .context_assembler
+                    .assemble(&content, &memories, &proc_history);
                 let llm_response = self.llm.generate(&messages).await?;
 
                 // Store the assistant turn in episodic memory
@@ -586,6 +641,11 @@ impl SignalProcessor {
         } else {
             tracing::info!("SQLite WAL checkpoint complete");
         }
+    }
+
+    /// Expose the procedure store (for adapter / MCP use).
+    pub fn procedures(&self) -> &cerebellum::ProcedureStore {
+        &self.procedures
     }
 
     /// Store a semantic fact directly (bypasses intent classification).

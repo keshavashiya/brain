@@ -12,11 +12,12 @@
 //!   request.  If no API keys are configured, auth is skipped.
 //!
 //! ## Tools
-//! - `memory_search`   — semantic search over stored facts/episodes
-//! - `memory_store`    — store a structured fact (subject predicate object)
-//! - `memory_facts`    — get all facts about a subject
-//! - `memory_episodes` — get recent conversation episodes
-//! - `user_profile`    — return user profile / config data
+//! - `memory_search`     — semantic search over stored facts/episodes
+//! - `memory_store`      — store a structured fact (subject predicate object)
+//! - `memory_facts`      — get all facts about a subject
+//! - `memory_episodes`   — get recent conversation episodes
+//! - `user_profile`      — return user profile / config data
+//! - `memory_procedures` — manage learned workflows (list / store / delete)
 //!
 //! ## MCP client config (stdio transport)
 //! ```json
@@ -272,6 +273,34 @@ impl McpServer {
                         "type": "object",
                         "properties": {}
                     }
+                },
+                {
+                    "name": "memory_procedures",
+                    "description": "Manage stored procedures (learned workflows). Use action='list' to see all, 'store' to save a new one, 'delete' to remove by id.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "description": "'list' | 'store' | 'delete'",
+                                "enum": ["list", "store", "delete"]
+                            },
+                            "trigger": {
+                                "type": "string",
+                                "description": "Keyword/phrase that activates the procedure (required for 'store')"
+                            },
+                            "steps": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Ordered list of action steps (required for 'store')"
+                            },
+                            "id": {
+                                "type": "string",
+                                "description": "Procedure ID (required for 'delete')"
+                            }
+                        },
+                        "required": ["action"]
+                    }
                 }
             ]
         }))
@@ -296,6 +325,7 @@ impl McpServer {
             "memory_facts" => self.tool_memory_facts(&args),
             "memory_episodes" => self.tool_memory_episodes(&args),
             "user_profile" => self.tool_user_profile(),
+            "memory_procedures" => self.tool_memory_procedures(&args),
             other => Err((-32602, format!("Unknown tool: {other}"))),
         }
     }
@@ -418,6 +448,74 @@ impl McpServer {
         };
 
         Ok(tool_result_text(text))
+    }
+
+    fn tool_memory_procedures(&self, args: &Value) -> Result<Value, (i32, String)> {
+        let action = args
+            .get("action")
+            .and_then(Value::as_str)
+            .ok_or((-32602, "Missing required argument: action".to_string()))?;
+
+        let procs = self.processor.procedures();
+
+        match action {
+            "list" => {
+                let list = procs
+                    .list_procedures()
+                    .map_err(|e| (-32603, format!("Failed to list procedures: {e}")))?;
+                let text = if list.is_empty() {
+                    "No procedures stored.".to_string()
+                } else {
+                    list.iter()
+                        .map(|p| {
+                            format!(
+                                "[{}] trigger='{}' steps={} use_count={}",
+                                p.id,
+                                p.trigger_pattern,
+                                p.steps.join(" → "),
+                                p.use_count
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                };
+                Ok(tool_result_text(text))
+            }
+            "store" => {
+                let trigger = args
+                    .get("trigger")
+                    .and_then(Value::as_str)
+                    .ok_or((-32602, "Missing argument: trigger".to_string()))?;
+                let steps: Vec<String> = args
+                    .get("steps")
+                    .and_then(Value::as_array)
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(Value::as_str)
+                            .map(String::from)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let id = procs
+                    .store_procedure(trigger, &steps)
+                    .map_err(|e| (-32603, format!("Failed to store procedure: {e}")))?;
+                Ok(tool_result_text(format!(
+                    "Stored procedure [{id}]: trigger_pattern='{trigger}' with {} step(s)",
+                    steps.len()
+                )))
+            }
+            "delete" => {
+                let id = args
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .ok_or((-32602, "Missing argument: id".to_string()))?;
+                procs
+                    .delete_procedure(id)
+                    .map_err(|e| (-32603, format!("Failed to delete procedure: {e}")))?;
+                Ok(tool_result_text(format!("Deleted procedure {id}")))
+            }
+            other => Err((-32602, format!("Unknown action: {other}. Use 'list', 'store', or 'delete'"))),
+        }
     }
 
     fn tool_user_profile(&self) -> Result<Value, (i32, String)> {
@@ -669,7 +767,8 @@ mod tests {
         assert!(names.contains(&"memory_facts"));
         assert!(names.contains(&"memory_episodes"));
         assert!(names.contains(&"user_profile"));
-        assert_eq!(tools.len(), 5);
+        assert!(names.contains(&"memory_procedures"));
+        assert_eq!(tools.len(), 6);
     }
 
     #[tokio::test]

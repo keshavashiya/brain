@@ -12,10 +12,9 @@ members = [
     "crates/adapters/ws",
     "crates/adapters/grpc",
     "crates/mcp",
-    # Placeholder crates - will be implemented in Phase 3
-    # "crates/cerebellum",
-    # "crates/ganglia",
-    # "crates/bridge",
+    "crates/cerebellum",
+    "crates/ganglia",
+    # "crates/bridge",  -- Phase 3
     "crates/cli",
 ]
 
