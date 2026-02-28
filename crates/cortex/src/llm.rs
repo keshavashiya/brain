@@ -145,24 +145,25 @@ pub struct OllamaProvider {
 
 impl OllamaProvider {
     /// Create a new Ollama provider.
-    pub fn new(base_url: &str, model: &str, temperature: f64, max_tokens: i32) -> Self {
+    pub fn new(base_url: &str, model: &str, temperature: f64, max_tokens: i32) -> Result<Self, LlmError> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .expect("Failed to create HTTP client");
+            .map_err(|e| LlmError::ProviderUnavailable(format!("Failed to create HTTP client: {e}")))?;
 
-        Self {
+        Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
             temperature,
             max_tokens,
-        }
+        })
     }
 
-    /// Create with default config.
+    /// Create with default config. Panics only if TLS initialisation fails (extremely rare).
     pub fn default_config() -> Self {
         Self::new("http://localhost:11434", "qwen2.5:14b", 0.7, 4096)
+            .expect("Failed to initialise default Ollama HTTP client")
     }
 
     fn convert_messages(messages: &[Message]) -> Vec<OllamaMessage> {
@@ -297,42 +298,32 @@ impl OpenAiProvider {
         model: &str,
         temperature: f64,
         max_tokens: Option<i32>,
-    ) -> Self {
+    ) -> Result<Self, LlmError> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(120))
             .build()
-            .expect("Failed to create HTTP client");
+            .map_err(|e| LlmError::ProviderUnavailable(format!("Failed to create HTTP client: {e}")))?;
 
-        Self {
+        Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.map(|s| s.to_string()),
             model: model.to_string(),
             temperature,
             max_tokens,
-        }
+        })
     }
 
     /// Create for OpenAI API.
     pub fn openai(api_key: &str, model: &str) -> Self {
-        Self::new(
-            "https://api.openai.com/v1",
-            Some(api_key),
-            model,
-            0.7,
-            Some(4096),
-        )
+        Self::new("https://api.openai.com/v1", Some(api_key), model, 0.7, Some(4096))
+            .expect("Failed to initialise OpenAI HTTP client")
     }
 
     /// Create for OpenRouter.
     pub fn openrouter(api_key: &str, model: &str) -> Self {
-        Self::new(
-            "https://openrouter.ai/api/v1",
-            Some(api_key),
-            model,
-            0.7,
-            Some(4096),
-        )
+        Self::new("https://openrouter.ai/api/v1", Some(api_key), model, 0.7, Some(4096))
+            .expect("Failed to initialise OpenRouter HTTP client")
     }
 
     fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
@@ -454,19 +445,29 @@ impl Default for ProviderConfig {
 /// Create an LLM provider from configuration.
 pub fn create_provider(config: &ProviderConfig) -> Box<dyn LlmProvider> {
     match config.provider.as_str() {
-        "ollama" => Box::new(OllamaProvider::new(
-            &config.base_url,
-            &config.model,
-            config.temperature,
-            config.max_tokens,
-        )),
-        "openai" => Box::new(OpenAiProvider::new(
-            &config.base_url,
-            config.api_key.as_deref(),
-            &config.model,
-            config.temperature,
-            Some(config.max_tokens),
-        )),
+        "ollama" => Box::new(
+            OllamaProvider::new(
+                &config.base_url,
+                &config.model,
+                config.temperature,
+                config.max_tokens,
+            )
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, "Failed to create Ollama provider, falling back to default");
+                OllamaProvider::default_config()
+            }),
+        ),
+        "openai" => Box::new(
+            OpenAiProvider::new(
+                &config.base_url,
+                config.api_key.as_deref(),
+                &config.model,
+                config.temperature,
+                Some(config.max_tokens),
+            )
+            // TLS initialisation failure is unrecoverable — surface clearly.
+            .expect("Failed to initialise OpenAI HTTP client"),
+        ),
         _ => Box::new(OllamaProvider::default_config()),
     }
 }
@@ -486,7 +487,8 @@ mod tests {
 
     #[test]
     fn test_ollama_provider_creation() {
-        let provider = OllamaProvider::new("http://localhost:11434", "llama3:8b", 0.5, 2048);
+        let provider = OllamaProvider::new("http://localhost:11434", "llama3:8b", 0.5, 2048)
+            .expect("OllamaProvider::new should not fail in test");
         assert_eq!(provider.name(), "ollama");
     }
 

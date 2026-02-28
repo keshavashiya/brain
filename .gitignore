@@ -41,3 +41,6 @@ logs/
 # Development references (not for version control)
 progress.md
 docs/
+.claude*
+.mcp.json
+CLAUDE.md

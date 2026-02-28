@@ -37,7 +37,7 @@ use axum::{
 use brain_core::ApiKeyConfig;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
 use signal::{Signal, SignalResponse, SignalSource};
@@ -202,6 +202,21 @@ fn check_auth(
 
 // ─── Router builder ──────────────────────────────────────────────────────────
 
+/// CORS restricted to localhost origins — Brain is a local daemon, not a public service.
+/// Remote origins are blocked to prevent cross-site requests from untrusted web pages.
+fn localhost_cors() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(|origin, _req| {
+            let bytes = origin.as_bytes();
+            bytes.starts_with(b"http://127.0.0.1")
+                || bytes.starts_with(b"http://localhost")
+                || bytes.starts_with(b"https://127.0.0.1")
+                || bytes.starts_with(b"https://localhost")
+        }))
+        .allow_methods(AllowMethods::any())
+        .allow_headers(AllowHeaders::any())
+}
+
 /// Build the axum router with all routes and CORS enabled.
 ///
 /// `api_keys` is taken from `BrainConfig.access.api_keys` by the caller.
@@ -228,7 +243,7 @@ pub fn create_router(
         .route("/v1/memory/facts", get(get_facts_handler))
         .route("/v1/memory/namespaces", get(get_namespaces_handler))
         .with_state(state)
-        .layer(CorsLayer::permissive())
+        .layer(localhost_cors())
 }
 
 /// Start the HTTP server, binding to `host:port`.
@@ -321,7 +336,7 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
 </main>
 <script>
 const API = '';
-let apiKey = localStorage.getItem('brain_api_key') || 'demokey123';
+let apiKey = localStorage.getItem('brain_api_key') || '';
 
 function hdr(){ return {'Authorization':'Bearer '+apiKey,'Content-Type':'application/json'} }
 
@@ -663,7 +678,11 @@ async fn post_signal_handler(
                 error = %e,
                 "signal processing failed"
             );
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
+            // Return an opaque error — do not leak internal details to the client.
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Signal processing failed. Check server logs for details.".to_string(),
+            ));
         }
     };
 

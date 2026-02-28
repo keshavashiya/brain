@@ -43,7 +43,7 @@ use axum::{
 use brain_core::ApiKeyConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -633,6 +633,21 @@ pub async fn serve_stdio(processor: signal::SignalProcessor) -> anyhow::Result<(
     Ok(())
 }
 
+// ─── CORS (localhost-only) ────────────────────────────────────────────────────
+
+fn localhost_cors() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(|origin, _req| {
+            let bytes = origin.as_bytes();
+            bytes.starts_with(b"http://127.0.0.1")
+                || bytes.starts_with(b"http://localhost")
+                || bytes.starts_with(b"https://127.0.0.1")
+                || bytes.starts_with(b"https://localhost")
+        }))
+        .allow_methods(AllowMethods::any())
+        .allow_headers(AllowHeaders::any())
+}
+
 // ─── HTTP Transport ───────────────────────────────────────────────────────────
 
 /// Shared state for the HTTP MCP server.
@@ -658,7 +673,7 @@ pub async fn serve_http(
         .route("/", post(http_handler))
         .route("/mcp", post(http_handler))
         .with_state(state)
-        .layer(CorsLayer::permissive());
+        .layer(localhost_cors());
 
     let addr: std::net::SocketAddr = format!("{host}:{port}").parse()?;
     tracing::info!("Brain MCP HTTP server listening on http://{addr}");
@@ -952,7 +967,7 @@ mod tests {
         let router = Router::new()
             .route("/mcp", post(http_handler))
             .with_state(state)
-            .layer(CorsLayer::permissive());
+            .layer(localhost_cors());
 
         let body = serde_json::json!({
             "jsonrpc": "2.0",
@@ -991,7 +1006,7 @@ mod tests {
         let router = Router::new()
             .route("/mcp", post(http_handler))
             .with_state(state)
-            .layer(CorsLayer::permissive());
+            .layer(localhost_cors());
 
         let body = serde_json::json!({
             "jsonrpc": "2.0",
@@ -1030,7 +1045,7 @@ mod tests {
         let router = Router::new()
             .route("/mcp", post(http_handler))
             .with_state(state)
-            .layer(CorsLayer::permissive());
+            .layer(localhost_cors());
 
         let body = serde_json::json!({
             "jsonrpc": "2.0",
