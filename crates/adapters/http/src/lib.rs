@@ -4,6 +4,7 @@
 //!
 //! ## Routes
 //! - `GET  /health`             — health check (no auth required)
+//! - `GET  /metrics`            — Prometheus-format counters (no auth required)
 //! - `POST /v1/signals`         — submit a signal (requires write)
 //! - `GET  /v1/signals/:id`     — retrieve cached signal response (requires read)
 //! - `POST /v1/memory/search`   — semantic search over stored facts (requires read)
@@ -13,12 +14,20 @@
 //! All `/v1/*` routes require `Authorization: Bearer <api-key>` header.
 //! The demo key `demokey123` (read+write) is pre-configured in `default.yaml`.
 
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Instant,
+};
 
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    response::Json,
+    response::{IntoResponse, Json},
     routing::{get, post},
     Router,
 };
@@ -89,6 +98,58 @@ pub struct HealthResponse {
     pub version: &'static str,
 }
 
+// ─── Metrics ─────────────────────────────────────────────────────────────────
+
+/// Atomic counters exposed at `GET /metrics` in Prometheus text format.
+#[derive(Default)]
+pub struct Metrics {
+    /// Total POST /v1/signals requests processed.
+    pub signals_total: AtomicU64,
+    /// Signals that returned a non-5xx response.
+    pub signals_ok: AtomicU64,
+    /// Signals that returned a 5xx error.
+    pub signals_error: AtomicU64,
+    /// Total POST /v1/memory/search requests.
+    pub search_total: AtomicU64,
+    /// Total GET /v1/memory/facts requests.
+    pub facts_total: AtomicU64,
+    /// Cumulative POST /v1/signals processing time in milliseconds.
+    pub signals_latency_ms_total: AtomicU64,
+}
+
+impl Metrics {
+    /// Render counters as Prometheus plain-text format (text/plain; version=0.0.4).
+    pub fn render(&self) -> String {
+        let signals_total = self.signals_total.load(Ordering::Relaxed);
+        let signals_ok = self.signals_ok.load(Ordering::Relaxed);
+        let signals_error = self.signals_error.load(Ordering::Relaxed);
+        let search_total = self.search_total.load(Ordering::Relaxed);
+        let facts_total = self.facts_total.load(Ordering::Relaxed);
+        let latency_ms = self.signals_latency_ms_total.load(Ordering::Relaxed);
+
+        format!(
+            "# HELP brain_signals_total Total signal requests received.\n\
+             # TYPE brain_signals_total counter\n\
+             brain_signals_total {signals_total}\n\
+             # HELP brain_signals_ok_total Successful signal requests.\n\
+             # TYPE brain_signals_ok_total counter\n\
+             brain_signals_ok_total {signals_ok}\n\
+             # HELP brain_signals_error_total Failed signal requests (5xx).\n\
+             # TYPE brain_signals_error_total counter\n\
+             brain_signals_error_total {signals_error}\n\
+             # HELP brain_search_total Total memory search requests.\n\
+             # TYPE brain_search_total counter\n\
+             brain_search_total {search_total}\n\
+             # HELP brain_facts_total Total memory facts requests.\n\
+             # TYPE brain_facts_total counter\n\
+             brain_facts_total {facts_total}\n\
+             # HELP brain_signals_latency_ms_total Cumulative signal processing latency in ms.\n\
+             # TYPE brain_signals_latency_ms_total counter\n\
+             brain_signals_latency_ms_total {latency_ms}\n"
+        )
+    }
+}
+
 // ─── App State ───────────────────────────────────────────────────────────────
 
 /// Shared state for all HTTP handlers.
@@ -98,6 +159,8 @@ pub struct AppState {
     cache: Mutex<HashMap<Uuid, SignalResponse>>,
     /// Configured API keys (loaded from BrainConfig).
     api_keys: Vec<ApiKeyConfig>,
+    /// Request counters and latency.
+    metrics: Arc<Metrics>,
 }
 
 // ─── Auth helpers ─────────────────────────────────────────────────────────────
@@ -147,10 +210,12 @@ pub fn create_router(
         processor,
         cache: Mutex::new(HashMap::new()),
         api_keys,
+        metrics: Arc::new(Metrics::default()),
     });
 
     Router::new()
         .route("/health", get(health_handler))
+        .route("/metrics", get(metrics_handler))
         .route("/v1/signals", post(post_signal_handler))
         .route("/v1/signals/:id", get(get_signal_handler))
         .route("/v1/memory/search", post(search_memory_handler))
@@ -187,6 +252,14 @@ async fn health_handler() -> Json<HealthResponse> {
     })
 }
 
+/// GET /metrics — Prometheus text format, no authentication required
+async fn metrics_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    (
+        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+        state.metrics.render(),
+    )
+}
+
 /// POST /v1/signals — requires write permission
 async fn post_signal_handler(
     State(state): State<Arc<AppState>>,
@@ -194,6 +267,9 @@ async fn post_signal_handler(
     Json(body): Json<SignalRequest>,
 ) -> Result<Json<SignalResponse>, (StatusCode, String)> {
     check_auth(&state, &headers, "write")?;
+
+    let t0 = Instant::now();
+    state.metrics.signals_total.fetch_add(1, Ordering::Relaxed);
 
     let source = parse_source(body.source.as_deref());
     let mut signal = Signal::new(
@@ -210,11 +286,35 @@ async fn post_signal_handler(
     }
 
     let signal_id = signal.id;
-    let response = state
-        .processor
-        .process(signal)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let result = state.processor.process(signal).await;
+
+    let elapsed_ms = t0.elapsed().as_millis() as u64;
+    state
+        .metrics
+        .signals_latency_ms_total
+        .fetch_add(elapsed_ms, Ordering::Relaxed);
+
+    let response = match result {
+        Ok(r) => {
+            state.metrics.signals_ok.fetch_add(1, Ordering::Relaxed);
+            tracing::info!(
+                signal_id = %signal_id,
+                latency_ms = elapsed_ms,
+                "signal processed"
+            );
+            r
+        }
+        Err(e) => {
+            state.metrics.signals_error.fetch_add(1, Ordering::Relaxed);
+            tracing::error!(
+                signal_id = %signal_id,
+                latency_ms = elapsed_ms,
+                error = %e,
+                "signal processing failed"
+            );
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string()));
+        }
+    };
 
     // Cache the response so GET /v1/signals/:id can retrieve it
     state.cache.lock().await.insert(signal_id, response.clone());
@@ -251,12 +351,15 @@ async fn search_memory_handler(
 ) -> Result<Json<Vec<FactJson>>, (StatusCode, String)> {
     check_auth(&state, &headers, "read")?;
 
+    state.metrics.search_total.fetch_add(1, Ordering::Relaxed);
+    let t0 = Instant::now();
     let top_k = body.top_k.unwrap_or(10);
     let namespace = body.namespace.as_deref();
     let results = state
         .processor
         .search_facts(&body.query, top_k, namespace)
         .await;
+    tracing::debug!(latency_ms = t0.elapsed().as_millis() as u64, query = %body.query, "memory search");
 
     let facts = results
         .into_iter()
@@ -285,6 +388,7 @@ async fn get_facts_handler(
 ) -> Result<Json<Vec<FactJson>>, (StatusCode, String)> {
     check_auth(&state, &headers, "read")?;
 
+    state.metrics.facts_total.fetch_add(1, Ordering::Relaxed);
     let namespace = params.get("namespace").map(|s| s.as_str());
     let facts = state
         .processor
@@ -397,6 +501,40 @@ mod tests {
         assert!(json.contains("\"subject\":\"user\""));
         assert!(json.contains("\"namespace\":\"personal\""));
         assert!(json.contains("\"distance\":0.05"));
+    }
+
+    /// GET /metrics — no auth required, returns Prometheus text.
+    #[tokio::test]
+    async fn test_metrics_endpoint() {
+        use axum::body::Body;
+        use axum::http::{self, Request};
+        use tower::util::ServiceExt;
+
+        let (router, _tmp) = make_router().await;
+
+        let request = Request::builder()
+            .method(http::Method::GET)
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let ct = response
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(ct.contains("text/plain"), "expected text/plain, got: {ct}");
+
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body = std::str::from_utf8(&bytes).unwrap();
+        assert!(body.contains("brain_signals_total"), "missing counter in metrics output");
+        assert!(body.contains("brain_search_total"), "missing search counter");
     }
 
     /// GET /health — no auth required, always returns 200.
@@ -625,6 +763,7 @@ mod tests {
             processor,
             cache: Mutex::new(HashMap::new()),
             api_keys,
+            metrics: Arc::new(Metrics::default()),
         });
 
         // POST /v1/signals with a store-fact intent
@@ -701,6 +840,7 @@ mod tests {
             processor,
             cache: Mutex::new(HashMap::new()),
             api_keys,
+            metrics: Arc::new(Metrics::default()),
         });
 
         let router = Router::new()
@@ -748,6 +888,7 @@ mod tests {
             processor,
             cache: Mutex::new(HashMap::new()),
             api_keys,
+            metrics: Arc::new(Metrics::default()),
         });
 
         // Manually insert a response into the cache
