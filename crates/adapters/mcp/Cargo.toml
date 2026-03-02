@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-brain_core = { path = "../core", package = "core" }
+brain_core = { path = "../../core", package = "core" }
 signal = { workspace = true }
 hippocampus = { workspace = true }
 tokio = { workspace = true }

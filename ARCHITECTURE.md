@@ -22,11 +22,11 @@ brain/
 │   ├── ganglia/        # Proactivity engine (scheduled reminders)
 │   ├── ruvector/       # (not a crate — ruvector-core is used as an external dep)
 │   ├── storage/        # SQLite migrations + ruvector-core wrapper + encryption
-│   ├── mcp/            # MCP adapter (stdio + HTTP transports)
 │   └── adapters/
 │       ├── http/       # Axum REST API (port 19789)
 │       ├── ws/         # WebSocket adapter (port 19790)
-│       └── grpc/       # gRPC adapter (port 19792)
+│       ├── grpc/       # gRPC adapter (port 19792)
+│       └── mcp/        # MCP adapter (stdio + HTTP transports, port 19791)
 └── crates/cli/         # `brain` binary — commands, service management, chat
 ```
 
@@ -47,7 +47,7 @@ cli ──► signal::SignalProcessor
 adapters/http ──► signal::SignalProcessor (Arc<>)
 adapters/ws   ──► signal::SignalProcessor (Arc<>)
 adapters/grpc ──► signal::SignalProcessor (Arc<>)
-mcp           ──► signal::SignalProcessor (Arc<>)
+adapters/mcp  ──► signal::SignalProcessor (Arc<>)
 
 External apps ──► Brain's HTTP / WS / MCP / gRPC API  (not inside this repo)
 ```

@@ -11,7 +11,7 @@ members = [
     "crates/adapters/http",
     "crates/adapters/ws",
     "crates/adapters/grpc",
-    "crates/mcp",
+    "crates/adapters/mcp",
     "crates/cerebellum",
     "crates/ganglia",
     "crates/cli",
@@ -89,6 +89,6 @@ signal = { path = "crates/signal" }
 httpadapter = { path = "crates/adapters/http" }
 wsadapter = { path = "crates/adapters/ws" }
 grpcadapter = { path = "crates/adapters/grpc" }
-mcp = { path = "crates/mcp" }
+mcp = { path = "crates/adapters/mcp" }
 cerebellum = { path = "crates/cerebellum" }
 ganglia = { path = "crates/ganglia" }
