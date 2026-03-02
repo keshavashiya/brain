@@ -15,12 +15,10 @@ default:
     @echo "  run            - Run brain CLI"
     @echo "  chat           - Start interactive chat"
     @echo "  status         - Show brain status"
+    @echo "  serve          - Start all adapters (foreground)"
     @echo "  fmt            - Format code"
     @echo "  lint           - Run clippy"
     @echo "  check          - Check without building"
-    @echo ""
-    @echo "Setup:"
-    @echo "  downloadmodels - Download ONNX embedding model"
     @echo ""
     @echo "Clean:"
     @echo "  clean          - Clean build artifacts"
@@ -52,6 +50,9 @@ chat *msg:
 status:
     cargo run --bin brain -- status
 
+serve *args:
+    cargo run --bin brain -- serve {{args}}
+
 # Dev tools
 fmt:
     cargo fmt --all
@@ -61,20 +62,6 @@ lint:
 
 fmtcheck:
     cargo fmt --all -- --check
-
-# Setup
-downloadmodels:
-    #!/usr/bin/env bash
-    set -e
-    mkdir -p models
-    if [ ! -f models/bge-small-en-v1.5.onnx ]; then
-        echo "Downloading BGE-small-en-v1.5 ONNX model..."
-        curl -L -o models/bge-small-en-v1.5.onnx \
-            "https://huggingface.co/BAAI/bge-small-en-v1.5/resolve/main/onnx/model.onnx"
-        echo "Model downloaded"
-    else
-        echo "Model already exists"
-    fi
 
 # Clean
 clean:

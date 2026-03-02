@@ -12,9 +12,6 @@ storage:
     ef_construction: 200
     m: 16
     ef_search: 50
-  self_learning:
-    enabled: true
-    gnn_layers: 3
 
 llm:
   provider: "ollama"

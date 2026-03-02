@@ -484,7 +484,7 @@ impl SignalProcessor {
 
     /// Generate a vector embedding for text.
     ///
-    /// Uses whichever provider was selected at startup (Ollama or local ONNX).
+    /// Uses whichever provider was selected at startup (Ollama or OpenAI-compatible).
     /// Falls back to a zero vector if no provider is available or if the call
     /// fails, so the pipeline degrades gracefully without panicking.
     async fn embed_text(&self, text: &str) -> Vec<f32> {

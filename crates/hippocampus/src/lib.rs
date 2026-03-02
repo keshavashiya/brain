@@ -5,7 +5,7 @@
 //! - Semantic memory (fact storage with vector embeddings)
 //! - Procedural memory (learned workflows)
 //! - Importance scoring (keyword-based, no LLM)
-//! - ONNX embedding pipeline (BGE-small-en-v1.5)
+//! - Embedding pipeline (Ollama / OpenAI-compatible)
 //! - Hybrid search (vector ANN + BM25 FTS5 + RRF fusion)
 //! - Memory consolidation (sleep cycle)
 

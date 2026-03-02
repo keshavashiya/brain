@@ -43,7 +43,6 @@ pub struct StorageConfig {
     pub ruvector_path: String,
     pub sqlite_path: String,
     pub hnsw: HnswConfig,
-    pub self_learning: SelfLearningConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,12 +50,6 @@ pub struct HnswConfig {
     pub ef_construction: u32,
     pub m: u32,
     pub ef_search: u32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SelfLearningConfig {
-    pub enabled: bool,
-    pub gnn_layers: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -259,7 +252,7 @@ impl BrainConfig {
             data_dir.clone(),
             data_dir.join("db"),       // SQLite databases
             data_dir.join("ruvector"), // RuVector vector tables
-            data_dir.join("models"),   // ONNX models
+            data_dir.join("models"),   // Reserved for future local models
             data_dir.join("logs"),     // Log files
             data_dir.join("exports"),  // Memory exports
         ];
@@ -281,7 +274,7 @@ impl BrainConfig {
         self.data_dir().join("ruvector")
     }
 
-    /// Path to the ONNX models directory.
+    /// Path to the models directory.
     pub fn models_path(&self) -> PathBuf {
         self.data_dir().join("models")
     }
@@ -405,10 +398,6 @@ impl Default for BrainConfig {
                     ef_construction: 200,
                     m: 16,
                     ef_search: 50,
-                },
-                self_learning: SelfLearningConfig {
-                    enabled: true,
-                    gnn_layers: 3,
                 },
             },
             llm: LlmConfig {

@@ -12,10 +12,10 @@ brain/
 │   ├── core/           # BrainConfig, loader — shared types used by all crates
 │   ├── signal/         # Signal / SignalResponse types + SignalAdapter trait
 │   │                     SignalProcessor (the single shared engine)
-│   ├── thalamus/       # Intent classification (rules + LLM fallback)
-│   ├── amygdala/       # Importance scoring (keyword heuristics + LLM)
+│   ├── thalamus/       # Intent classification (regex rules, LLM fallback planned)
+│   ├── amygdala/       # Importance scoring (keyword heuristics)
 │   ├── hippocampus/    # Memory: EpisodicStore, SemanticStore, RecallEngine,
-│   │                     Embedder (ONNX bge-small-en-v1.5), ImportanceScorer
+│   │                     Embedder (Ollama / OpenAI-compatible), ImportanceScorer
 │   ├── cortex/         # LLM clients: OllamaProvider, OpenAiProvider
 │   │                     ContextAssembler (builds prompts from recall results)
 │   ├── cerebellum/     # ProcedureStore — trigger-pattern → steps automation
@@ -35,13 +35,14 @@ brain/
 ```
 cli ──► signal::SignalProcessor
            │
-           ├── thalamus (intent)
-           ├── amygdala (importance)
+           ├── thalamus (intent classification)
+           ├── amygdala (importance scoring)
            ├── hippocampus (memory read/write)
-           │       ├── ruvector (HNSW index)
-           │       └── storage (SQLite)
-           ├── cortex (LLM + context)
-           └── cerebellum (procedures)
+           │       ├── ruvector-core (HNSW index)
+           │       └── storage (SQLite + encryption)
+           ├── cortex (LLM + context + actions)
+           ├── cerebellum (procedure store + trigger matching)
+           └── ganglia (proactivity, runs as background task)
 
 adapters/http ──► signal::SignalProcessor (Arc<>)
 adapters/ws   ──► signal::SignalProcessor (Arc<>)
@@ -102,11 +103,12 @@ The universal input envelope passed to `SignalProcessor::process`.
 pub struct Signal {
     pub id: Uuid,
     pub source: SignalSource,
-    pub channel: Option<String>,
-    pub sender: Option<String>,
+    pub channel: String,
+    pub sender: String,
     pub content: String,
-    pub namespace: Option<String>,
-    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub metadata: HashMap<String, String>,
+    pub timestamp: DateTime<Utc>,
+    pub namespace: String,  // default: "personal"
 }
 ```
 
@@ -118,8 +120,8 @@ The universal output.
 pub struct SignalResponse {
     pub signal_id: Uuid,
     pub status: ResponseStatus,
-    pub content: ResponseContent,
-    pub memory_context: Option<MemoryContext>,
+    pub response: ResponseContent,
+    pub memory_context: MemoryContext,
 }
 ```
 
@@ -147,14 +149,22 @@ pub struct SignalProcessor { /* private fields */ }
 
 impl SignalProcessor {
     pub async fn new(config: BrainConfig) -> Result<Self, SignalError>;
-    pub async fn process(&self, signal: &Signal) -> Result<SignalResponse, SignalError>;
+    pub async fn new_with_encryptor(config: BrainConfig, encryptor: Option<Encryptor>) -> Result<Self, SignalError>;
+    pub async fn process(&self, signal: Signal) -> Result<SignalResponse, SignalError>;
+
+    // Direct memory operations (used by adapters that bypass signal processing)
+    pub async fn store_fact_direct(&self, ns: &str, cat: &str, sub: &str, pred: &str, obj: &str) -> Result<String, SignalError>;
+    pub async fn search_facts(&self, query: &str, top_k: usize, namespace: Option<&str>) -> Vec<SemanticResult>;
 
     // Inspector accessors (for adapters that expose sub-resources)
     pub fn list_facts(&self, namespace: Option<&str>) -> Vec<Fact>;
+    pub fn facts_about(&self, subject: &str) -> Vec<Fact>;
     pub fn list_namespaces(&self) -> Vec<NamespaceStats>;
     pub fn recent_episodes(&self, limit: usize) -> Vec<Episode>;
     pub fn procedures(&self) -> &ProcedureStore;
+    pub fn episodic(&self) -> &EpisodicStore;
     pub fn config(&self) -> &BrainConfig;
+    pub fn shutdown(&self);  // WAL checkpoint
 }
 ```
 
@@ -457,7 +467,29 @@ The `BrainConfig` struct in `crates/core/src/config.rs` maps 1-to-1 with the YAM
 
 ## Proactivity Engine (`crates/ganglia`)
 
-An optional background loop that fires scheduled suggestions based on memory patterns. Disabled by default (`proactivity.enabled: false`). Respects `quiet_hours`, `max_per_day`, and `min_interval_minutes`.
+A background loop that detects recurring patterns in episodic memory (keyword × day-of-week × hour histograms) and generates proactive suggestions. Disabled by default (`proactivity.enabled: false`).
+
+When enabled, the daemon spawns a `HabitEngine` task that runs on a configurable interval (default: every 60 minutes). If a recurring pattern matches the current time slot and all rate limits are satisfied (`max_per_day`, `min_interval_minutes`, `quiet_hours`), the engine logs a proactive message to `~/.brain/logs/proactive.log`.
+
+The engine persists its state (last fire times, daily counts) in a `habit_state` key-value table in SQLite, so rate limits survive daemon restarts.
+
+---
+
+## Memory Consolidation (`crates/hippocampus/consolidation`)
+
+A background task that prunes low-retention memories using the forgetting curve. Enabled by default (`memory.consolidation.enabled: true`, interval: 24 hours).
+
+The `Consolidator` iterates over all episodes, computes retention as `importance * e^(-decay_rate * hours_since_last_access)`, and deletes episodes below `forgetting_threshold` (default: 0.05). It also identifies promotion candidates (episodes with high reinforcement counts) but does not yet promote them to semantic facts — this is planned.
+
+---
+
+## Procedure Store (`crates/cerebellum`)
+
+Stores trigger-pattern → steps-JSON automation rules. When a signal arrives, `SignalProcessor` checks all stored procedures for a trigger match (case-insensitive substring of the signal content). If a procedure matches, its steps are injected into the LLM context so the response incorporates the workflow.
+
+Procedures are managed via:
+- MCP `memory_procedures` tool (list / store / delete)
+- Direct `ProcedureStore` API (used by SignalProcessor)
 
 ---
 

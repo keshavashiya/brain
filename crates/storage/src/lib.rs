@@ -1,9 +1,9 @@
 //! # Brain Storage
 //!
 //! Storage abstraction layer providing:
-//! - SQLite for episodic memory, user profiles, procedures, and tasks
-//! - RuVector for vector-based semantic memory (HNSW + GNN self-learning)
-//! - Encryption (deferred to v1.1)
+//! - SQLite for episodic memory, semantic facts, procedures, and FTS5 index
+//! - RuVector for vector-based semantic memory (HNSW)
+//! - Encryption at rest (AES-256-GCM + Argon2id)
 //! - Schema migrations
 
 pub mod encryption;

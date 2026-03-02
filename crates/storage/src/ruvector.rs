@@ -25,9 +25,9 @@ use ruvector_core::{
     DistanceMetric, SearchQuery, VectorDB, VectorEntry,
 };
 
-/// Default vector dimension (BGE-small-en-v1.5 / bge-base / all-minilm).
+/// Default vector dimension.
 /// Override by passing the actual embedding model dimension to [`RuVectorStore::open`].
-pub const VECTOR_DIM: usize = 384;
+pub const VECTOR_DIM: usize = 768;
 
 // ─── Errors ──────────────────────────────────────────────────────────────────
 
