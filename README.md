@@ -1,8 +1,12 @@
-# Brain OS
+# Brain OS 🧠
 
-A **Central AI Operating System** written in pure Rust — a unified memory hub that any AI tool can connect to via HTTP, WebSocket, MCP, gRPC, or CLI.
+**Stop giving your AI amnesia.** 
 
-Instead of each tool keeping its own isolated context, Brain OS acts as a single source of truth. Scripts, agents, coding assistants, and chat interfaces all read from and write to one shared memory that grows smarter over time.
+Brain OS is a biologically-inspired, central cognitive engine written in pure Rust. Instead of every script, coding assistant, and chat UI keeping its own isolated, fragmented context, Brain OS acts as your single source of truth. 
+
+It routes intents through a Thalamus, scores importance via an Amygdala, and stores everything in a unified Hippocampus (FTS5 + HNSW Vector Search). Whether you connect via HTTP, WebSocket, gRPC, or MCP, your AI tools now share one localized, ever-growing memory that runs 24/7 on your machine.
+
+*Your data never leaves your hardware. Your AI never forgets.*
 
 ## How It Works
 
