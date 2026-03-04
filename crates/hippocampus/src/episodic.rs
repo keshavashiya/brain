@@ -51,6 +51,28 @@ pub struct FtsResult {
     pub timestamp: String,
 }
 
+/// Sanitize user input for FTS5 MATCH queries.
+///
+/// Strips characters that are special in FTS5 syntax (`"`, `*`, `+`, `-`,
+/// `(`, `)`, `^`, `/`, `?`, `:`, `~`, `{`, `}`, `[`, `]`) and joins the
+/// remaining alphanumeric tokens with spaces. Returns an empty string if
+/// no searchable tokens remain.
+fn sanitize_fts5_query(query: &str) -> String {
+    query
+        .chars()
+        .map(|c| {
+            if "\"*+-()^/?:~{}[]".contains(c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Episodic memory store — manages conversations via SQLite.
 pub struct EpisodicStore {
     db: SqlitePool,
@@ -212,6 +234,11 @@ impl EpisodicStore {
 
     /// Search episodes by full-text query using BM25 ranking.
     pub fn search_bm25(&self, query: &str, limit: usize) -> Result<Vec<FtsResult>, EpisodicError> {
+        let sanitized = sanitize_fts5_query(query);
+        if sanitized.is_empty() {
+            return Ok(Vec::new());
+        }
+
         Ok(self.db.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT e.id, f.content, f.rank, e.timestamp
@@ -223,7 +250,7 @@ impl EpisodicStore {
             )?;
 
             let results = stmt
-                .query_map(rusqlite::params![query, limit as i64], |row| {
+                .query_map(rusqlite::params![sanitized, limit as i64], |row| {
                     Ok(FtsResult {
                         episode_id: row.get(0)?,
                         content: row.get(1)?,
