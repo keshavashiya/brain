@@ -131,11 +131,11 @@ enum ServiceAction {
 
 // ─── Daemon helpers ───────────────────────────────────────────────────────────
 
-fn pid_path(config: &core::BrainConfig) -> std::path::PathBuf {
+fn pid_path(config: &brain_core::BrainConfig) -> std::path::PathBuf {
     config.data_dir().join("brain.pid")
 }
 
-fn read_pid(config: &core::BrainConfig) -> Option<u32> {
+fn read_pid(config: &brain_core::BrainConfig) -> Option<u32> {
     std::fs::read_to_string(pid_path(config))
         .ok()?
         .trim()
@@ -143,12 +143,12 @@ fn read_pid(config: &core::BrainConfig) -> Option<u32> {
         .ok()
 }
 
-fn write_pid(config: &core::BrainConfig, pid: u32) -> anyhow::Result<()> {
+fn write_pid(config: &brain_core::BrainConfig, pid: u32) -> anyhow::Result<()> {
     std::fs::write(pid_path(config), pid.to_string())?;
     Ok(())
 }
 
-fn remove_pid(config: &core::BrainConfig) {
+fn remove_pid(config: &brain_core::BrainConfig) {
     let _ = std::fs::remove_file(pid_path(config));
 }
 
@@ -272,11 +272,11 @@ fn spawn_daemon(log_path: &std::path::Path) -> anyhow::Result<u32> {
 
 // ─── Encryption helpers ───────────────────────────────────────────────────────
 
-fn salt_path(config: &core::BrainConfig) -> std::path::PathBuf {
+fn salt_path(config: &brain_core::BrainConfig) -> std::path::PathBuf {
     config.data_dir().join("db/salt")
 }
 
-fn load_salt(config: &core::BrainConfig) -> Option<[u8; 16]> {
+fn load_salt(config: &brain_core::BrainConfig) -> Option<[u8; 16]> {
     let bytes = std::fs::read(salt_path(config)).ok()?;
     if bytes.len() == 16 {
         let mut arr = [0u8; 16];
@@ -287,7 +287,7 @@ fn load_salt(config: &core::BrainConfig) -> Option<[u8; 16]> {
     }
 }
 
-fn write_salt(config: &core::BrainConfig, salt: &[u8; 16]) -> anyhow::Result<()> {
+fn write_salt(config: &brain_core::BrainConfig, salt: &[u8; 16]) -> anyhow::Result<()> {
     let path = salt_path(config);
     std::fs::write(&path, salt.as_slice())?;
     // Restrict to owner-read/write only so the salt is not world-readable.
@@ -303,7 +303,7 @@ fn write_salt(config: &core::BrainConfig, salt: &[u8; 16]) -> anyhow::Result<()>
 ///
 /// Passphrase is read from `BRAIN_PASSPHRASE` env var (daemon/CI) or prompted
 /// interactively via `rpassword`.
-fn resolve_encryptor(config: &core::BrainConfig) -> anyhow::Result<Option<storage::Encryptor>> {
+fn resolve_encryptor(config: &brain_core::BrainConfig) -> anyhow::Result<Option<storage::Encryptor>> {
     if !config.encryption.enabled {
         return Ok(None);
     }
@@ -342,9 +342,9 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
-    let config = core::BrainConfig::load().unwrap_or_else(|e| {
+    let config = brain_core::BrainConfig::load().unwrap_or_else(|e| {
         tracing::warn!("Failed to load config, using defaults: {e}");
-        core::BrainConfig::default()
+        brain_core::BrainConfig::default()
     });
 
     config.ensure_data_dirs()?;
@@ -356,11 +356,11 @@ async fn main() -> anyhow::Result<()> {
             println!("Forming neural pathways...");
             println!("  Cortex:    {}", data_dir.display());
 
-            match core::BrainConfig::write_default_config(force)? {
+            match brain_core::BrainConfig::write_default_config(force)? {
                 Some(path) => println!("  Genome:    {} (written)", path.display()),
                 None => println!(
                     "  Genome:    {} (already exists, use --force to overwrite)",
-                    core::BrainConfig::user_config_path().display()
+                    brain_core::BrainConfig::user_config_path().display()
                 ),
             }
 
@@ -388,7 +388,7 @@ async fn main() -> anyhow::Result<()> {
 
             println!(
                 "\nNeural pathways formed. Edit {} to customize your genome.",
-                core::BrainConfig::user_config_path().display()
+                brain_core::BrainConfig::user_config_path().display()
             );
         }
 
@@ -714,7 +714,7 @@ async fn main() -> anyhow::Result<()> {
 
 // ─── Status ───────────────────────────────────────────────────────────────────
 
-async fn show_status(config: &core::BrainConfig) -> anyhow::Result<()> {
+async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Result<()> {
     println!("Brain Scan");
     println!("  DNA:          v{}", env!("CARGO_PKG_VERSION"));
     println!("  Cortex:       {}", config.data_dir().display());
@@ -752,7 +752,7 @@ async fn show_status(config: &core::BrainConfig) -> anyhow::Result<()> {
     println!("  Neural mesh:  {}", config.ruvector_path().display());
     println!(
         "  Genome:       {}",
-        core::BrainConfig::user_config_path().display()
+        brain_core::BrainConfig::user_config_path().display()
     );
 
     println!("\n  Synapses:");
@@ -1125,7 +1125,7 @@ struct ExportEpisode {
     reinforcement_count: i32,
 }
 
-fn cmd_export(config: &core::BrainConfig, output: Option<&str>) -> anyhow::Result<()> {
+fn cmd_export(config: &brain_core::BrainConfig, output: Option<&str>) -> anyhow::Result<()> {
     let db = storage::SqlitePool::open(&config.sqlite_path())?;
 
     // Query all semantic facts
@@ -1205,7 +1205,7 @@ fn cmd_export(config: &core::BrainConfig, output: Option<&str>) -> anyhow::Resul
     Ok(())
 }
 
-async fn cmd_import(config: &core::BrainConfig, file: &str, dry_run: bool) -> anyhow::Result<()> {
+async fn cmd_import(config: &brain_core::BrainConfig, file: &str, dry_run: bool) -> anyhow::Result<()> {
     let raw = std::fs::read_to_string(file)
         .map_err(|e| anyhow::anyhow!("Cannot read {file}: {e}"))?;
     let export: MemoryExport =
@@ -1383,13 +1383,13 @@ async fn cmd_import(config: &core::BrainConfig, file: &str, dry_run: bool) -> an
 
 // ─── Chat ─────────────────────────────────────────────────────────────────────
 
-async fn chat_non_interactive(config: &core::BrainConfig, message: &str) -> anyhow::Result<()> {
+async fn chat_non_interactive(config: &brain_core::BrainConfig, message: &str) -> anyhow::Result<()> {
     let mut brain = BrainSession::new(config).await?;
     println!("{}", brain.process_message(message).await?);
     Ok(())
 }
 
-async fn chat_interactive(config: &core::BrainConfig) -> anyhow::Result<()> {
+async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()> {
     println!("╔═══════════════════════════════════════╗");
     println!(
         "║  Brain v{}                          ║",
@@ -1466,7 +1466,7 @@ async fn chat_interactive(config: &core::BrainConfig) -> anyhow::Result<()> {
 
 #[allow(dead_code)]
 struct BrainSession {
-    _config: core::BrainConfig,
+    _config: brain_core::BrainConfig,
     _db: storage::SqlitePool,
     episodic: hippocampus::EpisodicStore,
     semantic: Option<hippocampus::SemanticStore>,
@@ -1480,7 +1480,7 @@ struct BrainSession {
 }
 
 impl BrainSession {
-    async fn new(config: &core::BrainConfig) -> anyhow::Result<Self> {
+    async fn new(config: &brain_core::BrainConfig) -> anyhow::Result<Self> {
         let db = storage::SqlitePool::open(&config.sqlite_path())?;
         let episodic = hippocampus::EpisodicStore::new(db.clone());
 

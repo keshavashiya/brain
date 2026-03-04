@@ -10,7 +10,7 @@ name = "brain"
 path = "src/main.rs"
 
 [dependencies]
-core = { workspace = true }
+brain_core = { path = "../core", package = "core" }
 storage = { workspace = true }
 rusqlite = { workspace = true }
 hippocampus = { workspace = true }
