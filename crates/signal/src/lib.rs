@@ -501,10 +501,10 @@ impl SignalProcessor {
 
                 let message = if deleted_count > 0 {
                     format!(
-                        "Forgotten: removed {deleted_count} fact(s) matching \"{target}\""
+                        "Memory erased: removed {deleted_count} engram(s) matching \"{target}\""
                     )
                 } else {
-                    format!("No facts found matching \"{target}\" to forget")
+                    format!("No engrams found matching \"{target}\" to erase")
                 };
 
                 Ok(SignalResponse {

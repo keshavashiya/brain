@@ -676,7 +676,7 @@ pub async fn serve_http(
         .layer(localhost_cors());
 
     let addr: std::net::SocketAddr = format!("{host}:{port}").parse()?;
-    tracing::info!("Brain MCP HTTP server listening on http://{addr}");
+    tracing::info!("Synapse MCP online at http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router).await?;
     Ok(())

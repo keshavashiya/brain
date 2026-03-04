@@ -264,7 +264,7 @@ impl AgentService for AgentServiceImpl {
             session_id,
             accepted: true,
             message: format!(
-                "Welcome, {} ({})! Brain gRPC session established.",
+                "Synapse established — welcome, {} ({}).",
                 req.agent_id, req.agent_type
             ),
         }))
@@ -380,7 +380,7 @@ pub async fn serve(
         },
     );
 
-    tracing::info!("Brain gRPC server listening on {addr}");
+    tracing::info!("Synapse gRPC online at {addr}");
 
     Server::builder()
         .add_service(memory_svc)

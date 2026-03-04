@@ -257,7 +257,7 @@ pub async fn serve(
     let api_keys = processor.config().access.api_keys.clone();
     let router = create_router(processor, api_keys);
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
-    tracing::info!("Brain HTTP API listening on http://{addr}");
+    tracing::info!("Synapse HTTP online at http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router).await?;
     Ok(())
@@ -422,8 +422,8 @@ fn build_openapi() -> serde_json::Value {
     serde_json::json!({
         "openapi": "3.0.3",
         "info": {
-            "title": "Brain OS HTTP API",
-            "description": "Central AI operating system — signal processing, semantic memory search, and episodic memory management.",
+            "title": "Brain OS — Synapse HTTP API",
+            "description": "Your AI's long-term memory — signal processing, semantic search, and episodic recall.",
             "version": env!("CARGO_PKG_VERSION"),
             "contact": { "name": "Brain OS", "url": "https://github.com/keshavashiya/brain" }
         },

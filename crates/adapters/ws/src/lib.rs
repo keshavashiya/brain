@@ -101,7 +101,7 @@ pub async fn serve(
     let api_keys: Arc<Vec<ApiKeyConfig>> = Arc::new(processor.config().access.api_keys.clone());
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    tracing::info!("Brain WebSocket server listening on ws://{addr}");
+    tracing::info!("Synapse WebSocket online at ws://{addr}");
     let connections: Connections = Arc::new(Mutex::new(HashMap::new()));
 
     loop {

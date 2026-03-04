@@ -6,7 +6,7 @@ use crossterm::ExecutableCommand;
 use rustyline::DefaultEditor;
 use std::io::stdout;
 
-/// Brain OS -- Central AI Operating System
+/// Brain OS — your AI's long-term memory
 #[derive(Parser)]
 #[command(name = "brain", version, about, long_about = None)]
 struct Cli {
@@ -16,71 +16,70 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize Brain (creates ~/.brain/ and default config)
+    /// Initialize the neural pathways (~/.brain/ data + config)
     Init {
         /// Overwrite existing config file
         #[arg(long)]
         force: bool,
-        /// Enable encryption at rest (AES-256-GCM). Generates a salt and
-        /// prompts for a passphrase. Requires `encryption.enabled: true`
-        /// in config to activate on subsequent runs.
+        /// Seal the blood-brain barrier — enable encryption at rest
+        /// (AES-256-GCM). Generates a salt and prompts for a passphrase.
         #[arg(long)]
         encrypt: bool,
     },
 
-    /// Start an interactive chat session
+    /// Open a synapse — interactive chat session
     Chat {
         /// Optional initial message (non-interactive mode)
         message: Option<String>,
     },
 
-    /// Show system status
+    /// Run a brain scan — show system vitals
     Status,
 
-    /// Start all Brain services as a background daemon.
+    /// Wake the brain — start all services as a background daemon.
     ///
-    /// All adapters (HTTP, WebSocket, gRPC, MCP HTTP) start on their configured
-    /// ports and continue running after the terminal closes. Logs go to
-    /// ~/.brain/logs/brain.log. Use `brain stop` to shut down.
+    /// All synapses (HTTP, WebSocket, gRPC, MCP HTTP) bind to their
+    /// configured ports and keep running after the terminal closes.
+    /// Logs go to ~/.brain/logs/brain.log. Use `brain stop` to sleep.
     Start,
 
-    /// Stop the running Brain daemon.
+    /// Put the brain to sleep — stop the running daemon
     Stop,
 
-    /// Start Brain services in the foreground (development / debugging).
+    /// Keep the brain conscious — run services in the foreground (dev mode).
     ///
-    /// With no flags all four adapters start concurrently.
-    /// Use flags to start only specific adapters.
+    /// With no flags all four synapses start concurrently.
+    /// Use flags to activate only specific synapses.
     ///
     /// Examples:
-    ///   brain serve                  # all adapters
+    ///   brain serve                  # all synapses
     ///   brain serve --http           # HTTP only
     ///   brain serve --http --ws      # HTTP + WebSocket
     Serve {
-        /// Start the HTTP REST API adapter
+        /// Activate the HTTP synapse
         #[arg(long)]
         http: bool,
-        /// Start the WebSocket adapter
+        /// Activate the WebSocket synapse
         #[arg(long)]
         ws: bool,
-        /// Start the gRPC adapter
+        /// Activate the gRPC synapse
         #[arg(long)]
         grpc: bool,
-        /// Start the MCP HTTP adapter
+        /// Activate the MCP HTTP synapse
         #[arg(long)]
         mcp: bool,
-        /// Host to bind all adapters to
+        /// Host to bind all synapses to
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
     },
 
-    /// Start the MCP stdio server.
+    /// Expose a nerve ending — MCP stdio server for external AI clients.
     ///
     /// Used when an MCP client spawns Brain as a subprocess and communicates
     /// over stdin/stdout. This runs in the foreground by design.
     Mcp,
 
-    /// Export all memory (facts + episodes) to a JSON backup file.
+    /// Dump a memory engram — export all facts + episodes to JSON.
     ///
     /// Examples:
     ///   brain export                      # print JSON to stdout
@@ -91,7 +90,7 @@ enum Commands {
         output: Option<String>,
     },
 
-    /// Import memory from a JSON backup file produced by `brain export`.
+    /// Implant a memory engram — import facts + episodes from JSON backup.
     ///
     /// Examples:
     ///   brain import backup.json
@@ -104,15 +103,15 @@ enum Commands {
         dry_run: bool,
     },
 
-    /// Manage Brain as a system service (auto-start on login).
+    /// Wire the brainstem — manage auto-start on login.
     ///
     /// On macOS:   installs a launchd agent in ~/Library/LaunchAgents/.
     /// On Linux:   installs a systemd user service in ~/.config/systemd/user/.
     /// On Windows: registers a Task Scheduler task (no admin required).
     ///
     /// Examples:
-    ///   brain service install    # register + enable auto-start
-    ///   brain service uninstall  # remove the service registration
+    ///   brain service install    # wire the brainstem
+    ///   brain service uninstall  # sever the brainstem
     Service {
         #[command(subcommand)]
         action: ServiceAction,
@@ -121,12 +120,12 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum ServiceAction {
-    /// Register Brain as a login service and start it immediately.
+    /// Connect the brainstem — register as a login service and wake immediately.
     ///
     /// macOS: launchd plist with KeepAlive. Linux: systemd user unit.
     /// Windows: Task Scheduler task at ONLOGON (no admin required).
     Install,
-    /// Remove the Brain login service registration and stop auto-start.
+    /// Sever the brainstem — remove login service and stop auto-start.
     Uninstall,
 }
 
@@ -354,24 +353,24 @@ async fn main() -> anyhow::Result<()> {
         // ── init ──────────────────────────────────────────────────────────────
         Commands::Init { force, encrypt } => {
             let data_dir = config.data_dir();
-            println!("Initializing Brain...");
-            println!("  Data dir:  {}", data_dir.display());
+            println!("Forming neural pathways...");
+            println!("  Cortex:    {}", data_dir.display());
 
             match core::BrainConfig::write_default_config(force)? {
-                Some(path) => println!("  Config:    {} (created)", path.display()),
+                Some(path) => println!("  Genome:    {} (written)", path.display()),
                 None => println!(
-                    "  Config:    {} (already exists, use --force to overwrite)",
+                    "  Genome:    {} (already exists, use --force to overwrite)",
                     core::BrainConfig::user_config_path().display()
                 ),
             }
 
             let subdirs = ["db", "ruvector", "models", "logs", "exports"];
             for sub in &subdirs {
-                println!("  Dir:       {}", data_dir.join(sub).display());
+                println!("  Region:    {}", data_dir.join(sub).display());
             }
 
             println!(
-                "\n  Embedding:  {} (pull with `ollama pull {}`)",
+                "\n  Sensory cortex: {} (pull with `ollama pull {}`)",
                 config.embedding.model,
                 config.embedding.model
             );
@@ -380,15 +379,15 @@ async fn main() -> anyhow::Result<()> {
             if encrypt {
                 let salt = storage::Encryptor::generate_salt();
                 write_salt(&config, &salt)?;
-                println!("\n  Encryption: salt generated → {}", salt_path(&config).display());
+                println!("\n  Blood-brain barrier: salt generated → {}", salt_path(&config).display());
                 println!("  Next steps:");
-                println!("    1. Set 'encryption.enabled: true' in your config.");
+                println!("    1. Set 'encryption.enabled: true' in your genome.");
                 println!("    2. Set BRAIN_PASSPHRASE env var for the daemon, or");
                 println!("       Brain will prompt you for a passphrase on startup.");
             }
 
             println!(
-                "\nBrain initialized. Edit {} to customize.",
+                "\nNeural pathways formed. Edit {} to customize your genome.",
                 core::BrainConfig::user_config_path().display()
             );
         }
@@ -422,12 +421,12 @@ async fn main() -> anyhow::Result<()> {
             // Prevent double-start
             if let Some(pid) = read_pid(&config) {
                 if is_process_running(pid) {
-                    println!("Brain is already running (PID {}).", pid);
+                    println!("Brain is already awake (PID {}).", pid);
                     println!(
                         "  Logs → {}",
                         config.data_dir().join("logs/brain.log").display()
                     );
-                    println!("Run `brain stop` to stop it first.");
+                    println!("Run `brain stop` to put it to sleep first.");
                     return Ok(());
                 }
                 // Stale PID file — clean it up and continue
@@ -438,13 +437,13 @@ async fn main() -> anyhow::Result<()> {
             let pid = spawn_daemon(&log_path)?;
             write_pid(&config, pid)?;
 
-            println!("Brain started (PID {}).", pid);
-            println!("  HTTP  → http://127.0.0.1:{}", config.adapters.http.port);
-            println!("  WS    → ws://127.0.0.1:{}", config.adapters.ws.port);
-            println!("  MCP   → http://127.0.0.1:{}", config.adapters.mcp.port);
-            println!("  gRPC  → 127.0.0.1:{}", config.adapters.grpc.port);
-            println!("  Logs  → {}", log_path.display());
-            println!("\nRun `brain stop` to shut down.");
+            println!("Brain is awake (PID {}).", pid);
+            println!("  Synapse HTTP  → http://127.0.0.1:{}", config.adapters.http.port);
+            println!("  Synapse WS    → ws://127.0.0.1:{}", config.adapters.ws.port);
+            println!("  Synapse MCP   → http://127.0.0.1:{}", config.adapters.mcp.port);
+            println!("  Synapse gRPC  → 127.0.0.1:{}", config.adapters.grpc.port);
+            println!("  Logs          → {}", log_path.display());
+            println!("\nRun `brain stop` to put it to sleep.");
         }
 
         // ── stop (daemon) ─────────────────────────────────────────────────────
@@ -453,14 +452,14 @@ async fn main() -> anyhow::Result<()> {
                 Some(pid) if is_process_running(pid) => {
                     stop_process(pid)?;
                     remove_pid(&config);
-                    println!("Brain stopped (PID {}).", pid);
+                    println!("Brain is asleep (PID {}).", pid);
                 }
                 Some(_) => {
                     remove_pid(&config);
-                    println!("Brain was not running (stale PID file removed).");
+                    println!("Brain was already asleep (stale PID file cleaned up).");
                 }
                 None => {
-                    println!("Brain is not running.");
+                    println!("Brain is already asleep.");
                 }
             }
         }
@@ -489,7 +488,7 @@ async fn main() -> anyhow::Result<()> {
             let processor =
                 Arc::new(signal::SignalProcessor::new_with_encryptor(config.clone(), encryptor).await?);
 
-            println!("Starting Brain OS...");
+            println!("Waking Brain OS...");
 
             let mut set = tokio::task::JoinSet::new();
 
@@ -497,7 +496,7 @@ async fn main() -> anyhow::Result<()> {
                 let p = processor.clone();
                 let h = host.clone();
                 let port = config.adapters.http.port;
-                println!("  HTTP  → http://{}:{}", h, port);
+                println!("  Synapse HTTP  → http://{}:{}", h, port);
                 set.spawn(async move { httpadapter::serve(p, &h, port).await });
             }
 
@@ -505,7 +504,7 @@ async fn main() -> anyhow::Result<()> {
                 let p = processor.clone();
                 let h = host.clone();
                 let port = config.adapters.ws.port;
-                println!("  WS    → ws://{}:{}", h, port);
+                println!("  Synapse WS    → ws://{}:{}", h, port);
                 set.spawn(async move { wsadapter::serve(p, &h, port).await });
             }
 
@@ -513,7 +512,7 @@ async fn main() -> anyhow::Result<()> {
                 let p = processor.clone();
                 let h = host.clone();
                 let port = config.adapters.grpc.port;
-                println!("  gRPC  → {}:{}", h, port);
+                println!("  Synapse gRPC  → {}:{}", h, port);
                 set.spawn(async move { grpcadapter::serve(p, &h, port).await });
             }
 
@@ -521,7 +520,7 @@ async fn main() -> anyhow::Result<()> {
                 let p = processor.clone();
                 let h = host.clone();
                 let port = config.adapters.mcp.port;
-                println!("  MCP   → http://{}:{}", h, port);
+                println!("  Synapse MCP   → http://{}:{}", h, port);
                 set.spawn(async move { mcp::serve_http(p, &h, port).await });
             }
 
@@ -628,7 +627,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
 
-            println!("\nPress Ctrl+C to stop.\n");
+            println!("\nBrain is conscious. Press Ctrl+C to sleep.\n");
 
             // ── Graceful shutdown ─────────────────────────────────────────────
             // Race between: any adapter task finishing (error path) or a
@@ -682,7 +681,7 @@ async fn main() -> anyhow::Result<()> {
 
             // Flush SQLite WAL before exit
             processor.shutdown();
-            tracing::info!("Brain OS stopped cleanly");
+            tracing::info!("Brain OS is asleep");
         }
 
         // ── mcp stdio ─────────────────────────────────────────────────────────
@@ -716,70 +715,70 @@ async fn main() -> anyhow::Result<()> {
 // ─── Status ───────────────────────────────────────────────────────────────────
 
 async fn show_status(config: &core::BrainConfig) -> anyhow::Result<()> {
-    println!("Brain Status");
-    println!("  Version:    {}", env!("CARGO_PKG_VERSION"));
-    println!("  Data dir:   {}", config.data_dir().display());
+    println!("Brain Scan");
+    println!("  DNA:          v{}", env!("CARGO_PKG_VERSION"));
+    println!("  Cortex:       {}", config.data_dir().display());
 
     // Daemon state
     match read_pid(config) {
         Some(pid) if is_process_running(pid) => {
-            println!("  Daemon:     running (PID {})", pid);
+            println!("  State:        awake (PID {})", pid);
         }
         Some(_) => {
-            println!("  Daemon:     stopped (stale PID file)");
+            println!("  State:        asleep (stale PID file)");
         }
         None => {
-            println!("  Daemon:     stopped  (run `brain start` to start)");
+            println!("  State:        asleep (run `brain start` to wake)");
         }
     }
 
     println!(
-        "  LLM:        {} ({})",
+        "  Cortex LLM:   {} ({})",
         config.llm.model, config.llm.provider
     );
     println!(
-        "  Embedding:  {} ({}d)",
+        "  Sensory:      {} ({}d)",
         config.embedding.model, config.embedding.dimensions
     );
     println!(
-        "  Encryption: {}",
+        "  Barrier:      {}",
         if config.encryption.enabled {
-            "enabled"
+            "sealed"
         } else {
-            "disabled"
+            "open"
         }
     );
-    println!("  SQLite:     {}", config.sqlite_path().display());
-    println!("  RuVector:   {}", config.ruvector_path().display());
+    println!("  Hippocampus:  {}", config.sqlite_path().display());
+    println!("  Neural mesh:  {}", config.ruvector_path().display());
     println!(
-        "  Config:     {}",
+        "  Genome:       {}",
         core::BrainConfig::user_config_path().display()
     );
 
-    println!("\n  Adapters:");
+    println!("\n  Synapses:");
     let h = &config.adapters.http;
     println!(
         "    HTTP      : port {} ({})",
         h.port,
-        if h.enabled { "enabled" } else { "disabled" }
+        if h.enabled { "active" } else { "dormant" }
     );
     let w = &config.adapters.ws;
     println!(
         "    WebSocket : port {} ({})",
         w.port,
-        if w.enabled { "enabled" } else { "disabled" }
+        if w.enabled { "active" } else { "dormant" }
     );
     let m = &config.adapters.mcp;
     println!(
         "    MCP       : port {} ({})",
         m.port,
-        if m.enabled { "enabled" } else { "disabled" }
+        if m.enabled { "active" } else { "dormant" }
     );
     let g = &config.adapters.grpc;
     println!(
         "    gRPC      : port {} ({})",
         g.port,
-        if g.enabled { "enabled" } else { "disabled" }
+        if g.enabled { "active" } else { "dormant" }
     );
 
     // LLM health
@@ -794,22 +793,22 @@ async fn show_status(config: &core::BrainConfig) -> anyhow::Result<()> {
     let provider = cortex::llm::create_provider(&llm_cfg);
     let llm_healthy = provider.health_check().await;
     println!(
-        "  LLM Health: {}",
-        if llm_healthy { "connected" } else { "disconnected" }
+        "  Cortex:       {}",
+        if llm_healthy { "responsive" } else { "unresponsive" }
     );
 
     // Database stats
     match storage::SqlitePool::open(&config.sqlite_path()) {
         Ok(pool) => match pool.table_stats() {
             Ok(stats) => {
-                println!("\n  Database Tables:");
+                println!("\n  Memory Regions:");
                 for (table, count) in stats {
                     println!("    {}: {} rows", table, count);
                 }
             }
-            Err(e) => println!("\n  Database: error reading stats — {}", e),
+            Err(e) => println!("\n  Hippocampus: error reading stats — {}", e),
         },
-        Err(e) => println!("\n  Database: error opening — {}", e),
+        Err(e) => println!("\n  Hippocampus: error opening — {}", e),
     }
 
     Ok(())
@@ -890,11 +889,11 @@ fn cmd_service_install() -> anyhow::Result<()> {
             anyhow::bail!("launchctl load failed: {stderr}");
         }
 
-        println!("Brain service installed (launchd).");
+        println!("Brainstem wired (launchd).");
         println!("  Plist:  {}", plist_path.display());
         println!("  Log:    {}/brain.log", log_dir.display());
-        println!("  Brain will now start automatically on every login.");
-        println!("  To stop auto-start: brain service uninstall");
+        println!("  Brain will wake automatically on every login.");
+        println!("  To sever: brain service uninstall");
         return Ok(());
     }
 
@@ -909,7 +908,7 @@ fn cmd_service_install() -> anyhow::Result<()> {
 
         let unit = format!(
             r#"[Unit]
-Description=Brain OS — Personal AI Memory System
+Description=Brain OS — your AI's long-term memory
 After=network.target
 
 [Service]
@@ -937,16 +936,16 @@ WantedBy=default.target
             .status();
 
         if reload.is_err() || enable.is_err() {
-            println!("Brain service file written to {}.", service_path.display());
+            println!("Brainstem partially wired — unit file written to {}.", service_path.display());
             println!("  Run manually:");
             println!("    systemctl --user daemon-reload");
             println!("    systemctl --user enable --now brain.service");
         } else {
-            println!("Brain service installed (systemd user).");
+            println!("Brainstem wired (systemd user).");
             println!("  Unit:   {}", service_path.display());
             println!("  Log:    {}/brain.log", log_dir.display());
-            println!("  Brain will now start automatically on every login.");
-            println!("  To stop auto-start: brain service uninstall");
+            println!("  Brain will wake automatically on every login.");
+            println!("  To sever: brain service uninstall");
         }
         return Ok(());
     }
@@ -981,10 +980,10 @@ WantedBy=default.target
             .args(["/Run", "/TN", task_name])
             .output();
 
-        println!("Brain service installed (Windows Task Scheduler).");
+        println!("Brainstem wired (Windows Task Scheduler).");
         println!("  Task:   {task_name}");
-        println!("  Brain will now start automatically on every login.");
-        println!("  To stop auto-start: brain service uninstall");
+        println!("  Brain will wake automatically on every login.");
+        println!("  To sever: brain service uninstall");
         return Ok(());
     }
 
@@ -1011,7 +1010,7 @@ fn cmd_service_uninstall() -> anyhow::Result<()> {
             .join("com.brain.plist");
 
         if !plist_path.exists() {
-            println!("Brain service is not installed (no plist found).");
+            println!("No brainstem found (no plist installed).");
             return Ok(());
         }
 
@@ -1020,9 +1019,9 @@ fn cmd_service_uninstall() -> anyhow::Result<()> {
             .output();
 
         std::fs::remove_file(&plist_path)?;
-        println!("Brain service uninstalled.");
+        println!("Brainstem severed.");
         println!("  Removed: {}", plist_path.display());
-        println!("  Brain will no longer start automatically on login.");
+        println!("  Brain will no longer wake automatically on login.");
         return Ok(());
     }
 
@@ -1035,7 +1034,7 @@ fn cmd_service_uninstall() -> anyhow::Result<()> {
             .join("brain.service");
 
         if !service_path.exists() {
-            println!("Brain service is not installed (no unit file found).");
+            println!("No brainstem found (no unit file installed).");
             return Ok(());
         }
 
@@ -1049,9 +1048,9 @@ fn cmd_service_uninstall() -> anyhow::Result<()> {
             .args(["--user", "daemon-reload"])
             .output();
 
-        println!("Brain service uninstalled.");
+        println!("Brainstem severed.");
         println!("  Removed: {}", service_path.display());
-        println!("  Brain will no longer start automatically on login.");
+        println!("  Brain will no longer wake automatically on login.");
         return Ok(());
     }
 
@@ -1073,15 +1072,15 @@ fn cmd_service_uninstall() -> anyhow::Result<()> {
             let stderr = String::from_utf8_lossy(&out.stderr);
             // Treat "task not found" as a no-op so uninstall is idempotent
             if stderr.contains("cannot find") || stderr.contains("not exist") {
-                println!("Brain service is not installed (no task found).");
+                println!("No brainstem found (no task registered).");
                 return Ok(());
             }
             anyhow::bail!("schtasks /Delete failed: {stderr}");
         }
 
-        println!("Brain service uninstalled.");
+        println!("Brainstem severed.");
         println!("  Task '{task_name}' removed from Windows Task Scheduler.");
-        println!("  Brain will no longer start automatically on login.");
+        println!("  Brain will no longer wake automatically on login.");
         return Ok(());
     }
 
@@ -1396,13 +1395,13 @@ async fn chat_interactive(config: &core::BrainConfig) -> anyhow::Result<()> {
         "║  Brain v{}                          ║",
         env!("CARGO_PKG_VERSION")
     );
-    println!("║  A personal AI that remembers you     ║");
+    println!("║  Your AI's long-term memory           ║");
     println!("╚═══════════════════════════════════════╝");
     println!();
-    println!("  Model: {}", config.llm.model);
-    println!("  Data:  {}", config.data_dir().display());
+    println!("  Cortex:  {}", config.llm.model);
+    println!("  Memory:  {}", config.data_dir().display());
     println!();
-    println!("Commands: /status  /clear  /quit");
+    println!("Signals: /status  /clear  /quit");
     println!();
 
     let mut brain = BrainSession::new(config).await?;
@@ -1421,7 +1420,7 @@ async fn chat_interactive(config: &core::BrainConfig) -> anyhow::Result<()> {
 
                 match input {
                     "/quit" | "/exit" => {
-                        println!("Goodbye!");
+                        println!("Going dormant...");
                         break;
                     }
                     "/status" => {
@@ -1430,7 +1429,7 @@ async fn chat_interactive(config: &core::BrainConfig) -> anyhow::Result<()> {
                     }
                     "/clear" => {
                         brain.clear_history();
-                        println!("Conversation history cleared.");
+                        println!("Short-term memory cleared.");
                         continue;
                     }
                     _ => {}
@@ -1449,7 +1448,7 @@ async fn chat_interactive(config: &core::BrainConfig) -> anyhow::Result<()> {
             }
             Err(rustyline::error::ReadlineError::Interrupted)
             | Err(rustyline::error::ReadlineError::Eof) => {
-                println!("Goodbye!");
+                println!("Going dormant...");
                 break;
             }
             Err(err) => {
