@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
+use crossterm::cursor;
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
+use crossterm::terminal;
 use crossterm::ExecutableCommand;
 use rustyline::DefaultEditor;
-use std::io::stdout;
+use std::io::{stdout, Write};
 
 /// Brain OS — your AI's long-term memory
 #[derive(Parser)]
@@ -1450,7 +1452,35 @@ async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()
                     _ => {}
                 }
 
-                match brain.process_message(input).await {
+                // Show a spinner while recalling + thinking
+                let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let stop_clone = Arc::clone(&stop);
+                let spinner_handle = tokio::spawn(async move {
+                    let frames = ["  Recalling.", "  Recalling..", "  Recalling..."];
+                    let mut i = 0;
+                    while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                        {
+                            let mut out = stdout();
+                            let _ = out.execute(cursor::MoveToColumn(0));
+                            let _ = out.execute(terminal::Clear(terminal::ClearType::CurrentLine));
+                            let _ = write!(out, "\x1b[90m{}\x1b[0m", frames[i % frames.len()]);
+                            let _ = out.flush();
+                        }
+                        i += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    }
+                    // Clear the spinner line
+                    let mut out = stdout();
+                    let _ = out.execute(cursor::MoveToColumn(0));
+                    let _ = out.execute(terminal::Clear(terminal::ClearType::CurrentLine));
+                    let _ = out.flush();
+                });
+
+                let result = brain.process_message(input).await;
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                let _ = spinner_handle.await;
+
+                match result {
                     Ok(response) => {
                         let mut out = stdout();
                         out.execute(SetForegroundColor(Color::Green))?;
@@ -1458,7 +1488,14 @@ async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()
                         out.execute(ResetColor)?;
                         println!("{}", response);
                     }
-                    Err(e) => eprintln!("Error: {}", e),
+                    Err(e) => {
+                        let msg = e.to_string();
+                        if msg.contains("error sending request") || msg.contains("connection refused") {
+                            eprintln!("LLM unreachable — is Ollama running? (`ollama serve`)");
+                        } else {
+                            eprintln!("Error: {msg}");
+                        }
+                    }
                 }
             }
             Err(rustyline::error::ReadlineError::Interrupted)
