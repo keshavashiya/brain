@@ -379,11 +379,20 @@ async fn main() -> anyhow::Result<()> {
             if encrypt {
                 let salt = storage::Encryptor::generate_salt();
                 write_salt(&config, &salt)?;
-                println!("\n  Blood-brain barrier: salt generated → {}", salt_path(&config).display());
-                println!("  Next steps:");
-                println!("    1. Set 'encryption.enabled: true' in your genome.");
-                println!("    2. Set BRAIN_PASSPHRASE env var for the daemon, or");
-                println!("       Brain will prompt you for a passphrase on startup.");
+
+                // Enable encryption in the config file automatically
+                let config_path = brain_core::BrainConfig::user_config_path();
+                if let Ok(yaml) = std::fs::read_to_string(&config_path) {
+                    let patched = yaml.replace(
+                        "enabled: false               # Run `brain init --encrypt` to generate a salt and enable",
+                        "enabled: true                # Activated by `brain init --encrypt`",
+                    );
+                    let _ = std::fs::write(&config_path, patched);
+                }
+
+                println!("\n  Blood-brain barrier: sealed (salt → {})", salt_path(&config).display());
+                println!("  Set BRAIN_PASSPHRASE env var for the daemon, or");
+                println!("  Brain will prompt you for a passphrase on startup.");
             }
 
             println!(
