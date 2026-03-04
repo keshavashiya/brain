@@ -474,6 +474,50 @@ impl SignalProcessor {
                 })
             }
 
+            // ── FORGET: search for matching facts and delete them ────────────
+            thalamus::Intent::Forget { target } => {
+                let mut deleted_count = 0usize;
+
+                if let Some(semantic) = &self.semantic {
+                    match semantic.find_facts_matching(&target) {
+                        Ok(facts) if !facts.is_empty() => {
+                            for fact in &facts {
+                                if let Err(e) = semantic.delete_fact(&fact.id).await {
+                                    tracing::warn!(
+                                        fact_id = %fact.id,
+                                        "Failed to delete fact: {e}"
+                                    );
+                                } else {
+                                    deleted_count += 1;
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!("Forget search failed: {e}");
+                        }
+                    }
+                }
+
+                let message = if deleted_count > 0 {
+                    format!(
+                        "Forgotten: removed {deleted_count} fact(s) matching \"{target}\""
+                    )
+                } else {
+                    format!("No facts found matching \"{target}\" to forget")
+                };
+
+                Ok(SignalResponse {
+                    signal_id,
+                    status: ResponseStatus::Ok,
+                    response: ResponseContent::Text(message),
+                    memory_context: MemoryContext {
+                        facts_used: 0,
+                        episodes_used: 0,
+                    },
+                })
+            }
+
             // ── Other intents: route acknowledgement ─────────────────────────
             other => Ok(SignalResponse::ok(
                 signal_id,
@@ -552,7 +596,7 @@ impl SignalProcessor {
                     source: hippocampus::MemorySource::Episodic,
                     score: r.rank,
                     importance: 0.5,
-                    timestamp: String::new(),
+                    timestamp: r.timestamp,
                 })
                 .collect();
             (memories, 0, episodes_used)

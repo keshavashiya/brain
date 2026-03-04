@@ -38,6 +38,8 @@ pub struct Fact {
 pub struct SemanticResult {
     pub fact: Fact,
     pub distance: f32,
+    /// When this fact was last updated (ISO 8601).
+    pub created_at: String,
 }
 
 /// Semantic memory store — dual-writes to SQLite + RuVector.
@@ -128,9 +130,9 @@ impl SemanticStore {
             if results.len() >= top_k {
                 break;
             }
-            // Look up the full fact from SQLite
-            let fact_opt = self.get_fact(&vr.id)?;
-            if let Some(fact) = fact_opt {
+            // Look up the full fact + timestamp from SQLite
+            let fact_opt = self.get_fact_with_timestamp(&vr.id)?;
+            if let Some((fact, created_at)) = fact_opt {
                 // Filter by namespace if specified
                 if namespace.is_some_and(|ns| ns != fact.namespace) {
                     continue;
@@ -138,6 +140,7 @@ impl SemanticStore {
                 results.push(SemanticResult {
                     fact,
                     distance: vr.distance,
+                    created_at,
                 });
             }
         }
@@ -169,6 +172,37 @@ impl SemanticStore {
             );
             match result {
                 Ok(fact) => Ok(Some(fact)),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        })?)
+    }
+
+    /// Get a fact and its updated_at timestamp by ID.
+    fn get_fact_with_timestamp(&self, fact_id: &str) -> Result<Option<(Fact, String)>, SemanticError> {
+        let pool = &self.db;
+        Ok(self.db.with_conn(|conn| {
+            let result = conn.query_row(
+                "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, updated_at
+                 FROM semantic_facts WHERE id = ?1",
+                [fact_id],
+                |row| {
+                    let raw_object: String = row.get(5)?;
+                    let updated_at: String = row.get(8)?;
+                    Ok((Fact {
+                        id: row.get(0)?,
+                        namespace: row.get(1)?,
+                        category: row.get(2)?,
+                        subject: row.get(3)?,
+                        predicate: row.get(4)?,
+                        object: pool.decrypt_content(&raw_object),
+                        confidence: row.get(6)?,
+                        source_episode_id: row.get(7)?,
+                    }, updated_at))
+                },
+            );
+            match result {
+                Ok(pair) => Ok(Some(pair)),
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
                 Err(e) => Err(e.into()),
             }
@@ -359,6 +393,59 @@ impl SemanticStore {
                 .collect();
             result.sort_by(|a, b| a.namespace.cmp(&b.namespace));
             Ok(result)
+        })?)
+    }
+
+    /// Delete a fact from both SQLite and RuVector.
+    pub async fn delete_fact(&self, fact_id: &str) -> Result<(), SemanticError> {
+        // Delete from SQLite
+        self.db.with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM semantic_facts WHERE id = ?1",
+                [fact_id],
+            )?;
+            Ok(())
+        })?;
+
+        // Delete from RuVector
+        self.ruv.delete("facts_vec", fact_id).await?;
+
+        Ok(())
+    }
+
+    /// Find facts whose subject, predicate, or object contains the query string.
+    ///
+    /// Used by the Forget intent to find facts matching a target description.
+    pub fn find_facts_matching(&self, query: &str) -> Result<Vec<Fact>, SemanticError> {
+        let pool = &self.db;
+        let pattern = format!("%{query}%");
+        Ok(self.db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id
+                 FROM semantic_facts
+                 WHERE superseded_by IS NULL
+                   AND (subject LIKE ?1 OR predicate LIKE ?1 OR object LIKE ?1)
+                 ORDER BY rowid DESC
+                 LIMIT 50",
+            )?;
+
+            let facts = stmt
+                .query_map([&pattern], |row| {
+                    let raw_object: String = row.get(5)?;
+                    Ok(Fact {
+                        id: row.get(0)?,
+                        namespace: row.get(1)?,
+                        category: row.get(2)?,
+                        subject: row.get(3)?,
+                        predicate: row.get(4)?,
+                        object: pool.decrypt_content(&raw_object),
+                        confidence: row.get(6)?,
+                        source_episode_id: row.get(7)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            Ok(facts)
         })?)
     }
 

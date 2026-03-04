@@ -47,6 +47,8 @@ pub struct FtsResult {
     pub episode_id: String,
     pub content: String,
     pub rank: f64,
+    /// ISO 8601 timestamp of when this episode was stored.
+    pub timestamp: String,
 }
 
 /// Episodic memory store — manages conversations via SQLite.
@@ -212,7 +214,7 @@ impl EpisodicStore {
     pub fn search_bm25(&self, query: &str, limit: usize) -> Result<Vec<FtsResult>, EpisodicError> {
         Ok(self.db.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT e.id, f.content, f.rank
+                "SELECT e.id, f.content, f.rank, e.timestamp
                  FROM episodes_fts f
                  JOIN episodes e ON e.rowid = f.rowid
                  WHERE episodes_fts MATCH ?1
@@ -226,6 +228,7 @@ impl EpisodicStore {
                         episode_id: row.get(0)?,
                         content: row.get(1)?,
                         rank: row.get(2)?,
+                        timestamp: row.get(3)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;

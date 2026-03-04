@@ -55,6 +55,8 @@ pub struct ClientMessage {
     pub sender: Option<String>,
     /// Optional key-value metadata to attach to the signal.
     pub metadata: Option<HashMap<String, String>>,
+    /// Optional memory namespace (default: `"personal"`).
+    pub namespace: Option<String>,
 }
 
 /// Server-to-client auth result frame.
@@ -295,6 +297,9 @@ async fn process_text_frame(
     );
     if let Some(meta) = client_msg.metadata {
         signal.metadata = meta;
+    }
+    if let Some(ns) = client_msg.namespace {
+        signal.namespace = ns;
     }
 
     let signal_id = signal.id;

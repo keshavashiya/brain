@@ -700,7 +700,7 @@ async fn main() -> anyhow::Result<()> {
 
         // ── import ────────────────────────────────────────────────────────────
         Commands::Import { file, dry_run } => {
-            cmd_import(&config, &file, dry_run)?;
+            cmd_import(&config, &file, dry_run).await?;
         }
 
         // ── service ───────────────────────────────────────────────────────────
@@ -1206,7 +1206,7 @@ fn cmd_export(config: &core::BrainConfig, output: Option<&str>) -> anyhow::Resul
     Ok(())
 }
 
-fn cmd_import(config: &core::BrainConfig, file: &str, dry_run: bool) -> anyhow::Result<()> {
+async fn cmd_import(config: &core::BrainConfig, file: &str, dry_run: bool) -> anyhow::Result<()> {
     let raw = std::fs::read_to_string(file)
         .map_err(|e| anyhow::anyhow!("Cannot read {file}: {e}"))?;
     let export: MemoryExport =
@@ -1238,6 +1238,9 @@ fn cmd_import(config: &core::BrainConfig, file: &str, dry_run: bool) -> anyhow::
     let mut facts_imported = 0usize;
     let mut episodes_imported = 0usize;
 
+    // Collect IDs of newly imported facts for re-embedding
+    let mut new_fact_ids: Vec<usize> = Vec::new();
+
     db.with_conn(|conn| {
         // Insert sessions (skip if already exist)
         for (sid, channel) in &sessions {
@@ -1249,7 +1252,7 @@ fn cmd_import(config: &core::BrainConfig, file: &str, dry_run: bool) -> anyhow::
         }
 
         // Insert facts (skip duplicates by id)
-        for f in &export.facts {
+        for (idx, f) in export.facts.iter().enumerate() {
             let n = conn.execute(
                 "INSERT INTO semantic_facts
                     (id, namespace, category, subject, predicate, object,
@@ -1261,6 +1264,9 @@ fn cmd_import(config: &core::BrainConfig, file: &str, dry_run: bool) -> anyhow::
                     f.predicate, f.object, f.confidence, f.source_episode_id
                 ],
             )?;
+            if n > 0 {
+                new_fact_ids.push(idx);
+            }
             facts_imported += n;
         }
 
@@ -1290,6 +1296,88 @@ fn cmd_import(config: &core::BrainConfig, file: &str, dry_run: bool) -> anyhow::
         export.facts.len() - facts_imported,
         export.episodes.len() - episodes_imported,
     );
+
+    // Re-embed newly imported facts into RuVector so they're visible to vector search
+    if !new_fact_ids.is_empty() {
+        let embedding_dim = config.embedding.dimensions as usize;
+        let ruv_result = storage::RuVectorStore::open(&config.ruvector_path(), embedding_dim).await;
+
+        match ruv_result {
+            Ok(ruv) => {
+                ruv.ensure_tables().await.ok();
+
+                // Create embedder
+                let embedder = match config.llm.provider.as_str() {
+                    "openai" => {
+                        let api_key = std::env::var("BRAIN_LLM__API_KEY").unwrap_or_default();
+                        hippocampus::Embedder::for_openai(
+                            &config.llm.base_url,
+                            &config.embedding.model,
+                            &api_key,
+                        )
+                    }
+                    _ => hippocampus::Embedder::for_ollama(
+                        &config.llm.base_url,
+                        &config.embedding.model,
+                    ),
+                };
+
+                let mut embedded = 0usize;
+                let mut failed = 0usize;
+
+                for &idx in &new_fact_ids {
+                    let f = &export.facts[idx];
+                    let text = format!("{} {} {}", f.subject, f.predicate, f.object);
+
+                    match embedder.embed(&text).await {
+                        Ok(vector) => {
+                            let now = chrono::Utc::now().to_rfc3339();
+                            if let Err(e) = ruv
+                                .add_vectors(
+                                    "facts_vec",
+                                    vec![f.id.clone()],
+                                    vec![text],
+                                    vec![vector],
+                                    vec![now],
+                                    "semantic",
+                                )
+                                .await
+                            {
+                                tracing::warn!("RuVector insert failed for fact {}: {e}", f.id);
+                                failed += 1;
+                            } else {
+                                embedded += 1;
+                            }
+                        }
+                        Err(e) => {
+                            if embedded == 0 && failed == 0 {
+                                // First failure — likely embedding service is down
+                                println!(
+                                    "Warning: Embedding unavailable ({e}). \
+                                     Imported facts will not appear in vector search until re-embedded."
+                                );
+                                break;
+                            }
+                            failed += 1;
+                        }
+                    }
+                }
+
+                if embedded > 0 {
+                    println!("Re-embedded {embedded} facts into vector index.");
+                }
+                if failed > 0 {
+                    println!("Warning: {failed} facts failed to embed.");
+                }
+            }
+            Err(e) => {
+                println!(
+                    "Warning: RuVector unavailable ({e}). \
+                     Imported facts visible in SQLite but not vector search."
+                );
+            }
+        }
+    }
 
     Ok(())
 }
@@ -1383,6 +1471,9 @@ struct BrainSession {
     _db: storage::SqlitePool,
     episodic: hippocampus::EpisodicStore,
     semantic: Option<hippocampus::SemanticStore>,
+    embedder: Option<hippocampus::Embedder>,
+    embedding_dim: usize,
+    recall_engine: hippocampus::RecallEngine,
     llm: Box<dyn cortex::llm::LlmProvider>,
     context_assembler: cortex::context::ContextAssembler,
     conversation_history: Vec<cortex::llm::Message>,
@@ -1403,6 +1494,25 @@ impl BrainSession {
             None
         };
 
+        // Create embedder (same logic as SignalProcessor)
+        let embedding_dim = config.embedding.dimensions as usize;
+        let embedder = match config.llm.provider.as_str() {
+            "openai" => {
+                let api_key = std::env::var("BRAIN_LLM__API_KEY").unwrap_or_default();
+                Some(hippocampus::Embedder::for_openai(
+                    &config.llm.base_url,
+                    &config.embedding.model,
+                    &api_key,
+                ))
+            }
+            _ => Some(hippocampus::Embedder::for_ollama(
+                &config.llm.base_url,
+                &config.embedding.model,
+            )),
+        };
+
+        let recall_engine = hippocampus::RecallEngine::with_defaults();
+
         let llm = cortex::llm::create_provider(&cortex::llm::ProviderConfig {
             provider: config.llm.provider.clone(),
             base_url: config.llm.base_url.clone(),
@@ -1420,6 +1530,9 @@ impl BrainSession {
             _db: db,
             episodic,
             semantic,
+            embedder,
+            embedding_dim,
+            recall_engine,
             llm,
             context_assembler,
             conversation_history: Vec::new(),
@@ -1429,6 +1542,21 @@ impl BrainSession {
 
     fn clear_history(&mut self) {
         self.conversation_history.clear();
+    }
+
+    /// Generate a vector embedding for text, falling back to a zero vector.
+    async fn embed_text(&mut self, text: &str) -> Vec<f32> {
+        if let Some(ref mut embedder) = self.embedder {
+            match embedder.embed(text).await {
+                Ok(vec) => vec,
+                Err(e) => {
+                    tracing::warn!("Embedding failed in CLI chat, using zero vector: {e}");
+                    vec![0.0_f32; self.embedding_dim]
+                }
+            }
+        } else {
+            vec![0.0_f32; self.embedding_dim]
+        }
     }
 
     async fn process_message(&mut self, message: &str) -> anyhow::Result<String> {
@@ -1459,22 +1587,36 @@ impl BrainSession {
             };
         }
 
-        // BM25 recall from episodic memory
-        let mut memories = Vec::new();
-        if self.semantic.is_some() {
-            if let Ok(hits) = self.episodic.search_bm25(message, 10) {
-                for h in hits {
-                    memories.push(hippocampus::search::Memory {
-                        id: h.episode_id,
-                        content: h.content,
-                        source: hippocampus::search::MemorySource::Episodic,
-                        score: h.rank,
-                        importance: 0.5,
-                        timestamp: String::new(),
-                    });
+        // Hybrid recall (BM25 + ANN via RecallEngine) — same path as SignalProcessor
+        let query_vector = self.embed_text(message).await;
+        let memories = if let Some(semantic) = &self.semantic {
+            match self
+                .recall_engine
+                .recall(message, query_vector, &self.episodic, semantic, 10, None)
+                .await
+            {
+                Ok(mems) => mems,
+                Err(e) => {
+                    tracing::warn!("Recall engine failed in CLI chat: {e}");
+                    Vec::new()
                 }
             }
-        }
+        } else {
+            // Semantic store unavailable — fall back to BM25 only
+            self.episodic
+                .search_bm25(message, 10)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|r| hippocampus::search::Memory {
+                    id: r.episode_id,
+                    content: r.content,
+                    source: hippocampus::search::MemorySource::Episodic,
+                    score: r.rank,
+                    importance: 0.5,
+                    timestamp: r.timestamp,
+                })
+                .collect()
+        };
 
         let messages = self
             .context_assembler

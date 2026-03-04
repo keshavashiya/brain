@@ -23,6 +23,8 @@ message SearchRequest {
   string query = 1;
   // Maximum number of results to return (default: 10).
   uint32 top_k = 2;
+  // Optional namespace filter (default: all namespaces).
+  string namespace = 3;
 }
 
 message SearchResponse {
@@ -37,6 +39,8 @@ message StoreRequest {
   string object    = 3;
   // Optional category (default: "general").
   string category  = 4;
+  // Optional namespace (default: "personal").
+  string namespace = 5;
 }
 
 message StoreResponse {
@@ -50,6 +54,8 @@ message StoreResponse {
 message GetFactsRequest {
   // Optional subject filter; empty string returns all facts.
   string subject = 1;
+  // Optional namespace filter (default: all namespaces).
+  string namespace = 2;
 }
 
 message GetFactsResponse {

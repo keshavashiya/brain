@@ -141,14 +141,14 @@ impl RecallEngine {
         let fused = rrf_fuse(&[bm25_ranked, ann_ranked], self.config.rrf_k);
 
         // 4. Build Memory objects and rerank
-        let _now = chrono::Utc::now();
+        let now = chrono::Utc::now();
         let mut memories: Vec<Memory> = Vec::new();
 
         for (id, rrf_score) in &fused {
             // Try episodic first
             if let Some(fts) = bm25_results.iter().find(|r| &r.episode_id == id) {
                 let importance = 0.5; // default for BM25 hits
-                let hours = 1.0; // simplified — would parse timestamp
+                let hours = parse_elapsed_hours(&fts.timestamp, &now);
                 let retention = forgetting_curve(importance, hours, self.config.decay_rate);
                 let final_score = rrf_score
                     + self.config.importance_weight * importance
@@ -160,7 +160,7 @@ impl RecallEngine {
                     source: MemorySource::Episodic,
                     score: final_score,
                     importance,
-                    timestamp: String::new(),
+                    timestamp: fts.timestamp.clone(),
                 });
                 continue;
             }
@@ -168,7 +168,7 @@ impl RecallEngine {
             // Try semantic
             if let Some(sr) = ann_results.iter().find(|r| &r.fact.id == id) {
                 let importance = sr.fact.confidence;
-                let hours = 1.0;
+                let hours = parse_elapsed_hours(&sr.created_at, &now);
                 let retention = forgetting_curve(importance, hours, self.config.decay_rate);
                 let final_score = rrf_score
                     + self.config.importance_weight * importance
@@ -185,7 +185,7 @@ impl RecallEngine {
                     source: MemorySource::Semantic,
                     score: final_score,
                     importance,
-                    timestamp: String::new(),
+                    timestamp: sr.created_at.clone(),
                 });
             }
         }
@@ -200,6 +200,27 @@ impl RecallEngine {
 
         Ok(memories)
     }
+}
+
+/// Parse an ISO 8601 or SQLite datetime string and return hours elapsed since `now`.
+///
+/// Falls back to 1.0 hour if parsing fails (e.g., empty or malformed timestamp).
+fn parse_elapsed_hours(timestamp: &str, now: &chrono::DateTime<chrono::Utc>) -> f64 {
+    if timestamp.is_empty() {
+        return 1.0;
+    }
+    // Try RFC 3339 first (e.g. "2025-03-01T12:00:00+00:00")
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(timestamp) {
+        let elapsed = *now - dt.with_timezone(&chrono::Utc);
+        return (elapsed.num_seconds() as f64 / 3600.0).max(0.01);
+    }
+    // Try SQLite datetime format (e.g. "2025-03-01 12:00:00")
+    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%d %H:%M:%S") {
+        let dt = naive.and_utc();
+        let elapsed = *now - dt;
+        return (elapsed.num_seconds() as f64 / 3600.0).max(0.01);
+    }
+    1.0 // fallback
 }
 
 /// Errors from the recall engine.

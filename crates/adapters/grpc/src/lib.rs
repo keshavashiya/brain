@@ -78,7 +78,13 @@ impl MemoryService for MemoryServiceImpl {
             req.top_k as usize
         };
 
-        let results = self.processor.search_facts(&req.query, top_k, None).await;
+        let namespace = if req.namespace.is_empty() {
+            None
+        } else {
+            Some(req.namespace.as_str())
+        };
+
+        let results = self.processor.search_facts(&req.query, top_k, namespace).await;
 
         let facts = results
             .into_iter()
@@ -107,11 +113,16 @@ impl MemoryService for MemoryServiceImpl {
         } else {
             &req.category
         };
+        let namespace = if req.namespace.is_empty() {
+            "personal"
+        } else {
+            &req.namespace
+        };
 
         match self
             .processor
             .store_fact_direct(
-                "personal",
+                namespace,
                 category,
                 &req.subject,
                 &req.predicate,
@@ -128,15 +139,21 @@ impl MemoryService for MemoryServiceImpl {
         }
     }
 
-    /// List all active facts, optionally filtered by subject.
+    /// List all active facts, optionally filtered by subject and/or namespace.
     async fn get_facts(
         &self,
         request: Request<GetFactsRequest>,
     ) -> Result<Response<GetFactsResponse>, Status> {
         let req = request.into_inner();
 
+        let namespace = if req.namespace.is_empty() {
+            None
+        } else {
+            Some(req.namespace.as_str())
+        };
+
         let raw_facts = if req.subject.is_empty() {
-            self.processor.list_facts(None)
+            self.processor.list_facts(namespace)
         } else {
             self.processor.facts_about(&req.subject)
         };
@@ -329,6 +346,7 @@ impl AgentService for AgentServiceImpl {
 /// Start the gRPC server, binding to `host:port`.
 ///
 /// Registers both `MemoryService` and `AgentService`.
+/// All requests are authenticated via `x-api-key` or `authorization` metadata.
 /// Blocks until the server shuts down.
 pub async fn serve(
     processor: Arc<signal::SignalProcessor>,
@@ -337,8 +355,30 @@ pub async fn serve(
 ) -> anyhow::Result<()> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
 
-    let memory_svc = MemoryServiceServer::new(MemoryServiceImpl::new(processor.clone()));
-    let agent_svc = AgentServiceServer::new(AgentServiceImpl::new(processor));
+    let api_keys: Vec<String> = processor
+        .config()
+        .access
+        .api_keys
+        .iter()
+        .map(|k| k.key.clone())
+        .collect();
+
+    let auth_keys = Arc::new(api_keys);
+
+    let memory_svc = MemoryServiceServer::with_interceptor(
+        MemoryServiceImpl::new(processor.clone()),
+        {
+            let keys = Arc::clone(&auth_keys);
+            move |req: Request<()>| auth_interceptor(req, &keys)
+        },
+    );
+    let agent_svc = AgentServiceServer::with_interceptor(
+        AgentServiceImpl::new(processor),
+        {
+            let keys = Arc::clone(&auth_keys);
+            move |req: Request<()>| auth_interceptor(req, &keys)
+        },
+    );
 
     tracing::info!("Brain gRPC server listening on {addr}");
 
@@ -349,6 +389,41 @@ pub async fn serve(
         .await?;
 
     Ok(())
+}
+
+/// Tonic interceptor that validates API key authentication.
+///
+/// Accepts the key from either `x-api-key` or `authorization` (Bearer) metadata.
+/// Returns `UNAUTHENTICATED` if no valid key is found. If no keys are configured,
+/// all requests are allowed (open mode).
+fn auth_interceptor(req: Request<()>, api_keys: &[String]) -> Result<Request<()>, Status> {
+    // If no keys configured, allow all (open mode)
+    if api_keys.is_empty() {
+        return Ok(req);
+    }
+
+    let metadata = req.metadata();
+
+    // Check x-api-key header
+    if let Some(key) = metadata.get("x-api-key") {
+        if let Ok(key_str) = key.to_str() {
+            if api_keys.iter().any(|k| k == key_str) {
+                return Ok(req);
+            }
+        }
+    }
+
+    // Check authorization header (Bearer token)
+    if let Some(auth) = metadata.get("authorization") {
+        if let Ok(auth_str) = auth.to_str() {
+            let token = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str);
+            if api_keys.iter().any(|k| k == token) {
+                return Ok(req);
+            }
+        }
+    }
+
+    Err(Status::unauthenticated("Missing or invalid API key"))
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -396,6 +471,7 @@ mod tests {
 
         let req = Request::new(GetFactsRequest {
             subject: String::new(),
+            namespace: String::new(),
         });
         let resp = svc.get_facts(req).await.unwrap();
         assert!(resp.into_inner().facts.is_empty());
@@ -408,6 +484,7 @@ mod tests {
 
         let req = Request::new(GetFactsRequest {
             subject: "rust".to_string(),
+            namespace: String::new(),
         });
         let resp = svc.get_facts(req).await.unwrap();
         // No facts stored yet — result should be empty
@@ -422,6 +499,7 @@ mod tests {
         let req = Request::new(SearchRequest {
             query: "what is Rust".to_string(),
             top_k: 5,
+            namespace: String::new(),
         });
         let resp = svc.search(req).await.unwrap();
         // No facts in empty store
@@ -437,6 +515,7 @@ mod tests {
         let req = Request::new(SearchRequest {
             query: "test".to_string(),
             top_k: 0,
+            namespace: String::new(),
         });
         let resp = svc.search(req).await.unwrap();
         assert!(resp.into_inner().facts.is_empty());

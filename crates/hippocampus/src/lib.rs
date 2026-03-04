@@ -13,7 +13,6 @@ pub mod consolidation;
 pub mod embedding;
 pub mod episodic;
 pub mod importance;
-pub mod procedural;
 pub mod search;
 pub mod semantic;
 
