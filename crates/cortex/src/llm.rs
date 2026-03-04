@@ -146,8 +146,9 @@ pub struct OllamaProvider {
 impl OllamaProvider {
     /// Create a new Ollama provider.
     pub fn new(base_url: &str, model: &str, temperature: f64, max_tokens: i32) -> Result<Self, LlmError> {
+        // Ollama may need to load a large model on first call — allow up to 5 min
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(300))
             .build()
             .map_err(|e| LlmError::ProviderUnavailable(format!("Failed to create HTTP client: {e}")))?;
 
@@ -300,7 +301,7 @@ impl OpenAiProvider {
         max_tokens: Option<i32>,
     ) -> Result<Self, LlmError> {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(300))
             .build()
             .map_err(|e| LlmError::ProviderUnavailable(format!("Failed to create HTTP client: {e}")))?;
 

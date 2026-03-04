@@ -1396,7 +1396,8 @@ async fn cmd_import(config: &brain_core::BrainConfig, file: &str, dry_run: bool)
 
 async fn chat_non_interactive(config: &brain_core::BrainConfig, message: &str) -> anyhow::Result<()> {
     let mut brain = BrainSession::new(config).await?;
-    println!("{}", brain.process_message(message).await?);
+    let phase = std::sync::atomic::AtomicU8::new(0);
+    println!("{}", brain.process_message(message, &phase).await?);
     Ok(())
 }
 
@@ -1453,21 +1454,27 @@ async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()
                 }
 
                 // Show a spinner while recalling + thinking
+                let phase = Arc::new(std::sync::atomic::AtomicU8::new(0));
                 let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let phase_clone = Arc::clone(&phase);
                 let stop_clone = Arc::clone(&stop);
                 let spinner_handle = tokio::spawn(async move {
-                    let frames = ["  Recalling.", "  Recalling..", "  Recalling..."];
+                    let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
                     let mut i = 0;
                     while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                        let label = match phase_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                            0 => "Recalling memories",
+                            _ => "Thinking",
+                        };
                         {
                             let mut out = stdout();
                             let _ = out.execute(cursor::MoveToColumn(0));
                             let _ = out.execute(terminal::Clear(terminal::ClearType::CurrentLine));
-                            let _ = write!(out, "\x1b[90m{}\x1b[0m", frames[i % frames.len()]);
+                            let _ = write!(out, "\x1b[90m  {} {}\x1b[0m", frames[i % frames.len()], label);
                             let _ = out.flush();
                         }
                         i += 1;
-                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
                     }
                     // Clear the spinner line
                     let mut out = stdout();
@@ -1476,7 +1483,7 @@ async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()
                     let _ = out.flush();
                 });
 
-                let result = brain.process_message(input).await;
+                let result = brain.process_message(input, &phase).await;
                 stop.store(true, std::sync::atomic::Ordering::Relaxed);
                 let _ = spinner_handle.await;
 
@@ -1490,7 +1497,9 @@ async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()
                     }
                     Err(e) => {
                         let msg = e.to_string();
-                        if msg.contains("error sending request") || msg.contains("connection refused") {
+                        if msg.contains("timed out") || msg.contains("Timeout") {
+                            eprintln!("LLM timed out — model may still be loading. Try again.");
+                        } else if msg.contains("error sending request") || msg.contains("connection refused") || msg.contains("Connection refused") {
                             eprintln!("LLM unreachable — is Ollama running? (`ollama serve`)");
                         } else {
                             eprintln!("Error: {msg}");
@@ -1610,8 +1619,15 @@ impl BrainSession {
         }
     }
 
-    async fn process_message(&mut self, message: &str) -> anyhow::Result<String> {
+    async fn process_message(
+        &mut self,
+        message: &str,
+        phase: &std::sync::atomic::AtomicU8,
+    ) -> anyhow::Result<String> {
         use cortex::llm::{Message, Role};
+
+        // Phase 0: Recalling memories
+        phase.store(0, std::sync::atomic::Ordering::Relaxed);
 
         let importance = hippocampus::ImportanceScorer::score(message, true);
         self.episodic
@@ -1668,6 +1684,9 @@ impl BrainSession {
                 })
                 .collect()
         };
+
+        // Phase 1: Thinking (LLM inference)
+        phase.store(1, std::sync::atomic::Ordering::Relaxed);
 
         let messages = self
             .context_assembler
