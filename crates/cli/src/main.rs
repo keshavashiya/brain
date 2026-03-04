@@ -1399,13 +1399,14 @@ async fn chat_non_interactive(config: &brain_core::BrainConfig, message: &str) -
 }
 
 async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()> {
-    println!("╔═══════════════════════════════════════╗");
-    println!(
-        "║  Brain v{}                          ║",
-        env!("CARGO_PKG_VERSION")
-    );
-    println!("║  Your AI's long-term memory           ║");
-    println!("╚═══════════════════════════════════════╝");
+    let ver = env!("CARGO_PKG_VERSION");
+    let title = format!("Brain v{ver}");
+    let tagline = "Your AI's long-term memory";
+    let width = 37; // inner width between ║ borders
+    println!("╔═{}═╗", "═".repeat(width));
+    println!("║ {:^w$} ║", title, w = width);
+    println!("║ {:^w$} ║", tagline, w = width);
+    println!("╚═{}═╝", "═".repeat(width));
     println!();
     println!("  Cortex:  {}", config.llm.model);
     println!("  Memory:  {}", config.data_dir().display());
@@ -1428,7 +1429,7 @@ async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()
                 let _ = rl.add_history_entry(input);
 
                 match input {
-                    "/quit" | "/exit" => {
+                    "/quit" | "/exit" | "/q" => {
                         println!("Going dormant...");
                         break;
                     }
@@ -1439,6 +1440,11 @@ async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()
                     "/clear" => {
                         brain.clear_history();
                         println!("Short-term memory cleared.");
+                        continue;
+                    }
+                    s if s.starts_with('/') => {
+                        println!("Unknown signal: {s}");
+                        println!("Available: /status  /clear  /quit");
                         continue;
                     }
                     _ => {}
