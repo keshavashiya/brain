@@ -56,7 +56,9 @@ security:
 actions:
   web_search:
     enabled: true
-    endpoint: ""              # Set to an HTTP JSON search endpoint to enable backend wiring
+    provider: "searxng"       # searxng | tavily | custom
+    endpoint: "http://localhost:8888"  # SearXNG default; override for your instance
+    api_key: ""               # Required for tavily provider
     timeout_ms: 3000
     default_top_k: 5
   scheduling:
@@ -65,7 +67,7 @@ actions:
   messaging:
     enabled: false
     timeout_ms: 3000
-    channels: {}              # map channel -> webhook URL (e.g. {"ops":"https://..."})
+    channels: {}              # map channel -> ntfy topic or webhook URL (e.g. {"alerts":"brain-alerts"})
 
 proactivity:
   enabled: false               # Opt-in

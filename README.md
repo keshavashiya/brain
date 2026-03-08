@@ -20,7 +20,7 @@ The memory engine combines vector search (HNSW) with full-text search (BM25 FTS5
 
 ## Install
 
-**Requirements:** Rust 1.82+, [Ollama](https://ollama.com) (or any OpenAI-compatible API)
+**Requirements:** Rust 1.82+, [Ollama](https://ollama.com) (or any OpenAI-compatible API), Docker (optional, for web search + notifications)
 
 ```bash
 # Install the CLI
@@ -32,9 +32,14 @@ brain init
 # Pull the default LLM + embedding models (Ollama)
 ollama pull qwen2.5-coder:7b
 ollama pull nomic-embed-text
+
+# Start external services (SearXNG web search + ntfy notifications)
+brain deps up
 ```
 
 `brain init` creates `~/.brain/` with config, database, vector index, and log directories.
+
+`brain deps up` starts Docker containers for SearXNG (web search, port 8888) and ntfy (notifications, port 9090). These are optional — Brain works without them but web search intents will return "backend not configured".
 
 If the embedding provider is unavailable, Brain uses deterministic normalized fallback vectors so writes and search continue without panics. Semantic quality is lower until the embedding provider is healthy.
 
@@ -56,6 +61,28 @@ brain chat
 # One-shot message
 brain chat "remember that I use dark mode"
 ```
+
+## External Services (Docker)
+
+Brain uses optional Docker containers for web search and notifications:
+
+```bash
+# Start SearXNG (web search) + ntfy (notifications)
+brain deps up
+
+# Check if services are running
+brain deps status
+
+# Stop services
+brain deps down
+```
+
+| Service | Port | Purpose |
+|---------|------|---------|
+| SearXNG | 8888 | Web search backend (metasearch engine) |
+| ntfy | 9090 | Push notifications (alerts, reminders) |
+
+`brain status` automatically checks if these services are reachable.
 
 ## Auto-Start on Login
 
@@ -230,32 +257,45 @@ curl -X POST http://localhost:19789/v1/memory/search \
 
 ## Action Backends (Internal)
 
-Action intents routed by Thalamus (`web_search`, `schedule_task`, `send_message`) are handled by internal `ActionDispatcher` backends. This cycle keeps them internal-only (no new public HTTP/gRPC endpoints).
+Action intents routed by Thalamus (`web_search`, `schedule_task`, `send_message`) are handled by internal `ActionDispatcher` backends. These are internal-only (no public HTTP/gRPC endpoints).
 
 Behavior contract:
 - Disabled in config -> explicit `disabled by config` failure
 - Enabled but backend missing -> explicit `backend not configured` failure
 - Backend configured -> real execution with structured success output
 
-Default config is platform-agnostic:
+### Web Search Providers
+
+Set `provider` to choose how web search works:
 
 ```yaml
 actions:
   web_search:
     enabled: true
-    endpoint: ""        # configure an HTTP JSON endpoint
+    provider: "searxng"               # searxng | tavily | custom
+    endpoint: "http://localhost:8888"  # SearXNG instance URL
+    api_key: ""                       # required for tavily
     timeout_ms: 3000
     default_top_k: 5
+```
+
+| Provider | Auth | Self-hosted | Setup |
+|----------|------|-------------|-------|
+| `searxng` | None | Yes | `brain deps up` (or `docker run -d -p 8888:8080 searxng/searxng`) |
+| `tavily` | API key (free, no CC) | No | Sign up at tavily.com, set `api_key` |
+| `custom` | None | — | Set `endpoint` to any JSON search API |
+
+### Other Action Backends
+
+```yaml
   scheduling:
     enabled: false
-    mode: "persist_only"
+    mode: "persist_only"        # intents stored in SQLite, no internal cron
   messaging:
     enabled: false
     timeout_ms: 3000
-    channels: {}        # channel -> webhook URL
+    channels: {}                # channel -> webhook URL
 ```
-
-Scheduling is persist-only for now: intents are stored in SQLite (`scheduled_intents`) and not executed by an internal cron runner.
 
 ## Export & Import
 

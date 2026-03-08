@@ -127,10 +127,28 @@ pub struct ActionsConfig {
     pub messaging: MessagingActionConfig,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchProvider {
+    Searxng,
+    Tavily,
+    Custom,
+}
+
+impl Default for WebSearchProvider {
+    fn default() -> Self {
+        Self::Custom
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebSearchActionConfig {
     pub enabled: bool,
+    #[serde(default)]
+    pub provider: WebSearchProvider,
     pub endpoint: String,
+    #[serde(default)]
+    pub api_key: String,
     pub timeout_ms: u64,
     pub default_top_k: usize,
 }
@@ -433,8 +451,16 @@ impl BrainConfig {
             warnings.push("Consolidation interval_hours is 0 — consolidation will run immediately on every daemon wake-up, which may impact performance.".to_string());
         }
 
-        if self.actions.web_search.enabled && self.actions.web_search.endpoint.trim().is_empty() {
-            warnings.push("Actions web_search is enabled but actions.web_search.endpoint is empty; dispatches will fail with backend-not-configured.".to_string());
+        if self.actions.web_search.enabled {
+            match self.actions.web_search.provider {
+                WebSearchProvider::Custom if self.actions.web_search.endpoint.trim().is_empty() => {
+                    warnings.push("Actions web_search provider is 'custom' but endpoint is empty; dispatches will fail with backend-not-configured.".to_string());
+                }
+                WebSearchProvider::Tavily if self.actions.web_search.api_key.trim().is_empty() => {
+                    warnings.push("Actions web_search provider is 'tavily' but api_key is empty; dispatches will fail.".to_string());
+                }
+                _ => {}
+            }
         }
 
         if self.actions.messaging.enabled && self.actions.messaging.channels.is_empty() {
@@ -507,7 +533,9 @@ impl Default for BrainConfig {
             actions: ActionsConfig {
                 web_search: WebSearchActionConfig {
                     enabled: true,
-                    endpoint: String::new(),
+                    provider: WebSearchProvider::Searxng,
+                    endpoint: "http://localhost:8888".to_string(),
+                    api_key: String::new(),
                     timeout_ms: 3_000,
                     default_top_k: 5,
                 },
@@ -589,6 +617,7 @@ mod tests {
         assert_eq!(config.llm.provider, "ollama");
         assert_eq!(config.embedding.dimensions, 768); // nomic-embed-text default
         assert!(!config.encryption.enabled); // Deferred to v1.1
+        assert_eq!(config.actions.web_search.provider, WebSearchProvider::Searxng);
         assert_eq!(config.actions.scheduling.mode, SchedulingMode::PersistOnly);
         assert!(!config.proactivity.enabled);
         assert!(config.adapters.http.enabled);
@@ -719,21 +748,50 @@ mod tests {
     fn test_actions_defaults_deserialize() {
         let config = BrainConfig::load().expect("embedded defaults should load");
         assert!(config.actions.web_search.enabled);
+        assert_eq!(config.actions.web_search.provider, WebSearchProvider::Searxng);
         assert_eq!(config.actions.web_search.default_top_k, 5);
         assert_eq!(config.actions.scheduling.mode, SchedulingMode::PersistOnly);
         assert!(!config.actions.messaging.enabled);
     }
 
     #[test]
-    fn test_validate_actions_warning_for_enabled_without_backend_config() {
+    fn test_validate_actions_warning_custom_without_endpoint() {
         let mut config = validated_config();
         config.actions.web_search.enabled = true;
+        config.actions.web_search.provider = WebSearchProvider::Custom;
         config.actions.web_search.endpoint.clear();
         config.actions.messaging.enabled = true;
         config.actions.messaging.channels.clear();
         let warnings = config.validate().expect("config should still be valid");
-        assert!(warnings.iter().any(|w| w.contains("web_search")));
+        assert!(warnings.iter().any(|w| w.contains("'custom'")));
         assert!(warnings.iter().any(|w| w.contains("messaging")));
+    }
+
+    #[test]
+    fn test_validate_tavily_without_api_key_warning() {
+        let mut config = validated_config();
+        config.actions.web_search.enabled = true;
+        config.actions.web_search.provider = WebSearchProvider::Tavily;
+        config.actions.web_search.api_key.clear();
+        let warnings = config.validate().expect("config should still be valid");
+        assert!(
+            warnings.iter().any(|w| w.contains("'tavily'") && w.contains("api_key")),
+            "expected tavily api_key warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_validate_searxng_no_web_search_warning() {
+        let mut config = validated_config();
+        config.actions.web_search.enabled = true;
+        config.actions.web_search.provider = WebSearchProvider::Searxng;
+        let warnings = config.validate().expect("config should still be valid");
+        assert!(
+            !warnings.iter().any(|w| w.contains("web_search")),
+            "SearXNG with default endpoint should not trigger web_search warning, got: {:?}",
+            warnings
+        );
     }
 
     #[test]

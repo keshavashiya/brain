@@ -1,0 +1,31 @@
+# SearXNG settings for Brain OS
+# Enables JSON output format required by Brain's web search backend.
+
+use_default_settings: true
+
+search:
+  formats:
+    - html
+    - json
+
+server:
+  secret_key: "brain-os-local-dev-key"
+  limiter: false
+  image_proxy: false
+
+ui:
+  static_use_hash: true
+
+engines:
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+    disabled: false
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: wp
+    disabled: false
+  - name: wikidata
+    engine: wikidata
+    shortcut: wd
+    disabled: false

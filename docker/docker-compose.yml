@@ -1,0 +1,39 @@
+# Brain OS — External Services
+#
+# Start:  docker compose -f docker/docker-compose.yml up -d
+# Stop:   docker compose -f docker/docker-compose.yml down
+# Status: docker compose -f docker/docker-compose.yml ps
+#
+# Or use: brain deps up / brain deps down / brain deps status
+
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: brain-searxng
+    ports:
+      - "127.0.0.1:8888:8080"
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8888/
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  ntfy:
+    image: binwiederhier/ntfy:latest
+    container_name: brain-ntfy
+    ports:
+      - "127.0.0.1:9090:80"
+    command: serve
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:80/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

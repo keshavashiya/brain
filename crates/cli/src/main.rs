@@ -118,6 +118,29 @@ enum Commands {
         #[command(subcommand)]
         action: ServiceAction,
     },
+
+    /// Manage external dependencies (SearXNG, ntfy) via Docker.
+    ///
+    /// Runs `docker compose` with the bundled docker/docker-compose.yml.
+    ///
+    /// Examples:
+    ///   brain deps up       # start SearXNG + ntfy containers
+    ///   brain deps down     # stop containers
+    ///   brain deps status   # show container status
+    Deps {
+        #[command(subcommand)]
+        action: DepsAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum DepsAction {
+    /// Start external service containers (SearXNG, ntfy).
+    Up,
+    /// Stop external service containers.
+    Down,
+    /// Show external service container status.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -766,6 +789,11 @@ async fn main() -> anyhow::Result<()> {
             ServiceAction::Install => cmd_service_install()?,
             ServiceAction::Uninstall => cmd_service_uninstall()?,
         },
+
+        // ── deps ─────────────────────────────────────────────────────────────
+        Commands::Deps { action } => {
+            cmd_deps(action)?;
+        }
     }
 
     Ok(())
@@ -874,6 +902,118 @@ async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Result<()> {
         Err(e) => println!("\n  Hippocampus: error opening — {}", e),
     }
 
+    // External service health
+    println!("\n  External Services:");
+    let services: Vec<(&str, &str)> = vec![
+        ("SearXNG", &config.actions.web_search.endpoint),
+        ("ntfy", "http://127.0.0.1:9090"),
+    ];
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .unwrap_or_default();
+    for (name, endpoint) in services {
+        let ep = endpoint.trim().trim_end_matches('/');
+        if ep.is_empty() {
+            println!("    {:<10}: not configured", name);
+            continue;
+        }
+        let health_url = if name == "SearXNG" {
+            format!("{}/healthz", ep)
+        } else {
+            format!("{}/v1/health", ep)
+        };
+        let healthy = client.get(&health_url).send().await.is_ok_and(|r| r.status().is_success());
+        println!(
+            "    {:<10}: {} ({})",
+            name,
+            if healthy { "running" } else { "stopped" },
+            ep
+        );
+    }
+
+    Ok(())
+}
+
+// ─── Deps management ─────────────────────────────────────────────────────────
+
+fn find_compose_file() -> Option<std::path::PathBuf> {
+    // Check relative to the binary's location first (dev builds), then fallback
+    // to common install paths.
+    let candidates = [
+        // Running from source checkout (cargo run)
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("docker/docker-compose.yml")),
+        // Installed alongside binary
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("../share/brain/docker/docker-compose.yml"))),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn cmd_deps(action: DepsAction) -> anyhow::Result<()> {
+    let compose_file = find_compose_file().ok_or_else(|| {
+        anyhow::anyhow!(
+            "docker/docker-compose.yml not found.\n\
+             If installed from release, run from the Brain source directory."
+        )
+    })?;
+
+    // Verify docker is available
+    let docker_ok = std::process::Command::new("docker")
+        .arg("info")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !docker_ok {
+        anyhow::bail!(
+            "Docker is not running or not installed.\n\
+             Install Docker Desktop: https://docs.docker.com/get-docker/"
+        );
+    }
+
+    let compose_dir = compose_file.parent().unwrap();
+    let run = |args: &[&str]| -> anyhow::Result<()> {
+        let status = std::process::Command::new("docker")
+            .arg("compose")
+            .args(["-f", compose_file.to_str().unwrap()])
+            .args(["--project-directory", compose_dir.to_str().unwrap()])
+            .args(args)
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("docker compose {} failed", args.join(" "));
+        }
+        Ok(())
+    };
+
+    match action {
+        DepsAction::Up => {
+            println!("Starting Brain external services...");
+            run(&["up", "-d"])?;
+            println!("\nServices started:");
+            println!("  SearXNG → http://127.0.0.1:8888");
+            println!("  ntfy    → http://127.0.0.1:9090");
+            println!("\nRun `brain status` to verify connectivity.");
+        }
+        DepsAction::Down => {
+            println!("Stopping Brain external services...");
+            run(&["down"])?;
+            println!("Services stopped.");
+        }
+        DepsAction::Status => {
+            run(&["ps"])?;
+        }
+    }
     Ok(())
 }
 
@@ -1937,27 +2077,190 @@ impl cortex::actions::MemoryBackend for CliMemoryBackend {
     }
 }
 
+// ─── Web Search Backends ─────────────────────────────────────────────────────
+
+/// Parse a JSON array of search results into `SearchHit`s with flexible field names.
+fn parse_search_results(
+    candidates: Vec<serde_json::Value>,
+    top_k: usize,
+) -> Vec<cortex::actions::SearchHit> {
+    candidates
+        .into_iter()
+        .filter_map(|entry| {
+            let title = entry
+                .get("title")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| entry.get("name").and_then(serde_json::Value::as_str))
+                .unwrap_or("untitled")
+                .to_string();
+            let url = entry
+                .get("url")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| entry.get("link").and_then(serde_json::Value::as_str))
+                .unwrap_or_default()
+                .to_string();
+            if url.is_empty() {
+                return None;
+            }
+            let snippet = entry
+                .get("snippet")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| entry.get("description").and_then(serde_json::Value::as_str))
+                .or_else(|| entry.get("content").and_then(serde_json::Value::as_str))
+                .unwrap_or_default()
+                .to_string();
+            Some(cortex::actions::SearchHit {
+                title,
+                url,
+                snippet,
+            })
+        })
+        .take(top_k.max(1))
+        .collect()
+}
+
+fn build_search_client(timeout_ms: u64) -> anyhow::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms.max(1)))
+        .build()
+        .map_err(|e| anyhow::anyhow!("search client init failed: {e}"))
+}
+
+/// SearXNG provider — self-hosted metasearch engine.
+/// GET `{endpoint}/search?q={query}&format=json`
 #[derive(Clone)]
-struct CliWebSearchBackend {
+struct SearxngSearchBackend {
     endpoint: String,
     client: reqwest::Client,
 }
 
-impl CliWebSearchBackend {
+impl SearxngSearchBackend {
     fn new(endpoint: &str, timeout_ms: u64) -> anyhow::Result<Self> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(timeout_ms.max(1)))
-            .build()
-            .map_err(|e| anyhow::anyhow!("web search client init failed: {e}"))?;
         Ok(Self {
-            endpoint: endpoint.to_string(),
-            client,
+            endpoint: endpoint.trim_end_matches('/').to_string(),
+            client: build_search_client(timeout_ms)?,
         })
     }
 }
 
 #[async_trait::async_trait]
-impl cortex::actions::WebSearchBackend for CliWebSearchBackend {
+impl cortex::actions::WebSearchBackend for SearxngSearchBackend {
+    async fn search(
+        &self,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<cortex::actions::SearchHit>, cortex::actions::ActionError> {
+        let url = format!("{}/search", self.endpoint);
+        let response = self
+            .client
+            .get(&url)
+            .query(&[("q", query), ("format", "json")])
+            .send()
+            .await
+            .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(cortex::actions::ActionError::ExecutionFailed(format!(
+                "SearXNG returned HTTP {}",
+                response.status()
+            )));
+        }
+
+        let body = response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))?;
+
+        let candidates = body
+            .get("results")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        Ok(parse_search_results(candidates, top_k))
+    }
+}
+
+/// Tavily provider — AI-focused search API (1000 free/month, no CC).
+/// POST `{endpoint}/search` with Bearer auth.
+#[derive(Clone)]
+struct TavilySearchBackend {
+    endpoint: String,
+    api_key: String,
+    client: reqwest::Client,
+}
+
+impl TavilySearchBackend {
+    fn new(endpoint: &str, api_key: &str, timeout_ms: u64) -> anyhow::Result<Self> {
+        Ok(Self {
+            endpoint: endpoint.trim_end_matches('/').to_string(),
+            api_key: api_key.to_string(),
+            client: build_search_client(timeout_ms)?,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl cortex::actions::WebSearchBackend for TavilySearchBackend {
+    async fn search(
+        &self,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<cortex::actions::SearchHit>, cortex::actions::ActionError> {
+        let url = format!("{}/search", self.endpoint);
+        let response = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.api_key)
+            .json(&serde_json::json!({
+                "query": query,
+                "max_results": top_k,
+                "search_depth": "basic",
+            }))
+            .send()
+            .await
+            .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(cortex::actions::ActionError::ExecutionFailed(format!(
+                "Tavily returned HTTP {}",
+                response.status()
+            )));
+        }
+
+        let body = response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))?;
+
+        let candidates = body
+            .get("results")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        Ok(parse_search_results(candidates, top_k))
+    }
+}
+
+/// Custom provider — raw JSON POST to a user-configured endpoint (backward-compatible).
+#[derive(Clone)]
+struct CustomSearchBackend {
+    endpoint: String,
+    client: reqwest::Client,
+}
+
+impl CustomSearchBackend {
+    fn new(endpoint: &str, timeout_ms: u64) -> anyhow::Result<Self> {
+        Ok(Self {
+            endpoint: endpoint.to_string(),
+            client: build_search_client(timeout_ms)?,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl cortex::actions::WebSearchBackend for CustomSearchBackend {
     async fn search(
         &self,
         query: &str,
@@ -1990,44 +2293,11 @@ impl cortex::actions::WebSearchBackend for CliWebSearchBackend {
             .get("hits")
             .and_then(|v| v.as_array())
             .cloned()
+            .or_else(|| body.get("results").and_then(|v| v.as_array()).cloned())
             .or_else(|| body.as_array().cloned())
             .unwrap_or_default();
 
-        let hits = candidates
-            .into_iter()
-            .filter_map(|entry| {
-                let title = entry
-                    .get("title")
-                    .and_then(serde_json::Value::as_str)
-                    .or_else(|| entry.get("name").and_then(serde_json::Value::as_str))
-                    .unwrap_or("untitled")
-                    .to_string();
-                let url = entry
-                    .get("url")
-                    .and_then(serde_json::Value::as_str)
-                    .or_else(|| entry.get("link").and_then(serde_json::Value::as_str))
-                    .unwrap_or_default()
-                    .to_string();
-                if url.is_empty() {
-                    return None;
-                }
-                let snippet = entry
-                    .get("snippet")
-                    .and_then(serde_json::Value::as_str)
-                    .or_else(|| entry.get("description").and_then(serde_json::Value::as_str))
-                    .or_else(|| entry.get("content").and_then(serde_json::Value::as_str))
-                    .unwrap_or_default()
-                    .to_string();
-                Some(cortex::actions::SearchHit {
-                    title,
-                    url,
-                    snippet,
-                })
-            })
-            .take(top_k.max(1))
-            .collect();
-
-        Ok(hits)
+        Ok(parse_search_results(candidates, top_k))
     }
 }
 
@@ -2225,19 +2495,59 @@ impl BrainSession {
         action_dispatcher.set_namespace("personal");
 
         if config.actions.web_search.enabled {
-            let endpoint = config.actions.web_search.endpoint.trim();
-            if endpoint.is_empty() {
-                tracing::warn!(
-                    "actions.web_search.enabled=true but endpoint is empty; backend not configured"
-                );
-            } else {
-                match CliWebSearchBackend::new(endpoint, config.actions.web_search.timeout_ms) {
-                    Ok(backend) => {
-                        action_dispatcher =
-                            action_dispatcher.with_web_search_backend(Arc::new(backend));
-                    }
-                    Err(e) => tracing::warn!("Web search backend init failed: {e}"),
+            let ws = &config.actions.web_search;
+            let timeout = ws.timeout_ms;
+            let endpoint = ws.endpoint.trim();
+
+            let backend_result: Result<
+                Option<Arc<dyn cortex::actions::WebSearchBackend>>,
+                anyhow::Error,
+            > = match ws.provider {
+                brain_core::config::WebSearchProvider::Searxng => {
+                    let ep = if endpoint.is_empty() {
+                        "http://localhost:8888"
+                    } else {
+                        endpoint
+                    };
+                    SearxngSearchBackend::new(ep, timeout).map(|b| Some(Arc::new(b) as _))
                 }
+                brain_core::config::WebSearchProvider::Tavily => {
+                    let api_key = ws.api_key.trim();
+                    if api_key.is_empty() {
+                        tracing::warn!("actions.web_search.provider=tavily but api_key is empty; backend not configured");
+                        Ok(None)
+                    } else {
+                        let ep = if endpoint.is_empty() {
+                            "https://api.tavily.com"
+                        } else {
+                            endpoint
+                        };
+                        TavilySearchBackend::new(ep, api_key, timeout)
+                            .map(|b| Some(Arc::new(b) as _))
+                    }
+                }
+                brain_core::config::WebSearchProvider::Custom => {
+                    if endpoint.is_empty() {
+                        tracing::warn!("actions.web_search.provider=custom but endpoint is empty; backend not configured");
+                        Ok(None)
+                    } else {
+                        CustomSearchBackend::new(endpoint, timeout)
+                            .map(|b| Some(Arc::new(b) as _))
+                    }
+                }
+            };
+
+            match backend_result {
+                Ok(Some(backend)) => {
+                    tracing::info!(
+                        provider = %serde_json::to_string(&ws.provider).unwrap_or_default().trim_matches('"'),
+                        "Web search backend configured"
+                    );
+                    action_dispatcher =
+                        action_dispatcher.with_web_search_backend(backend);
+                }
+                Ok(None) => {} // warning already logged above
+                Err(e) => tracing::warn!("Web search backend init failed: {e}"),
             }
         }
 
@@ -2539,12 +2849,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_brain_session_web_search_enabled_without_endpoint_returns_explicit_error() {
+    async fn test_brain_session_web_search_custom_without_endpoint_returns_explicit_error() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = brain_core::BrainConfig::default();
         config.brain.data_dir = temp.path().to_string_lossy().to_string();
         config.actions.web_search.enabled = true;
+        config.actions.web_search.provider = brain_core::config::WebSearchProvider::Custom;
         config.actions.web_search.endpoint.clear();
+        config.actions.messaging.enabled = false;
+        config.actions.scheduling.enabled = false;
+
+        let mut session = BrainSession::new(&config).await.unwrap();
+        let result = session
+            .prepare_context("search for rust async")
+            .await
+            .unwrap();
+
+        match result {
+            PrepareResult::ActionResult(text) => {
+                assert!(text.contains("backend not configured"));
+            }
+            _ => panic!("expected action dispatch result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_brain_session_tavily_without_api_key_returns_explicit_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_string_lossy().to_string();
+        config.actions.web_search.enabled = true;
+        config.actions.web_search.provider = brain_core::config::WebSearchProvider::Tavily;
+        config.actions.web_search.api_key.clear();
         config.actions.messaging.enabled = false;
         config.actions.scheduling.enabled = false;
 

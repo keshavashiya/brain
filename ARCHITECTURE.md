@@ -220,7 +220,7 @@ Dispatch contract is explicit:
 - enabled with backend -> real execution with structured success output
 
 Current concrete wiring in CLI is platform-agnostic:
-- Web search: generic HTTP JSON endpoint
+- Web search: provider-based (`searxng`, `tavily`, or `custom` HTTP JSON endpoint)
 - Scheduling: persist-only SQLite intent storage (`scheduled_intents`)
 - Messaging: channel -> webhook endpoint map
 
