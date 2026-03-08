@@ -310,7 +310,9 @@ fn write_salt(config: &brain_core::BrainConfig, salt: &[u8; 16]) -> anyhow::Resu
 ///
 /// Passphrase is read from `BRAIN_PASSPHRASE` env var (daemon/CI) or prompted
 /// interactively via `rpassword`.
-fn resolve_encryptor(config: &brain_core::BrainConfig) -> anyhow::Result<Option<storage::Encryptor>> {
+fn resolve_encryptor(
+    config: &brain_core::BrainConfig,
+) -> anyhow::Result<Option<storage::Encryptor>> {
     if !config.encryption.enabled {
         return Ok(None);
     }
@@ -384,8 +386,7 @@ async fn main() -> anyhow::Result<()> {
 
             println!(
                 "\n  Sensory cortex: {} (pull with `ollama pull {}`)",
-                config.embedding.model,
-                config.embedding.model
+                config.embedding.model, config.embedding.model
             );
 
             // ── Encryption setup ──────────────────────────────────────────────
@@ -403,7 +404,10 @@ async fn main() -> anyhow::Result<()> {
                     let _ = std::fs::write(&config_path, patched);
                 }
 
-                println!("\n  Blood-brain barrier: sealed (salt → {})", salt_path(&config).display());
+                println!(
+                    "\n  Blood-brain barrier: sealed (salt → {})",
+                    salt_path(&config).display()
+                );
                 println!("  Set BRAIN_PASSPHRASE env var for the daemon, or");
                 println!("  Brain will prompt you for a passphrase on startup.");
             }
@@ -489,31 +493,38 @@ async fn main() -> anyhow::Result<()> {
             write_pid(&config, pid)?;
 
             println!("Brain is awake (PID {}).", pid);
-            println!("  Synapse HTTP  → http://127.0.0.1:{}", config.adapters.http.port);
-            println!("  Synapse WS    → ws://127.0.0.1:{}", config.adapters.ws.port);
-            println!("  Synapse MCP   → http://127.0.0.1:{}", config.adapters.mcp.port);
+            println!(
+                "  Synapse HTTP  → http://127.0.0.1:{}",
+                config.adapters.http.port
+            );
+            println!(
+                "  Synapse WS    → ws://127.0.0.1:{}",
+                config.adapters.ws.port
+            );
+            println!(
+                "  Synapse MCP   → http://127.0.0.1:{}",
+                config.adapters.mcp.port
+            );
             println!("  Synapse gRPC  → 127.0.0.1:{}", config.adapters.grpc.port);
             println!("  Logs          → {}", log_path.display());
             println!("\nRun `brain stop` to put it to sleep.");
         }
 
         // ── stop (daemon) ─────────────────────────────────────────────────────
-        Commands::Stop => {
-            match read_pid(&config) {
-                Some(pid) if is_process_running(pid) => {
-                    stop_process(pid)?;
-                    remove_pid(&config);
-                    println!("Brain is asleep (PID {}).", pid);
-                }
-                Some(_) => {
-                    remove_pid(&config);
-                    println!("Brain was already asleep (stale PID file cleaned up).");
-                }
-                None => {
-                    println!("Brain is already asleep.");
-                }
+        Commands::Stop => match read_pid(&config) {
+            Some(pid) if is_process_running(pid) => {
+                stop_process(pid)?;
+                remove_pid(&config);
+                println!("Brain is asleep (PID {}).", pid);
             }
-        }
+            Some(_) => {
+                remove_pid(&config);
+                println!("Brain was already asleep (stale PID file cleaned up).");
+            }
+            None => {
+                println!("Brain is already asleep.");
+            }
+        },
 
         // ── serve (foreground) ────────────────────────────────────────────────
         Commands::Serve {
@@ -536,8 +547,9 @@ async fn main() -> anyhow::Result<()> {
 
             let run_all = !http && !ws && !grpc && !mcp;
             let encryptor = resolve_encryptor(&config)?;
-            let processor =
-                Arc::new(signal::SignalProcessor::new_with_encryptor(config.clone(), encryptor).await?);
+            let processor = Arc::new(
+                signal::SignalProcessor::new_with_encryptor(config.clone(), encryptor).await?,
+            );
 
             println!("Waking Brain OS...");
 
@@ -591,10 +603,8 @@ async fn main() -> anyhow::Result<()> {
                 };
                 let log_path = config.data_dir().join("logs/proactive.log");
                 set.spawn(async move {
-                    let engine = ganglia::HabitEngine::new(
-                        p.episodic().pool().clone(),
-                        habit_cfg.clone(),
-                    );
+                    let engine =
+                        ganglia::HabitEngine::new(p.episodic().pool().clone(), habit_cfg.clone());
                     if let Err(e) = engine.ensure_tables() {
                         tracing::warn!("HabitEngine table init failed: {e}");
                         return Ok(());
@@ -614,11 +624,8 @@ async fn main() -> anyhow::Result<()> {
                                     msg.content
                                 );
                                 // Append to proactive log file
-                                let line = format!(
-                                    "[{}] {}\n",
-                                    msg.created_at.to_rfc3339(),
-                                    msg.content
-                                );
+                                let line =
+                                    format!("[{}] {}\n", msg.created_at.to_rfc3339(), msg.content);
                                 let _ = std::fs::OpenOptions::new()
                                     .create(true)
                                     .append(true)
@@ -647,36 +654,37 @@ async fn main() -> anyhow::Result<()> {
                 let interval_hours = config.memory.consolidation.interval_hours;
                 let prune_threshold = config.memory.consolidation.forgetting_threshold;
                 set.spawn(async move {
-                    let consolidator = hippocampus::Consolidator::new(
-                        hippocampus::ConsolidationConfig {
+                    let consolidator =
+                        hippocampus::Consolidator::new(hippocampus::ConsolidationConfig {
                             prune_threshold,
                             ..Default::default()
-                        },
-                    );
+                        });
                     // Skip the first tick so consolidation doesn't run at startup.
-                    let mut ticker = tokio::time::interval(
-                        tokio::time::Duration::from_secs(interval_hours as u64 * 3600),
-                    );
+                    let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(
+                        interval_hours as u64 * 3600,
+                    ));
                     ticker.tick().await;
                     loop {
                         ticker.tick().await;
                         match consolidator.consolidate(p.episodic()) {
-                            Ok(r) => tracing::info!(
-                                pruned = r.episodes_pruned,
-                                promoted = r.episodes_promoted,
-                                remaining = r.episodes_remaining,
-                                "Memory consolidation complete"
-                            ),
+                            Ok(r) => {
+                                let promoted_now =
+                                    promote_candidates(p.as_ref(), &r.promotion_candidates).await;
+
+                                tracing::info!(
+                                    pruned = r.episodes_pruned,
+                                    promotion_candidates = r.episodes_promoted,
+                                    promoted = promoted_now,
+                                    remaining = r.episodes_remaining,
+                                    "Memory consolidation complete"
+                                );
+                            }
                             Err(e) => tracing::warn!("Memory consolidation error: {e}"),
                         }
                     }
                 });
-                tracing::info!(
-                    interval_hours,
-                    "Memory consolidation scheduled"
-                );
+                tracing::info!(interval_hours, "Memory consolidation scheduled");
             }
-
 
             println!("\nBrain is conscious. Press Ctrl+C to sleep.\n");
 
@@ -845,7 +853,11 @@ async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Result<()> {
     let llm_healthy = provider.health_check().await;
     println!(
         "  Cortex:       {}",
-        if llm_healthy { "responsive" } else { "unresponsive" }
+        if llm_healthy {
+            "responsive"
+        } else {
+            "unresponsive"
+        }
     );
 
     // Database stats
@@ -987,7 +999,10 @@ WantedBy=default.target
             .status();
 
         if reload.is_err() || enable.is_err() {
-            println!("Brainstem partially wired — unit file written to {}.", service_path.display());
+            println!(
+                "Brainstem partially wired — unit file written to {}.",
+                service_path.display()
+            );
             println!("  Run manually:");
             println!("    systemctl --user daemon-reload");
             println!("    systemctl --user enable --now brain.service");
@@ -1011,12 +1026,9 @@ WantedBy=default.target
         // /F overwrites any existing task with the same name (idempotent)
         let out = std::process::Command::new("schtasks")
             .args([
-                "/Create",
-                "/TN", task_name,
-                "/TR", &cmd,
-                "/SC", "ONLOGON",
-                "/RL", "HIGHEST",   // run with the highest privileges the user has
-                "/F",               // overwrite if already exists
+                "/Create", "/TN", task_name, "/TR", &cmd, "/SC", "ONLOGON", "/RL",
+                "HIGHEST", // run with the highest privileges the user has
+                "/F",      // overwrite if already exists
             ])
             .output()
             .map_err(|e| anyhow::anyhow!("schtasks not found: {e}"))?;
@@ -1169,11 +1181,17 @@ struct ExportEpisode {
     id: String,
     session_id: String,
     session_channel: String,
+    #[serde(default = "default_export_namespace")]
+    namespace: String,
     role: String,
     content: String,
     timestamp: String,
     importance: f64,
     reinforcement_count: i32,
+}
+
+fn default_export_namespace() -> String {
+    "personal".to_string()
 }
 
 fn cmd_export(config: &brain_core::BrainConfig, output: Option<&str>) -> anyhow::Result<()> {
@@ -1208,7 +1226,7 @@ fn cmd_export(config: &brain_core::BrainConfig, output: Option<&str>) -> anyhow:
     let episodes: Vec<ExportEpisode> = db.with_conn(|conn| {
         let mut stmt = conn.prepare(
             "SELECT e.id, e.session_id, COALESCE(s.channel, 'cli'),
-                    e.role, e.content, e.timestamp,
+                    e.namespace, e.role, e.content, e.timestamp,
                     e.importance, e.reinforcement_count
              FROM episodes e
              LEFT JOIN sessions s ON s.id = e.session_id
@@ -1220,11 +1238,12 @@ fn cmd_export(config: &brain_core::BrainConfig, output: Option<&str>) -> anyhow:
                     id: row.get(0)?,
                     session_id: row.get(1)?,
                     session_channel: row.get(2)?,
-                    role: row.get(3)?,
-                    content: row.get(4)?,
-                    timestamp: row.get(5)?,
-                    importance: row.get(6)?,
-                    reinforcement_count: row.get(7)?,
+                    namespace: row.get(3)?,
+                    role: row.get(4)?,
+                    content: row.get(5)?,
+                    timestamp: row.get(6)?,
+                    importance: row.get(7)?,
+                    reinforcement_count: row.get(8)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -1256,9 +1275,13 @@ fn cmd_export(config: &brain_core::BrainConfig, output: Option<&str>) -> anyhow:
     Ok(())
 }
 
-async fn cmd_import(config: &brain_core::BrainConfig, file: &str, dry_run: bool) -> anyhow::Result<()> {
-    let raw = std::fs::read_to_string(file)
-        .map_err(|e| anyhow::anyhow!("Cannot read {file}: {e}"))?;
+async fn cmd_import(
+    config: &brain_core::BrainConfig,
+    file: &str,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    let raw =
+        std::fs::read_to_string(file).map_err(|e| anyhow::anyhow!("Cannot read {file}: {e}"))?;
     let export: MemoryExport =
         serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("Invalid export file: {e}"))?;
 
@@ -1277,8 +1300,7 @@ async fn cmd_import(config: &brain_core::BrainConfig, file: &str, dry_run: bool)
     let db = storage::SqlitePool::open(&config.sqlite_path())?;
 
     // Collect unique sessions needed for episodes
-    let mut sessions: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
+    let mut sessions: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for ep in &export.episodes {
         sessions
             .entry(ep.session_id.clone())
@@ -1310,8 +1332,14 @@ async fn cmd_import(config: &brain_core::BrainConfig, file: &str, dry_run: bool)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(id) DO NOTHING",
                 rusqlite::params![
-                    f.id, f.namespace, f.category, f.subject,
-                    f.predicate, f.object, f.confidence, f.source_episode_id
+                    f.id,
+                    f.namespace,
+                    f.category,
+                    f.subject,
+                    f.predicate,
+                    f.object,
+                    f.confidence,
+                    f.source_episode_id
                 ],
             )?;
             if n > 0 {
@@ -1324,13 +1352,19 @@ async fn cmd_import(config: &brain_core::BrainConfig, file: &str, dry_run: bool)
         for e in &export.episodes {
             let n = conn.execute(
                 "INSERT INTO episodes
-                    (id, session_id, role, content, timestamp,
+                    (id, session_id, namespace, role, content, timestamp,
                      importance, reinforcement_count)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                  ON CONFLICT(id) DO NOTHING",
                 rusqlite::params![
-                    e.id, e.session_id, e.role, e.content,
-                    e.timestamp, e.importance, e.reinforcement_count
+                    e.id,
+                    e.session_id,
+                    e.namespace,
+                    e.role,
+                    e.content,
+                    e.timestamp,
+                    e.importance,
+                    e.reinforcement_count
                 ],
             )?;
             episodes_imported += n;
@@ -1432,9 +1466,84 @@ async fn cmd_import(config: &brain_core::BrainConfig, file: &str, dry_run: bool)
     Ok(())
 }
 
+async fn promote_candidates(
+    processor: &signal::SignalProcessor,
+    candidates: &[hippocampus::PromotionCandidate],
+) -> usize {
+    let mut promoted_now = 0usize;
+
+    for candidate in candidates {
+        let already_promoted = processor
+            .episodic()
+            .pool()
+            .with_conn(|conn| {
+                let exists: i64 = conn.query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM episode_promotions
+                        WHERE episode_id = ?1
+                    )",
+                    [&candidate.episode_id],
+                    |row| row.get(0),
+                )?;
+                Ok(exists > 0)
+            })
+            .unwrap_or(false);
+
+        if already_promoted {
+            continue;
+        }
+
+        let (subject, predicate, object) =
+            thalamus::IntentClassifier::parse_store_fact_content(&candidate.content);
+
+        if object.trim().is_empty() {
+            continue;
+        }
+
+        match processor
+            .store_fact_direct(
+                &candidate.namespace,
+                "consolidated",
+                &subject,
+                &predicate,
+                &object,
+            )
+            .await
+        {
+            Ok(fact_id) => {
+                if let Err(e) = processor.episodic().pool().with_conn(|conn| {
+                    conn.execute(
+                        "INSERT INTO episode_promotions (episode_id, fact_id)
+                         VALUES (?1, ?2)
+                         ON CONFLICT(episode_id) DO NOTHING",
+                        rusqlite::params![&candidate.episode_id, fact_id],
+                    )?;
+                    Ok(())
+                }) {
+                    tracing::warn!(
+                        episode_id = %candidate.episode_id,
+                        "Failed to persist promotion marker: {e}"
+                    );
+                } else {
+                    promoted_now += 1;
+                }
+            }
+            Err(e) => tracing::warn!(
+                episode_id = %candidate.episode_id,
+                "Failed to promote episode: {e}"
+            ),
+        }
+    }
+
+    promoted_now
+}
+
 // ─── Chat ─────────────────────────────────────────────────────────────────────
 
-async fn chat_non_interactive(config: &brain_core::BrainConfig, message: &str) -> anyhow::Result<()> {
+async fn chat_non_interactive(
+    config: &brain_core::BrainConfig,
+    message: &str,
+) -> anyhow::Result<()> {
     use futures::StreamExt;
 
     let mut brain = BrainSession::new(config).await?;
@@ -1549,7 +1658,12 @@ async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()
                             let mut out = stdout();
                             let _ = out.execute(cursor::MoveToColumn(0));
                             let _ = out.execute(terminal::Clear(terminal::ClearType::CurrentLine));
-                            let _ = write!(out, "\x1b[90m  {} {}\x1b[0m", frames[i % frames.len()], label);
+                            let _ = write!(
+                                out,
+                                "\x1b[90m  {} {}\x1b[0m",
+                                frames[i % frames.len()],
+                                label
+                            );
                             let _ = out.flush();
                         }
                         i += 1;
@@ -1565,11 +1679,12 @@ async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()
 
                 // Wrap handle in Option so we can .take() it exactly once
                 let mut spinner_handle = Some(spinner_handle);
-                let dismiss_spinner = |stop: &Arc<std::sync::atomic::AtomicBool>,
-                                       handle: &mut Option<tokio::task::JoinHandle<()>>| {
-                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
-                    handle.take() // returns the JoinHandle (if not already taken)
-                };
+                let dismiss_spinner =
+                    |stop: &Arc<std::sync::atomic::AtomicBool>,
+                     handle: &mut Option<tokio::task::JoinHandle<()>>| {
+                        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                        handle.take() // returns the JoinHandle (if not already taken)
+                    };
 
                 match prepare_result {
                     Ok(PrepareResult::ActionResult(text)) => {
@@ -1596,7 +1711,9 @@ async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()
                                     match chunk {
                                         Ok(c) => {
                                             // Stop spinner & print prefix on first token
-                                            if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle) {
+                                            if let Some(h) =
+                                                dismiss_spinner(&stop, &mut spinner_handle)
+                                            {
                                                 let _ = h.await;
                                                 let mut out = stdout();
                                                 out.execute(SetForegroundColor(Color::Green))?;
@@ -1612,7 +1729,9 @@ async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()
                                             }
                                         }
                                         Err(e) => {
-                                            if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle) {
+                                            if let Some(h) =
+                                                dismiss_spinner(&stop, &mut spinner_handle)
+                                            {
                                                 let _ = h.await;
                                             }
                                             eprintln!("\nStream error: {e}");
@@ -1633,7 +1752,8 @@ async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()
                                 // Fallback to non-streaming (spinner keeps running)
                                 match brain.llm.generate(&messages).await {
                                     Ok(response) => {
-                                        if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle) {
+                                        if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle)
+                                        {
                                             let _ = h.await;
                                         }
                                         let mut out = stdout();
@@ -1641,18 +1761,24 @@ async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()
                                         out.execute(Print("Brain: "))?;
                                         out.execute(ResetColor)?;
                                         println!("{}", response.content);
-                                        if let Err(e) = brain.finalize_response(input, &response.content) {
+                                        if let Err(e) =
+                                            brain.finalize_response(input, &response.content)
+                                        {
                                             tracing::warn!("Failed to store response: {e}");
                                         }
                                     }
                                     Err(e) => {
-                                        if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle) {
+                                        if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle)
+                                        {
                                             let _ = h.await;
                                         }
                                         let msg = e.to_string();
                                         if msg.contains("timed out") || msg.contains("Timeout") {
                                             eprintln!("LLM timed out — model may still be loading. Try again.");
-                                        } else if msg.contains("error sending request") || msg.contains("connection refused") || msg.contains("Connection refused") {
+                                        } else if msg.contains("error sending request")
+                                            || msg.contains("connection refused")
+                                            || msg.contains("Connection refused")
+                                        {
                                             eprintln!("LLM unreachable — is Ollama running? (`ollama serve`)");
                                         } else {
                                             eprintln!("Error: {msg}");
@@ -1669,7 +1795,10 @@ async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()
                         let msg = e.to_string();
                         if msg.contains("timed out") || msg.contains("Timeout") {
                             eprintln!("LLM timed out — model may still be loading. Try again.");
-                        } else if msg.contains("error sending request") || msg.contains("connection refused") || msg.contains("Connection refused") {
+                        } else if msg.contains("error sending request")
+                            || msg.contains("connection refused")
+                            || msg.contains("Connection refused")
+                        {
                             eprintln!("LLM unreachable — is Ollama running? (`ollama serve`)");
                         } else {
                             eprintln!("Error: {msg}");
@@ -1703,17 +1832,124 @@ enum PrepareResult {
     LlmReady(Vec<cortex::llm::Message>),
 }
 
+#[derive(Clone)]
+struct CliMemoryBackend {
+    semantic: Option<hippocampus::SemanticStore>,
+    embedder: Arc<tokio::sync::Mutex<Option<hippocampus::Embedder>>>,
+    embedding_dim: usize,
+}
+
+#[async_trait::async_trait]
+impl cortex::actions::MemoryBackend for CliMemoryBackend {
+    async fn store_fact(
+        &self,
+        namespace: &str,
+        category: &str,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+    ) -> Result<String, cortex::actions::ActionError> {
+        let Some(semantic) = &self.semantic else {
+            return Err(cortex::actions::ActionError::ExecutionFailed(
+                "Semantic store unavailable".to_string(),
+            ));
+        };
+
+        let content = format!("{subject} {predicate} {object}");
+        let vector = {
+            let mut guard = self.embedder.lock().await;
+            if let Some(embedder) = guard.as_mut() {
+                match embedder.embed(&content).await {
+                    Ok(v) => {
+                        hippocampus::embedding::sanitize_embedding(v, self.embedding_dim, &content)
+                    }
+                    Err(e) => {
+                        tracing::warn!("CLI ActionDispatcher embedding failed: {e}");
+                        hippocampus::embedding::deterministic_fallback_embedding(
+                            &content,
+                            self.embedding_dim,
+                        )
+                    }
+                }
+            } else {
+                hippocampus::embedding::deterministic_fallback_embedding(
+                    &content,
+                    self.embedding_dim,
+                )
+            }
+        };
+
+        semantic
+            .store_fact(
+                namespace, category, subject, predicate, object, 1.0, None, vector,
+            )
+            .await
+            .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))
+    }
+
+    async fn recall(
+        &self,
+        query: &str,
+        top_k: usize,
+        namespace: Option<&str>,
+    ) -> Result<Vec<cortex::actions::MemoryFact>, cortex::actions::ActionError> {
+        let Some(semantic) = &self.semantic else {
+            return Err(cortex::actions::ActionError::ExecutionFailed(
+                "Semantic store unavailable".to_string(),
+            ));
+        };
+
+        let vector = {
+            let mut guard = self.embedder.lock().await;
+            if let Some(embedder) = guard.as_mut() {
+                match embedder.embed(query).await {
+                    Ok(v) => {
+                        hippocampus::embedding::sanitize_embedding(v, self.embedding_dim, query)
+                    }
+                    Err(e) => {
+                        tracing::warn!("CLI ActionDispatcher embedding failed: {e}");
+                        hippocampus::embedding::deterministic_fallback_embedding(
+                            query,
+                            self.embedding_dim,
+                        )
+                    }
+                }
+            } else {
+                hippocampus::embedding::deterministic_fallback_embedding(query, self.embedding_dim)
+            }
+        };
+
+        let results = semantic
+            .search_similar(vector, top_k.max(1), namespace)
+            .await
+            .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))?;
+
+        Ok(results
+            .into_iter()
+            .map(|r| cortex::actions::MemoryFact {
+                namespace: r.fact.namespace,
+                subject: r.fact.subject,
+                predicate: r.fact.predicate,
+                object: r.fact.object,
+                confidence: r.fact.confidence,
+            })
+            .collect())
+    }
+}
+
 #[allow(dead_code)]
 struct BrainSession {
     _config: brain_core::BrainConfig,
     _db: storage::SqlitePool,
     episodic: hippocampus::EpisodicStore,
     semantic: Option<hippocampus::SemanticStore>,
-    embedder: Option<hippocampus::Embedder>,
+    embedder: Arc<tokio::sync::Mutex<Option<hippocampus::Embedder>>>,
     embedding_dim: usize,
     recall_engine: hippocampus::RecallEngine,
     llm: Box<dyn cortex::llm::LlmProvider>,
     context_assembler: cortex::context::ContextAssembler,
+    action_dispatcher: cortex::actions::ActionDispatcher,
+    namespace: String,
     conversation_history: Vec<cortex::llm::Message>,
     session_id: String,
 }
@@ -1723,8 +1959,11 @@ impl BrainSession {
         let db = storage::SqlitePool::open(&config.sqlite_path())?;
         let episodic = hippocampus::EpisodicStore::new(db.clone());
 
-        let semantic = if let Ok(ruv) =
-            storage::RuVectorStore::open(&config.ruvector_path(), config.embedding.dimensions as usize).await
+        let semantic = if let Ok(ruv) = storage::RuVectorStore::open(
+            &config.ruvector_path(),
+            config.embedding.dimensions as usize,
+        )
+        .await
         {
             ruv.ensure_tables().await.ok();
             Some(hippocampus::SemanticStore::new(db.clone(), ruv))
@@ -1734,20 +1973,32 @@ impl BrainSession {
 
         // Create embedder (same logic as SignalProcessor)
         let embedding_dim = config.embedding.dimensions as usize;
-        let embedder = match config.llm.provider.as_str() {
-            "openai" => {
-                let api_key = std::env::var("BRAIN_LLM__API_KEY").unwrap_or_default();
-                Some(hippocampus::Embedder::for_openai(
+        let embedder = Arc::new(tokio::sync::Mutex::new(
+            match config.llm.provider.as_str() {
+                "openai" => {
+                    let api_key = std::env::var("BRAIN_LLM__API_KEY").unwrap_or_default();
+                    Some(hippocampus::Embedder::for_openai(
+                        &config.llm.base_url,
+                        &config.embedding.model,
+                        &api_key,
+                    ))
+                }
+                _ => Some(hippocampus::Embedder::for_ollama(
                     &config.llm.base_url,
                     &config.embedding.model,
-                    &api_key,
-                ))
-            }
-            _ => Some(hippocampus::Embedder::for_ollama(
-                &config.llm.base_url,
-                &config.embedding.model,
-            )),
-        };
+                )),
+            },
+        ));
+
+        let action_backend = Arc::new(CliMemoryBackend {
+            semantic: semantic.clone(),
+            embedder: Arc::clone(&embedder),
+            embedding_dim,
+        });
+        let action_dispatcher = cortex::actions::ActionDispatcher::with_memory_backend(
+            cortex::actions::ActionConfig::default(),
+            action_backend,
+        );
 
         let recall_engine = hippocampus::RecallEngine::with_defaults();
 
@@ -1773,6 +2024,8 @@ impl BrainSession {
             recall_engine,
             llm,
             context_assembler,
+            action_dispatcher,
+            namespace: "personal".to_string(),
             conversation_history: Vec::new(),
             session_id,
         })
@@ -1782,41 +2035,52 @@ impl BrainSession {
         self.conversation_history.clear();
     }
 
-    /// Generate a vector embedding for text, falling back to a zero vector.
+    /// Generate a vector embedding for text, falling back to a deterministic vector.
     async fn embed_text(&mut self, text: &str) -> Vec<f32> {
-        if let Some(ref mut embedder) = self.embedder {
+        let mut guard = self.embedder.lock().await;
+        if let Some(ref mut embedder) = *guard {
             match embedder.embed(text).await {
-                Ok(vec) => vec,
+                Ok(vec) => {
+                    hippocampus::embedding::sanitize_embedding(vec, self.embedding_dim, text)
+                }
                 Err(e) => {
-                    tracing::warn!("Embedding failed in CLI chat, using zero vector: {e}");
-                    vec![0.0_f32; self.embedding_dim]
+                    tracing::warn!("Embedding failed in CLI chat, using fallback vector: {e}");
+                    hippocampus::embedding::deterministic_fallback_embedding(
+                        text,
+                        self.embedding_dim,
+                    )
                 }
             }
         } else {
-            vec![0.0_f32; self.embedding_dim]
+            hippocampus::embedding::deterministic_fallback_embedding(text, self.embedding_dim)
         }
     }
 
     /// Phase 0: store user episode, route via thalamus, recall memories, assemble context.
     async fn prepare_context(&mut self, message: &str) -> anyhow::Result<PrepareResult> {
         let importance = hippocampus::ImportanceScorer::score(message, true);
-        self.episodic
-            .store_episode(&self.session_id, "user", message, importance)?;
+        self.episodic.store_episode(
+            &self.session_id,
+            "user",
+            message,
+            importance,
+            Some(&self.namespace),
+        )?;
 
         let thalamus = thalamus::SignalRouter::new();
-        let classification = thalamus.route(&thalamus::NormalizedMessage {
-            content: message.to_string(),
-            channel: "cli".to_string(),
-            sender: "user".to_string(),
-            timestamp: chrono::Utc::now(),
-            message_id: None,
-            metadata: std::collections::HashMap::new(),
-        });
+        let classification = thalamus
+            .route(&thalamus::NormalizedMessage {
+                content: message.to_string(),
+                channel: "cli".to_string(),
+                sender: "user".to_string(),
+                timestamp: chrono::Utc::now(),
+                message_id: None,
+                metadata: std::collections::HashMap::new(),
+            })
+            .await;
 
         if let Some(action) = thalamus.intent_to_action(&classification.intent) {
-            let result = cortex::actions::ActionDispatcher::with_defaults()
-                .dispatch(&action)
-                .await;
+            let result = self.action_dispatcher.dispatch(&action).await;
             return if result.success {
                 Ok(PrepareResult::ActionResult(result.output))
             } else {
@@ -1832,7 +2096,14 @@ impl BrainSession {
         let memories = if let Some(semantic) = &self.semantic {
             match self
                 .recall_engine
-                .recall(message, query_vector, &self.episodic, semantic, 10, None)
+                .recall(
+                    message,
+                    query_vector,
+                    &self.episodic,
+                    semantic,
+                    10,
+                    Some(&self.namespace),
+                )
                 .await
             {
                 Ok(mems) => mems,
@@ -1843,7 +2114,7 @@ impl BrainSession {
             }
         } else {
             self.episodic
-                .search_bm25(message, 10)
+                .search_bm25(message, 10, Some(&self.namespace))
                 .unwrap_or_default()
                 .into_iter()
                 .map(|r| hippocampus::search::Memory {
@@ -1857,19 +2128,28 @@ impl BrainSession {
                 .collect()
         };
 
-        let messages = self
-            .context_assembler
-            .assemble(message, &memories, &self.conversation_history);
+        let messages =
+            self.context_assembler
+                .assemble(message, &memories, &self.conversation_history);
 
         Ok(PrepareResult::LlmReady(messages))
     }
 
     /// Store assistant response in episodic memory and conversation history.
-    fn finalize_response(&mut self, user_message: &str, assistant_content: &str) -> anyhow::Result<()> {
+    fn finalize_response(
+        &mut self,
+        user_message: &str,
+        assistant_content: &str,
+    ) -> anyhow::Result<()> {
         use cortex::llm::{Message, Role};
 
-        self.episodic
-            .store_episode(&self.session_id, "assistant", assistant_content, 0.5)?;
+        self.episodic.store_episode(
+            &self.session_id,
+            "assistant",
+            assistant_content,
+            0.5,
+            Some(&self.namespace),
+        )?;
 
         self.conversation_history.push(Message {
             role: Role::User,
@@ -1899,5 +2179,39 @@ impl BrainSession {
                 Ok(response.content)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_promotion_idempotency_guard() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let processor = signal::SignalProcessor::new(config).await.unwrap();
+
+        let session_id = processor.episodic().create_session("test").unwrap();
+        let episode_id = processor
+            .episodic()
+            .store_episode(&session_id, "user", "project uses bun", 0.9, Some("work"))
+            .unwrap();
+
+        let candidates = vec![hippocampus::PromotionCandidate {
+            episode_id,
+            namespace: "work".to_string(),
+            content: "project uses bun".to_string(),
+            importance: 0.9,
+            reinforcement_count: 3,
+        }];
+
+        let first = promote_candidates(&processor, &candidates).await;
+        let second = promote_candidates(&processor, &candidates).await;
+
+        assert_eq!(first, 1, "first promotion should persist");
+        assert_eq!(second, 0, "second promotion should be skipped");
+        assert_eq!(processor.list_facts(Some("work")).len(), 1);
     }
 }

@@ -411,8 +411,9 @@ impl McpServer {
             .get("subject")
             .and_then(Value::as_str)
             .ok_or((-32602, "Missing required argument: subject".to_string()))?;
+        let namespace = args.get("namespace").and_then(Value::as_str);
 
-        let facts = self.processor.facts_about(subject);
+        let facts = self.processor.facts_about(subject, namespace);
 
         let text = if facts.is_empty() {
             format!("No facts found about '{subject}'.")
@@ -435,7 +436,7 @@ impl McpServer {
     fn tool_memory_episodes(&self, args: &Value) -> Result<Value, (i32, String)> {
         let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
 
-        let episodes = self.processor.recent_episodes(limit);
+        let episodes = self.processor.recent_episodes(limit, None);
 
         let text = if episodes.is_empty() {
             "No conversation episodes found.".to_string()
@@ -514,7 +515,10 @@ impl McpServer {
                     .map_err(|e| (-32603, format!("Failed to delete procedure: {e}")))?;
                 Ok(tool_result_text(format!("Deleted procedure {id}")))
             }
-            other => Err((-32602, format!("Unknown action: {other}. Use 'list', 'store', or 'delete'"))),
+            other => Err((
+                -32602,
+                format!("Unknown action: {other}. Use 'list', 'store', or 'delete'"),
+            )),
         }
     }
 
@@ -1093,7 +1097,7 @@ mod tests {
     ///
     /// Stores a structured fact via the `memory_store` MCP tool, then immediately
     /// calls `memory_search` and verifies the stored fact appears in the results.
-    /// Zero-vector fallback (no Ollama) ensures all stored facts are returned.
+    /// Deterministic fallback embeddings (when no Ollama) keep search available.
     #[tokio::test]
     async fn test_mcp_memory_store_then_search_roundtrip() {
         let (server, _tmp) = make_server().await;
@@ -1143,7 +1147,7 @@ mod tests {
             .as_str()
             .unwrap()
             .to_string();
-        // With zero-vector fallback, stored facts are returned; result should not be "No relevant"
+        // With deterministic fallback embeddings, stored facts are still returned.
         assert!(
             !search_text.contains("No relevant"),
             "memory_search should return the stored fact, got: {search_text}"

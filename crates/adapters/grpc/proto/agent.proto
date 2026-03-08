@@ -36,6 +36,8 @@ message SignalRequest {
   string sender  = 3;
   string content = 4;
   map<string, string> metadata = 5;
+  // Optional namespace (default: "personal").
+  string namespace = 6;
 }
 
 message SignalResponse {

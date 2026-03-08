@@ -3,6 +3,8 @@
 //! Dispatches tool calls from LLM: command execution (sandboxed),
 //! web search, scheduling, memory operations, and message sending.
 
+use std::sync::Arc;
+
 use thiserror::Error;
 
 // ─── Errors ─────────────────────────────────────────────────────────────────
@@ -62,6 +64,36 @@ pub struct ActionResult {
     pub success: bool,
     pub output: String,
     pub error: Option<String>,
+}
+
+/// Normalized memory fact used by action backends.
+#[derive(Debug, Clone)]
+pub struct MemoryFact {
+    pub namespace: String,
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    pub confidence: f64,
+}
+
+/// Optional backend that provides real memory read/write operations.
+#[async_trait::async_trait]
+pub trait MemoryBackend: Send + Sync {
+    async fn store_fact(
+        &self,
+        namespace: &str,
+        category: &str,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+    ) -> Result<String, ActionError>;
+
+    async fn recall(
+        &self,
+        query: &str,
+        top_k: usize,
+        namespace: Option<&str>,
+    ) -> Result<Vec<MemoryFact>, ActionError>;
 }
 
 impl ActionResult {
@@ -128,12 +160,27 @@ impl Default for ActionConfig {
 /// Dispatches actions/tools.
 pub struct ActionDispatcher {
     config: ActionConfig,
+    memory_backend: Option<Arc<dyn MemoryBackend>>,
 }
 
 impl ActionDispatcher {
     /// Create a new dispatcher.
     pub fn new(config: ActionConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            memory_backend: None,
+        }
+    }
+
+    /// Create a new dispatcher with a memory backend attached.
+    pub fn with_memory_backend(
+        config: ActionConfig,
+        memory_backend: Arc<dyn MemoryBackend>,
+    ) -> Self {
+        Self {
+            config,
+            memory_backend: Some(memory_backend),
+        }
     }
 
     /// Create with default config.
@@ -232,21 +279,45 @@ impl ActionDispatcher {
 
     /// Store a fact in semantic memory.
     async fn store_fact(&self, subject: &str, predicate: &str, object: &str) -> ActionResult {
-        tracing::info!("Store fact: {} {} {}", subject, predicate, object);
-        // This would integrate with SemanticStore
-        // For now, return success
-        ActionResult::success(format!("Fact stored: {} {} {}", subject, predicate, object))
+        let Some(memory) = &self.memory_backend else {
+            return ActionResult::failure("Memory backend not available");
+        };
+
+        match memory
+            .store_fact("personal", "action", subject, predicate, object)
+            .await
+        {
+            Ok(id) => ActionResult::success(format!(
+                "Fact stored [{}]: {} {} {}",
+                id, subject, predicate, object
+            )),
+            Err(e) => ActionResult::failure(format!("Failed to store fact: {e}")),
+        }
     }
 
     /// Recall from memory.
     async fn recall(&self, query: &str) -> ActionResult {
-        tracing::info!("Recall query: {}", query);
-        // This would integrate with RecallEngine
-        // For now, return placeholder
-        ActionResult::success(format!(
-            "Recall results for '{}' would appear here. (Integrate with hippocampus::RecallEngine)",
-            query
-        ))
+        let Some(memory) = &self.memory_backend else {
+            return ActionResult::failure("Memory backend not available");
+        };
+
+        match memory.recall(query, 10, Some("personal")).await {
+            Ok(results) if results.is_empty() => ActionResult::success("No matching facts found."),
+            Ok(results) => {
+                let lines = results
+                    .iter()
+                    .map(|r| {
+                        format!(
+                            "[{}] {} {} {} (confidence: {:.2})",
+                            r.namespace, r.subject, r.predicate, r.object, r.confidence
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ActionResult::success(format!("Found {} fact(s):\n{}", results.len(), lines))
+            }
+            Err(e) => ActionResult::failure(format!("Recall failed: {e}")),
+        }
     }
 
     /// Send a message via channel.
@@ -344,6 +415,51 @@ pub fn get_available_tools() -> Vec<ToolDefinition> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    struct MockMemoryBackend {
+        facts: Mutex<Vec<MemoryFact>>,
+    }
+
+    #[async_trait::async_trait]
+    impl MemoryBackend for MockMemoryBackend {
+        async fn store_fact(
+            &self,
+            namespace: &str,
+            _category: &str,
+            subject: &str,
+            predicate: &str,
+            object: &str,
+        ) -> Result<String, ActionError> {
+            self.facts.lock().unwrap().push(MemoryFact {
+                namespace: namespace.to_string(),
+                subject: subject.to_string(),
+                predicate: predicate.to_string(),
+                object: object.to_string(),
+                confidence: 1.0,
+            });
+            Ok("fact-1".to_string())
+        }
+
+        async fn recall(
+            &self,
+            query: &str,
+            _top_k: usize,
+            namespace: Option<&str>,
+        ) -> Result<Vec<MemoryFact>, ActionError> {
+            let facts = self.facts.lock().unwrap();
+            Ok(facts
+                .iter()
+                .filter(|f| {
+                    namespace.is_none_or(|ns| f.namespace == ns)
+                        && (f.subject.contains(query)
+                            || f.predicate.contains(query)
+                            || f.object.contains(query))
+                })
+                .cloned()
+                .collect())
+        }
+    }
 
     #[test]
     fn test_action_result_success() {
@@ -404,5 +520,60 @@ mod tests {
         assert!(!tools.is_empty());
         assert!(tools.iter().any(|t| t.name == "execute_command"));
         assert!(tools.iter().any(|t| t.name == "web_search"));
+    }
+
+    #[tokio::test]
+    async fn test_store_fact_with_memory_backend() {
+        let backend = Arc::new(MockMemoryBackend {
+            facts: Mutex::new(Vec::new()),
+        });
+        let dispatcher = ActionDispatcher::with_memory_backend(ActionConfig::default(), backend);
+
+        let action = Action::StoreFact {
+            subject: "user".to_string(),
+            predicate: "likes".to_string(),
+            object: "Rust".to_string(),
+        };
+        let result = dispatcher.dispatch(&action).await;
+        assert!(result.success);
+        assert!(result.output.contains("Fact stored"));
+    }
+
+    #[tokio::test]
+    async fn test_recall_with_memory_backend() {
+        let backend = Arc::new(MockMemoryBackend {
+            facts: Mutex::new(Vec::new()),
+        });
+        let dispatcher =
+            ActionDispatcher::with_memory_backend(ActionConfig::default(), backend.clone());
+
+        let store = Action::StoreFact {
+            subject: "user".to_string(),
+            predicate: "likes".to_string(),
+            object: "Rust".to_string(),
+        };
+        let _ = dispatcher.dispatch(&store).await;
+
+        let recall = Action::Recall {
+            query: "Rust".to_string(),
+        };
+        let result = dispatcher.dispatch(&recall).await;
+        assert!(result.success);
+        assert!(result.output.contains("Found 1 fact"));
+    }
+
+    #[tokio::test]
+    async fn test_memory_actions_fail_without_backend() {
+        let dispatcher = ActionDispatcher::with_defaults();
+        let action = Action::Recall {
+            query: "anything".to_string(),
+        };
+        let result = dispatcher.dispatch(&action).await;
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Memory backend not available"));
     }
 }

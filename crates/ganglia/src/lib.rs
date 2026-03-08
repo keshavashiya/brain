@@ -133,12 +133,12 @@ impl HabitEngine {
         })?;
 
         const STOPWORDS: &[&str] = &[
-            "i", "me", "my", "the", "a", "an", "is", "are", "was", "were", "be", "been",
-            "being", "have", "has", "had", "do", "does", "did", "will", "would", "shall",
-            "should", "may", "might", "must", "can", "could", "to", "of", "in", "on", "at",
-            "for", "with", "by", "from", "that", "this", "it", "its", "and", "or", "but",
-            "not", "no", "about", "what", "how", "when", "where", "who", "which", "brain",
-            "remember", "recall", "store", "fact", "help", "also", "just", "then", "than",
+            "i", "me", "my", "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+            "have", "has", "had", "do", "does", "did", "will", "would", "shall", "should", "may",
+            "might", "must", "can", "could", "to", "of", "in", "on", "at", "for", "with", "by",
+            "from", "that", "this", "it", "its", "and", "or", "but", "not", "no", "about", "what",
+            "how", "when", "where", "who", "which", "brain", "remember", "recall", "store", "fact",
+            "help", "also", "just", "then", "than",
         ];
 
         // (keyword, day_of_week, hour) → occurrence count
@@ -158,10 +158,7 @@ impl HabitEngine {
                 let kw = word
                     .trim_matches(|c: char| !c.is_alphanumeric())
                     .to_lowercase();
-                if kw.len() >= 4
-                    && !STOPWORDS.contains(&kw.as_str())
-                    && seen.insert(kw.clone())
-                {
+                if kw.len() >= 4 && !STOPWORDS.contains(&kw.as_str()) && seen.insert(kw.clone()) {
                     *counts.entry((kw, dow, hour)).or_insert(0) += 1;
                 }
             }

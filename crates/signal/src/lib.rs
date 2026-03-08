@@ -9,7 +9,7 @@
 //! - Hippocampus (episodic + semantic memory)
 //! - Cortex (LLM reasoning + context assembly)
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -145,6 +145,21 @@ impl SignalResponse {
     }
 }
 
+/// Broadcast event emitted after a signal has been processed successfully.
+#[derive(Debug, Clone)]
+pub struct SignalProcessedEvent {
+    pub signal_id: Uuid,
+    pub source: SignalSource,
+    pub channel: String,
+    pub sender: String,
+    pub namespace: String,
+    pub status: ResponseStatus,
+    pub response: String,
+    pub facts_used: usize,
+    pub episodes_used: usize,
+    pub timestamp: DateTime<Utc>,
+}
+
 // ─── Signal Adapter Trait ─────────────────────────────────────────────────────
 
 /// Trait implemented by all protocol adapters (HTTP, WebSocket, MCP, gRPC, CLI).
@@ -177,9 +192,101 @@ pub struct SignalProcessor {
     /// Actual output dimension of the active embedding provider (probed at startup).
     embedding_dim: usize,
     recall_engine: hippocampus::RecallEngine,
-    llm: Box<dyn cortex::LlmProvider>,
+    llm: Arc<dyn cortex::LlmProvider>,
     context_assembler: cortex::context::ContextAssembler,
     procedures: cerebellum::ProcedureStore,
+    events_tx: tokio::sync::broadcast::Sender<SignalProcessedEvent>,
+}
+
+/// Optional LLM-backed fallback classifier for intent routing.
+struct LlmIntentFallback {
+    llm: Arc<dyn cortex::LlmProvider>,
+}
+
+#[derive(serde::Deserialize)]
+struct LlmIntentPayload {
+    intent: String,
+    subject: Option<String>,
+    predicate: Option<String>,
+    object: Option<String>,
+    query: Option<String>,
+    target: Option<String>,
+}
+
+impl LlmIntentFallback {
+    fn new(llm: Arc<dyn cortex::LlmProvider>) -> Self {
+        Self { llm }
+    }
+
+    fn parse_json_payload(raw: &str) -> Option<LlmIntentPayload> {
+        let trimmed = raw.trim();
+        if let Ok(payload) = serde_json::from_str::<LlmIntentPayload>(trimmed) {
+            return Some(payload);
+        }
+
+        let start = trimmed.find('{')?;
+        let end = trimmed.rfind('}')?;
+        serde_json::from_str::<LlmIntentPayload>(&trimmed[start..=end]).ok()
+    }
+}
+
+#[async_trait::async_trait]
+impl thalamus::IntentFallback for LlmIntentFallback {
+    async fn classify_with_llm(&self, input: &str) -> Option<thalamus::Classification> {
+        use cortex::llm::{Message, Role};
+        use thalamus::{Classification, ClassificationMethod, Intent};
+
+        let prompt = format!(
+            "Classify the input into one intent: store_fact, recall, forget, or chat.\n\
+             Return JSON with keys: intent, subject, predicate, object, query, target.\n\
+             Keep missing keys null.\n\
+             Input: {input}"
+        );
+        let messages = vec![Message {
+            role: Role::User,
+            content: prompt,
+        }];
+
+        let response = self.llm.generate(&messages).await.ok()?;
+        let payload = Self::parse_json_payload(&response.content)?;
+        let intent = match payload.intent.to_lowercase().as_str() {
+            "store_fact" => Intent::StoreFact {
+                subject: payload.subject.unwrap_or_else(|| "user".to_string()),
+                predicate: payload.predicate.unwrap_or_else(|| "said".to_string()),
+                object: payload.object.unwrap_or_else(|| input.to_string()),
+            },
+            "recall" => Intent::Recall {
+                query: payload.query.unwrap_or_else(|| input.to_string()),
+            },
+            "forget" => Intent::Forget {
+                target: payload.target.unwrap_or_else(|| input.to_string()),
+            },
+            _ => Intent::Chat {
+                content: input.to_string(),
+            },
+        };
+
+        Some(Classification {
+            intent,
+            confidence: 0.6,
+            method: ClassificationMethod::Llm,
+        })
+    }
+}
+
+fn llm_intent_fallback_enabled() -> bool {
+    std::env::var("BRAIN_INTENT_LLM_FALLBACK")
+        .ok()
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false)
+}
+
+fn response_to_text(content: &ResponseContent) -> String {
+    match content {
+        ResponseContent::Text(t) => t.clone(),
+        ResponseContent::Json(v) => v.to_string(),
+        ResponseContent::Error(e) => e.clone(),
+    }
 }
 
 impl SignalProcessor {
@@ -230,7 +337,7 @@ impl SignalProcessor {
             temperature: config.llm.temperature,
             max_tokens: config.llm.max_tokens as i32,
         };
-        let llm = cortex::llm::create_provider(&llm_config);
+        let llm: Arc<dyn cortex::LlmProvider> = cortex::llm::create_provider(&llm_config).into();
 
         // Create embedder — provider is selected from llm.provider config.
         // The model and dimension come from the embedding config section.
@@ -238,8 +345,7 @@ impl SignalProcessor {
         let embedding_dim = config.embedding.dimensions as usize;
         let embedder_inner = match config.llm.provider.as_str() {
             "openai" => {
-                let api_key = std::env::var("BRAIN_LLM__API_KEY")
-                    .unwrap_or_else(|_| String::new());
+                let api_key = std::env::var("BRAIN_LLM__API_KEY").unwrap_or_else(|_| String::new());
                 tracing::info!(
                     model = config.embedding.model,
                     dim = embedding_dim,
@@ -269,27 +375,37 @@ impl SignalProcessor {
         // Create semantic store (optional — fails gracefully if RuVector unavailable).
         // Pass the probed embedding_dim so VectorDB is sized to match the provider.
         // Note: ruvector-core stores only IDs; content encryption is handled by SQLite.
-        let semantic =
-            match storage::RuVectorStore::open(&config.ruvector_path(), embedding_dim).await {
-                Ok(ruv) => {
-                    if encryptor.is_some() {
-                        tracing::info!("Encryption enabled: vector IDs stored in ruvector-core, content encrypted in SQLite");
-                    }
-                    let _ = ruv.ensure_tables().await;
-                    Some(hippocampus::SemanticStore::new(db.clone(), ruv))
+        let semantic = match storage::RuVectorStore::open(&config.ruvector_path(), embedding_dim)
+            .await
+        {
+            Ok(ruv) => {
+                if encryptor.is_some() {
+                    tracing::info!("Encryption enabled: vector IDs stored in ruvector-core, content encrypted in SQLite");
                 }
-                Err(e) => {
-                    tracing::warn!("RuVector unavailable, semantic memory disabled: {e}");
-                    None
-                }
-            };
+                let _ = ruv.ensure_tables().await;
+                Some(hippocampus::SemanticStore::new(db.clone(), ruv))
+            }
+            Err(e) => {
+                tracing::warn!("RuVector unavailable, semantic memory disabled: {e}");
+                None
+            }
+        };
 
         // Create recall engine with default RRF config
         let recall_engine = hippocampus::RecallEngine::with_defaults();
+        let (events_tx, _) = tokio::sync::broadcast::channel(512);
+
+        let classifier = if llm_intent_fallback_enabled() {
+            tracing::info!("LLM intent fallback enabled");
+            thalamus::IntentClassifier::new()
+                .with_llm_fallback(Arc::new(LlmIntentFallback::new(llm.clone())))
+        } else {
+            thalamus::IntentClassifier::new()
+        };
 
         Ok(Self {
             config,
-            classifier: thalamus::IntentClassifier::new(),
+            classifier,
             importance: amygdala::ImportanceScorer::new(),
             episodic,
             semantic,
@@ -299,6 +415,7 @@ impl SignalProcessor {
             llm,
             context_assembler: cortex::context::ContextAssembler::with_defaults(),
             procedures,
+            events_tx,
         })
     }
 
@@ -308,6 +425,15 @@ impl SignalProcessor {
     /// - `StoreFact`  → Amygdala importance → Hippocampus semantic store → confirmation
     /// - `Recall`     → Hippocampus hybrid search → Cortex context assembly → LLM response
     /// - `Chat`       → Hippocampus context → Cortex LLM → Hippocampus episode store
+    #[tracing::instrument(
+        name = "signal.process",
+        skip(self, signal),
+        fields(
+            signal_id = %signal.id,
+            source = ?signal.source,
+            namespace = %signal.namespace
+        )
+    )]
     pub async fn process(&self, signal: Signal) -> Result<SignalResponse, SignalError> {
         let signal_id = signal.id;
 
@@ -315,7 +441,7 @@ impl SignalProcessor {
         let importance = self.importance.score(&signal.content);
 
         // 2. Classify intent via Thalamus
-        let classification = self.classifier.classify(&signal.content);
+        let classification = self.classifier.classify(&signal.content).await;
 
         tracing::debug!(
             signal_id = %signal_id,
@@ -349,7 +475,7 @@ impl SignalProcessor {
             }
         };
 
-        match classification.intent {
+        let response: Result<SignalResponse, SignalError> = match classification.intent {
             // ── STORE_FACT: importance score → semantic memory → confirmation ────
             thalamus::Intent::StoreFact {
                 subject,
@@ -440,7 +566,13 @@ impl SignalProcessor {
                     .map_err(|e| SignalError::Storage(e.to_string()))?;
 
                 self.episodic
-                    .store_episode(&session_id, "user", &signal.content, importance as f64)
+                    .store_episode(
+                        &session_id,
+                        "user",
+                        &signal.content,
+                        importance as f64,
+                        Some(&signal.namespace),
+                    )
                     .map_err(|e| SignalError::Storage(e.to_string()))?;
 
                 // Build procedure hints as synthetic prior messages
@@ -460,7 +592,13 @@ impl SignalProcessor {
 
                 // Store the assistant turn in episodic memory
                 self.episodic
-                    .store_episode(&session_id, "assistant", &llm_response.content, 0.5)
+                    .store_episode(
+                        &session_id,
+                        "assistant",
+                        &llm_response.content,
+                        0.5,
+                        Some(&signal.namespace),
+                    )
                     .map_err(|e| SignalError::Storage(e.to_string()))?;
 
                 Ok(SignalResponse {
@@ -479,7 +617,7 @@ impl SignalProcessor {
                 let mut deleted_count = 0usize;
 
                 if let Some(semantic) = &self.semantic {
-                    match semantic.find_facts_matching(&target) {
+                    match semantic.find_facts_matching(&target, Some(&signal.namespace)) {
                         Ok(facts) if !facts.is_empty() => {
                             for fact in &facts {
                                 if let Err(e) = semantic.delete_fact(&fact.id).await {
@@ -523,25 +661,36 @@ impl SignalProcessor {
                 signal_id,
                 format!("Intent classified: {:?}", other),
             )),
-        }
+        };
+        let response = response?;
+
+        self.publish_event(&signal, &response);
+        Ok(response)
     }
 
     /// Generate a vector embedding for text.
     ///
     /// Uses whichever provider was selected at startup (Ollama or OpenAI-compatible).
-    /// Falls back to a zero vector if no provider is available or if the call
-    /// fails, so the pipeline degrades gracefully without panicking.
+    /// Falls back to a deterministic, non-zero normalized vector if no provider
+    /// is available or if the call fails.
     async fn embed_text(&self, text: &str) -> Vec<f32> {
         let mut guard = self.embedder.lock().await;
         match &mut *guard {
             Some(embedder) => match embedder.embed(text).await {
-                Ok(vec) => vec,
+                Ok(vec) => {
+                    hippocampus::embedding::sanitize_embedding(vec, self.embedding_dim, text)
+                }
                 Err(e) => {
-                    tracing::warn!("Embedding failed, using zero vector: {e}");
-                    vec![0.0_f32; self.embedding_dim]
+                    tracing::warn!("Embedding failed, using deterministic fallback vector: {e}");
+                    hippocampus::embedding::deterministic_fallback_embedding(
+                        text,
+                        self.embedding_dim,
+                    )
                 }
             },
-            None => vec![0.0_f32; self.embedding_dim],
+            None => {
+                hippocampus::embedding::deterministic_fallback_embedding(text, self.embedding_dim)
+            }
         }
     }
 
@@ -586,7 +735,10 @@ impl SignalProcessor {
             }
         } else {
             // Semantic store unavailable — fall back to episodic BM25 only
-            let bm25 = self.episodic.search_bm25(query, top_k).unwrap_or_default();
+            let bm25 = self
+                .episodic
+                .search_bm25(query, top_k, namespace)
+                .unwrap_or_default();
             let episodes_used = bm25.len();
             let memories = bm25
                 .into_iter()
@@ -601,6 +753,27 @@ impl SignalProcessor {
                 .collect();
             (memories, 0, episodes_used)
         }
+    }
+
+    fn publish_event(&self, signal: &Signal, response: &SignalResponse) {
+        let event = SignalProcessedEvent {
+            signal_id: response.signal_id,
+            source: signal.source.clone(),
+            channel: signal.channel.clone(),
+            sender: signal.sender.clone(),
+            namespace: signal.namespace.clone(),
+            status: response.status.clone(),
+            response: response_to_text(&response.response),
+            facts_used: response.memory_context.facts_used,
+            episodes_used: response.memory_context.episodes_used,
+            timestamp: Utc::now(),
+        };
+        let _ = self.events_tx.send(event);
+    }
+
+    /// Subscribe to live signal-processing events.
+    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<SignalProcessedEvent> {
+        self.events_tx.subscribe()
     }
 
     /// Expose the config (for adapter use).
@@ -663,9 +836,11 @@ impl SignalProcessor {
     }
 
     /// Get all facts about a specific subject.
-    pub fn facts_about(&self, subject: &str) -> Vec<hippocampus::Fact> {
+    pub fn facts_about(&self, subject: &str, namespace: Option<&str>) -> Vec<hippocampus::Fact> {
         if let Some(semantic) = &self.semantic {
-            semantic.get_facts_about(subject).unwrap_or_default()
+            semantic
+                .get_facts_about_in_namespace(subject, namespace)
+                .unwrap_or_default()
         } else {
             Vec::new()
         }
@@ -681,8 +856,12 @@ impl SignalProcessor {
     }
 
     /// Get the most recent episodes across all sessions.
-    pub fn recent_episodes(&self, limit: usize) -> Vec<hippocampus::Episode> {
-        self.episodic.recent(limit).unwrap_or_default()
+    pub fn recent_episodes(
+        &self,
+        limit: usize,
+        namespace: Option<&str>,
+    ) -> Vec<hippocampus::Episode> {
+        self.episodic.recent(limit, namespace).unwrap_or_default()
     }
 
     /// Flush all in-flight writes and checkpoint the SQLite WAL.
@@ -814,7 +993,7 @@ mod tests {
     /// Integration test: CLI input → SignalProcessor → StoreFact → memory stored.
     ///
     /// Tests the full STORE_FACT pipeline without requiring a running LLM or
-    /// embedding model (embedding gracefully degrades to zero vector).
+    /// embedding model (embedding gracefully degrades to deterministic fallback).
     #[tokio::test]
     async fn test_process_store_fact_integration() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -851,8 +1030,8 @@ mod tests {
     ///
     /// Tests the full round-trip: process() stores a fact via the StoreFact pipeline,
     /// list_facts() confirms persistence, and search_facts() confirms the fact is
-    /// retrievable via the vector search API. Zero-vector fallback (no Ollama) is used,
-    /// which returns all stored facts at distance 1.0.
+    /// retrievable via the vector search API. Deterministic fallback vectors are
+    /// used when embeddings are unavailable.
     #[tokio::test]
     async fn test_store_fact_then_search_roundtrip() {
         let temp_dir = tempfile::tempdir().unwrap();
@@ -883,7 +1062,6 @@ mod tests {
         );
 
         // Verify search: search_facts returns results
-        // (zero-vector fallback returns all stored facts at distance 1.0)
         let results = processor
             .search_facts("Rust programming language", 5, None)
             .await;
@@ -891,6 +1069,32 @@ mod tests {
             !results.is_empty(),
             "search_facts() should return the stored fact"
         );
+    }
+
+    #[tokio::test]
+    async fn test_forget_is_namespace_scoped() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
+        let processor = SignalProcessor::new(config).await.unwrap();
+
+        processor
+            .store_fact_direct("personal", "test", "project", "uses", "bun")
+            .await
+            .unwrap();
+        processor
+            .store_fact_direct("work", "test", "project", "uses", "bun")
+            .await
+            .unwrap();
+
+        let mut forget_signal = Signal::new(SignalSource::Cli, "cli", "user", "forget bun");
+        forget_signal.namespace = "work".to_string();
+        let _ = processor.process(forget_signal).await.unwrap();
+
+        let personal = processor.list_facts(Some("personal"));
+        let work = processor.list_facts(Some("work"));
+        assert_eq!(personal.len(), 1, "personal namespace fact should remain");
+        assert_eq!(work.len(), 0, "work namespace fact should be deleted");
     }
 
     /// Integration test: chat signal creates episodic memory entries.

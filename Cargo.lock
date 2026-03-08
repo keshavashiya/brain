@@ -522,17 +522,20 @@ name = "cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "clap",
  "core",
  "cortex",
  "crossterm",
  "futures",
+ "futures-util",
  "ganglia",
  "grpcadapter",
  "hippocampus",
  "httpadapter",
  "mcp",
+ "reqwest",
  "rpassword",
  "rusqlite",
  "rustyline",
@@ -540,8 +543,11 @@ dependencies = [
  "serde_json",
  "signal",
  "storage",
+ "tempfile",
  "thalamus",
  "tokio",
+ "tokio-tungstenite",
+ "tonic",
  "tracing",
  "tracing-subscriber",
  "wsadapter",
@@ -3075,12 +3081,14 @@ dependencies = [
 name = "thalamus"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "cortex",
  "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 

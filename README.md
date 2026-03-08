@@ -30,11 +30,13 @@ cargo install --path crates/cli
 brain init
 
 # Pull the default LLM + embedding models (Ollama)
-ollama pull qwen2.5:14b
+ollama pull qwen2.5-coder:7b
 ollama pull nomic-embed-text
 ```
 
 `brain init` creates `~/.brain/` with config, database, vector index, and log directories.
+
+If the embedding provider is unavailable, Brain uses deterministic normalized fallback vectors so writes and search continue without panics. Semantic quality is lower until the embedding provider is healthy.
 
 ## Usage
 
@@ -98,7 +100,7 @@ Brain also exposes MCP over HTTP (`brain serve --mcp`) for clients that prefer H
 |------|-----------|-------------|
 | `memory_search` | `query`, `top_k?`, `namespace?` | Hybrid semantic + full-text search |
 | `memory_store` | `subject`, `predicate`, `object`, `category`, `namespace?` | Store a semantic fact |
-| `memory_facts` | `subject` | All facts about a subject |
+| `memory_facts` | `subject`, `namespace?` | All facts about a subject (optional namespace filter) |
 | `memory_episodes` | `limit?` | Recent conversation history |
 | `user_profile` | — | Current user configuration |
 | `memory_procedures` | `action`, `trigger?`, `steps?`, `procedure_id?` | Manage learned workflows (list / store / delete) |
@@ -136,6 +138,8 @@ open http://localhost:19789/ui
 
 # OpenAPI spec
 curl http://localhost:19789/openapi.json
+
+# OpenAPI info.title: "Brain OS — Synapse HTTP API"
 
 # Swagger UI
 open http://localhost:19789/api
@@ -187,6 +191,15 @@ curl http://localhost:19789/v1/memory/namespaces \
 | MCP HTTP | 19791 | MCP over HTTP transport |
 | gRPC | 19792 | Protobuf RPC |
 | MCP stdio | stdin/stdout | `brain mcp` for MCP clients |
+
+### Adapter Behavior Matrix
+
+| Adapter | Auth | Namespace Input | Streaming | Memory Semantics |
+|---------|------|-----------------|-----------|------------------|
+| HTTP | Bearer API key | `namespace` on `/v1/signals` and `/v1/memory/search` | Request/response | Shared semantic+episodic stores |
+| WebSocket | First frame `api_key` | `namespace` in each message | Bidirectional socket | Shared semantic+episodic stores |
+| gRPC | Interceptor (`x-api-key` or Bearer metadata) | `namespace` on signal/search/store requests | Server streaming (`ReceiveSignals`, `StreamSignals`) | Shared semantic+episodic stores |
+| MCP (stdio/http) | `_meta.x-api-key` / `x-api-key` header | Tool args (`memory_store`, `memory_search`, `memory_facts`) | JSON-RPC request/response | Shared semantic+episodic stores |
 
 For development, `brain serve` runs everything in the foreground with optional flags:
 
@@ -243,7 +256,7 @@ The export format is a self-contained JSON file containing all facts and episode
 | WebSocket | First frame: `{"api_key":"<key>"}` |
 | MCP HTTP | `x-api-key: <key>` header |
 | MCP stdio | `params._meta["x-api-key"]` |
-| gRPC | Not yet enforced (planned) |
+| gRPC | Interceptor checks `x-api-key` or `authorization` metadata |
 
 Configure keys in `~/.brain/config.yaml`:
 
@@ -273,7 +286,7 @@ Config is loaded from three sources (highest priority wins):
 ```yaml
 llm:
   provider: "ollama"               # ollama | openai
-  model: "qwen2.5:14b"
+  model: "qwen2.5-coder:7b"
   base_url: "http://localhost:11434"
   temperature: 0.7
   max_tokens: 4096

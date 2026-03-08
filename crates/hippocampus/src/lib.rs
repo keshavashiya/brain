@@ -16,7 +16,9 @@ pub mod importance;
 pub mod search;
 pub mod semantic;
 
-pub use consolidation::{ConsolidationConfig, ConsolidationReport, Consolidator};
+pub use consolidation::{
+    ConsolidationConfig, ConsolidationReport, Consolidator, PromotionCandidate,
+};
 pub use embedding::{Embedder, EmbeddingError};
 pub use episodic::{Episode, EpisodicStore, Session};
 pub use importance::{ImportanceScorer, ImportanceSignals};

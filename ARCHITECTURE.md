@@ -12,7 +12,7 @@ brain/
 │   ├── core/           # BrainConfig, loader — shared types used by all crates
 │   ├── signal/         # Signal / SignalResponse types + SignalAdapter trait
 │   │                     SignalProcessor (the single shared engine)
-│   ├── thalamus/       # Intent classification (regex rules, LLM fallback planned)
+│   ├── thalamus/       # Intent classification (regex fast-path + optional LLM fallback)
 │   ├── amygdala/       # Importance scoring (keyword heuristics)
 │   ├── hippocampus/    # Memory: EpisodicStore, SemanticStore, RecallEngine,
 │   │                     Embedder (Ollama / OpenAI-compatible), ImportanceScorer
@@ -72,7 +72,7 @@ SignalProcessor::process(&signal)
      │
      ├─ 2. Amygdala: score importance (0.0 – 1.0)
      │
-     ├─ 3. Hippocampus: store episode (always)
+     ├─ 3. Hippocampus: store episode (chat path)
      │
      ├─ 4. Intent-dependent branch:
      │     STORE_FACT  → extract triple, store semantic fact
@@ -86,7 +86,7 @@ SignalProcessor::process(&signal)
      │
      ├─ 7. LlmProvider::generate(messages) → Response
      │
-     └─ 8. Return SignalResponse { text, memory_context }
+     └─ 8. Return SignalResponse + publish event bus update
 ```
 
 The response is returned directly to the calling adapter, which sends it back to the client in the protocol-appropriate format.
@@ -192,6 +192,8 @@ Brain uses [`ruvector-core`](https://github.com/ruvnet/ruvector) (crates.io: `ru
 - `search(SearchQuery { vector, k })` → `Vec<SearchResult { id, score }>`
 - `delete(id)` — remove by ID
 
+Before insert/search, vectors are sanitized (finite values, expected dimensions, L2 normalization). Invalid vectors are replaced with deterministic normalized fallback vectors, and insert vectors receive a tiny deterministic id-based jitter to avoid HNSW pathological duplicate-distance asserts.
+
 ### Hybrid Search
 
 `RecallEngine::search()` runs both:
@@ -266,7 +268,7 @@ Apps that need push notifications or streaming responses connect to `ws://localh
 
 **4. gRPC (for high-throughput or typed clients)**
 
-Generate client stubs from Brain's proto files in `crates/adapters/grpc/proto/` for any language. The `MemoryService` and `AgentService` RPCs map 1-to-1 with the HTTP routes.
+Generate client stubs from Brain's proto files in `crates/adapters/grpc/proto/` for any language. The `MemoryService` and `AgentService` RPCs map 1-to-1 with the HTTP routes. `AgentService.ReceiveSignals` is a live server stream: subscribers receive an initial `connected` event plus fan-out updates emitted by `SignalProcessor` after successful processing.
 
 ### SDK / client library
 
@@ -479,7 +481,7 @@ The engine persists its state (last fire times, daily counts) in a `habit_state`
 
 A background task that prunes low-retention memories using the forgetting curve. Enabled by default (`memory.consolidation.enabled: true`, interval: 24 hours).
 
-The `Consolidator` iterates over all episodes, computes retention as `importance * e^(-decay_rate * hours_since_last_access)`, and deletes episodes below `forgetting_threshold` (default: 0.05). It also identifies promotion candidates (episodes with high reinforcement counts) but does not yet promote them to semantic facts — this is planned.
+The `Consolidator` iterates over episodes, computes retention as `importance * e^(-decay_rate * hours_since_last_access)`, deletes episodes below `forgetting_threshold` (default: 0.05), and returns concrete promotion candidates (`episode_id`, `namespace`, `content`, `reinforcement`). The daemon loop promotes these candidates to semantic facts using deterministic StoreFact parsing and records `episode_promotions` in SQLite for idempotency across runs.
 
 ---
 
@@ -492,4 +494,3 @@ Procedures are managed via:
 - Direct `ProcedureStore` API (used by SignalProcessor)
 
 ---
-

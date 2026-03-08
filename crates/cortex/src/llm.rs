@@ -144,12 +144,19 @@ pub struct OllamaProvider {
 
 impl OllamaProvider {
     /// Create a new Ollama provider.
-    pub fn new(base_url: &str, model: &str, temperature: f64, max_tokens: i32) -> Result<Self, LlmError> {
+    pub fn new(
+        base_url: &str,
+        model: &str,
+        temperature: f64,
+        max_tokens: i32,
+    ) -> Result<Self, LlmError> {
         // Ollama may need to load a large model on first call — allow up to 5 min
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()
-            .map_err(|e| LlmError::ProviderUnavailable(format!("Failed to create HTTP client: {e}")))?;
+            .map_err(|e| {
+                LlmError::ProviderUnavailable(format!("Failed to create HTTP client: {e}"))
+            })?;
 
         Ok(Self {
             client,
@@ -208,10 +215,7 @@ impl LlmProvider for OllamaProvider {
 
         let data: OllamaResponse = resp.json().await?;
 
-        let content = data
-            .message
-            .map(|m| m.content)
-            .unwrap_or_default();
+        let content = data.message.map(|m| m.content).unwrap_or_default();
 
         Ok(Response {
             content,
@@ -272,10 +276,7 @@ impl LlmProvider for OllamaProvider {
 
                         match serde_json::from_str::<OllamaResponse>(line) {
                             Ok(data) => {
-                                let content = data
-                                    .message
-                                    .map(|m| m.content)
-                                    .unwrap_or_default();
+                                let content = data.message.map(|m| m.content).unwrap_or_default();
                                 let chunk = ResponseChunk {
                                     content,
                                     is_done: data.done,
@@ -302,11 +303,10 @@ impl LlmProvider for OllamaProvider {
                             // Stream ended — parse any remaining data in buffer
                             let remaining = buf.trim();
                             if !remaining.is_empty() {
-                                if let Ok(data) = serde_json::from_str::<OllamaResponse>(remaining) {
-                                    let content = data
-                                        .message
-                                        .map(|m| m.content)
-                                        .unwrap_or_default();
+                                if let Ok(data) = serde_json::from_str::<OllamaResponse>(remaining)
+                                {
+                                    let content =
+                                        data.message.map(|m| m.content).unwrap_or_default();
                                     return Ok(Some((
                                         ResponseChunk {
                                             content,
@@ -419,7 +419,9 @@ impl OpenAiProvider {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(300))
             .build()
-            .map_err(|e| LlmError::ProviderUnavailable(format!("Failed to create HTTP client: {e}")))?;
+            .map_err(|e| {
+                LlmError::ProviderUnavailable(format!("Failed to create HTTP client: {e}"))
+            })?;
 
         Ok(Self {
             client,
@@ -433,14 +435,26 @@ impl OpenAiProvider {
 
     /// Create for OpenAI API.
     pub fn openai(api_key: &str, model: &str) -> Self {
-        Self::new("https://api.openai.com/v1", Some(api_key), model, 0.7, Some(4096))
-            .expect("Failed to initialise OpenAI HTTP client")
+        Self::new(
+            "https://api.openai.com/v1",
+            Some(api_key),
+            model,
+            0.7,
+            Some(4096),
+        )
+        .expect("Failed to initialise OpenAI HTTP client")
     }
 
     /// Create for OpenRouter.
     pub fn openrouter(api_key: &str, model: &str) -> Self {
-        Self::new("https://openrouter.ai/api/v1", Some(api_key), model, 0.7, Some(4096))
-            .expect("Failed to initialise OpenRouter HTTP client")
+        Self::new(
+            "https://openrouter.ai/api/v1",
+            Some(api_key),
+            model,
+            0.7,
+            Some(4096),
+        )
+        .expect("Failed to initialise OpenRouter HTTP client")
     }
 
     fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
@@ -569,11 +583,8 @@ impl LlmProvider for OpenAiProvider {
                             match serde_json::from_str::<OpenAiStreamResponse>(data) {
                                 Ok(resp) => {
                                     if let Some(choice) = resp.choices.first() {
-                                        let content = choice
-                                            .delta
-                                            .content
-                                            .clone()
-                                            .unwrap_or_default();
+                                        let content =
+                                            choice.delta.content.clone().unwrap_or_default();
                                         let is_done = choice.finish_reason.is_some();
                                         let chunk = ResponseChunk { content, is_done };
                                         return Ok(Some((chunk, (byte_stream, buf))));

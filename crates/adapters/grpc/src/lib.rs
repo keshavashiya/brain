@@ -84,7 +84,10 @@ impl MemoryService for MemoryServiceImpl {
             Some(req.namespace.as_str())
         };
 
-        let results = self.processor.search_facts(&req.query, top_k, namespace).await;
+        let results = self
+            .processor
+            .search_facts(&req.query, top_k, namespace)
+            .await;
 
         let facts = results
             .into_iter()
@@ -155,7 +158,7 @@ impl MemoryService for MemoryServiceImpl {
         let raw_facts = if req.subject.is_empty() {
             self.processor.list_facts(namespace)
         } else {
-            self.processor.facts_about(&req.subject)
+            self.processor.facts_about(&req.subject, namespace)
         };
 
         let facts = raw_facts
@@ -199,6 +202,9 @@ impl MemoryService for MemoryServiceImpl {
             req.content.clone(),
         );
         sig.metadata = req.metadata;
+        if !req.namespace.is_empty() {
+            sig.namespace = req.namespace;
+        }
 
         let processor = self.processor.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(4);
@@ -293,6 +299,9 @@ impl AgentService for AgentServiceImpl {
             req.content.clone(),
         );
         sig.metadata = req.metadata;
+        if !req.namespace.is_empty() {
+            sig.namespace = req.namespace;
+        }
 
         match self.processor.process(sig).await {
             Ok(resp) => Ok(Response::new(AgentSignalResponse {
@@ -309,31 +318,68 @@ impl AgentService for AgentServiceImpl {
     type ReceiveSignalsStream = SignalUpdateStream;
 
     /// Subscribe to a stream of updates for a session.
-    ///
-    /// Currently sends a single "connected" event and then the stream ends.
-    /// In a full implementation this would fan-out events to subscribers.
     async fn receive_signals(
         &self,
         request: Request<ReceiveRequest>,
     ) -> Result<Response<Self::ReceiveSignalsStream>, Status> {
         let req = request.into_inner();
         let session_id = req.session_id.clone();
+        let mut events = self.processor.subscribe_events();
 
         tracing::debug!(session_id = %session_id, "ReceiveSignals stream opened");
 
-        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let (tx, rx) = tokio::sync::mpsc::channel(32);
         let now = chrono::Utc::now().to_rfc3339();
 
         tokio::spawn(async move {
             // Send an initial "connected" event
-            let _ = tx
+            if tx
                 .send(Ok(SignalUpdate {
                     event_type: "connected".to_string(),
                     content: format!("Session {session_id} active"),
                     timestamp: now,
                 }))
-                .await;
-            // Stream ends naturally when tx is dropped
+                .await
+                .is_err()
+            {
+                return;
+            }
+
+            loop {
+                match events.recv().await {
+                    Ok(event) => {
+                        let content = format!(
+                            "[{}:{}] {}",
+                            event.namespace, event.signal_id, event.response
+                        );
+                        if tx
+                            .send(Ok(SignalUpdate {
+                                event_type: "processed".to_string(),
+                                content,
+                                timestamp: event.timestamp.to_rfc3339(),
+                            }))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        if tx
+                            .send(Ok(SignalUpdate {
+                                event_type: "lagged".to_string(),
+                                content: format!("Dropped {skipped} events"),
+                                timestamp: chrono::Utc::now().to_rfc3339(),
+                            }))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
         });
 
         let stream: SignalUpdateStream = Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx));
@@ -365,20 +411,15 @@ pub async fn serve(
 
     let auth_keys = Arc::new(api_keys);
 
-    let memory_svc = MemoryServiceServer::with_interceptor(
-        MemoryServiceImpl::new(processor.clone()),
-        {
+    let memory_svc =
+        MemoryServiceServer::with_interceptor(MemoryServiceImpl::new(processor.clone()), {
             let keys = Arc::clone(&auth_keys);
             move |req: Request<()>| auth_interceptor(req, &keys)
-        },
-    );
-    let agent_svc = AgentServiceServer::with_interceptor(
-        AgentServiceImpl::new(processor),
-        {
-            let keys = Arc::clone(&auth_keys);
-            move |req: Request<()>| auth_interceptor(req, &keys)
-        },
-    );
+        });
+    let agent_svc = AgentServiceServer::with_interceptor(AgentServiceImpl::new(processor), {
+        let keys = Arc::clone(&auth_keys);
+        move |req: Request<()>| auth_interceptor(req, &keys)
+    });
 
     tracing::info!("Synapse gRPC online at {addr}");
 
@@ -549,6 +590,7 @@ mod tests {
             sender: "testagent".to_string(),
             content: "Remember that Rust is fast".to_string(),
             metadata: std::collections::HashMap::new(),
+            namespace: String::new(),
         });
         let resp = svc.send_signal(req).await.unwrap();
         let inner = resp.into_inner();
@@ -569,6 +611,7 @@ mod tests {
             sender: "testclient".to_string(),
             content: "Remember that Brain is the central AI OS".to_string(),
             metadata: std::collections::HashMap::new(),
+            namespace: String::new(),
         });
         let resp = svc.stream_signals(req).await.unwrap();
         let mut stream = resp.into_inner();
@@ -600,6 +643,43 @@ mod tests {
         let update = first.unwrap().unwrap();
         assert_eq!(update.event_type, "connected");
         assert!(update.content.contains(&session_id));
+    }
+
+    #[tokio::test]
+    async fn test_agent_receive_signals_fanout_after_send_signal() {
+        use tokio::time::{timeout, Duration};
+        use tokio_stream::StreamExt;
+
+        let processor = make_processor().await;
+        let agent_svc = AgentServiceImpl::new(processor.clone());
+
+        let recv_req = Request::new(ReceiveRequest {
+            session_id: Uuid::new_v4().to_string(),
+        });
+        let recv_resp = agent_svc.receive_signals(recv_req).await.unwrap();
+        let mut stream = recv_resp.into_inner();
+
+        // Initial connected event
+        let connected = stream.next().await.unwrap().unwrap();
+        assert_eq!(connected.event_type, "connected");
+
+        let send_req = Request::new(AgentSignalRequest {
+            source: "grpc".to_string(),
+            channel: "test".to_string(),
+            sender: "testagent".to_string(),
+            content: "Remember that fanout works".to_string(),
+            metadata: std::collections::HashMap::new(),
+            namespace: "personal".to_string(),
+        });
+        let send_resp = agent_svc.send_signal(send_req).await.unwrap().into_inner();
+        assert_eq!(send_resp.status, "Ok");
+
+        let next = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("expected fanout event within timeout");
+        let update = next.expect("stream closed").expect("stream error");
+        assert_eq!(update.event_type, "processed");
+        assert!(update.content.contains("fanout works"));
     }
 
     #[test]

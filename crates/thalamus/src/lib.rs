@@ -11,6 +11,7 @@ use cortex::actions::Action;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::Arc;
 use thiserror::Error;
 
 // ─── Errors ─────────────────────────────────────────────────────────────────
@@ -80,6 +81,14 @@ pub enum ClassificationMethod {
     Fallback,
 }
 
+/// Optional LLM fallback hook used when no regex pattern matches.
+#[async_trait::async_trait]
+pub trait IntentFallback: Send + Sync {
+    /// Returns a best-effort classification for ambiguous input.
+    /// Return `None` to allow the classifier's normal fallback behavior.
+    async fn classify_with_llm(&self, input: &str) -> Option<Classification>;
+}
+
 // ─── Message Types ──────────────────────────────────────────────────────────
 
 /// Normalized message format for all channels.
@@ -104,6 +113,7 @@ pub struct NormalizedMessage {
 /// Intent classifier using two-tier approach.
 pub struct IntentClassifier {
     patterns: Vec<(IntentPattern, Intent)>,
+    llm_fallback: Option<Arc<dyn IntentFallback>>,
 }
 
 /// A regex pattern that maps to an intent.
@@ -207,7 +217,16 @@ impl IntentClassifier {
             Intent::SystemStatus,
         ));
 
-        Self { patterns }
+        Self {
+            patterns,
+            llm_fallback: None,
+        }
+    }
+
+    /// Attach an optional async fallback classifier.
+    pub fn with_llm_fallback(mut self, fallback: Arc<dyn IntentFallback>) -> Self {
+        self.llm_fallback = Some(fallback);
+        self
     }
 
     /// Build a pattern with named extractors.
@@ -255,20 +274,11 @@ impl IntentClassifier {
         match base {
             Intent::StoreFact { .. } => {
                 let content = get_group("content");
-                // Try to parse "subject predicate object" from content
-                let parts: Vec<&str> = content.splitn(3, ' ').collect();
-                if parts.len() >= 3 {
-                    Intent::StoreFact {
-                        subject: parts[0].to_string(),
-                        predicate: parts[1].to_string(),
-                        object: parts[2].to_string(),
-                    }
-                } else {
-                    Intent::StoreFact {
-                        subject: "user".to_string(),
-                        predicate: "said".to_string(),
-                        object: content,
-                    }
+                let (subject, predicate, object) = Self::parse_store_fact_content(&content);
+                Intent::StoreFact {
+                    subject,
+                    predicate,
+                    object,
                 }
             }
             Intent::Recall { .. } => Intent::Recall {
@@ -307,10 +317,34 @@ impl IntentClassifier {
         }
     }
 
-    /// Classify with fallback to chat intent.
-    pub fn classify(&self, input: &str) -> Classification {
+    /// Deterministically parse free-form text into a store-fact tuple.
+    pub fn parse_store_fact_content(content: &str) -> (String, String, String) {
+        let parts: Vec<&str> = content.splitn(3, ' ').collect();
+        if parts.len() >= 3 {
+            (
+                parts[0].to_string(),
+                parts[1].to_string(),
+                parts[2].to_string(),
+            )
+        } else {
+            ("user".to_string(), "said".to_string(), content.to_string())
+        }
+    }
+
+    /// Classify with optional LLM fallback and final fallback to chat intent.
+    pub async fn classify(&self, input: &str) -> Classification {
         if let Some(classification) = self.classify_fast(input) {
             return classification;
+        }
+
+        // LLM fallback: bounded timeout, fail-open to chat on timeout or error.
+        if let Some(fallback) = &self.llm_fallback {
+            let timeout = tokio::time::Duration::from_millis(1500);
+            if let Ok(Some(classification)) =
+                tokio::time::timeout(timeout, fallback.classify_with_llm(input)).await
+            {
+                return classification;
+            }
         }
 
         // Default to chat
@@ -346,8 +380,8 @@ impl SignalRouter {
     }
 
     /// Route a message and return the classified intent.
-    pub fn route(&self, message: &NormalizedMessage) -> Classification {
-        self.classifier.classify(&message.content)
+    pub async fn route(&self, message: &NormalizedMessage) -> Classification {
+        self.classifier.classify(&message.content).await
     }
 
     /// Convert intent to action (for action intents).
@@ -402,10 +436,10 @@ impl Default for SignalRouter {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_classify_store_fact() {
+    #[tokio::test]
+    async fn test_classify_store_fact() {
         let classifier = IntentClassifier::new();
-        let result = classifier.classify("Remember that I like coffee");
+        let result = classifier.classify("Remember that I like coffee").await;
 
         assert!(
             matches!(result.intent, Intent::StoreFact { .. }),
@@ -415,10 +449,10 @@ mod tests {
         assert_eq!(result.method, ClassificationMethod::Regex);
     }
 
-    #[test]
-    fn test_classify_recall() {
+    #[tokio::test]
+    async fn test_classify_recall() {
         let classifier = IntentClassifier::new();
-        let result = classifier.classify("What did we discuss yesterday?");
+        let result = classifier.classify("What did we discuss yesterday?").await;
 
         assert!(
             matches!(result.intent, Intent::Recall { .. }),
@@ -427,10 +461,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_classify_execute_command() {
+    #[tokio::test]
+    async fn test_classify_execute_command() {
         let classifier = IntentClassifier::new();
-        let result = classifier.classify("Run ls -la");
+        let result = classifier.classify("Run ls -la").await;
 
         assert!(
             matches!(result.intent, Intent::ExecuteCommand { .. }),
@@ -439,10 +473,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_classify_web_search() {
+    #[tokio::test]
+    async fn test_classify_web_search() {
         let classifier = IntentClassifier::new();
-        let result = classifier.classify("Search for Rust programming");
+        let result = classifier.classify("Search for Rust programming").await;
 
         assert!(
             matches!(result.intent, Intent::WebSearch { .. }),
@@ -451,10 +485,10 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_classify_schedule() {
+    #[tokio::test]
+    async fn test_classify_schedule() {
         let classifier = IntentClassifier::new();
-        let result = classifier.classify("Remind me to call mom");
+        let result = classifier.classify("Remind me to call mom").await;
 
         assert!(
             matches!(result.intent, Intent::Schedule { .. }),
@@ -463,18 +497,18 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_classify_status() {
+    #[tokio::test]
+    async fn test_classify_status() {
         let classifier = IntentClassifier::new();
-        let result = classifier.classify("/status");
+        let result = classifier.classify("/status").await;
 
         assert_eq!(result.intent, Intent::SystemStatus);
     }
 
-    #[test]
-    fn test_classify_chat_fallback() {
+    #[tokio::test]
+    async fn test_classify_chat_fallback() {
         let classifier = IntentClassifier::new();
-        let result = classifier.classify("Hello, how are you?");
+        let result = classifier.classify("Hello, how are you?").await;
 
         assert!(
             matches!(result.intent, Intent::Chat { .. }),

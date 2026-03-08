@@ -52,6 +52,18 @@ pub struct ConsolidationReport {
     pub episodes_promoted: usize,
     /// Total episodes remaining.
     pub episodes_remaining: i64,
+    /// Concrete episodes eligible for semantic promotion.
+    pub promotion_candidates: Vec<PromotionCandidate>,
+}
+
+/// Episode metadata needed for deterministic semantic promotion.
+#[derive(Debug, Clone)]
+pub struct PromotionCandidate {
+    pub episode_id: String,
+    pub namespace: String,
+    pub content: String,
+    pub importance: f64,
+    pub reinforcement_count: i32,
 }
 
 /// The consolidation engine manages memory lifecycle.
@@ -76,13 +88,14 @@ impl Consolidator {
         episodic: &EpisodicStore,
     ) -> Result<ConsolidationReport, ConsolidationError> {
         let mut pruned = 0;
-        let mut promoted = 0;
+        let mut promotion_candidates = Vec::new();
 
         // Get all episodes sorted by importance (lowest first)
         let db = episodic.pool();
+        let pool = episodic.pool();
         let candidates = db.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, importance, decay_rate, reinforcement_count,
+                "SELECT rowid, id, namespace, content, importance, decay_rate, reinforcement_count,
                         COALESCE(last_accessed, timestamp) as last_access_time
                  FROM episodes
                  ORDER BY importance ASC
@@ -91,12 +104,16 @@ impl Consolidator {
 
             let rows = stmt
                 .query_map([self.config.max_prune_per_run as i64 * 2], |row| {
+                    let raw_content: String = row.get(3)?;
                     Ok(ConsolidationCandidate {
-                        id: row.get(0)?,
-                        importance: row.get(1)?,
-                        decay_rate: row.get(2)?,
-                        reinforcement_count: row.get(3)?,
-                        last_accessed: row.get::<_, String>(4)?,
+                        row_id: row.get(0)?,
+                        id: row.get(1)?,
+                        namespace: row.get(2)?,
+                        content: pool.decrypt_content(&raw_content),
+                        importance: row.get(4)?,
+                        decay_rate: row.get(5)?,
+                        reinforcement_count: row.get(6)?,
+                        last_accessed: row.get::<_, String>(7)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -121,14 +138,9 @@ impl Consolidator {
                 // Prune this episode
                 db.with_conn(|conn| {
                     conn.execute("DELETE FROM episodes WHERE id = ?1", [&candidate.id])?;
-                    // Also clean up FTS entry
                     conn.execute(
-                        "DELETE FROM episodes_fts WHERE rowid IN (
-                            SELECT rowid FROM episodes_fts WHERE content IN (
-                                SELECT content FROM episodes WHERE id = ?1
-                            )
-                        )",
-                        [&candidate.id],
+                        "DELETE FROM episodes_fts WHERE rowid = ?1",
+                        [candidate.row_id],
                     )?;
                     Ok(())
                 })?;
@@ -137,10 +149,13 @@ impl Consolidator {
 
             // Check for promotion candidates
             if candidate.reinforcement_count >= self.config.promotion_threshold {
-                promoted += 1;
-                // Note: Actual promotion to semantic memory would require
-                // the SemanticStore and Embedder — we just count here.
-                // Integration with SemanticStore happens at a higher level.
+                promotion_candidates.push(PromotionCandidate {
+                    episode_id: candidate.id.clone(),
+                    namespace: candidate.namespace.clone(),
+                    content: candidate.content.clone(),
+                    importance: candidate.importance,
+                    reinforcement_count: candidate.reinforcement_count,
+                });
             }
         }
 
@@ -148,8 +163,9 @@ impl Consolidator {
 
         Ok(ConsolidationReport {
             episodes_pruned: pruned,
-            episodes_promoted: promoted,
+            episodes_promoted: promotion_candidates.len(),
             episodes_remaining: remaining,
+            promotion_candidates,
         })
     }
 }
@@ -157,7 +173,10 @@ impl Consolidator {
 /// Internal candidate for consolidation evaluation.
 #[derive(Debug)]
 struct ConsolidationCandidate {
+    row_id: i64,
     id: String,
+    namespace: String,
+    content: String,
     importance: f64,
     decay_rate: f64,
     reinforcement_count: i32,
@@ -230,7 +249,7 @@ mod tests {
 
         // Store a low-importance episode
         store
-            .store_episode(&session_id, "user", "trivial message", 0.01)
+            .store_episode(&session_id, "user", "trivial message", 0.01, None)
             .unwrap();
         assert_eq!(store.count().unwrap(), 1);
 
@@ -258,7 +277,13 @@ mod tests {
 
         // Store a high-importance episode
         store
-            .store_episode(&session_id, "user", "critical: remember this forever", 1.0)
+            .store_episode(
+                &session_id,
+                "user",
+                "critical: remember this forever",
+                1.0,
+                None,
+            )
             .unwrap();
         assert_eq!(store.count().unwrap(), 1);
 
@@ -280,7 +305,13 @@ mod tests {
 
         let session_id = store.create_session("test").unwrap();
         store
-            .store_episode(&session_id, "user", "I love Rust programming", 0.8)
+            .store_episode(
+                &session_id,
+                "user",
+                "I love Rust programming",
+                0.8,
+                Some("work"),
+            )
             .unwrap();
 
         // Reinforce multiple times to cross promotion threshold
@@ -302,5 +333,8 @@ mod tests {
             report.episodes_promoted > 0,
             "Reinforced episode should be a promotion candidate"
         );
+        assert_eq!(report.promotion_candidates.len(), 1);
+        assert_eq!(report.promotion_candidates[0].namespace, "work");
+        assert!(report.promotion_candidates[0].content.contains("Rust"));
     }
 }

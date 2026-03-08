@@ -330,9 +330,18 @@ fn parse_source(s: Option<&str>) -> SignalSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio_tungstenite::connect_async;
 
     fn demo_keys() -> Vec<ApiKeyConfig> {
         brain_core::BrainConfig::default().access.api_keys
+    }
+
+    fn random_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
     }
 
     #[test]
@@ -459,5 +468,97 @@ mod tests {
         let text = r#"{"source":"ws","content":"Remember that Rust is fast","sender":"user-1"}"#;
         let response = process_text_frame(text, conn_id, &processor).await;
         assert_eq!(response.status, signal::ResponseStatus::Ok);
+    }
+
+    #[tokio::test]
+    #[ignore = "Requires local TCP listener permissions in the runtime environment"]
+    async fn test_ws_server_auth_success_and_failure() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
+        let port = random_port();
+
+        let server_task = tokio::spawn(serve(processor.clone(), "127.0.0.1", port));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Valid auth
+        let (mut ws_ok, _) = connect_async(format!("ws://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        ws_ok
+            .send(Message::Text(r#"{"api_key":"demokey123"}"#.into()))
+            .await
+            .unwrap();
+        let auth_ok = ws_ok.next().await.unwrap().unwrap();
+        let auth_ok_text = auth_ok.into_text().unwrap().to_string();
+        assert!(auth_ok_text.contains("\"status\":\"authenticated\""));
+        ws_ok.close(None).await.unwrap();
+
+        // Invalid auth
+        let (mut ws_bad, _) = connect_async(format!("ws://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        ws_bad
+            .send(Message::Text(r#"{"api_key":"wrong"}"#.into()))
+            .await
+            .unwrap();
+        let auth_bad = ws_bad.next().await.unwrap().unwrap();
+        let auth_bad_text = auth_bad.into_text().unwrap().to_string();
+        assert!(auth_bad_text.contains("\"status\":\"error\""));
+        assert!(auth_bad_text.contains("Invalid or missing API key"));
+
+        server_task.abort();
+    }
+
+    #[tokio::test]
+    #[ignore = "Requires local TCP listener permissions in the runtime environment"]
+    async fn test_ws_server_multi_client_writes() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
+        let port = random_port();
+
+        let server_task = tokio::spawn(serve(processor.clone(), "127.0.0.1", port));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut handles = Vec::new();
+        for i in 0..3 {
+            let url = format!("ws://127.0.0.1:{port}");
+            handles.push(tokio::spawn(async move {
+                let (mut ws, _) = connect_async(url).await.unwrap();
+                ws.send(Message::Text(r#"{"api_key":"demokey123"}"#.into()))
+                    .await
+                    .unwrap();
+                let _ = ws.next().await;
+                let payload = format!(
+                    r#"{{"source":"ws","sender":"client-{i}","namespace":"work","content":"Remember user{i} role developer{i}"}}"#
+                );
+                ws.send(Message::Text(payload.into())).await.unwrap();
+                let resp = ws.next().await.unwrap().unwrap().into_text().unwrap().to_string();
+                assert!(resp.contains("\"status\":\"Ok\""));
+            }));
+        }
+
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        // Verify all writes landed in the shared memory.
+        let facts = processor.list_facts(Some("work"));
+        assert!(
+            facts.len() >= 3,
+            "expected at least 3 facts, got {}",
+            facts.len()
+        );
+
+        server_task.abort();
     }
 }

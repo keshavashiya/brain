@@ -118,7 +118,7 @@ impl RecallEngine {
 
         // 1. BM25 search on episodic store
         let bm25_results = episodic
-            .search_bm25(query, limit)
+            .search_bm25(query, limit, namespace)
             .map_err(RecallError::Episodic)?;
 
         let bm25_ranked: Vec<(String, f64)> = bm25_results

@@ -23,6 +23,7 @@ pub enum EpisodicError {
 pub struct Episode {
     pub id: String,
     pub session_id: String,
+    pub namespace: String,
     pub role: String,
     pub content: String,
     pub timestamp: String,
@@ -148,15 +149,24 @@ impl EpisodicStore {
         role: &str,
         content: &str,
         importance: f64,
+        namespace: Option<&str>,
     ) -> Result<String, EpisodicError> {
         let id = Uuid::new_v4().to_string();
         let encrypted_content = self.db.encrypt_content(content);
         let is_encrypted = self.db.is_encrypted();
+        let namespace = namespace.unwrap_or("personal");
         self.db.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO episodes (id, session_id, role, content, importance)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                rusqlite::params![id, session_id, role, encrypted_content, importance],
+                "INSERT INTO episodes (id, session_id, namespace, role, content, importance)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    id,
+                    session_id,
+                    namespace,
+                    role,
+                    encrypted_content,
+                    importance
+                ],
             )?;
 
             // FTS5 indexes plaintext for BM25 search.
@@ -184,7 +194,7 @@ impl EpisodicStore {
         Ok(self.db.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, session_id, role, content, timestamp,
-                        importance, decay_rate, reinforcement_count, last_accessed
+                        namespace, importance, decay_rate, reinforcement_count, last_accessed
                  FROM episodes
                  WHERE session_id = ?1
                  ORDER BY timestamp ASC
@@ -200,10 +210,11 @@ impl EpisodicStore {
                         role: row.get(2)?,
                         content: pool.decrypt_content(&raw),
                         timestamp: row.get(4)?,
-                        importance: row.get(5)?,
-                        decay_rate: row.get(6)?,
-                        reinforcement_count: row.get(7)?,
-                        last_accessed: row.get(8)?,
+                        namespace: row.get(5)?,
+                        importance: row.get(6)?,
+                        decay_rate: row.get(7)?,
+                        reinforcement_count: row.get(8)?,
+                        last_accessed: row.get(9)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -233,34 +244,62 @@ impl EpisodicStore {
     }
 
     /// Search episodes by full-text query using BM25 ranking.
-    pub fn search_bm25(&self, query: &str, limit: usize) -> Result<Vec<FtsResult>, EpisodicError> {
+    pub fn search_bm25(
+        &self,
+        query: &str,
+        limit: usize,
+        namespace: Option<&str>,
+    ) -> Result<Vec<FtsResult>, EpisodicError> {
         let sanitized = sanitize_fts5_query(query);
         if sanitized.is_empty() {
             return Ok(Vec::new());
         }
 
         Ok(self.db.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT e.id, f.content, f.rank, e.timestamp
-                 FROM episodes_fts f
-                 JOIN episodes e ON e.rowid = f.rowid
-                 WHERE episodes_fts MATCH ?1
-                 ORDER BY f.rank
-                 LIMIT ?2",
-            )?;
+            if let Some(ns) = namespace {
+                let mut stmt = conn.prepare(
+                    "SELECT e.id, f.content, f.rank, e.timestamp
+                     FROM episodes_fts f
+                     JOIN episodes e ON e.rowid = f.rowid
+                     WHERE episodes_fts MATCH ?1
+                       AND e.namespace = ?2
+                     ORDER BY f.rank
+                     LIMIT ?3",
+                )?;
 
-            let results = stmt
-                .query_map(rusqlite::params![sanitized, limit as i64], |row| {
-                    Ok(FtsResult {
-                        episode_id: row.get(0)?,
-                        content: row.get(1)?,
-                        rank: row.get(2)?,
-                        timestamp: row.get(3)?,
-                    })
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
+                let results = stmt
+                    .query_map(rusqlite::params![sanitized, ns, limit as i64], |row| {
+                        Ok(FtsResult {
+                            episode_id: row.get(0)?,
+                            content: row.get(1)?,
+                            rank: row.get(2)?,
+                            timestamp: row.get(3)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(results)
+            } else {
+                let mut stmt = conn.prepare(
+                    "SELECT e.id, f.content, f.rank, e.timestamp
+                     FROM episodes_fts f
+                     JOIN episodes e ON e.rowid = f.rowid
+                     WHERE episodes_fts MATCH ?1
+                     ORDER BY f.rank
+                     LIMIT ?2",
+                )?;
 
-            Ok(results)
+                let results = stmt
+                    .query_map(rusqlite::params![sanitized, limit as i64], |row| {
+                        Ok(FtsResult {
+                            episode_id: row.get(0)?,
+                            content: row.get(1)?,
+                            rank: row.get(2)?,
+                            timestamp: row.get(3)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(results)
+            }
         })?)
     }
 
@@ -274,35 +313,68 @@ impl EpisodicStore {
     }
 
     /// Get recent episodes across all sessions.
-    pub fn recent(&self, limit: usize) -> Result<Vec<Episode>, EpisodicError> {
+    pub fn recent(
+        &self,
+        limit: usize,
+        namespace: Option<&str>,
+    ) -> Result<Vec<Episode>, EpisodicError> {
         let pool = &self.db;
         Ok(self.db.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, session_id, role, content, timestamp,
-                        importance, decay_rate, reinforcement_count, last_accessed
-                 FROM episodes
-                 ORDER BY timestamp DESC
-                 LIMIT ?1",
-            )?;
+            if let Some(ns) = namespace {
+                let mut stmt = conn.prepare(
+                    "SELECT id, session_id, role, content, timestamp,
+                            namespace, importance, decay_rate, reinforcement_count, last_accessed
+                     FROM episodes
+                     WHERE namespace = ?1
+                     ORDER BY timestamp DESC
+                     LIMIT ?2",
+                )?;
+                let episodes = stmt
+                    .query_map(rusqlite::params![ns, limit as i64], |row| {
+                        let raw: String = row.get(3)?;
+                        Ok(Episode {
+                            id: row.get(0)?,
+                            session_id: row.get(1)?,
+                            role: row.get(2)?,
+                            content: pool.decrypt_content(&raw),
+                            timestamp: row.get(4)?,
+                            namespace: row.get(5)?,
+                            importance: row.get(6)?,
+                            decay_rate: row.get(7)?,
+                            reinforcement_count: row.get(8)?,
+                            last_accessed: row.get(9)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(episodes)
+            } else {
+                let mut stmt = conn.prepare(
+                    "SELECT id, session_id, role, content, timestamp,
+                            namespace, importance, decay_rate, reinforcement_count, last_accessed
+                     FROM episodes
+                     ORDER BY timestamp DESC
+                     LIMIT ?1",
+                )?;
 
-            let episodes = stmt
-                .query_map([limit as i64], |row| {
-                    let raw: String = row.get(3)?;
-                    Ok(Episode {
-                        id: row.get(0)?,
-                        session_id: row.get(1)?,
-                        role: row.get(2)?,
-                        content: pool.decrypt_content(&raw),
-                        timestamp: row.get(4)?,
-                        importance: row.get(5)?,
-                        decay_rate: row.get(6)?,
-                        reinforcement_count: row.get(7)?,
-                        last_accessed: row.get(8)?,
-                    })
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            Ok(episodes)
+                let episodes = stmt
+                    .query_map([limit as i64], |row| {
+                        let raw: String = row.get(3)?;
+                        Ok(Episode {
+                            id: row.get(0)?,
+                            session_id: row.get(1)?,
+                            role: row.get(2)?,
+                            content: pool.decrypt_content(&raw),
+                            timestamp: row.get(4)?,
+                            namespace: row.get(5)?,
+                            importance: row.get(6)?,
+                            decay_rate: row.get(7)?,
+                            reinforcement_count: row.get(8)?,
+                            last_accessed: row.get(9)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(episodes)
+            }
         })?)
     }
 }
@@ -343,13 +415,13 @@ mod tests {
         let session = store.create_session("cli").unwrap();
 
         store
-            .store_episode(&session, "user", "Hello Brain!", 0.5)
+            .store_episode(&session, "user", "Hello Brain!", 0.5, None)
             .unwrap();
         store
-            .store_episode(&session, "assistant", "Hello! How can I help?", 0.5)
+            .store_episode(&session, "assistant", "Hello! How can I help?", 0.5, None)
             .unwrap();
         store
-            .store_episode(&session, "user", "What's the weather?", 0.3)
+            .store_episode(&session, "user", "What's the weather?", 0.3, None)
             .unwrap();
 
         let history = store.get_session_history(&session, 10).unwrap();
@@ -366,7 +438,7 @@ mod tests {
 
         assert_eq!(store.count().unwrap(), 0);
         store
-            .store_episode(&session, "user", "Test message", 0.5)
+            .store_episode(&session, "user", "Test message", 0.5, None)
             .unwrap();
         assert_eq!(store.count().unwrap(), 1);
     }
@@ -376,7 +448,7 @@ mod tests {
         let store = test_store();
         let session = store.create_session("cli").unwrap();
         let ep_id = store
-            .store_episode(&session, "user", "Important fact", 0.8)
+            .store_episode(&session, "user", "Important fact", 0.8, None)
             .unwrap();
 
         // Initial reinforcement count is 0
@@ -398,16 +470,16 @@ mod tests {
         let session = store.create_session("cli").unwrap();
 
         store
-            .store_episode(&session, "user", "I love programming in Rust", 0.7)
+            .store_episode(&session, "user", "I love programming in Rust", 0.7, None)
             .unwrap();
         store
-            .store_episode(&session, "user", "Python is great for scripting", 0.5)
+            .store_episode(&session, "user", "Python is great for scripting", 0.5, None)
             .unwrap();
         store
-            .store_episode(&session, "user", "Rust has amazing performance", 0.8)
+            .store_episode(&session, "user", "Rust has amazing performance", 0.8, None)
             .unwrap();
 
-        let results = store.search_bm25("Rust", 10).unwrap();
+        let results = store.search_bm25("Rust", 10, None).unwrap();
         assert_eq!(results.len(), 2);
         // Both results should contain "Rust"
         assert!(results.iter().all(|r| r.content.contains("Rust")));
@@ -420,17 +492,50 @@ mod tests {
         let s2 = store.create_session("whatsapp").unwrap();
 
         store
-            .store_episode(&s1, "user", "First message", 0.5)
+            .store_episode(&s1, "user", "First message", 0.5, None)
             .unwrap();
         store
-            .store_episode(&s2, "user", "Second message", 0.5)
+            .store_episode(&s2, "user", "Second message", 0.5, None)
             .unwrap();
 
-        let recent = store.recent(10).unwrap();
+        let recent = store.recent(10, None).unwrap();
         assert_eq!(recent.len(), 2);
         // Both messages should be present (order depends on timestamp precision)
         let contents: Vec<&str> = recent.iter().map(|e| e.content.as_str()).collect();
         assert!(contents.contains(&"First message"));
         assert!(contents.contains(&"Second message"));
+    }
+
+    #[test]
+    fn test_namespace_filtered_search_and_recent() {
+        let store = test_store();
+        let session = store.create_session("cli").unwrap();
+
+        store
+            .store_episode(
+                &session,
+                "user",
+                "Rust memory model notes",
+                0.7,
+                Some("work"),
+            )
+            .unwrap();
+        store
+            .store_episode(
+                &session,
+                "user",
+                "Rust hobby project",
+                0.7,
+                Some("personal"),
+            )
+            .unwrap();
+
+        let work_hits = store.search_bm25("Rust", 10, Some("work")).unwrap();
+        assert_eq!(work_hits.len(), 1);
+        assert!(work_hits[0].content.contains("memory model"));
+
+        let personal_recent = store.recent(10, Some("personal")).unwrap();
+        assert_eq!(personal_recent.len(), 1);
+        assert_eq!(personal_recent[0].namespace, "personal");
     }
 }

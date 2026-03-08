@@ -166,11 +166,7 @@ impl ProcedureStore {
     // ── Mutate ────────────────────────────────────────────────────────────────
 
     /// Replace the steps of an existing procedure.
-    pub fn update_steps(
-        &self,
-        id: &str,
-        new_steps: &[String],
-    ) -> Result<(), CerebellumError> {
+    pub fn update_steps(&self, id: &str, new_steps: &[String]) -> Result<(), CerebellumError> {
         if new_steps.is_empty() {
             return Err(CerebellumError::InvalidSteps(
                 "Procedure must have at least one step".to_string(),
@@ -222,8 +218,7 @@ impl ProcedureStore {
     /// Total number of stored procedures.
     pub fn count(&self) -> Result<i64, CerebellumError> {
         Ok(self.db.with_conn(|conn| {
-            let n: i64 =
-                conn.query_row("SELECT COUNT(*) FROM procedures", [], |row| row.get(0))?;
+            let n: i64 = conn.query_row("SELECT COUNT(*) FROM procedures", [], |row| row.get(0))?;
             Ok(n)
         })?)
     }
@@ -342,9 +337,7 @@ mod tests {
     #[test]
     fn test_record_execution_increments_count() {
         let store = test_store();
-        let id = store
-            .store_procedure("test", &["step 1".into()])
-            .unwrap();
+        let id = store.store_procedure("test", &["step 1".into()]).unwrap();
         store.record_execution(&id).unwrap();
         store.record_execution(&id).unwrap();
         let proc = store.get_procedure(&id).unwrap();
@@ -354,10 +347,10 @@ mod tests {
     #[test]
     fn test_update_steps() {
         let store = test_store();
-        let id = store
-            .store_procedure("old", &["step 1".into()])
+        let id = store.store_procedure("old", &["step 1".into()]).unwrap();
+        store
+            .update_steps(&id, &["step A".into(), "step B".into()])
             .unwrap();
-        store.update_steps(&id, &["step A".into(), "step B".into()]).unwrap();
         let proc = store.get_procedure(&id).unwrap();
         assert_eq!(proc.steps, vec!["step A", "step B"]);
     }
@@ -365,9 +358,7 @@ mod tests {
     #[test]
     fn test_multiple_triggers_in_input() {
         let store = test_store();
-        store
-            .store_procedure("PR", &["check CI".into()])
-            .unwrap();
+        store.store_procedure("PR", &["check CI".into()]).unwrap();
         store
             .store_procedure("deploy", &["run tests".into()])
             .unwrap();

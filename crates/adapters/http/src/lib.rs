@@ -440,10 +440,7 @@ loadFacts();
 
 /// GET /ui — embedded single-page memory explorer (no auth required)
 async fn ui_handler() -> impl IntoResponse {
-    (
-        [("content-type", "text/html; charset=utf-8")],
-        UI_HTML,
-    )
+    ([("content-type", "text/html; charset=utf-8")], UI_HTML)
 }
 
 // ─── OpenAPI spec ─────────────────────────────────────────────────────────────
@@ -927,8 +924,14 @@ mod tests {
             .unwrap();
         let spec: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
         assert_eq!(spec["openapi"], "3.0.3");
-        assert!(spec["paths"]["/v1/signals"].is_object(), "missing /v1/signals path");
-        assert!(spec["components"]["schemas"]["FactJson"].is_object(), "missing FactJson schema");
+        assert!(
+            spec["paths"]["/v1/signals"].is_object(),
+            "missing /v1/signals path"
+        );
+        assert!(
+            spec["components"]["schemas"]["FactJson"].is_object(),
+            "missing FactJson schema"
+        );
     }
 
     /// GET /api — no auth required, returns Swagger UI HTML.
@@ -988,7 +991,10 @@ mod tests {
             .unwrap();
         let body = std::str::from_utf8(&bytes).unwrap();
         assert!(body.contains("Brain Memory Explorer"), "missing page title");
-        assert!(body.contains("/v1/memory/search"), "missing API endpoint reference");
+        assert!(
+            body.contains("/v1/memory/search"),
+            "missing API endpoint reference"
+        );
     }
 
     /// GET /metrics — no auth required, returns Prometheus text.
@@ -1021,8 +1027,14 @@ mod tests {
             .await
             .unwrap();
         let body = std::str::from_utf8(&bytes).unwrap();
-        assert!(body.contains("brain_signals_total"), "missing counter in metrics output");
-        assert!(body.contains("brain_search_total"), "missing search counter");
+        assert!(
+            body.contains("brain_signals_total"),
+            "missing counter in metrics output"
+        );
+        assert!(
+            body.contains("brain_search_total"),
+            "missing search counter"
+        );
     }
 
     /// GET /health — no auth required, always returns 200.

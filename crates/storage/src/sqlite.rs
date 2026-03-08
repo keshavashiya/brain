@@ -353,6 +353,17 @@ impl SqlitePool {
                     ON procedures(trigger_pattern);
             ",
             ),
+            (
+                13,
+                "create_episode_promotions",
+                "
+                CREATE TABLE IF NOT EXISTS episode_promotions (
+                    episode_id TEXT PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE,
+                    fact_id TEXT NOT NULL REFERENCES semantic_facts(id) ON DELETE CASCADE,
+                    promoted_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+            ",
+            ),
         ]
     }
 
@@ -377,6 +388,7 @@ impl SqlitePool {
                 "sessions",
                 "episodes",
                 "semantic_facts",
+                "episode_promotions",
                 "user_profile",
                 "procedures",
                 "audit_log",
@@ -405,7 +417,7 @@ mod tests {
     fn test_open_memory() {
         let pool = SqlitePool::open_memory().unwrap();
         let version = pool.schema_version().unwrap();
-        assert_eq!(version, 12); // All migrations applied (last: rebuild_procedures_table)
+        assert_eq!(version, 13); // All migrations applied
     }
 
     #[test]
@@ -413,14 +425,14 @@ mod tests {
         let pool = SqlitePool::open_memory().unwrap();
         // Running migrate again should be a no-op
         pool.migrate().unwrap();
-        assert_eq!(pool.schema_version().unwrap(), 12);
+        assert_eq!(pool.schema_version().unwrap(), 13);
     }
 
     #[test]
     fn test_table_stats_empty() {
         let pool = SqlitePool::open_memory().unwrap();
         let stats = pool.table_stats().unwrap();
-        assert_eq!(stats.len(), 6);
+        assert_eq!(stats.len(), 7);
         for (_, count) in &stats {
             assert_eq!(*count, 0);
         }

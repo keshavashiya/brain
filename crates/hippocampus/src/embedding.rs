@@ -50,6 +50,86 @@ pub enum EmbeddingError {
     ProviderUnavailable(String),
 }
 
+/// Deterministically generate a non-zero fallback embedding and normalize it.
+///
+/// This is used when the embedding provider is unavailable or returns an invalid
+/// vector shape/value. The output is stable for the same `(seed, dimensions)`.
+pub fn deterministic_fallback_embedding(seed: &str, dimensions: usize) -> Vec<f32> {
+    if dimensions == 0 {
+        return Vec::new();
+    }
+
+    // FNV-1a 64-bit hash as deterministic PRNG seed.
+    let mut state: u64 = 0xcbf29ce484222325;
+    for b in seed.as_bytes() {
+        state ^= u64::from(*b);
+        state = state.wrapping_mul(0x100000001b3);
+    }
+    if state == 0 {
+        state = 1;
+    }
+
+    let mut out = Vec::with_capacity(dimensions);
+    for _ in 0..dimensions {
+        // xorshift64*
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        let r = state.wrapping_mul(0x2545f4914f6cdd1d);
+        let unit = (r as f64 / u64::MAX as f64) as f32;
+        out.push(unit * 2.0 - 1.0);
+    }
+
+    normalize_or_unit(out)
+}
+
+/// Validate and normalize an embedding vector, with deterministic fallback.
+///
+/// Conditions enforced:
+/// - exact `dimensions`
+/// - finite values only
+/// - non-zero norm
+/// - normalized output
+pub fn sanitize_embedding(candidate: Vec<f32>, dimensions: usize, seed: &str) -> Vec<f32> {
+    if dimensions == 0 {
+        return Vec::new();
+    }
+    if candidate.len() != dimensions || candidate.iter().any(|x| !x.is_finite()) {
+        return deterministic_fallback_embedding(seed, dimensions);
+    }
+
+    let norm_sq: f32 = candidate.iter().map(|x| x * x).sum();
+    if !norm_sq.is_finite() || norm_sq <= 1e-12 {
+        return deterministic_fallback_embedding(seed, dimensions);
+    }
+
+    let normalized = normalize_or_unit(candidate);
+    if normalized.iter().all(|x| x.is_finite()) {
+        normalized
+    } else {
+        deterministic_fallback_embedding(seed, dimensions)
+    }
+}
+
+fn normalize_or_unit(mut vector: Vec<f32>) -> Vec<f32> {
+    if vector.is_empty() {
+        return vector;
+    }
+
+    let norm_sq: f32 = vector.iter().map(|x| x * x).sum();
+    if !norm_sq.is_finite() || norm_sq <= 1e-12 {
+        let mut unit = vec![0.0_f32; vector.len()];
+        unit[0] = 1.0;
+        return unit;
+    }
+
+    let norm = norm_sq.sqrt();
+    for v in &mut vector {
+        *v /= norm;
+    }
+    vector
+}
+
 // ─── Ollama Provider ─────────────────────────────────────────────────────────
 
 /// Ollama embedding provider — calls `POST /api/embed`.
@@ -301,7 +381,11 @@ mod tests {
 
     #[test]
     fn test_openai_provider_new() {
-        let p = OpenAIProvider::new("https://api.openai.com/v1", "text-embedding-3-small", "sk-x");
+        let p = OpenAIProvider::new(
+            "https://api.openai.com/v1",
+            "text-embedding-3-small",
+            "sk-x",
+        );
         assert_eq!(p.model, "text-embedding-3-small");
         assert_eq!(p.base_url, "https://api.openai.com/v1");
     }
@@ -322,5 +406,40 @@ mod tests {
         let e = Embedder::for_ollama("http://localhost:11434", "nomic-embed-text");
         let v = e.embed("Hello, world!").await.unwrap();
         assert_eq!(v.len(), 768, "nomic-embed-text produces 768-dim vectors");
+    }
+
+    #[test]
+    fn test_deterministic_fallback_embedding_is_stable_and_normalized() {
+        let a = deterministic_fallback_embedding("remember rust", 16);
+        let b = deterministic_fallback_embedding("remember rust", 16);
+        let c = deterministic_fallback_embedding("remember bun", 16);
+
+        assert_eq!(a.len(), 16);
+        assert_eq!(a, b, "same seed must produce same fallback vector");
+        assert_ne!(a, c, "different seeds should produce different vectors");
+
+        let norm = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-5,
+            "fallback vector must be normalized"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_embedding_rejects_invalid_inputs() {
+        let zero = vec![0.0_f32; 8];
+        let nan = vec![f32::NAN; 8];
+        let wrong = vec![0.1_f32; 4];
+
+        let a = sanitize_embedding(zero, 8, "seed-a");
+        let b = sanitize_embedding(nan, 8, "seed-b");
+        let c = sanitize_embedding(wrong, 8, "seed-c");
+
+        assert_eq!(a.len(), 8);
+        assert_eq!(b.len(), 8);
+        assert_eq!(c.len(), 8);
+        assert!(a.iter().all(|x| x.is_finite()));
+        assert!(b.iter().all(|x| x.is_finite()));
+        assert!(c.iter().all(|x| x.is_finite()));
     }
 }

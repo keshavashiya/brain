@@ -204,7 +204,6 @@ pub struct GrpcAdapterConfig {
     pub port: u16,
 }
 
-
 impl BrainConfig {
     /// Load configuration from all sources.
     ///
@@ -597,7 +596,9 @@ mod tests {
         let mut config = validated_config();
         // Make HTTP and WS share the same port
         config.adapters.ws.port = config.adapters.http.port;
-        let err = config.validate().expect_err("should fail with port conflict");
+        let err = config
+            .validate()
+            .expect_err("should fail with port conflict");
         assert!(
             err.contains("Port conflict"),
             "unexpected error message: {err}"
