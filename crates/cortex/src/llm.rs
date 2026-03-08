@@ -122,11 +122,10 @@ struct OllamaOptions {
     num_predict: i32,
 }
 
-/// Ollama API response (non-streaming).
+/// Ollama API response (works for both streaming and non-streaming).
 #[derive(Deserialize)]
 struct OllamaResponse {
-    message: OllamaMessage,
-    #[allow(dead_code)]
+    message: Option<OllamaMessage>,
     done: bool,
     #[serde(default)]
     prompt_eval_count: Option<u32>,
@@ -163,7 +162,7 @@ impl OllamaProvider {
 
     /// Create with default config. Panics only if TLS initialisation fails (extremely rare).
     pub fn default_config() -> Self {
-        Self::new("http://localhost:11434", "qwen2.5:14b", 0.7, 4096)
+        Self::new("http://localhost:11434", "qwen2.5-coder:7b", 0.7, 4096)
             .expect("Failed to initialise default Ollama HTTP client")
     }
 
@@ -209,8 +208,13 @@ impl LlmProvider for OllamaProvider {
 
         let data: OllamaResponse = resp.json().await?;
 
+        let content = data
+            .message
+            .map(|m| m.content)
+            .unwrap_or_default();
+
         Ok(Response {
-            content: data.message.content,
+            content,
             usage: Some(Usage {
                 prompt_tokens: data.prompt_eval_count.unwrap_or(0),
                 completion_tokens: data.eval_count.unwrap_or(0),
@@ -221,12 +225,106 @@ impl LlmProvider for OllamaProvider {
 
     async fn generate_stream(
         &self,
-        _messages: &[Message],
+        messages: &[Message],
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ResponseChunk, LlmError>> + Send>>, LlmError> {
-        // Streaming support planned for v0.2
-        Err(LlmError::Stream(
-            "Streaming support is planned for v0.2".to_string(),
-        ))
+        use futures::stream::try_unfold;
+
+        let url = format!("{}/api/chat", self.base_url);
+        let request = OllamaRequest {
+            model: self.model.clone(),
+            messages: Self::convert_messages(messages),
+            stream: true,
+            options: Some(OllamaOptions {
+                temperature: self.temperature,
+                num_predict: self.max_tokens,
+            }),
+        };
+
+        let resp = self.client.post(&url).json(&request).send().await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(LlmError::Api {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+
+        let byte_stream = resp.bytes_stream();
+
+        // State: (byte_stream, leftover buffer for incomplete lines)
+        let stream = try_unfold(
+            (Box::pin(byte_stream), String::new()),
+            |(mut byte_stream, mut buf)| async move {
+                use futures::TryStreamExt;
+
+                loop {
+                    // Try to extract a complete line from the buffer
+                    if let Some(newline_pos) = buf.find('\n') {
+                        let line: String = buf[..newline_pos].to_string();
+                        buf = buf[newline_pos + 1..].to_string();
+
+                        let line = line.trim();
+                        if line.is_empty() {
+                            continue;
+                        }
+
+                        match serde_json::from_str::<OllamaResponse>(line) {
+                            Ok(data) => {
+                                let content = data
+                                    .message
+                                    .map(|m| m.content)
+                                    .unwrap_or_default();
+                                let chunk = ResponseChunk {
+                                    content,
+                                    is_done: data.done,
+                                };
+                                if data.done {
+                                    return Ok(Some((chunk, (byte_stream, buf))));
+                                }
+                                return Ok(Some((chunk, (byte_stream, buf))));
+                            }
+                            Err(e) => {
+                                return Err(LlmError::InvalidFormat(format!(
+                                    "Failed to parse streaming response: {e}"
+                                )));
+                            }
+                        }
+                    }
+
+                    // Need more data from the network
+                    match byte_stream.try_next().await {
+                        Ok(Some(bytes)) => {
+                            buf.push_str(&String::from_utf8_lossy(&bytes));
+                        }
+                        Ok(None) => {
+                            // Stream ended — parse any remaining data in buffer
+                            let remaining = buf.trim();
+                            if !remaining.is_empty() {
+                                if let Ok(data) = serde_json::from_str::<OllamaResponse>(remaining) {
+                                    let content = data
+                                        .message
+                                        .map(|m| m.content)
+                                        .unwrap_or_default();
+                                    return Ok(Some((
+                                        ResponseChunk {
+                                            content,
+                                            is_done: true,
+                                        },
+                                        (byte_stream, String::new()),
+                                    )));
+                                }
+                            }
+                            return Ok(None);
+                        }
+                        Err(e) => return Err(LlmError::Http(e)),
+                    }
+                }
+            },
+        );
+
+        Ok(Box::pin(stream))
     }
 
     async fn health_check(&self) -> bool {
@@ -436,7 +534,7 @@ impl Default for ProviderConfig {
             provider: "ollama".to_string(),
             base_url: "http://localhost:11434".to_string(),
             api_key: None,
-            model: "qwen2.5:14b".to_string(),
+            model: "qwen2.5-coder:7b".to_string(),
             temperature: 0.7,
             max_tokens: 4096,
         }
@@ -483,7 +581,7 @@ mod tests {
     fn test_provider_config_default() {
         let config = ProviderConfig::default();
         assert_eq!(config.provider, "ollama");
-        assert_eq!(config.model, "qwen2.5:14b");
+        assert_eq!(config.model, "qwen2.5-coder:7b");
     }
 
     #[test]

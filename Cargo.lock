@@ -526,6 +526,7 @@ dependencies = [
  "core",
  "cortex",
  "crossterm",
+ "futures",
  "ganglia",
  "grpcadapter",
  "hippocampus",

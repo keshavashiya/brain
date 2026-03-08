@@ -50,6 +50,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # Configuration
 figment = { version = "0.10", features = ["yaml", "env"] }
 
+# Async streams
+futures = "0.3"
+
 # HTTP client
 reqwest = { version = "0.12", features = ["json", "stream"] }
 

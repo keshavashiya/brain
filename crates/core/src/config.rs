@@ -288,7 +288,11 @@ impl BrainConfig {
     ///
     /// Returns the path written, or None if the file already exists
     /// and `force` is false.
-    pub fn write_default_config(force: bool) -> std::io::Result<Option<PathBuf>> {
+    /// Write the default config to `~/.brain/config.yaml`.
+    ///
+    /// Returns `(config_path, generated_api_key)`, or `None` if the file already
+    /// exists and `force` is false.
+    pub fn write_default_config(force: bool) -> std::io::Result<Option<(PathBuf, String)>> {
         let config_path = Self::user_config_path();
 
         if config_path.exists() && !force {
@@ -300,8 +304,26 @@ impl BrainConfig {
             std::fs::create_dir_all(parent)?;
         }
 
-        std::fs::write(&config_path, DEFAULT_CONFIG)?;
-        Ok(Some(config_path))
+        // Generate a random API key to replace the demo key
+        let api_key = Self::generate_api_key();
+        let config = DEFAULT_CONFIG.replace("demokey123", &api_key);
+
+        std::fs::write(&config_path, config)?;
+        Ok(Some((config_path, api_key)))
+    }
+
+    /// Generate a random 36-char API key with `brk_` prefix.
+    fn generate_api_key() -> String {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let t = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let pid = std::process::id() as u128;
+        let stack_addr = &t as *const u128 as u128;
+        let a = t.wrapping_mul(6364136223846793005).wrapping_add(pid);
+        let b = stack_addr.wrapping_mul(1442695040888963407).wrapping_add(t);
+        format!("brk_{:016x}{:016x}", a, b)
     }
 
     /// Path to user config file.
@@ -402,7 +424,7 @@ impl Default for BrainConfig {
             },
             llm: LlmConfig {
                 provider: "ollama".to_string(),
-                model: "qwen2.5:14b".to_string(),
+                model: "qwen2.5-coder:7b".to_string(),
                 base_url: "http://localhost:11434".to_string(),
                 temperature: 0.7,
                 max_tokens: 4096,
@@ -541,7 +563,7 @@ mod tests {
         // Load using Serialized defaults (no file needed)
         let figment = Figment::new().merge(Serialized::defaults(BrainConfig::default()));
         let config: BrainConfig = figment.extract().unwrap();
-        assert_eq!(config.llm.model, "qwen2.5:14b");
+        assert_eq!(config.llm.model, "qwen2.5-coder:7b");
         assert_eq!(config.memory.search.rrf_k, 60);
     }
 

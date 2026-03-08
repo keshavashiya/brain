@@ -314,13 +314,21 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
   .card .badge{display:inline-block;background:#0f172a;border:1px solid #334155;border-radius:.25rem;padding:.15rem .4rem;font-size:.7rem;color:#64748b;margin-right:.25rem}
   .card .conf{color:#4ade80;font-size:.75rem}
   .empty{color:#475569;text-align:center;padding:3rem;font-size:.9rem}
+  .key-bar{display:flex;align-items:center;gap:.5rem;margin-left:auto}
+  .key-bar label{font-size:.75rem;color:#64748b}
+  .key-bar input{background:#0f172a;border:1px solid #334155;border-radius:.25rem;padding:.35rem .5rem;color:#94a3b8;font-size:.75rem;width:10rem;outline:none}
+  .key-bar input:focus{border-color:#38bdf8}
 </style>
 </head>
 <body>
 <header>
   <h1>🧠 Brain</h1>
   <span>Memory Explorer</span>
-  <span id="api-status" style="margin-left:auto;font-size:.75rem"></span>
+  <div class="key-bar">
+    <label for="api-key">API Key</label>
+    <input id="api-key" type="password" placeholder="Enter API key">
+    <span id="api-status" style="font-size:.75rem"></span>
+  </div>
 </header>
 <main>
   <div class="search-bar">
@@ -338,7 +346,24 @@ const UI_HTML: &str = r#"<!DOCTYPE html>
 const API = '';
 let apiKey = localStorage.getItem('brain_api_key') || '';
 
+const keyInput = document.getElementById('api-key');
+keyInput.value = apiKey;
+function applyKey(){
+  apiKey = keyInput.value.trim();
+  localStorage.setItem('brain_api_key', apiKey);
+  keyInput.style.borderColor='';
+  loadFacts();
+}
+keyInput.addEventListener('change', applyKey);
+keyInput.addEventListener('keydown', function(e){ if(e.key==='Enter') applyKey(); });
+
 function hdr(){ return {'Authorization':'Bearer '+apiKey,'Content-Type':'application/json'} }
+
+function flagKeyInput(msg){
+  keyInput.style.borderColor='#f87171';
+  keyInput.focus();
+  setStatus(msg || 'Invalid API key — enter your key above',true);
+}
 
 async function checkHealth(){
   try{
@@ -373,9 +398,11 @@ function esc(s){ const d=document.createElement('div');d.textContent=s;return d.
 async function search(){
   const q=document.getElementById('q').value.trim();
   if(!q){await loadFacts();return;}
+  if(!apiKey){flagKeyInput('Enter your API key above to search');return;}
   setStatus('Searching…');
   try{
     const r=await fetch(API+'/v1/memory/search',{method:'POST',headers:hdr(),body:JSON.stringify({query:q,top_k:20})});
+    if(r.status===401){flagKeyInput();return;}
     if(!r.ok){setStatus('Search failed: '+r.status,true);return;}
     const facts=await r.json();
     setStatus(facts.length+' result'+(facts.length!==1?'s':''));
@@ -384,11 +411,14 @@ async function search(){
 }
 
 async function loadFacts(){
+  if(!apiKey){flagKeyInput('Enter your API key above to browse memories');return;}
   setStatus('Loading…');
   try{
     const r=await fetch(API+'/v1/memory/facts',{headers:hdr()});
+    if(r.status===401){flagKeyInput();return;}
     if(!r.ok){setStatus('Failed to load facts: '+r.status,true);return;}
     const facts=await r.json();
+    keyInput.style.borderColor='#4ade80';
     setStatus(facts.length+' stored fact'+(facts.length!==1?'s':''));
     document.getElementById('results').innerHTML=facts.length?facts.map(renderFact).join(''):'<p class="empty">No facts stored yet. Send a "Remember…" signal to add some.</p>';
   }catch(e){setStatus('Error: '+e.message,true);}
@@ -403,6 +433,7 @@ function switchTab(t){
 
 document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter')search();});
 checkHealth();
+loadFacts();
 </script>
 </body>
 </html>"#;

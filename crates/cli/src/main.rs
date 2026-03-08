@@ -235,7 +235,7 @@ fn stop_process(pid: u32) -> anyhow::Result<()> {
 ///
 /// - Unix: child is placed in its own process group so it survives terminal close / SIGHUP
 /// - Windows: `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` flags achieve the same
-fn spawn_daemon(log_path: &std::path::Path) -> anyhow::Result<u32> {
+fn spawn_daemon(log_path: &std::path::Path, passphrase: Option<&str>) -> anyhow::Result<u32> {
     // Ensure log directory exists
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -253,6 +253,11 @@ fn spawn_daemon(log_path: &std::path::Path) -> anyhow::Result<u32> {
         .stdout(log_file.try_clone()?)
         .stderr(log_file)
         .stdin(std::process::Stdio::null());
+
+    // Pass passphrase via env so the detached daemon doesn't need a terminal
+    if let Some(pp) = passphrase {
+        cmd.env("BRAIN_PASSPHRASE", pp);
+    }
 
     // Unix: detach from the terminal's process group
     #[cfg(unix)]
@@ -358,13 +363,19 @@ async fn main() -> anyhow::Result<()> {
             println!("Forming neural pathways...");
             println!("  Cortex:    {}", data_dir.display());
 
-            match brain_core::BrainConfig::write_default_config(force)? {
-                Some(path) => println!("  Genome:    {} (written)", path.display()),
-                None => println!(
-                    "  Genome:    {} (already exists, use --force to overwrite)",
-                    brain_core::BrainConfig::user_config_path().display()
-                ),
-            }
+            let generated_key = match brain_core::BrainConfig::write_default_config(force)? {
+                Some((path, key)) => {
+                    println!("  Genome:    {} (written)", path.display());
+                    Some(key)
+                }
+                None => {
+                    println!(
+                        "  Genome:    {} (already exists, use --force to overwrite)",
+                        brain_core::BrainConfig::user_config_path().display()
+                    );
+                    None
+                }
+            };
 
             let subdirs = ["db", "ruvector", "models", "logs", "exports"];
             for sub in &subdirs {
@@ -395,6 +406,11 @@ async fn main() -> anyhow::Result<()> {
                 println!("\n  Blood-brain barrier: sealed (salt → {})", salt_path(&config).display());
                 println!("  Set BRAIN_PASSPHRASE env var for the daemon, or");
                 println!("  Brain will prompt you for a passphrase on startup.");
+            }
+
+            if let Some(key) = generated_key {
+                println!("\n  API key:   {}", key);
+                println!("  Use this key for HTTP/WS/MCP authentication.");
             }
 
             println!(
@@ -444,8 +460,32 @@ async fn main() -> anyhow::Result<()> {
                 remove_pid(&config);
             }
 
+            // If encryption is enabled, resolve passphrase now (while we have a terminal)
+            // so the detached daemon receives it via env var.
+            let passphrase = if config.encryption.enabled {
+                if let Ok(p) = std::env::var("BRAIN_PASSPHRASE") {
+                    Some(p)
+                } else {
+                    // Validate passphrase against the salt before spawning
+                    let salt = load_salt(&config).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Encryption is enabled but no salt file found.\n\
+                             Run `brain init --encrypt` to generate one."
+                        )
+                    })?;
+                    let p = rpassword::prompt_password("Brain passphrase: ")
+                        .map_err(|e| anyhow::anyhow!("Failed to read passphrase: {e}"))?;
+                    // Verify key derivation succeeds before handing off to daemon
+                    storage::Encryptor::from_passphrase(&p, &salt)
+                        .map_err(|e| anyhow::anyhow!("Key derivation failed: {e}"))?;
+                    Some(p)
+                }
+            } else {
+                None
+            };
+
             let log_path = config.data_dir().join("logs/brain.log");
-            let pid = spawn_daemon(&log_path)?;
+            let pid = spawn_daemon(&log_path, passphrase.as_deref())?;
             write_pid(&config, pid)?;
 
             println!("Brain is awake (PID {}).", pid);
@@ -1395,9 +1435,47 @@ async fn cmd_import(config: &brain_core::BrainConfig, file: &str, dry_run: bool)
 // ─── Chat ─────────────────────────────────────────────────────────────────────
 
 async fn chat_non_interactive(config: &brain_core::BrainConfig, message: &str) -> anyhow::Result<()> {
+    use futures::StreamExt;
+
     let mut brain = BrainSession::new(config).await?;
-    let phase = std::sync::atomic::AtomicU8::new(0);
-    println!("{}", brain.process_message(message, &phase).await?);
+
+    match brain.prepare_context(message).await? {
+        PrepareResult::ActionResult(text) => {
+            println!("{text}");
+        }
+        PrepareResult::LlmReady(messages) => {
+            // Try streaming first
+            match brain.llm.generate_stream(&messages).await {
+                Ok(mut stream) => {
+                    let mut full_response = String::new();
+                    while let Some(chunk) = stream.next().await {
+                        match chunk {
+                            Ok(c) => {
+                                print!("{}", c.content);
+                                let _ = stdout().flush();
+                                full_response.push_str(&c.content);
+                                if c.is_done {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("\nStream error: {e}");
+                                break;
+                            }
+                        }
+                    }
+                    println!();
+                    brain.finalize_response(message, &full_response)?;
+                }
+                Err(_) => {
+                    // Fallback to non-streaming
+                    let response = brain.llm.generate(&messages).await?;
+                    println!("{}", response.content);
+                    brain.finalize_response(message, &response.content)?;
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1453,16 +1531,17 @@ async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()
                     _ => {}
                 }
 
-                // Show a spinner while recalling + thinking
+                // Spinner runs from recall through LLM prompt processing,
+                // until the first token arrives (or an action completes).
                 let phase = Arc::new(std::sync::atomic::AtomicU8::new(0));
                 let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let phase_clone = Arc::clone(&phase);
-                let stop_clone = Arc::clone(&stop);
+                let phase_c = Arc::clone(&phase);
+                let stop_c = Arc::clone(&stop);
                 let spinner_handle = tokio::spawn(async move {
                     let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
                     let mut i = 0;
-                    while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                        let label = match phase_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                    while !stop_c.load(std::sync::atomic::Ordering::Relaxed) {
+                        let label = match phase_c.load(std::sync::atomic::Ordering::Relaxed) {
                             0 => "Recalling memories",
                             _ => "Thinking",
                         };
@@ -1476,26 +1555,117 @@ async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()
                         i += 1;
                         tokio::time::sleep(std::time::Duration::from_millis(80)).await;
                     }
-                    // Clear the spinner line
                     let mut out = stdout();
                     let _ = out.execute(cursor::MoveToColumn(0));
                     let _ = out.execute(terminal::Clear(terminal::ClearType::CurrentLine));
                     let _ = out.flush();
                 });
 
-                let result = brain.process_message(input, &phase).await;
-                stop.store(true, std::sync::atomic::Ordering::Relaxed);
-                let _ = spinner_handle.await;
+                let prepare_result = brain.prepare_context(input).await;
 
-                match result {
-                    Ok(response) => {
+                // Wrap handle in Option so we can .take() it exactly once
+                let mut spinner_handle = Some(spinner_handle);
+                let dismiss_spinner = |stop: &Arc<std::sync::atomic::AtomicBool>,
+                                       handle: &mut Option<tokio::task::JoinHandle<()>>| {
+                    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                    handle.take() // returns the JoinHandle (if not already taken)
+                };
+
+                match prepare_result {
+                    Ok(PrepareResult::ActionResult(text)) => {
+                        if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle) {
+                            let _ = h.await;
+                        }
                         let mut out = stdout();
                         out.execute(SetForegroundColor(Color::Green))?;
                         out.execute(Print("Brain: "))?;
                         out.execute(ResetColor)?;
-                        println!("{}", response);
+                        println!("{text}");
+                    }
+                    Ok(PrepareResult::LlmReady(messages)) => {
+                        // Switch spinner to "Thinking" while we wait for first token
+                        phase.store(1, std::sync::atomic::Ordering::Relaxed);
+
+                        // Try streaming — spinner keeps running until first token
+                        let stream_result = brain.llm.generate_stream(&messages).await;
+                        match stream_result {
+                            Ok(mut stream) => {
+                                use futures::StreamExt;
+                                let mut full_response = String::new();
+                                while let Some(chunk) = stream.next().await {
+                                    match chunk {
+                                        Ok(c) => {
+                                            // Stop spinner & print prefix on first token
+                                            if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle) {
+                                                let _ = h.await;
+                                                let mut out = stdout();
+                                                out.execute(SetForegroundColor(Color::Green))?;
+                                                out.execute(Print("Brain: "))?;
+                                                out.execute(ResetColor)?;
+                                                let _ = out.flush();
+                                            }
+                                            print!("{}", c.content);
+                                            let _ = stdout().flush();
+                                            full_response.push_str(&c.content);
+                                            if c.is_done {
+                                                break;
+                                            }
+                                        }
+                                        Err(e) => {
+                                            if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle) {
+                                                let _ = h.await;
+                                            }
+                                            eprintln!("\nStream error: {e}");
+                                            break;
+                                        }
+                                    }
+                                }
+                                // If stream ended with zero tokens, dismiss spinner
+                                if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle) {
+                                    let _ = h.await;
+                                }
+                                println!();
+                                if let Err(e) = brain.finalize_response(input, &full_response) {
+                                    tracing::warn!("Failed to store response: {e}");
+                                }
+                            }
+                            Err(_) => {
+                                // Fallback to non-streaming (spinner keeps running)
+                                match brain.llm.generate(&messages).await {
+                                    Ok(response) => {
+                                        if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle) {
+                                            let _ = h.await;
+                                        }
+                                        let mut out = stdout();
+                                        out.execute(SetForegroundColor(Color::Green))?;
+                                        out.execute(Print("Brain: "))?;
+                                        out.execute(ResetColor)?;
+                                        println!("{}", response.content);
+                                        if let Err(e) = brain.finalize_response(input, &response.content) {
+                                            tracing::warn!("Failed to store response: {e}");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle) {
+                                            let _ = h.await;
+                                        }
+                                        let msg = e.to_string();
+                                        if msg.contains("timed out") || msg.contains("Timeout") {
+                                            eprintln!("LLM timed out — model may still be loading. Try again.");
+                                        } else if msg.contains("error sending request") || msg.contains("connection refused") || msg.contains("Connection refused") {
+                                            eprintln!("LLM unreachable — is Ollama running? (`ollama serve`)");
+                                        } else {
+                                            eprintln!("Error: {msg}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     Err(e) => {
+                        if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle) {
+                            let _ = h.await;
+                        }
                         let msg = e.to_string();
                         if msg.contains("timed out") || msg.contains("Timeout") {
                             eprintln!("LLM timed out — model may still be loading. Try again.");
@@ -1524,6 +1694,14 @@ async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()
 }
 
 // ─── BrainSession ─────────────────────────────────────────────────────────────
+
+/// Result of context preparation (Phase 0).
+enum PrepareResult {
+    /// Thalamus dispatched an action — response is ready.
+    ActionResult(String),
+    /// Messages are assembled and ready for the LLM.
+    LlmReady(Vec<cortex::llm::Message>),
+}
 
 #[allow(dead_code)]
 struct BrainSession {
@@ -1619,16 +1797,8 @@ impl BrainSession {
         }
     }
 
-    async fn process_message(
-        &mut self,
-        message: &str,
-        phase: &std::sync::atomic::AtomicU8,
-    ) -> anyhow::Result<String> {
-        use cortex::llm::{Message, Role};
-
-        // Phase 0: Recalling memories
-        phase.store(0, std::sync::atomic::Ordering::Relaxed);
-
+    /// Phase 0: store user episode, route via thalamus, recall memories, assemble context.
+    async fn prepare_context(&mut self, message: &str) -> anyhow::Result<PrepareResult> {
         let importance = hippocampus::ImportanceScorer::score(message, true);
         self.episodic
             .store_episode(&self.session_id, "user", message, importance)?;
@@ -1648,13 +1818,16 @@ impl BrainSession {
                 .dispatch(&action)
                 .await;
             return if result.success {
-                Ok(result.output)
+                Ok(PrepareResult::ActionResult(result.output))
             } else {
-                Ok(format!("Error: {}", result.error.unwrap_or_default()))
+                Ok(PrepareResult::ActionResult(format!(
+                    "Error: {}",
+                    result.error.unwrap_or_default()
+                )))
             };
         }
 
-        // Hybrid recall (BM25 + ANN via RecallEngine) — same path as SignalProcessor
+        // Hybrid recall (BM25 + ANN via RecallEngine)
         let query_vector = self.embed_text(message).await;
         let memories = if let Some(semantic) = &self.semantic {
             match self
@@ -1669,7 +1842,6 @@ impl BrainSession {
                 }
             }
         } else {
-            // Semantic store unavailable — fall back to BM25 only
             self.episodic
                 .search_bm25(message, 10)
                 .unwrap_or_default()
@@ -1685,25 +1857,27 @@ impl BrainSession {
                 .collect()
         };
 
-        // Phase 1: Thinking (LLM inference)
-        phase.store(1, std::sync::atomic::Ordering::Relaxed);
-
         let messages = self
             .context_assembler
             .assemble(message, &memories, &self.conversation_history);
 
-        let response = self.llm.generate(&messages).await?;
+        Ok(PrepareResult::LlmReady(messages))
+    }
+
+    /// Store assistant response in episodic memory and conversation history.
+    fn finalize_response(&mut self, user_message: &str, assistant_content: &str) -> anyhow::Result<()> {
+        use cortex::llm::{Message, Role};
 
         self.episodic
-            .store_episode(&self.session_id, "assistant", &response.content, 0.5)?;
+            .store_episode(&self.session_id, "assistant", assistant_content, 0.5)?;
 
         self.conversation_history.push(Message {
             role: Role::User,
-            content: message.to_string(),
+            content: user_message.to_string(),
         });
         self.conversation_history.push(Message {
             role: Role::Assistant,
-            content: response.content.clone(),
+            content: assistant_content.to_string(),
         });
 
         // Keep last 20 exchanges
@@ -1711,6 +1885,19 @@ impl BrainSession {
             self.conversation_history = self.conversation_history.split_off(20);
         }
 
-        Ok(response.content)
+        Ok(())
+    }
+
+    /// Convenience wrapper: prepare_context → generate → finalize (non-streaming).
+    #[allow(dead_code)]
+    async fn process_message(&mut self, message: &str) -> anyhow::Result<String> {
+        match self.prepare_context(message).await? {
+            PrepareResult::ActionResult(text) => Ok(text),
+            PrepareResult::LlmReady(messages) => {
+                let response = self.llm.generate(&messages).await?;
+                self.finalize_response(message, &response.content)?;
+                Ok(response.content)
+            }
+        }
     }
 }
