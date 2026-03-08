@@ -314,16 +314,10 @@ impl BrainConfig {
 
     /// Generate a random 36-char API key with `brk_` prefix.
     fn generate_api_key() -> String {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let t = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let pid = std::process::id() as u128;
-        let stack_addr = &t as *const u128 as u128;
-        let a = t.wrapping_mul(6364136223846793005).wrapping_add(pid);
-        let b = stack_addr.wrapping_mul(1442695040888963407).wrapping_add(t);
-        format!("brk_{:016x}{:016x}", a, b)
+        let mut buf = [0u8; 16];
+        getrandom::getrandom(&mut buf).expect("failed to obtain random bytes from OS");
+        let hex: String = buf.iter().map(|b| format!("{:02x}", b)).collect();
+        format!("brk_{}", hex)
     }
 
     /// Path to user config file.

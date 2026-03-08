@@ -13,63 +13,13 @@ use std::collections::HashSet;
 
 /// Importance scorer with per-process novelty tracking.
 ///
-/// Delegates keyword-based scoring to the canonical weights defined in
-/// `hippocampus::importance` and adds a novelty bonus for previously unseen
-/// topic tokens.
+/// Delegates keyword-based scoring to the canonical weights and keyword lists
+/// defined in `hippocampus::importance::ImportanceScorer` and adds a novelty
+/// bonus for previously unseen topic tokens.
 pub struct ImportanceScorer {
     /// Previously seen topic tokens (for novelty detection).
     seen_topics: std::sync::Mutex<HashSet<String>>,
 }
-
-// Canonical scoring weights — kept in sync with hippocampus::importance.
-const BASE_SCORE: f32 = 0.3;
-const EXPLICIT_BOOST: f32 = 0.3;
-const URGENCY_BOOST: f32 = 0.2;
-const EMOTIONAL_BOOST: f32 = 0.15;
-const NOVELTY_BOOST: f32 = 0.1;
-
-/// Keywords that signal explicit memory intent.
-const EXPLICIT_KEYWORDS: &[&str] = &[
-    "remember",
-    "important",
-    "don't forget",
-    "dont forget",
-    "note that",
-    "keep in mind",
-    "make sure to remember",
-    "never forget",
-    "always remember",
-];
-
-/// Keywords that signal urgency.
-const URGENCY_KEYWORDS: &[&str] = &[
-    "asap",
-    "urgent",
-    "deadline",
-    "emergency",
-    "immediately",
-    "right now",
-    "timesensitive",
-    "critical",
-    "due date",
-    "overdue",
-];
-
-/// Keywords that signal emotional intensity.
-const EMOTIONAL_KEYWORDS: &[&str] = &[
-    "stressed",
-    "excited",
-    "frustrated",
-    "anxious",
-    "worried",
-    "happy",
-    "angry",
-    "overwhelmed",
-    "thrilled",
-    "exhausted",
-    "passionate",
-    "terrified",
-];
 
 impl ImportanceScorer {
     /// Create a new `ImportanceScorer` with an empty novelty history.
@@ -81,49 +31,31 @@ impl ImportanceScorer {
 
     /// Score the importance of `text`. Returns a value in [0.0, 1.0].
     ///
-    /// Uses the same keyword lists and weights as `hippocampus::ImportanceScorer`,
-    /// plus per-process novelty tracking.
+    /// Uses the canonical keyword lists and weights from
+    /// `hippocampus::ImportanceScorer`, plus per-process novelty tracking.
     pub fn score(&self, text: &str) -> f32 {
+        let is_novel = self.check_novelty(text);
+        hippocampus::ImportanceScorer::score(text, is_novel) as f32
+    }
+
+    /// Check whether the text contains novel tokens (not seen before in this
+    /// process). Side-effect: records all substantial tokens as "seen".
+    fn check_novelty(&self, text: &str) -> bool {
         let lower = text.to_lowercase();
+        let tokens: Vec<String> = lower
+            .split(|c: char| !c.is_alphabetic())
+            .filter(|w| w.len() > 4)
+            .map(|w| w.to_string())
+            .collect();
 
-        let mut score: f32 = BASE_SCORE;
-
-        if EXPLICIT_KEYWORDS.iter().any(|kw| lower.contains(kw)) {
-            score += EXPLICIT_BOOST;
-        }
-
-        if URGENCY_KEYWORDS.iter().any(|kw| lower.contains(kw)) {
-            score += URGENCY_BOOST;
-        }
-
-        if EMOTIONAL_KEYWORDS.iter().any(|kw| lower.contains(kw)) {
-            score += EMOTIONAL_BOOST;
-        }
-
-        // Novelty detection: a word is "novel" if it is a substantial
-        // token (len > 4) and has not been seen before in this process.
-        let is_novel = {
-            let tokens: Vec<String> = lower
-                .split(|c: char| !c.is_alphabetic())
-                .filter(|w| w.len() > 4)
-                .map(|w| w.to_string())
-                .collect();
-
-            let mut seen = self.seen_topics.lock().unwrap();
-            let mut found_new = false;
-            for token in tokens {
-                if seen.insert(token) {
-                    found_new = true;
-                }
+        let mut seen = self.seen_topics.lock().unwrap();
+        let mut found_new = false;
+        for token in tokens {
+            if seen.insert(token) {
+                found_new = true;
             }
-            found_new
-        };
-
-        if is_novel {
-            score += NOVELTY_BOOST;
         }
-
-        score.clamp(0.0, 1.0)
+        found_new
     }
 }
 

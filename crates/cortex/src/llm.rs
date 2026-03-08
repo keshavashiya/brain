@@ -372,6 +372,24 @@ struct OpenAiChoice {
     finish_reason: Option<String>,
 }
 
+/// Streaming chunk from OpenAI SSE (delta instead of message).
+#[derive(Deserialize)]
+struct OpenAiStreamResponse {
+    choices: Vec<OpenAiStreamChoice>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiStreamChoice {
+    delta: OpenAiDelta,
+    finish_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OpenAiDelta {
+    #[serde(default)]
+    content: Option<String>,
+}
+
 #[derive(Deserialize)]
 struct OpenAiUsage {
     prompt_tokens: u32,
@@ -494,12 +512,99 @@ impl LlmProvider for OpenAiProvider {
 
     async fn generate_stream(
         &self,
-        _messages: &[Message],
+        messages: &[Message],
     ) -> Result<Pin<Box<dyn Stream<Item = Result<ResponseChunk, LlmError>> + Send>>, LlmError> {
-        // Streaming support planned for v0.2
-        Err(LlmError::Stream(
-            "Streaming support is planned for v0.2".to_string(),
-        ))
+        use futures::stream::try_unfold;
+
+        let url = format!("{}/chat/completions", self.base_url);
+        let request = OpenAiRequest {
+            model: self.model.clone(),
+            messages: Self::convert_messages(messages),
+            temperature: self.temperature,
+            max_tokens: self.max_tokens,
+            stream: true,
+        };
+
+        let resp = self
+            .build_request(self.client.post(&url))
+            .json(&request)
+            .send()
+            .await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(LlmError::Api {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+
+        let byte_stream = resp.bytes_stream();
+
+        // State: (byte_stream, leftover buffer for incomplete SSE lines)
+        let stream = try_unfold(
+            (Box::pin(byte_stream), String::new()),
+            |(mut byte_stream, mut buf)| async move {
+                use futures::TryStreamExt;
+
+                loop {
+                    // Try to extract a complete line from the buffer
+                    if let Some(newline_pos) = buf.find('\n') {
+                        let line: String = buf[..newline_pos].to_string();
+                        buf = buf[newline_pos + 1..].to_string();
+
+                        let line = line.trim();
+                        if line.is_empty() {
+                            continue;
+                        }
+
+                        // SSE format: "data: {...}" or "data: [DONE]"
+                        if let Some(data) = line.strip_prefix("data: ") {
+                            let data = data.trim();
+                            if data == "[DONE]" {
+                                return Ok(None);
+                            }
+
+                            match serde_json::from_str::<OpenAiStreamResponse>(data) {
+                                Ok(resp) => {
+                                    if let Some(choice) = resp.choices.first() {
+                                        let content = choice
+                                            .delta
+                                            .content
+                                            .clone()
+                                            .unwrap_or_default();
+                                        let is_done = choice.finish_reason.is_some();
+                                        let chunk = ResponseChunk { content, is_done };
+                                        return Ok(Some((chunk, (byte_stream, buf))));
+                                    }
+                                    // Choice with no delta content (e.g. role-only chunk) — skip
+                                    continue;
+                                }
+                                Err(e) => {
+                                    return Err(LlmError::InvalidFormat(format!(
+                                        "Failed to parse streaming response: {e}"
+                                    )));
+                                }
+                            }
+                        }
+                        // Skip non-data SSE lines (e.g. "event:", comments)
+                        continue;
+                    }
+
+                    // Need more data from the network
+                    match byte_stream.try_next().await {
+                        Ok(Some(bytes)) => {
+                            buf.push_str(&String::from_utf8_lossy(&bytes));
+                        }
+                        Ok(None) => return Ok(None),
+                        Err(e) => return Err(LlmError::Http(e)),
+                    }
+                }
+            },
+        );
+
+        Ok(Box::pin(stream))
     }
 
     async fn health_check(&self) -> bool {
