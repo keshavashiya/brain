@@ -119,13 +119,13 @@ enum Commands {
         action: ServiceAction,
     },
 
-    /// Manage external dependencies (SearXNG, ntfy) via Docker.
+    /// Manage external dependencies (SearXNG) via Docker.
     ///
     /// Runs `docker compose` with the bundled docker/docker-compose.yml.
     ///
     /// Examples:
-    ///   brain deps up       # start SearXNG + ntfy containers
-    ///   brain deps down     # stop containers
+    ///   brain deps up       # start SearXNG container
+    ///   brain deps down     # stop container
     ///   brain deps status   # show container status
     Deps {
         #[command(subcommand)]
@@ -135,7 +135,7 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum DepsAction {
-    /// Start external service containers (SearXNG, ntfy).
+    /// Start external service containers (SearXNG).
     Up,
     /// Stop external service containers.
     Down,
@@ -903,32 +903,20 @@ async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Result<()> {
     }
 
     // External service health
-    println!("\n  External Services:");
-    let services: Vec<(&str, &str)> = vec![
-        ("SearXNG", &config.actions.web_search.endpoint),
-        ("ntfy", "http://127.0.0.1:9090"),
-    ];
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(2))
-        .build()
-        .unwrap_or_default();
-    for (name, endpoint) in services {
-        let ep = endpoint.trim().trim_end_matches('/');
-        if ep.is_empty() {
-            println!("    {:<10}: not configured", name);
-            continue;
-        }
-        let health_url = if name == "SearXNG" {
-            format!("{}/healthz", ep)
-        } else {
-            format!("{}/v1/health", ep)
-        };
+    let searxng_ep = config.actions.web_search.endpoint.trim().trim_end_matches('/');
+    if !searxng_ep.is_empty() {
+        println!("\n  External Services:");
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap_or_default();
+        let health_url = format!("{}/healthz", searxng_ep);
         let healthy = client.get(&health_url).send().await.is_ok_and(|r| r.status().is_success());
         println!(
             "    {:<10}: {} ({})",
-            name,
+            "SearXNG",
             if healthy { "running" } else { "stopped" },
-            ep
+            searxng_ep
         );
     }
 
@@ -1002,7 +990,6 @@ fn cmd_deps(action: DepsAction) -> anyhow::Result<()> {
             run(&["up", "-d"])?;
             println!("\nServices started:");
             println!("  SearXNG → http://127.0.0.1:8888");
-            println!("  ntfy    → http://127.0.0.1:9090");
             println!("\nRun `brain status` to verify connectivity.");
         }
         DepsAction::Down => {
@@ -2077,6 +2064,161 @@ impl cortex::actions::MemoryBackend for CliMemoryBackend {
     }
 }
 
+// ─── Resilience: retry + circuit breaker ─────────────────────────────────────
+
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+/// Tracks consecutive failures and opens a circuit after a threshold is reached.
+/// While the circuit is open, requests fail immediately without hitting the network.
+struct CircuitBreaker {
+    consecutive_failures: AtomicU32,
+    /// Epoch millis of the last failure (used for cooldown calculation).
+    last_failure_epoch_ms: AtomicU64,
+    threshold: u32,
+    cooldown_ms: u64,
+    name: String,
+}
+
+impl CircuitBreaker {
+    fn new(name: &str, threshold: u32, cooldown_secs: u64) -> Self {
+        Self {
+            consecutive_failures: AtomicU32::new(0),
+            last_failure_epoch_ms: AtomicU64::new(0),
+            threshold,
+            cooldown_ms: cooldown_secs * 1000,
+            name: name.to_string(),
+        }
+    }
+
+    fn is_open(&self) -> bool {
+        let failures = self.consecutive_failures.load(Ordering::Relaxed);
+        if failures < self.threshold {
+            return false;
+        }
+        // Check if cooldown has elapsed
+        let last_fail = self.last_failure_epoch_ms.load(Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        if now.saturating_sub(last_fail) >= self.cooldown_ms {
+            // Cooldown elapsed — allow a probe request (half-open)
+            return false;
+        }
+        true
+    }
+
+    fn record_success(&self) {
+        let prev = self.consecutive_failures.swap(0, Ordering::Relaxed);
+        if prev >= self.threshold {
+            tracing::info!(backend = %self.name, "Circuit breaker closed (backend recovered)");
+        }
+    }
+
+    fn record_failure(&self) {
+        let prev = self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        self.last_failure_epoch_ms.store(now, Ordering::Relaxed);
+        if prev + 1 == self.threshold {
+            tracing::warn!(
+                backend = %self.name,
+                threshold = self.threshold,
+                cooldown_secs = self.cooldown_ms / 1000,
+                "Circuit breaker OPEN — backend disabled until cooldown elapses"
+            );
+        }
+    }
+}
+
+/// Returns true if the error is transient (worth retrying).
+fn is_transient(err: &reqwest::Error) -> bool {
+    if err.is_timeout() || err.is_connect() {
+        return true;
+    }
+    if let Some(status) = err.status() {
+        return status.is_server_error(); // 5xx
+    }
+    false
+}
+
+/// Returns true if the HTTP status is transient (worth retrying).
+fn is_transient_status(status: reqwest::StatusCode) -> bool {
+    status.is_server_error() // 5xx
+}
+
+/// Send an HTTP request with retry + circuit breaker.
+///
+/// `build_request` is called each attempt to produce a fresh `RequestBuilder`
+/// (since `RequestBuilder` is consumed on `.send()`).
+async fn resilient_send<F>(
+    build_request: F,
+    circuit_breaker: &CircuitBreaker,
+    max_retries: u32,
+    retry_base_ms: u64,
+) -> Result<reqwest::Response, cortex::actions::ActionError>
+where
+    F: Fn() -> reqwest::RequestBuilder,
+{
+    if circuit_breaker.is_open() {
+        return Err(cortex::actions::ActionError::ExecutionFailed(format!(
+            "{} circuit breaker is open — backend disabled until cooldown elapses",
+            circuit_breaker.name
+        )));
+    }
+
+    let attempts = 1 + max_retries;
+    let mut last_err = None;
+
+    for attempt in 0..attempts {
+        if attempt > 0 {
+            let delay = retry_base_ms * (1u64 << (attempt - 1).min(5));
+            tokio::time::sleep(tokio::time::Duration::from_millis(delay)).await;
+        }
+
+        match build_request().send().await {
+            Ok(response) => {
+                if response.status().is_success() || !is_transient_status(response.status()) {
+                    // Success or non-retryable status (4xx) — return as-is
+                    circuit_breaker.record_success();
+                    return Ok(response);
+                }
+                // 5xx — retryable
+                let status = response.status();
+                tracing::debug!(
+                    backend = %circuit_breaker.name,
+                    attempt = attempt + 1,
+                    status = %status,
+                    "Transient HTTP error, will retry"
+                );
+                last_err = Some(format!("HTTP {}", status));
+            }
+            Err(e) => {
+                if !is_transient(&e) {
+                    // Non-transient error — fail immediately
+                    circuit_breaker.record_failure();
+                    return Err(cortex::actions::ActionError::ExecutionFailed(e.to_string()));
+                }
+                tracing::debug!(
+                    backend = %circuit_breaker.name,
+                    attempt = attempt + 1,
+                    error = %e,
+                    "Transient error, will retry"
+                );
+                last_err = Some(e.to_string());
+            }
+        }
+    }
+
+    // All attempts exhausted
+    circuit_breaker.record_failure();
+    Err(cortex::actions::ActionError::ExecutionFailed(
+        last_err.unwrap_or_else(|| "all retry attempts exhausted".to_string()),
+    ))
+}
+
 // ─── Web Search Backends ─────────────────────────────────────────────────────
 
 /// Parse a JSON array of search results into `SearchHit`s with flexible field names.
@@ -2128,17 +2270,30 @@ fn build_search_client(timeout_ms: u64) -> anyhow::Result<reqwest::Client> {
 
 /// SearXNG provider — self-hosted metasearch engine.
 /// GET `{endpoint}/search?q={query}&format=json`
-#[derive(Clone)]
 struct SearxngSearchBackend {
     endpoint: String,
     client: reqwest::Client,
+    circuit_breaker: Arc<CircuitBreaker>,
+    max_retries: u32,
+    retry_base_ms: u64,
 }
 
 impl SearxngSearchBackend {
-    fn new(endpoint: &str, timeout_ms: u64) -> anyhow::Result<Self> {
+    fn new(
+        endpoint: &str,
+        timeout_ms: u64,
+        resilience: &brain_core::config::ResilienceConfig,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             endpoint: endpoint.trim_end_matches('/').to_string(),
             client: build_search_client(timeout_ms)?,
+            circuit_breaker: Arc::new(CircuitBreaker::new(
+                "searxng",
+                resilience.circuit_breaker_threshold,
+                resilience.circuit_breaker_cooldown_secs,
+            )),
+            max_retries: resilience.max_retries,
+            retry_base_ms: resilience.retry_base_ms,
         })
     }
 }
@@ -2151,13 +2306,20 @@ impl cortex::actions::WebSearchBackend for SearxngSearchBackend {
         top_k: usize,
     ) -> Result<Vec<cortex::actions::SearchHit>, cortex::actions::ActionError> {
         let url = format!("{}/search", self.endpoint);
-        let response = self
-            .client
-            .get(&url)
-            .query(&[("q", query), ("format", "json")])
-            .send()
-            .await
-            .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))?;
+        let client = self.client.clone();
+        let url_clone = url.clone();
+        let query_owned = query.to_string();
+        let response = resilient_send(
+            || {
+                client
+                    .get(&url_clone)
+                    .query(&[("q", query_owned.as_str()), ("format", "json")])
+            },
+            &self.circuit_breaker,
+            self.max_retries,
+            self.retry_base_ms,
+        )
+        .await?;
 
         if !response.status().is_success() {
             return Err(cortex::actions::ActionError::ExecutionFailed(format!(
@@ -2171,11 +2333,13 @@ impl cortex::actions::WebSearchBackend for SearxngSearchBackend {
             .await
             .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))?;
 
-        let candidates = body
-            .get("results")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let candidates = match body.get("results").and_then(|v| v.as_array()) {
+            Some(arr) => arr.clone(),
+            None => {
+                tracing::warn!(backend = "searxng", "Response missing 'results' array — returning empty");
+                Vec::new()
+            }
+        };
 
         Ok(parse_search_results(candidates, top_k))
     }
@@ -2183,19 +2347,33 @@ impl cortex::actions::WebSearchBackend for SearxngSearchBackend {
 
 /// Tavily provider — AI-focused search API (1000 free/month, no CC).
 /// POST `{endpoint}/search` with Bearer auth.
-#[derive(Clone)]
 struct TavilySearchBackend {
     endpoint: String,
     api_key: String,
     client: reqwest::Client,
+    circuit_breaker: Arc<CircuitBreaker>,
+    max_retries: u32,
+    retry_base_ms: u64,
 }
 
 impl TavilySearchBackend {
-    fn new(endpoint: &str, api_key: &str, timeout_ms: u64) -> anyhow::Result<Self> {
+    fn new(
+        endpoint: &str,
+        api_key: &str,
+        timeout_ms: u64,
+        resilience: &brain_core::config::ResilienceConfig,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             endpoint: endpoint.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
             client: build_search_client(timeout_ms)?,
+            circuit_breaker: Arc::new(CircuitBreaker::new(
+                "tavily",
+                resilience.circuit_breaker_threshold,
+                resilience.circuit_breaker_cooldown_secs,
+            )),
+            max_retries: resilience.max_retries,
+            retry_base_ms: resilience.retry_base_ms,
         })
     }
 }
@@ -2208,18 +2386,26 @@ impl cortex::actions::WebSearchBackend for TavilySearchBackend {
         top_k: usize,
     ) -> Result<Vec<cortex::actions::SearchHit>, cortex::actions::ActionError> {
         let url = format!("{}/search", self.endpoint);
-        let response = self
-            .client
-            .post(&url)
-            .bearer_auth(&self.api_key)
-            .json(&serde_json::json!({
-                "query": query,
-                "max_results": top_k,
-                "search_depth": "basic",
-            }))
-            .send()
-            .await
-            .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))?;
+        let client = self.client.clone();
+        let url_clone = url.clone();
+        let api_key = self.api_key.clone();
+        let query_owned = query.to_string();
+        let response = resilient_send(
+            || {
+                client
+                    .post(&url_clone)
+                    .bearer_auth(&api_key)
+                    .json(&serde_json::json!({
+                        "query": query_owned,
+                        "max_results": top_k,
+                        "search_depth": "basic",
+                    }))
+            },
+            &self.circuit_breaker,
+            self.max_retries,
+            self.retry_base_ms,
+        )
+        .await?;
 
         if !response.status().is_success() {
             return Err(cortex::actions::ActionError::ExecutionFailed(format!(
@@ -2233,28 +2419,49 @@ impl cortex::actions::WebSearchBackend for TavilySearchBackend {
             .await
             .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))?;
 
-        let candidates = body
-            .get("results")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
+        let candidates = match body.get("results").and_then(|v| v.as_array()) {
+            Some(arr) => {
+                // Schema validation: Tavily results should have `url` fields
+                if !arr.is_empty() && arr[0].get("url").is_none() {
+                    tracing::warn!(backend = "tavily", "Results missing 'url' field — response schema may have changed");
+                }
+                arr.clone()
+            }
+            None => {
+                tracing::warn!(backend = "tavily", "Response missing 'results' array — returning empty");
+                Vec::new()
+            }
+        };
 
         Ok(parse_search_results(candidates, top_k))
     }
 }
 
 /// Custom provider — raw JSON POST to a user-configured endpoint (backward-compatible).
-#[derive(Clone)]
 struct CustomSearchBackend {
     endpoint: String,
     client: reqwest::Client,
+    circuit_breaker: Arc<CircuitBreaker>,
+    max_retries: u32,
+    retry_base_ms: u64,
 }
 
 impl CustomSearchBackend {
-    fn new(endpoint: &str, timeout_ms: u64) -> anyhow::Result<Self> {
+    fn new(
+        endpoint: &str,
+        timeout_ms: u64,
+        resilience: &brain_core::config::ResilienceConfig,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             endpoint: endpoint.to_string(),
             client: build_search_client(timeout_ms)?,
+            circuit_breaker: Arc::new(CircuitBreaker::new(
+                "custom-search",
+                resilience.circuit_breaker_threshold,
+                resilience.circuit_breaker_cooldown_secs,
+            )),
+            max_retries: resilience.max_retries,
+            retry_base_ms: resilience.retry_base_ms,
         })
     }
 }
@@ -2266,16 +2473,21 @@ impl cortex::actions::WebSearchBackend for CustomSearchBackend {
         query: &str,
         top_k: usize,
     ) -> Result<Vec<cortex::actions::SearchHit>, cortex::actions::ActionError> {
-        let response = self
-            .client
-            .post(&self.endpoint)
-            .json(&serde_json::json!({
-                "query": query,
-                "top_k": top_k,
-            }))
-            .send()
-            .await
-            .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))?;
+        let client = self.client.clone();
+        let endpoint = self.endpoint.clone();
+        let query_owned = query.to_string();
+        let response = resilient_send(
+            || {
+                client.post(&endpoint).json(&serde_json::json!({
+                    "query": query_owned,
+                    "top_k": top_k,
+                }))
+            },
+            &self.circuit_breaker,
+            self.max_retries,
+            self.retry_base_ms,
+        )
+        .await?;
 
         if !response.status().is_success() {
             return Err(cortex::actions::ActionError::ExecutionFailed(format!(
@@ -2340,30 +2552,70 @@ impl cortex::actions::SchedulingBackend for CliSchedulingBackend {
     }
 }
 
-#[derive(Clone)]
-struct CliMessageBackend {
-    channel_endpoints: HashMap<String, String>,
-    client: reqwest::Client,
+// ─── Message backend ─────────────────────────────────────────────────────────
+
+const DEFAULT_MESSAGE_BODY: &str = r#"{"channel":"{{channel}}","recipient":"{{recipient}}","content":"{{content}}","namespace":"{{namespace}}","timestamp":"{{timestamp}}"}"#;
+
+/// JSON-escape a string value (without surrounding quotes).
+fn json_escape(s: &str) -> String {
+    let escaped = serde_json::to_string(s).unwrap_or_else(|_| format!("\"{}\"", s));
+    escaped[1..escaped.len() - 1].to_string()
 }
 
-impl CliMessageBackend {
-    fn new(channels: &HashMap<String, String>, timeout_ms: u64) -> anyhow::Result<Self> {
+/// Render a message template by replacing `{{placeholder}}` tokens.
+fn render_message_template(
+    template: &str,
+    channel: &str,
+    recipient: &str,
+    content: &str,
+    namespace: &str,
+    timestamp: &str,
+) -> String {
+    template
+        .replace("{{channel}}", &json_escape(channel))
+        .replace("{{recipient}}", &json_escape(recipient))
+        .replace("{{content}}", &json_escape(content))
+        .replace("{{namespace}}", &json_escape(namespace))
+        .replace("{{timestamp}}", &json_escape(timestamp))
+}
+
+struct WebhookMessageBackend {
+    channels: HashMap<String, brain_core::config::ChannelConfig>,
+    client: reqwest::Client,
+    circuit_breaker: Arc<CircuitBreaker>,
+    max_retries: u32,
+    retry_base_ms: u64,
+}
+
+impl WebhookMessageBackend {
+    fn new(
+        channels: &HashMap<String, brain_core::config::ChannelConfig>,
+        timeout_ms: u64,
+        resilience: &brain_core::config::ResilienceConfig,
+    ) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(timeout_ms.max(1)))
             .build()
             .map_err(|e| anyhow::anyhow!("message client init failed: {e}"))?;
         Ok(Self {
-            channel_endpoints: channels
+            channels: channels
                 .iter()
                 .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
                 .collect(),
             client,
+            circuit_breaker: Arc::new(CircuitBreaker::new(
+                "webhook-message",
+                resilience.circuit_breaker_threshold,
+                resilience.circuit_breaker_cooldown_secs,
+            )),
+            max_retries: resilience.max_retries,
+            retry_base_ms: resilience.retry_base_ms,
         })
     }
 }
 
 #[async_trait::async_trait]
-impl cortex::actions::MessageBackend for CliMessageBackend {
+impl cortex::actions::MessageBackend for WebhookMessageBackend {
     async fn send(
         &self,
         channel: &str,
@@ -2371,35 +2623,59 @@ impl cortex::actions::MessageBackend for CliMessageBackend {
         content: &str,
         namespace: &str,
     ) -> Result<cortex::actions::MessageOutcome, cortex::actions::ActionError> {
-        let endpoint = self
-            .channel_endpoints
+        let channel_cfg = self
+            .channels
             .get(&channel.to_ascii_lowercase())
             .ok_or_else(|| {
                 cortex::actions::ActionError::InvalidArguments(format!(
                     "No webhook mapping for channel '{}'",
                     channel
                 ))
-            })?;
+            })?
+            .clone();
 
-        let payload = serde_json::json!({
-            "channel": channel,
-            "recipient": recipient,
-            "content": content,
-            "namespace": namespace,
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-        });
+        let client = self.client.clone();
+        let template = if channel_cfg.body.is_empty() {
+            DEFAULT_MESSAGE_BODY.to_string()
+        } else {
+            channel_cfg.body.clone()
+        };
+        let url = channel_cfg.url.clone();
+        let headers = channel_cfg.headers.clone();
+        let channel_owned = channel.to_string();
+        let recipient_owned = recipient.to_string();
+        let content_owned = content.to_string();
+        let namespace_owned = namespace.to_string();
 
-        let response = self
-            .client
-            .post(endpoint)
-            .json(&payload)
-            .send()
-            .await
-            .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))?;
+        let response = resilient_send(
+            || {
+                let timestamp = chrono::Utc::now().to_rfc3339();
+                let rendered = render_message_template(
+                    &template,
+                    &channel_owned,
+                    &recipient_owned,
+                    &content_owned,
+                    &namespace_owned,
+                    &timestamp,
+                );
+                let mut req = client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .body(rendered);
+                for (key, value) in &headers {
+                    req = req.header(key.as_str(), value.as_str());
+                }
+                req
+            },
+            &self.circuit_breaker,
+            self.max_retries,
+            self.retry_base_ms,
+        )
+        .await?;
 
         if !response.status().is_success() {
             return Err(cortex::actions::ActionError::ExecutionFailed(format!(
-                "message endpoint for channel '{}' returned HTTP {}",
+                "webhook for channel '{}' returned HTTP {}",
                 channel,
                 response.status()
             )));
@@ -2409,7 +2685,11 @@ impl cortex::actions::MessageBackend for CliMessageBackend {
         let mut delivery_id = format!("msg-{}", chrono::Utc::now().timestamp_micros());
         let mut status = "accepted".to_string();
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
-            if let Some(id) = value.get("delivery_id").and_then(serde_json::Value::as_str) {
+            if let Some(id) = value
+                .get("id")
+                .or_else(|| value.get("delivery_id"))
+                .and_then(serde_json::Value::as_str)
+            {
                 delivery_id = id.to_string();
             }
             if let Some(s) = value.get("status").and_then(serde_json::Value::as_str) {
@@ -2498,6 +2778,7 @@ impl BrainSession {
             let ws = &config.actions.web_search;
             let timeout = ws.timeout_ms;
             let endpoint = ws.endpoint.trim();
+            let res = &config.actions.resilience;
 
             let backend_result: Result<
                 Option<Arc<dyn cortex::actions::WebSearchBackend>>,
@@ -2509,7 +2790,7 @@ impl BrainSession {
                     } else {
                         endpoint
                     };
-                    SearxngSearchBackend::new(ep, timeout).map(|b| Some(Arc::new(b) as _))
+                    SearxngSearchBackend::new(ep, timeout, res).map(|b| Some(Arc::new(b) as _))
                 }
                 brain_core::config::WebSearchProvider::Tavily => {
                     let api_key = ws.api_key.trim();
@@ -2522,7 +2803,7 @@ impl BrainSession {
                         } else {
                             endpoint
                         };
-                        TavilySearchBackend::new(ep, api_key, timeout)
+                        TavilySearchBackend::new(ep, api_key, timeout, res)
                             .map(|b| Some(Arc::new(b) as _))
                     }
                 }
@@ -2531,7 +2812,7 @@ impl BrainSession {
                         tracing::warn!("actions.web_search.provider=custom but endpoint is empty; backend not configured");
                         Ok(None)
                     } else {
-                        CustomSearchBackend::new(endpoint, timeout)
+                        CustomSearchBackend::new(endpoint, timeout, res)
                             .map(|b| Some(Arc::new(b) as _))
                     }
                 }
@@ -2565,13 +2846,16 @@ impl BrainSession {
                     "actions.messaging.enabled=true but no channel webhook mappings are configured"
                 );
             } else {
-                match CliMessageBackend::new(
+                let res = &config.actions.resilience;
+                match WebhookMessageBackend::new(
                     &config.actions.messaging.channels,
                     config.actions.messaging.timeout_ms,
+                    res,
                 ) {
                     Ok(backend) => {
+                        tracing::info!("Message backend configured");
                         action_dispatcher =
-                            action_dispatcher.with_message_backend(Arc::new(backend))
+                            action_dispatcher.with_message_backend(Arc::new(backend));
                     }
                     Err(e) => tracing::warn!("Message backend init failed: {e}"),
                 }
@@ -2920,5 +3204,111 @@ mod tests {
             }
             _ => panic!("expected action dispatch result"),
         }
+    }
+
+    #[test]
+    fn test_circuit_breaker_closed_by_default() {
+        let cb = CircuitBreaker::new("test", 3, 60);
+        assert!(!cb.is_open());
+    }
+
+    #[test]
+    fn test_circuit_breaker_opens_after_threshold() {
+        let cb = CircuitBreaker::new("test", 3, 60);
+        cb.record_failure();
+        cb.record_failure();
+        assert!(!cb.is_open(), "should still be closed below threshold");
+        cb.record_failure();
+        assert!(cb.is_open(), "should be open at threshold");
+    }
+
+    #[test]
+    fn test_circuit_breaker_resets_on_success() {
+        let cb = CircuitBreaker::new("test", 3, 60);
+        cb.record_failure();
+        cb.record_failure();
+        cb.record_success();
+        assert!(!cb.is_open());
+        // Failures start from zero again
+        cb.record_failure();
+        cb.record_failure();
+        assert!(!cb.is_open(), "should be closed — counter was reset");
+    }
+
+    #[test]
+    fn test_circuit_breaker_half_open_after_cooldown() {
+        let cb = CircuitBreaker::new("test", 2, 0); // 0-second cooldown = immediate half-open
+        cb.record_failure();
+        cb.record_failure();
+        // With 0s cooldown, the circuit should allow a probe immediately
+        assert!(!cb.is_open(), "should be half-open after zero cooldown");
+    }
+
+    #[test]
+    fn test_render_message_template_default() {
+        let rendered = render_message_template(
+            DEFAULT_MESSAGE_BODY,
+            "alerts",
+            "alice",
+            "deploy done",
+            "work",
+            "2026-03-08T12:00:00Z",
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&rendered)
+            .expect("default template should produce valid JSON");
+        assert_eq!(parsed["channel"], "alerts");
+        assert_eq!(parsed["recipient"], "alice");
+        assert_eq!(parsed["content"], "deploy done");
+        assert_eq!(parsed["namespace"], "work");
+        assert_eq!(parsed["timestamp"], "2026-03-08T12:00:00Z");
+    }
+
+    #[test]
+    fn test_render_message_template_custom_slack() {
+        let template = r#"{"text": "[{{channel}}] {{content}}"}"#;
+        let rendered = render_message_template(
+            template, "ops", "bob", "server is down", "personal", "2026-03-08T12:00:00Z",
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&rendered)
+            .expect("custom template should produce valid JSON");
+        assert_eq!(parsed["text"], "[ops] server is down");
+    }
+
+    #[test]
+    fn test_render_message_template_escapes_quotes() {
+        let rendered = render_message_template(
+            DEFAULT_MESSAGE_BODY,
+            "alerts",
+            "alice",
+            r#"He said "hello""#,
+            "work",
+            "2026-03-08T12:00:00Z",
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&rendered)
+            .expect("escaped content should produce valid JSON");
+        assert_eq!(parsed["content"], r#"He said "hello""#);
+    }
+
+    #[test]
+    fn test_render_message_template_escapes_newlines() {
+        let rendered = render_message_template(
+            DEFAULT_MESSAGE_BODY,
+            "alerts",
+            "alice",
+            "line1\nline2",
+            "work",
+            "2026-03-08T12:00:00Z",
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&rendered)
+            .expect("newline content should produce valid JSON");
+        assert_eq!(parsed["content"], "line1\nline2");
+    }
+
+    #[test]
+    fn test_json_escape() {
+        assert_eq!(json_escape("hello"), "hello");
+        assert_eq!(json_escape(r#"say "hi""#), r#"say \"hi\""#);
+        assert_eq!(json_escape("a\nb"), r#"a\nb"#);
+        assert_eq!(json_escape("back\\slash"), r#"back\\slash"#);
     }
 }

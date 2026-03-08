@@ -23,17 +23,3 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
-
-  ntfy:
-    image: binwiederhier/ntfy:latest
-    container_name: brain-ntfy
-    ports:
-      - "127.0.0.1:9090:80"
-    command: serve
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:80/v1/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 5s

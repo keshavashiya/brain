@@ -33,13 +33,13 @@ brain init
 ollama pull qwen2.5-coder:7b
 ollama pull nomic-embed-text
 
-# Start external services (SearXNG web search + ntfy notifications)
+# Start external services (SearXNG web search)
 brain deps up
 ```
 
 `brain init` creates `~/.brain/` with config, database, vector index, and log directories.
 
-`brain deps up` starts Docker containers for SearXNG (web search, port 8888) and ntfy (notifications, port 9090). These are optional — Brain works without them but web search intents will return "backend not configured".
+`brain deps up` starts a Docker container for SearXNG (web search, port 8888). This is optional — Brain works without it but web search intents will return "backend not configured".
 
 If the embedding provider is unavailable, Brain uses deterministic normalized fallback vectors so writes and search continue without panics. Semantic quality is lower until the embedding provider is healthy.
 
@@ -64,25 +64,19 @@ brain chat "remember that I use dark mode"
 
 ## External Services (Docker)
 
-Brain uses optional Docker containers for web search and notifications:
+Brain uses an optional Docker container for web search:
 
 ```bash
-# Start SearXNG (web search) + ntfy (notifications)
-brain deps up
-
-# Check if services are running
-brain deps status
-
-# Stop services
-brain deps down
+brain deps up       # Start SearXNG
+brain deps status   # Check if running
+brain deps down     # Stop
 ```
 
 | Service | Port | Purpose |
 |---------|------|---------|
 | SearXNG | 8888 | Web search backend (metasearch engine) |
-| ntfy | 9090 | Push notifications (alerts, reminders) |
 
-`brain status` automatically checks if these services are reachable.
+`brain status` automatically checks if SearXNG is reachable.
 
 ## Auto-Start on Login
 
@@ -285,16 +279,53 @@ actions:
 | `tavily` | API key (free, no CC) | No | Sign up at tavily.com, set `api_key` |
 | `custom` | None | — | Set `endpoint` to any JSON search API |
 
+### Messaging (Webhooks)
+
+Brain sends messages via configurable webhook URLs. Any service that accepts HTTP POST works — Slack, Discord, Telegram, ntfy.sh, custom endpoints:
+
+```yaml
+actions:
+  messaging:
+    enabled: true
+    timeout_ms: 3000
+    channels:
+      slack:
+        url: "https://hooks.slack.com/services/T/B/x"
+        body: '{"text": "{{content}}"}'
+      discord:
+        url: "https://discord.com/api/webhooks/123/abc"
+        body: '{"content": "[{{channel}}] {{content}}"}'
+      telegram:
+        url: "https://api.telegram.org/bot<TOKEN>/sendMessage"
+        body: '{"chat_id": "<ID>", "text": "{{content}}"}'
+        headers:
+          Content-Type: "application/json"
+      simple: "https://example.com/hook"  # shorthand: URL only, default JSON body
+```
+
+Template placeholders: `{{content}}`, `{{channel}}`, `{{recipient}}`, `{{namespace}}`, `{{timestamp}}`. Values are JSON-escaped automatically. Custom `headers` are optional (useful for APIs requiring auth tokens).
+
+### Backend Resilience
+
+All HTTP backends (web search + messaging) share retry and circuit breaker settings:
+
+```yaml
+actions:
+  resilience:
+    max_retries: 2                    # retries on 5xx / timeout / connection refused
+    retry_base_ms: 500                # exponential backoff: 500 → 1000 → 2000ms
+    circuit_breaker_threshold: 5      # consecutive failures before circuit opens
+    circuit_breaker_cooldown_secs: 60 # seconds before retrying after circuit opens
+```
+
+4xx errors (auth, bad request) fail immediately without retries. When a circuit opens, all requests to that backend return an instant error until the cooldown elapses.
+
 ### Other Action Backends
 
 ```yaml
   scheduling:
     enabled: false
     mode: "persist_only"        # intents stored in SQLite, no internal cron
-  messaging:
-    enabled: false
-    timeout_ms: 3000
-    channels: {}                # channel -> webhook URL
 ```
 
 ## Export & Import

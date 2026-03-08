@@ -125,6 +125,27 @@ pub struct ActionsConfig {
     pub web_search: WebSearchActionConfig,
     pub scheduling: SchedulingActionConfig,
     pub messaging: MessagingActionConfig,
+    #[serde(default)]
+    pub resilience: ResilienceConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResilienceConfig {
+    pub max_retries: u32,
+    pub retry_base_ms: u64,
+    pub circuit_breaker_threshold: u32,
+    pub circuit_breaker_cooldown_secs: u64,
+}
+
+impl Default for ResilienceConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 2,
+            retry_base_ms: 500,
+            circuit_breaker_threshold: 5,
+            circuit_breaker_cooldown_secs: 60,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -166,10 +187,51 @@ pub enum SchedulingMode {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChannelConfig {
+    pub url: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessagingActionConfig {
     pub enabled: bool,
     pub timeout_ms: u64,
-    pub channels: HashMap<String, String>,
+    #[serde(deserialize_with = "deserialize_channels", default)]
+    pub channels: HashMap<String, ChannelConfig>,
+}
+
+/// Deserialize channels supporting both old format (string URL) and new format (ChannelConfig).
+fn deserialize_channels<'de, D>(
+    deserializer: D,
+) -> Result<HashMap<String, ChannelConfig>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ChannelEntry {
+        Full(ChannelConfig),
+        UrlOnly(String),
+    }
+
+    let raw: HashMap<String, ChannelEntry> = HashMap::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .map(|(k, v)| {
+            let config = match v {
+                ChannelEntry::Full(c) => c,
+                ChannelEntry::UrlOnly(url) => ChannelConfig {
+                    url,
+                    body: String::new(),
+                    headers: HashMap::new(),
+                },
+            };
+            (k, config)
+        })
+        .collect())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -463,8 +525,39 @@ impl BrainConfig {
             }
         }
 
-        if self.actions.messaging.enabled && self.actions.messaging.channels.is_empty() {
-            warnings.push("Actions messaging is enabled but actions.messaging.channels has no mappings; dispatches will fail for all channels.".to_string());
+        if self.actions.messaging.enabled {
+            if self.actions.messaging.channels.is_empty() {
+                warnings.push("Actions messaging is enabled but actions.messaging.channels has no mappings; dispatches will fail for all channels.".to_string());
+            } else {
+                for (name, channel_cfg) in &self.actions.messaging.channels {
+                    if channel_cfg.url.trim().is_empty() {
+                        warnings.push(format!(
+                            "actions.messaging.channels.{name}: url is empty; dispatches to this channel will fail."
+                        ));
+                    }
+                }
+            }
+        }
+
+        // ── Timeout bounds ───────────────────────────────────────────────────
+        for (name, ms) in [
+            ("web_search.timeout_ms", self.actions.web_search.timeout_ms),
+            ("messaging.timeout_ms", self.actions.messaging.timeout_ms),
+        ] {
+            if ms == 0 {
+                warnings.push(format!("actions.{name} is 0; will be clamped to 1ms at runtime."));
+            } else if ms > 30_000 {
+                warnings.push(format!("actions.{name} is {}ms (>30s) — requests may block for a long time.", ms));
+            }
+        }
+
+        // ── Resilience bounds ────────────────────────────────────────────────
+        let res = &self.actions.resilience;
+        if res.max_retries > 10 {
+            warnings.push(format!("actions.resilience.max_retries is {} (>10) — excessive retries may amplify failures.", res.max_retries));
+        }
+        if res.circuit_breaker_threshold == 0 {
+            warnings.push("actions.resilience.circuit_breaker_threshold is 0; circuit breaker will never trip.".to_string());
         }
 
         Ok(warnings)
@@ -548,6 +641,7 @@ impl Default for BrainConfig {
                     timeout_ms: 3_000,
                     channels: HashMap::new(),
                 },
+                resilience: ResilienceConfig::default(),
             },
             proactivity: ProactivityConfig {
                 enabled: false,
@@ -809,5 +903,143 @@ mod tests {
         let config = validated_config();
         // Default config has unique ports — should not error
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_timeout_zero_warning() {
+        let mut config = validated_config();
+        config.actions.web_search.timeout_ms = 0;
+        let warnings = config.validate().expect("should be valid");
+        assert!(
+            warnings.iter().any(|w| w.contains("timeout_ms") && w.contains("0")),
+            "expected timeout_ms=0 warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_validate_timeout_too_high_warning() {
+        let mut config = validated_config();
+        config.actions.messaging.timeout_ms = 60_000;
+        let warnings = config.validate().expect("should be valid");
+        assert!(
+            warnings.iter().any(|w| w.contains("timeout_ms") && w.contains("60000")),
+            "expected high timeout warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_validate_resilience_max_retries_warning() {
+        let mut config = validated_config();
+        config.actions.resilience.max_retries = 15;
+        let warnings = config.validate().expect("should be valid");
+        assert!(
+            warnings.iter().any(|w| w.contains("max_retries") && w.contains("15")),
+            "expected max_retries warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_validate_resilience_threshold_zero_warning() {
+        let mut config = validated_config();
+        config.actions.resilience.circuit_breaker_threshold = 0;
+        let warnings = config.validate().expect("should be valid");
+        assert!(
+            warnings.iter().any(|w| w.contains("circuit_breaker_threshold")),
+            "expected circuit_breaker_threshold=0 warning, got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_resilience_defaults() {
+        let res = ResilienceConfig::default();
+        assert_eq!(res.max_retries, 2);
+        assert_eq!(res.retry_base_ms, 500);
+        assert_eq!(res.circuit_breaker_threshold, 5);
+        assert_eq!(res.circuit_breaker_cooldown_secs, 60);
+    }
+
+    #[test]
+    fn test_channel_config_old_format_compat() {
+        // Old format: channels map string → string (URL only)
+        let yaml = r#"
+            enabled: false
+            timeout_ms: 3000
+            channels:
+              alerts: "https://example.com/hook"
+              ops: "https://slack.example.com/webhook"
+        "#;
+        let cfg: MessagingActionConfig =
+            serde_yaml::from_str(yaml).expect("old format should deserialize");
+        assert_eq!(cfg.channels.len(), 2);
+        assert_eq!(cfg.channels["alerts"].url, "https://example.com/hook");
+        assert!(cfg.channels["alerts"].body.is_empty());
+        assert!(cfg.channels["alerts"].headers.is_empty());
+    }
+
+    #[test]
+    fn test_channel_config_new_format() {
+        let yaml = r#"
+            enabled: true
+            timeout_ms: 3000
+            channels:
+              alerts:
+                url: "https://hooks.slack.com/services/T/B/x"
+                body: '{"text": "{{content}}"}'
+                headers:
+                  Authorization: "Bearer tok123"
+        "#;
+        let cfg: MessagingActionConfig =
+            serde_yaml::from_str(yaml).expect("new format should deserialize");
+        assert_eq!(cfg.channels.len(), 1);
+        let ch = &cfg.channels["alerts"];
+        assert_eq!(ch.url, "https://hooks.slack.com/services/T/B/x");
+        assert_eq!(ch.body, r#"{"text": "{{content}}"}"#);
+        assert_eq!(ch.headers["Authorization"], "Bearer tok123");
+    }
+
+    #[test]
+    fn test_channel_config_mixed_format() {
+        let yaml = r#"
+            enabled: true
+            timeout_ms: 3000
+            channels:
+              simple: "https://example.com/hook"
+              custom:
+                url: "https://discord.com/api/webhooks/123/abc"
+                body: '{"content": "{{content}}"}'
+        "#;
+        let cfg: MessagingActionConfig =
+            serde_yaml::from_str(yaml).expect("mixed format should deserialize");
+        assert_eq!(cfg.channels.len(), 2);
+        assert_eq!(cfg.channels["simple"].url, "https://example.com/hook");
+        assert!(cfg.channels["simple"].body.is_empty());
+        let custom = &cfg.channels["custom"];
+        assert_eq!(custom.url, "https://discord.com/api/webhooks/123/abc");
+        assert!(!custom.body.is_empty());
+        assert!(custom.headers.is_empty());
+    }
+
+    #[test]
+    fn test_validate_channel_empty_url_warning() {
+        let mut config = validated_config();
+        config.actions.messaging.enabled = true;
+        config.actions.messaging.channels.insert(
+            "bad".into(),
+            ChannelConfig {
+                url: "".into(),
+                body: String::new(),
+                headers: HashMap::new(),
+            },
+        );
+        let warnings = config.validate().expect("should be valid");
+        assert!(
+            warnings.iter().any(|w| w.contains("channels.bad") && w.contains("url is empty")),
+            "expected empty-url warning, got: {:?}",
+            warnings
+        );
     }
 }

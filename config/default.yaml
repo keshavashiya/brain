@@ -67,7 +67,20 @@ actions:
   messaging:
     enabled: false
     timeout_ms: 3000
-    channels: {}              # map channel -> ntfy topic or webhook URL (e.g. {"alerts":"brain-alerts"})
+    channels: {}
+    # Channel config — URL-only shorthand or full config with body template + headers:
+    #   alerts: "https://example.com/hook"              # shorthand: URL only, default JSON body
+    #   slack:
+    #     url: "https://hooks.slack.com/services/T/B/x"
+    #     body: '{"text": "{{content}}"}'               # template: {{channel}} {{recipient}} {{content}} {{namespace}} {{timestamp}}
+    #   telegram:
+    #     url: "https://api.telegram.org/bot<TOKEN>/sendMessage"
+    #     body: '{"chat_id": "<CHAT_ID>", "text": "[{{channel}}] {{content}}"}'
+  resilience:
+    max_retries: 2            # retries on transient errors (5xx, timeout, connection refused)
+    retry_base_ms: 500        # base delay; doubles each retry (500 → 1000 → 2000)
+    circuit_breaker_threshold: 5    # consecutive failures before circuit opens
+    circuit_breaker_cooldown_secs: 60  # seconds to wait before retrying after circuit opens
 
 proactivity:
   enabled: false               # Opt-in

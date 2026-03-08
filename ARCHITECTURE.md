@@ -222,7 +222,12 @@ Dispatch contract is explicit:
 Current concrete wiring in CLI is platform-agnostic:
 - Web search: provider-based (`searxng`, `tavily`, or `custom` HTTP JSON endpoint)
 - Scheduling: persist-only SQLite intent storage (`scheduled_intents`)
-- Messaging: channel -> webhook endpoint map
+- Messaging: webhook POST with configurable body templates + custom headers per channel
+
+All HTTP backends share a resilience layer (`actions.resilience` config):
+- Retry with exponential backoff on transient errors (5xx, timeout, connection refused); 4xx errors fail immediately
+- Circuit breaker per backend: opens after N consecutive failures, auto-resets after cooldown
+- Schema validation: structured warnings logged on unexpected response shapes (never crashes)
 
 ---
 
