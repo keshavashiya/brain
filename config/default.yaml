@@ -53,6 +53,20 @@ security:
     - rustc
   exec_timeout_seconds: 30
 
+actions:
+  web_search:
+    enabled: true
+    endpoint: ""              # Set to an HTTP JSON search endpoint to enable backend wiring
+    timeout_ms: 3000
+    default_top_k: 5
+  scheduling:
+    enabled: false
+    mode: "persist_only"      # Persist intents only; no internal cron runner
+  messaging:
+    enabled: false
+    timeout_ms: 3000
+    channels: {}              # map channel -> webhook URL (e.g. {"ops":"https://..."})
+
 proactivity:
   enabled: false               # Opt-in
   max_per_day: 5
@@ -86,4 +100,3 @@ access:
       permissions:
         - read
         - write
-

@@ -17,7 +17,7 @@ brain/
 │   ├── hippocampus/    # Memory: EpisodicStore, SemanticStore, RecallEngine,
 │   │                     Embedder (Ollama / OpenAI-compatible), ImportanceScorer
 │   ├── cortex/         # LLM clients: OllamaProvider, OpenAiProvider
-│   │                     ContextAssembler (builds prompts from recall results)
+│   │                     ContextAssembler + ActionDispatcher (pluggable backends)
 │   ├── cerebellum/     # ProcedureStore — trigger-pattern → steps automation
 │   ├── ganglia/        # Proactivity engine (scheduled reminders)
 │   ├── ruvector/       # (not a crate — ruvector-core is used as an external dep)
@@ -201,6 +201,28 @@ Before insert/search, vectors are sanitized (finite values, expected dimensions,
 2. SQLite FTS5 BM25 full-text search
 
 Results are merged with Reciprocal Rank Fusion (RRF, `k=60`) and re-ranked by importance score.
+
+---
+
+## Action Dispatcher Backends (Internal)
+
+Action execution is internal to the shared engine/CLI flow and not exposed as a new public adapter API in this cycle.
+
+`cortex::ActionDispatcher` supports backend traits for:
+- memory (`store_fact`, `recall`)
+- web search (`web_search`)
+- scheduling (`schedule_task`)
+- outbound messaging (`send_message`)
+
+Dispatch contract is explicit:
+- feature disabled -> failure (`disabled by config`)
+- enabled without backend wiring -> failure (`backend not configured`)
+- enabled with backend -> real execution with structured success output
+
+Current concrete wiring in CLI is platform-agnostic:
+- Web search: generic HTTP JSON endpoint
+- Scheduling: persist-only SQLite intent storage (`scheduled_intents`)
+- Messaging: channel -> webhook endpoint map
 
 ---
 

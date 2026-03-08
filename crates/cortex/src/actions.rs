@@ -96,6 +96,57 @@ pub trait MemoryBackend: Send + Sync {
     ) -> Result<Vec<MemoryFact>, ActionError>;
 }
 
+/// Structured web-search hit returned by WebSearchBackend.
+#[derive(Debug, Clone)]
+pub struct SearchHit {
+    pub title: String,
+    pub url: String,
+    pub snippet: String,
+}
+
+/// Optional backend for web search actions.
+#[async_trait::async_trait]
+pub trait WebSearchBackend: Send + Sync {
+    async fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>, ActionError>;
+}
+
+/// Structured scheduling outcome returned by SchedulingBackend.
+#[derive(Debug, Clone)]
+pub struct ScheduleOutcome {
+    pub schedule_id: String,
+    pub status: String,
+}
+
+/// Optional backend for scheduling actions.
+#[async_trait::async_trait]
+pub trait SchedulingBackend: Send + Sync {
+    async fn schedule(
+        &self,
+        description: &str,
+        cron: Option<&str>,
+        namespace: &str,
+    ) -> Result<ScheduleOutcome, ActionError>;
+}
+
+/// Structured message-delivery outcome returned by MessageBackend.
+#[derive(Debug, Clone)]
+pub struct MessageOutcome {
+    pub delivery_id: String,
+    pub status: String,
+}
+
+/// Optional backend for outbound message actions.
+#[async_trait::async_trait]
+pub trait MessageBackend: Send + Sync {
+    async fn send(
+        &self,
+        channel: &str,
+        recipient: &str,
+        content: &str,
+        namespace: &str,
+    ) -> Result<MessageOutcome, ActionError>;
+}
+
 impl ActionResult {
     /// Create a successful result.
     pub fn success(output: impl Into<String>) -> Self {
@@ -131,6 +182,8 @@ pub struct ActionConfig {
     pub enable_scheduling: bool,
     /// Enable channel sends.
     pub enable_channel_send: bool,
+    /// Default number of hits to request from the web search backend.
+    pub web_search_top_k: usize,
 }
 
 impl Default for ActionConfig {
@@ -153,6 +206,7 @@ impl Default for ActionConfig {
             enable_web_search: true,
             enable_scheduling: false,
             enable_channel_send: false,
+            web_search_top_k: 5,
         }
     }
 }
@@ -161,6 +215,10 @@ impl Default for ActionConfig {
 pub struct ActionDispatcher {
     config: ActionConfig,
     memory_backend: Option<Arc<dyn MemoryBackend>>,
+    web_search_backend: Option<Arc<dyn WebSearchBackend>>,
+    scheduling_backend: Option<Arc<dyn SchedulingBackend>>,
+    message_backend: Option<Arc<dyn MessageBackend>>,
+    namespace: String,
 }
 
 impl ActionDispatcher {
@@ -169,6 +227,10 @@ impl ActionDispatcher {
         Self {
             config,
             memory_backend: None,
+            web_search_backend: None,
+            scheduling_backend: None,
+            message_backend: None,
+            namespace: "personal".to_string(),
         }
     }
 
@@ -177,15 +239,50 @@ impl ActionDispatcher {
         config: ActionConfig,
         memory_backend: Arc<dyn MemoryBackend>,
     ) -> Self {
-        Self {
-            config,
-            memory_backend: Some(memory_backend),
-        }
+        Self::new(config).with_memory(memory_backend)
     }
 
     /// Create with default config.
     pub fn with_defaults() -> Self {
         Self::new(ActionConfig::default())
+    }
+
+    /// Attach a memory backend.
+    pub fn with_memory(mut self, memory_backend: Arc<dyn MemoryBackend>) -> Self {
+        self.memory_backend = Some(memory_backend);
+        self
+    }
+
+    /// Attach a web-search backend.
+    pub fn with_web_search_backend(mut self, backend: Arc<dyn WebSearchBackend>) -> Self {
+        self.web_search_backend = Some(backend);
+        self
+    }
+
+    /// Attach a scheduling backend.
+    pub fn with_scheduling_backend(mut self, backend: Arc<dyn SchedulingBackend>) -> Self {
+        self.scheduling_backend = Some(backend);
+        self
+    }
+
+    /// Attach a message backend.
+    pub fn with_message_backend(mut self, backend: Arc<dyn MessageBackend>) -> Self {
+        self.message_backend = Some(backend);
+        self
+    }
+
+    /// Set the default namespace used by action backends.
+    pub fn set_namespace(&mut self, namespace: impl Into<String>) {
+        self.namespace = namespace.into();
+    }
+
+    fn active_namespace(&self) -> &str {
+        let trimmed = self.namespace.trim();
+        if trimmed.is_empty() {
+            "personal"
+        } else {
+            trimmed
+        }
     }
 
     /// Execute an action.
@@ -252,29 +349,60 @@ impl ActionDispatcher {
     /// Search the web.
     async fn web_search(&self, query: &str) -> ActionResult {
         if !self.config.enable_web_search {
-            return ActionResult::failure("Web search is disabled");
+            return ActionResult::failure("Web search is disabled by config");
         }
-
-        // Placeholder: In a real implementation, this would use Brave/SearXNG API
-        // For now, return a mock result
-        tracing::info!("Web search query: {}", query);
-        ActionResult::success(format!(
-            "Web search for '{}' would be performed here. (Not implemented in v0.1)",
-            query
-        ))
+        let Some(backend) = &self.web_search_backend else {
+            return ActionResult::failure("Web search backend not configured");
+        };
+        let top_k = self.config.web_search_top_k.max(1);
+        match backend.search(query, top_k).await {
+            Ok(hits) => {
+                if hits.is_empty() {
+                    return ActionResult::success(format!(
+                        "web_search ok query=\"{}\" top_k={} hits=0",
+                        query, top_k
+                    ));
+                }
+                let lines = hits
+                    .iter()
+                    .enumerate()
+                    .map(|(i, hit)| {
+                        format!("{}. {} ({}) - {}", i + 1, hit.title, hit.url, hit.snippet)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ActionResult::success(format!(
+                    "web_search ok query=\"{}\" top_k={} hits={}\n{}",
+                    query,
+                    top_k,
+                    hits.len(),
+                    lines
+                ))
+            }
+            Err(e) => ActionResult::failure(format!("Web search failed: {e}")),
+        }
     }
 
     /// Schedule a task.
     async fn schedule_task(&self, description: &str, cron: Option<&str>) -> ActionResult {
         if !self.config.enable_scheduling {
-            return ActionResult::failure("Scheduling is disabled");
+            return ActionResult::failure("Scheduling is disabled by config");
         }
-
-        tracing::info!("Schedule task: {} (cron: {:?})", description, cron);
-        ActionResult::success(format!(
-            "Task '{}' scheduled (cron: {:?}). (Not fully implemented in v0.1)",
-            description, cron
-        ))
+        let Some(backend) = &self.scheduling_backend else {
+            return ActionResult::failure("Scheduling backend not configured");
+        };
+        let namespace = self.active_namespace();
+        match backend.schedule(description, cron, namespace).await {
+            Ok(outcome) => ActionResult::success(format!(
+                "schedule_task ok id={} status={} namespace={} cron={} description=\"{}\"",
+                outcome.schedule_id,
+                outcome.status,
+                namespace,
+                cron.unwrap_or("none"),
+                description
+            )),
+            Err(e) => ActionResult::failure(format!("Schedule task failed: {e}")),
+        }
     }
 
     /// Store a fact in semantic memory.
@@ -282,14 +410,15 @@ impl ActionDispatcher {
         let Some(memory) = &self.memory_backend else {
             return ActionResult::failure("Memory backend not available");
         };
+        let namespace = self.active_namespace();
 
         match memory
-            .store_fact("personal", "action", subject, predicate, object)
+            .store_fact(namespace, "action", subject, predicate, object)
             .await
         {
             Ok(id) => ActionResult::success(format!(
-                "Fact stored [{}]: {} {} {}",
-                id, subject, predicate, object
+                "Fact stored [{}] [{}]: {} {} {}",
+                id, namespace, subject, predicate, object
             )),
             Err(e) => ActionResult::failure(format!("Failed to store fact: {e}")),
         }
@@ -300,8 +429,9 @@ impl ActionDispatcher {
         let Some(memory) = &self.memory_backend else {
             return ActionResult::failure("Memory backend not available");
         };
+        let namespace = self.active_namespace();
 
-        match memory.recall(query, 10, Some("personal")).await {
+        match memory.recall(query, 10, Some(namespace)).await {
             Ok(results) if results.is_empty() => ActionResult::success("No matching facts found."),
             Ok(results) => {
                 let lines = results
@@ -323,14 +453,19 @@ impl ActionDispatcher {
     /// Send a message via channel.
     async fn send_message(&self, channel: &str, recipient: &str, content: &str) -> ActionResult {
         if !self.config.enable_channel_send {
-            return ActionResult::failure("Channel sending is disabled");
+            return ActionResult::failure("Channel sending is disabled by config");
         }
-
-        tracing::info!("Send message via {} to {}: {}", channel, recipient, content);
-        ActionResult::success(format!(
-            "Message queued to send via {} to {}",
-            channel, recipient
-        ))
+        let Some(backend) = &self.message_backend else {
+            return ActionResult::failure("Message backend not configured");
+        };
+        let namespace = self.active_namespace();
+        match backend.send(channel, recipient, content, namespace).await {
+            Ok(outcome) => ActionResult::success(format!(
+                "send_message ok id={} status={} channel={} recipient={} namespace={}",
+                outcome.delivery_id, outcome.status, channel, recipient, namespace
+            )),
+            Err(e) => ActionResult::failure(format!("Send message failed: {e}")),
+        }
     }
 }
 
@@ -461,6 +596,71 @@ mod tests {
         }
     }
 
+    struct MockWebSearchBackend;
+
+    #[async_trait::async_trait]
+    impl WebSearchBackend for MockWebSearchBackend {
+        async fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>, ActionError> {
+            Ok((0..top_k)
+                .map(|i| SearchHit {
+                    title: format!("{query} hit {}", i + 1),
+                    url: format!("https://example.com/{i}"),
+                    snippet: "snippet".to_string(),
+                })
+                .collect())
+        }
+    }
+
+    struct MockSchedulingBackend {
+        calls: Mutex<Vec<(String, Option<String>, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SchedulingBackend for MockSchedulingBackend {
+        async fn schedule(
+            &self,
+            description: &str,
+            cron: Option<&str>,
+            namespace: &str,
+        ) -> Result<ScheduleOutcome, ActionError> {
+            self.calls.lock().expect("calls lock").push((
+                description.to_string(),
+                cron.map(|c| c.to_string()),
+                namespace.to_string(),
+            ));
+            Ok(ScheduleOutcome {
+                schedule_id: "sched-1".to_string(),
+                status: "scheduled".to_string(),
+            })
+        }
+    }
+
+    struct MockMessageBackend {
+        calls: Mutex<Vec<(String, String, String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl MessageBackend for MockMessageBackend {
+        async fn send(
+            &self,
+            channel: &str,
+            recipient: &str,
+            content: &str,
+            namespace: &str,
+        ) -> Result<MessageOutcome, ActionError> {
+            self.calls.lock().expect("calls lock").push((
+                channel.to_string(),
+                recipient.to_string(),
+                content.to_string(),
+                namespace.to_string(),
+            ));
+            Ok(MessageOutcome {
+                delivery_id: "msg-1".to_string(),
+                status: "accepted".to_string(),
+            })
+        }
+    }
+
     #[test]
     fn test_action_result_success() {
         let result = ActionResult::success("output");
@@ -482,6 +682,7 @@ mod tests {
         assert!(config.command_allowlist.contains(&"ls".to_string()));
         assert_eq!(config.command_timeout_secs, 30);
         assert!(config.enable_web_search);
+        assert_eq!(config.web_search_top_k, 5);
     }
 
     #[tokio::test]
@@ -544,9 +745,10 @@ mod tests {
         let backend = Arc::new(MockMemoryBackend {
             facts: Mutex::new(Vec::new()),
         });
-        let dispatcher =
+        let mut dispatcher =
             ActionDispatcher::with_memory_backend(ActionConfig::default(), backend.clone());
 
+        dispatcher.set_namespace("work");
         let store = Action::StoreFact {
             subject: "user".to_string(),
             predicate: "likes".to_string(),
@@ -554,12 +756,22 @@ mod tests {
         };
         let _ = dispatcher.dispatch(&store).await;
 
+        dispatcher.set_namespace("personal");
+        let store_personal = Action::StoreFact {
+            subject: "user".to_string(),
+            predicate: "likes".to_string(),
+            object: "Go".to_string(),
+        };
+        let _ = dispatcher.dispatch(&store_personal).await;
+
+        dispatcher.set_namespace("work");
         let recall = Action::Recall {
             query: "Rust".to_string(),
         };
         let result = dispatcher.dispatch(&recall).await;
         assert!(result.success);
         assert!(result.output.contains("Found 1 fact"));
+        assert!(result.output.contains("[work]"));
     }
 
     #[tokio::test]
@@ -575,5 +787,158 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("Memory backend not available"));
+    }
+
+    #[tokio::test]
+    async fn test_web_search_disabled() {
+        let mut cfg = ActionConfig::default();
+        cfg.enable_web_search = false;
+        let dispatcher = ActionDispatcher::new(cfg);
+        let result = dispatcher
+            .dispatch(&Action::WebSearch {
+                query: "rust".to_string(),
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("disabled by config"));
+    }
+
+    #[tokio::test]
+    async fn test_web_search_backend_not_configured() {
+        let dispatcher = ActionDispatcher::with_defaults();
+        let result = dispatcher
+            .dispatch(&Action::WebSearch {
+                query: "rust".to_string(),
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("backend not configured"));
+    }
+
+    #[tokio::test]
+    async fn test_web_search_success_with_backend() {
+        let dispatcher = ActionDispatcher::with_defaults()
+            .with_web_search_backend(Arc::new(MockWebSearchBackend));
+        let result = dispatcher
+            .dispatch(&Action::WebSearch {
+                query: "rust".to_string(),
+            })
+            .await;
+        assert!(result.success);
+        assert!(result.output.contains("web_search ok"));
+        assert!(result.output.contains("hits=5"));
+    }
+
+    #[tokio::test]
+    async fn test_schedule_task_backend_matrix() {
+        let mut disabled = ActionConfig::default();
+        disabled.enable_scheduling = false;
+        let dispatcher = ActionDispatcher::new(disabled.clone());
+        let result = dispatcher
+            .dispatch(&Action::ScheduleTask {
+                description: "ship release".to_string(),
+                cron: Some("0 10 * * 1".to_string()),
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("disabled by config"));
+
+        disabled.enable_scheduling = true;
+        let unconfigured = ActionDispatcher::new(disabled.clone());
+        let result = unconfigured
+            .dispatch(&Action::ScheduleTask {
+                description: "ship release".to_string(),
+                cron: Some("0 10 * * 1".to_string()),
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("backend not configured"));
+
+        let backend = Arc::new(MockSchedulingBackend {
+            calls: Mutex::new(Vec::new()),
+        });
+        let backend_trait: Arc<dyn SchedulingBackend> = backend.clone();
+        let mut configured = ActionDispatcher::new(disabled).with_scheduling_backend(backend_trait);
+        configured.set_namespace("work");
+        let result = configured
+            .dispatch(&Action::ScheduleTask {
+                description: "ship release".to_string(),
+                cron: Some("0 10 * * 1".to_string()),
+            })
+            .await;
+        assert!(result.success);
+        let calls = backend.calls.lock().expect("calls lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].2, "work");
+    }
+
+    #[tokio::test]
+    async fn test_send_message_backend_matrix() {
+        let mut disabled = ActionConfig::default();
+        disabled.enable_channel_send = false;
+        let dispatcher = ActionDispatcher::new(disabled.clone());
+        let result = dispatcher
+            .dispatch(&Action::SendMessage {
+                channel: "ops".to_string(),
+                recipient: "alice".to_string(),
+                content: "deploy now".to_string(),
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("disabled by config"));
+
+        disabled.enable_channel_send = true;
+        let unconfigured = ActionDispatcher::new(disabled.clone());
+        let result = unconfigured
+            .dispatch(&Action::SendMessage {
+                channel: "ops".to_string(),
+                recipient: "alice".to_string(),
+                content: "deploy now".to_string(),
+            })
+            .await;
+        assert!(!result.success);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("backend not configured"));
+
+        let backend = Arc::new(MockMessageBackend {
+            calls: Mutex::new(Vec::new()),
+        });
+        let backend_trait: Arc<dyn MessageBackend> = backend.clone();
+        let mut configured = ActionDispatcher::new(disabled).with_message_backend(backend_trait);
+        configured.set_namespace("project-x");
+        let result = configured
+            .dispatch(&Action::SendMessage {
+                channel: "ops".to_string(),
+                recipient: "alice".to_string(),
+                content: "deploy now".to_string(),
+            })
+            .await;
+        assert!(result.success);
+        let calls = backend.calls.lock().expect("calls lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].3, "project-x");
     }
 }

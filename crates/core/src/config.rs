@@ -9,7 +9,10 @@
 /// This means `brain` works anywhere without needing config files on disk.
 const DEFAULT_CONFIG: &str = include_str!("../../../config/default.yaml");
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use figment::{
     providers::{Env, Format, Yaml},
@@ -27,6 +30,7 @@ pub struct BrainConfig {
     pub memory: MemoryConfig,
     pub encryption: EncryptionConfig,
     pub security: SecurityConfig,
+    pub actions: ActionsConfig,
     pub proactivity: ProactivityConfig,
     pub adapters: AdaptersConfig,
     pub access: AccessConfig,
@@ -114,6 +118,40 @@ pub struct EncryptionConfig {
 pub struct SecurityConfig {
     pub exec_allowlist: Vec<String>,
     pub exec_timeout_seconds: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionsConfig {
+    pub web_search: WebSearchActionConfig,
+    pub scheduling: SchedulingActionConfig,
+    pub messaging: MessagingActionConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebSearchActionConfig {
+    pub enabled: bool,
+    pub endpoint: String,
+    pub timeout_ms: u64,
+    pub default_top_k: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchedulingActionConfig {
+    pub enabled: bool,
+    pub mode: SchedulingMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SchedulingMode {
+    PersistOnly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessagingActionConfig {
+    pub enabled: bool,
+    pub timeout_ms: u64,
+    pub channels: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -395,6 +433,14 @@ impl BrainConfig {
             warnings.push("Consolidation interval_hours is 0 — consolidation will run immediately on every daemon wake-up, which may impact performance.".to_string());
         }
 
+        if self.actions.web_search.enabled && self.actions.web_search.endpoint.trim().is_empty() {
+            warnings.push("Actions web_search is enabled but actions.web_search.endpoint is empty; dispatches will fail with backend-not-configured.".to_string());
+        }
+
+        if self.actions.messaging.enabled && self.actions.messaging.channels.is_empty() {
+            warnings.push("Actions messaging is enabled but actions.messaging.channels has no mappings; dispatches will fail for all channels.".to_string());
+        }
+
         Ok(warnings)
     }
 }
@@ -457,6 +503,23 @@ impl Default for BrainConfig {
                     "rustc".into(),
                 ],
                 exec_timeout_seconds: 30,
+            },
+            actions: ActionsConfig {
+                web_search: WebSearchActionConfig {
+                    enabled: true,
+                    endpoint: String::new(),
+                    timeout_ms: 3_000,
+                    default_top_k: 5,
+                },
+                scheduling: SchedulingActionConfig {
+                    enabled: false,
+                    mode: SchedulingMode::PersistOnly,
+                },
+                messaging: MessagingActionConfig {
+                    enabled: false,
+                    timeout_ms: 3_000,
+                    channels: HashMap::new(),
+                },
             },
             proactivity: ProactivityConfig {
                 enabled: false,
@@ -526,6 +589,7 @@ mod tests {
         assert_eq!(config.llm.provider, "ollama");
         assert_eq!(config.embedding.dimensions, 768); // nomic-embed-text default
         assert!(!config.encryption.enabled); // Deferred to v1.1
+        assert_eq!(config.actions.scheduling.mode, SchedulingMode::PersistOnly);
         assert!(!config.proactivity.enabled);
         assert!(config.adapters.http.enabled);
     }
@@ -563,15 +627,25 @@ mod tests {
     // ── validate() ────────────────────────────────────────────────────────────
 
     /// Helper: default config with no API keys (to keep warnings deterministic).
+    fn writable_test_data_dir() -> String {
+        std::env::temp_dir()
+            .join("brain-core-tests")
+            .to_string_lossy()
+            .to_string()
+    }
+
+    /// Helper: default config with no API keys (to keep warnings deterministic).
     fn validated_config() -> BrainConfig {
         let mut c = BrainConfig::default();
+        c.brain.data_dir = writable_test_data_dir();
         c.access.api_keys.clear();
         c
     }
 
     #[test]
     fn test_validate_default_has_demo_key_warning() {
-        let config = BrainConfig::default();
+        let mut config = BrainConfig::default();
+        config.brain.data_dir = writable_test_data_dir();
         let warnings = config.validate().expect("default config should be valid");
         assert!(
             warnings.iter().any(|w| w.contains("demokey123")),
@@ -639,6 +713,27 @@ mod tests {
             "expected interval warning, got: {:?}",
             warnings
         );
+    }
+
+    #[test]
+    fn test_actions_defaults_deserialize() {
+        let config = BrainConfig::load().expect("embedded defaults should load");
+        assert!(config.actions.web_search.enabled);
+        assert_eq!(config.actions.web_search.default_top_k, 5);
+        assert_eq!(config.actions.scheduling.mode, SchedulingMode::PersistOnly);
+        assert!(!config.actions.messaging.enabled);
+    }
+
+    #[test]
+    fn test_validate_actions_warning_for_enabled_without_backend_config() {
+        let mut config = validated_config();
+        config.actions.web_search.enabled = true;
+        config.actions.web_search.endpoint.clear();
+        config.actions.messaging.enabled = true;
+        config.actions.messaging.channels.clear();
+        let warnings = config.validate().expect("config should still be valid");
+        assert!(warnings.iter().any(|w| w.contains("web_search")));
+        assert!(warnings.iter().any(|w| w.contains("messaging")));
     }
 
     #[test]

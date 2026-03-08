@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex};
 use rusqlite::Connection;
 use thiserror::Error;
 use tracing::info;
+use uuid::Uuid;
 
 use crate::encryption::Encryptor;
 
@@ -40,6 +41,18 @@ pub enum SqliteError {
 pub struct SqlitePool {
     conn: Arc<Mutex<Connection>>,
     encryptor: Option<Arc<Encryptor>>,
+}
+
+/// Persisted scheduling intent (persist-only mode, no internal runtime).
+#[derive(Debug, Clone)]
+pub struct ScheduledIntent {
+    pub id: String,
+    pub description: String,
+    pub cron: Option<String>,
+    pub namespace: String,
+    pub created_at: String,
+    pub status: String,
+    pub metadata: Option<String>,
 }
 
 impl SqlitePool {
@@ -156,6 +169,94 @@ impl SqlitePool {
         self.with_conn(|conn| {
             conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
             Ok(())
+        })
+    }
+
+    /// Persist a scheduled intent and return its generated ID.
+    pub fn insert_scheduled_intent(
+        &self,
+        description: &str,
+        cron: Option<&str>,
+        namespace: &str,
+        metadata: Option<&str>,
+    ) -> Result<String, SqliteError> {
+        let id = Uuid::new_v4().to_string();
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO scheduled_intents (id, description, cron, namespace, metadata)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![id, description, cron, namespace, metadata],
+            )?;
+            Ok(())
+        })?;
+        Ok(id)
+    }
+
+    /// List scheduled intents, optionally filtered by namespace.
+    pub fn list_scheduled_intents(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<Vec<ScheduledIntent>, SqliteError> {
+        self.with_conn(|conn| {
+            let mut intents = Vec::new();
+            if let Some(ns) = namespace {
+                let mut stmt = conn.prepare(
+                    "SELECT id, description, cron, namespace, created_at, status, metadata
+                     FROM scheduled_intents
+                     WHERE namespace = ?1
+                     ORDER BY created_at DESC",
+                )?;
+                let rows = stmt.query_map([ns], |row| {
+                    Ok(ScheduledIntent {
+                        id: row.get(0)?,
+                        description: row.get(1)?,
+                        cron: row.get(2)?,
+                        namespace: row.get(3)?,
+                        created_at: row.get(4)?,
+                        status: row.get(5)?,
+                        metadata: row.get(6)?,
+                    })
+                })?;
+                for row in rows {
+                    intents.push(row?);
+                }
+            } else {
+                let mut stmt = conn.prepare(
+                    "SELECT id, description, cron, namespace, created_at, status, metadata
+                     FROM scheduled_intents
+                     ORDER BY created_at DESC",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok(ScheduledIntent {
+                        id: row.get(0)?,
+                        description: row.get(1)?,
+                        cron: row.get(2)?,
+                        namespace: row.get(3)?,
+                        created_at: row.get(4)?,
+                        status: row.get(5)?,
+                        metadata: row.get(6)?,
+                    })
+                })?;
+                for row in rows {
+                    intents.push(row?);
+                }
+            }
+            Ok(intents)
+        })
+    }
+
+    /// Update a scheduled intent status. Returns true when a row was updated.
+    pub fn update_scheduled_intent_status(
+        &self,
+        id: &str,
+        status: &str,
+    ) -> Result<bool, SqliteError> {
+        self.with_conn(|conn| {
+            let affected = conn.execute(
+                "UPDATE scheduled_intents SET status = ?2 WHERE id = ?1",
+                rusqlite::params![id, status],
+            )?;
+            Ok(affected > 0)
         })
     }
 
@@ -364,6 +465,25 @@ impl SqlitePool {
                 );
             ",
             ),
+            (
+                14,
+                "create_scheduled_intents",
+                "
+                CREATE TABLE IF NOT EXISTS scheduled_intents (
+                    id TEXT PRIMARY KEY,
+                    description TEXT NOT NULL,
+                    cron TEXT,
+                    namespace TEXT NOT NULL DEFAULT 'personal',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    status TEXT NOT NULL DEFAULT 'scheduled',
+                    metadata TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_scheduled_intents_namespace
+                    ON scheduled_intents(namespace);
+                CREATE INDEX IF NOT EXISTS idx_scheduled_intents_status
+                    ON scheduled_intents(status);
+            ",
+            ),
         ]
     }
 
@@ -389,6 +509,7 @@ impl SqlitePool {
                 "episodes",
                 "semantic_facts",
                 "episode_promotions",
+                "scheduled_intents",
                 "user_profile",
                 "procedures",
                 "audit_log",
@@ -417,7 +538,7 @@ mod tests {
     fn test_open_memory() {
         let pool = SqlitePool::open_memory().unwrap();
         let version = pool.schema_version().unwrap();
-        assert_eq!(version, 13); // All migrations applied
+        assert_eq!(version, 14); // All migrations applied
     }
 
     #[test]
@@ -425,17 +546,54 @@ mod tests {
         let pool = SqlitePool::open_memory().unwrap();
         // Running migrate again should be a no-op
         pool.migrate().unwrap();
-        assert_eq!(pool.schema_version().unwrap(), 13);
+        assert_eq!(pool.schema_version().unwrap(), 14);
     }
 
     #[test]
     fn test_table_stats_empty() {
         let pool = SqlitePool::open_memory().unwrap();
         let stats = pool.table_stats().unwrap();
-        assert_eq!(stats.len(), 7);
+        assert_eq!(stats.len(), 8);
         for (_, count) in &stats {
             assert_eq!(*count, 0);
         }
+    }
+
+    #[test]
+    fn test_scheduled_intent_lifecycle() {
+        let pool = SqlitePool::open_memory().unwrap();
+        let id = pool
+            .insert_scheduled_intent(
+                "deploy release",
+                Some("0 9 * * 1-5"),
+                "work",
+                Some(r#"{"source":"test"}"#),
+            )
+            .unwrap();
+
+        let all = pool.list_scheduled_intents(None).unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].id, id);
+        assert_eq!(all[0].namespace, "work");
+        assert_eq!(all[0].status, "scheduled");
+
+        let personal = pool.list_scheduled_intents(Some("personal")).unwrap();
+        assert!(personal.is_empty());
+
+        let work = pool.list_scheduled_intents(Some("work")).unwrap();
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].description, "deploy release");
+        assert_eq!(work[0].cron.as_deref(), Some("0 9 * * 1-5"));
+        assert!(work[0].created_at.contains(':'));
+        assert_eq!(work[0].metadata.as_deref(), Some(r#"{"source":"test"}"#));
+
+        let updated = pool
+            .update_scheduled_intent_status(&id, "cancelled")
+            .unwrap();
+        assert!(updated);
+
+        let work_after = pool.list_scheduled_intents(Some("work")).unwrap();
+        assert_eq!(work_after[0].status, "cancelled");
     }
 
     #[test]

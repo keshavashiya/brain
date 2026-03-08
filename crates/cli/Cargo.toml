@@ -35,9 +35,9 @@ serde_json = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
 async-trait = "0.1"
+reqwest = { workspace = true }
 
 [dev-dependencies]
-reqwest = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = "0.3"
 tonic = { version = "0.14", features = ["transport"] }

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use clap::{Parser, Subcommand};
 use crossterm::cursor;
@@ -1937,6 +1937,223 @@ impl cortex::actions::MemoryBackend for CliMemoryBackend {
     }
 }
 
+#[derive(Clone)]
+struct CliWebSearchBackend {
+    endpoint: String,
+    client: reqwest::Client,
+}
+
+impl CliWebSearchBackend {
+    fn new(endpoint: &str, timeout_ms: u64) -> anyhow::Result<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(timeout_ms.max(1)))
+            .build()
+            .map_err(|e| anyhow::anyhow!("web search client init failed: {e}"))?;
+        Ok(Self {
+            endpoint: endpoint.to_string(),
+            client,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl cortex::actions::WebSearchBackend for CliWebSearchBackend {
+    async fn search(
+        &self,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<cortex::actions::SearchHit>, cortex::actions::ActionError> {
+        let response = self
+            .client
+            .post(&self.endpoint)
+            .json(&serde_json::json!({
+                "query": query,
+                "top_k": top_k,
+            }))
+            .send()
+            .await
+            .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(cortex::actions::ActionError::ExecutionFailed(format!(
+                "search endpoint returned HTTP {}",
+                response.status()
+            )));
+        }
+
+        let body = response
+            .json::<serde_json::Value>()
+            .await
+            .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))?;
+
+        let candidates: Vec<serde_json::Value> = body
+            .get("hits")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .or_else(|| body.as_array().cloned())
+            .unwrap_or_default();
+
+        let hits = candidates
+            .into_iter()
+            .filter_map(|entry| {
+                let title = entry
+                    .get("title")
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| entry.get("name").and_then(serde_json::Value::as_str))
+                    .unwrap_or("untitled")
+                    .to_string();
+                let url = entry
+                    .get("url")
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| entry.get("link").and_then(serde_json::Value::as_str))
+                    .unwrap_or_default()
+                    .to_string();
+                if url.is_empty() {
+                    return None;
+                }
+                let snippet = entry
+                    .get("snippet")
+                    .and_then(serde_json::Value::as_str)
+                    .or_else(|| entry.get("description").and_then(serde_json::Value::as_str))
+                    .or_else(|| entry.get("content").and_then(serde_json::Value::as_str))
+                    .unwrap_or_default()
+                    .to_string();
+                Some(cortex::actions::SearchHit {
+                    title,
+                    url,
+                    snippet,
+                })
+            })
+            .take(top_k.max(1))
+            .collect();
+
+        Ok(hits)
+    }
+}
+
+#[derive(Clone)]
+struct CliSchedulingBackend {
+    db: storage::SqlitePool,
+    mode: brain_core::config::SchedulingMode,
+}
+
+#[async_trait::async_trait]
+impl cortex::actions::SchedulingBackend for CliSchedulingBackend {
+    async fn schedule(
+        &self,
+        description: &str,
+        cron: Option<&str>,
+        namespace: &str,
+    ) -> Result<cortex::actions::ScheduleOutcome, cortex::actions::ActionError> {
+        if self.mode != brain_core::config::SchedulingMode::PersistOnly {
+            return Err(cortex::actions::ActionError::InvalidArguments(format!(
+                "Unsupported scheduling mode: {:?}",
+                self.mode
+            )));
+        }
+
+        let metadata = serde_json::json!({
+            "source": "action_dispatcher",
+            "mode": "persist_only",
+        })
+        .to_string();
+
+        let schedule_id = self
+            .db
+            .insert_scheduled_intent(description, cron, namespace, Some(&metadata))
+            .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))?;
+
+        Ok(cortex::actions::ScheduleOutcome {
+            schedule_id,
+            status: "scheduled".to_string(),
+        })
+    }
+}
+
+#[derive(Clone)]
+struct CliMessageBackend {
+    channel_endpoints: HashMap<String, String>,
+    client: reqwest::Client,
+}
+
+impl CliMessageBackend {
+    fn new(channels: &HashMap<String, String>, timeout_ms: u64) -> anyhow::Result<Self> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(timeout_ms.max(1)))
+            .build()
+            .map_err(|e| anyhow::anyhow!("message client init failed: {e}"))?;
+        Ok(Self {
+            channel_endpoints: channels
+                .iter()
+                .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
+                .collect(),
+            client,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl cortex::actions::MessageBackend for CliMessageBackend {
+    async fn send(
+        &self,
+        channel: &str,
+        recipient: &str,
+        content: &str,
+        namespace: &str,
+    ) -> Result<cortex::actions::MessageOutcome, cortex::actions::ActionError> {
+        let endpoint = self
+            .channel_endpoints
+            .get(&channel.to_ascii_lowercase())
+            .ok_or_else(|| {
+                cortex::actions::ActionError::InvalidArguments(format!(
+                    "No webhook mapping for channel '{}'",
+                    channel
+                ))
+            })?;
+
+        let payload = serde_json::json!({
+            "channel": channel,
+            "recipient": recipient,
+            "content": content,
+            "namespace": namespace,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        });
+
+        let response = self
+            .client
+            .post(endpoint)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))?;
+
+        if !response.status().is_success() {
+            return Err(cortex::actions::ActionError::ExecutionFailed(format!(
+                "message endpoint for channel '{}' returned HTTP {}",
+                channel,
+                response.status()
+            )));
+        }
+
+        let body = response.text().await.unwrap_or_default();
+        let mut delivery_id = format!("msg-{}", chrono::Utc::now().timestamp_micros());
+        let mut status = "accepted".to_string();
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
+            if let Some(id) = value.get("delivery_id").and_then(serde_json::Value::as_str) {
+                delivery_id = id.to_string();
+            }
+            if let Some(s) = value.get("status").and_then(serde_json::Value::as_str) {
+                status = s.to_string();
+            }
+        }
+
+        Ok(cortex::actions::MessageOutcome {
+            delivery_id,
+            status,
+        })
+    }
+}
+
 #[allow(dead_code)]
 struct BrainSession {
     _config: brain_core::BrainConfig,
@@ -1995,10 +2212,61 @@ impl BrainSession {
             embedder: Arc::clone(&embedder),
             embedding_dim,
         });
-        let action_dispatcher = cortex::actions::ActionDispatcher::with_memory_backend(
-            cortex::actions::ActionConfig::default(),
-            action_backend,
-        );
+        let action_config = cortex::actions::ActionConfig {
+            command_allowlist: config.security.exec_allowlist.clone(),
+            command_timeout_secs: config.security.exec_timeout_seconds as u64,
+            enable_web_search: config.actions.web_search.enabled,
+            enable_scheduling: config.actions.scheduling.enabled,
+            enable_channel_send: config.actions.messaging.enabled,
+            web_search_top_k: config.actions.web_search.default_top_k,
+        };
+        let mut action_dispatcher =
+            cortex::actions::ActionDispatcher::with_memory_backend(action_config, action_backend);
+        action_dispatcher.set_namespace("personal");
+
+        if config.actions.web_search.enabled {
+            let endpoint = config.actions.web_search.endpoint.trim();
+            if endpoint.is_empty() {
+                tracing::warn!(
+                    "actions.web_search.enabled=true but endpoint is empty; backend not configured"
+                );
+            } else {
+                match CliWebSearchBackend::new(endpoint, config.actions.web_search.timeout_ms) {
+                    Ok(backend) => {
+                        action_dispatcher =
+                            action_dispatcher.with_web_search_backend(Arc::new(backend));
+                    }
+                    Err(e) => tracing::warn!("Web search backend init failed: {e}"),
+                }
+            }
+        }
+
+        if config.actions.scheduling.enabled {
+            let backend = CliSchedulingBackend {
+                db: db.clone(),
+                mode: config.actions.scheduling.mode.clone(),
+            };
+            action_dispatcher = action_dispatcher.with_scheduling_backend(Arc::new(backend));
+        }
+
+        if config.actions.messaging.enabled {
+            if config.actions.messaging.channels.is_empty() {
+                tracing::warn!(
+                    "actions.messaging.enabled=true but no channel webhook mappings are configured"
+                );
+            } else {
+                match CliMessageBackend::new(
+                    &config.actions.messaging.channels,
+                    config.actions.messaging.timeout_ms,
+                ) {
+                    Ok(backend) => {
+                        action_dispatcher =
+                            action_dispatcher.with_message_backend(Arc::new(backend))
+                    }
+                    Err(e) => tracing::warn!("Message backend init failed: {e}"),
+                }
+            }
+        }
 
         let recall_engine = hippocampus::RecallEngine::with_defaults();
 
@@ -2080,6 +2348,7 @@ impl BrainSession {
             .await;
 
         if let Some(action) = thalamus.intent_to_action(&classification.intent) {
+            self.action_dispatcher.set_namespace(self.namespace.clone());
             let result = self.action_dispatcher.dispatch(&action).await;
             return if result.success {
                 Ok(PrepareResult::ActionResult(result.output))
@@ -2213,5 +2482,107 @@ mod tests {
         assert_eq!(first, 1, "first promotion should persist");
         assert_eq!(second, 0, "second promotion should be skipped");
         assert_eq!(processor.list_facts(Some("work")).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_scheduling_backend_persists_intent() {
+        let db = storage::SqlitePool::open_memory().unwrap();
+        let backend = CliSchedulingBackend {
+            db: db.clone(),
+            mode: brain_core::config::SchedulingMode::PersistOnly,
+        };
+
+        let outcome = cortex::actions::SchedulingBackend::schedule(
+            &backend,
+            "ship release",
+            Some("0 9 * * 1-5"),
+            "work",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome.status, "scheduled");
+        let intents = db.list_scheduled_intents(Some("work")).unwrap();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].id, outcome.schedule_id);
+        assert_eq!(intents[0].description, "ship release");
+    }
+
+    #[tokio::test]
+    async fn test_brain_session_schedule_intent_dispatches_and_persists() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_string_lossy().to_string();
+        config.actions.scheduling.enabled = true;
+        config.actions.web_search.enabled = false;
+        config.actions.messaging.enabled = false;
+
+        let mut session = BrainSession::new(&config).await.unwrap();
+        session.namespace = "work".to_string();
+
+        let result = session
+            .prepare_context("remind me to ship release notes")
+            .await
+            .unwrap();
+
+        match result {
+            PrepareResult::ActionResult(text) => {
+                assert!(text.contains("schedule_task ok"));
+                assert!(text.contains("namespace=work"));
+            }
+            _ => panic!("expected action dispatch result"),
+        }
+
+        let db = storage::SqlitePool::open(&config.sqlite_path()).unwrap();
+        let intents = db.list_scheduled_intents(Some("work")).unwrap();
+        assert_eq!(intents.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_brain_session_web_search_enabled_without_endpoint_returns_explicit_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_string_lossy().to_string();
+        config.actions.web_search.enabled = true;
+        config.actions.web_search.endpoint.clear();
+        config.actions.messaging.enabled = false;
+        config.actions.scheduling.enabled = false;
+
+        let mut session = BrainSession::new(&config).await.unwrap();
+        let result = session
+            .prepare_context("search for rust async")
+            .await
+            .unwrap();
+
+        match result {
+            PrepareResult::ActionResult(text) => {
+                assert!(text.contains("backend not configured"));
+            }
+            _ => panic!("expected action dispatch result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_brain_session_send_message_enabled_without_channel_mapping_explicit_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_string_lossy().to_string();
+        config.actions.messaging.enabled = true;
+        config.actions.messaging.channels.clear();
+        config.actions.web_search.enabled = false;
+        config.actions.scheduling.enabled = false;
+
+        let mut session = BrainSession::new(&config).await.unwrap();
+        let result = session
+            .prepare_context("send via ops to alice saying deploy now")
+            .await
+            .unwrap();
+
+        match result {
+            PrepareResult::ActionResult(text) => {
+                assert!(text.contains("backend not configured"));
+            }
+            _ => panic!("expected action dispatch result"),
+        }
     }
 }

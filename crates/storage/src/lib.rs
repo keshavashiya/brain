@@ -12,4 +12,4 @@ pub mod sqlite;
 
 pub use encryption::Encryptor;
 pub use ruvector::{RuVectorStore, VectorResult};
-pub use sqlite::SqlitePool;
+pub use sqlite::{ScheduledIntent, SqlitePool};

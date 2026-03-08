@@ -228,6 +228,35 @@ curl -X POST http://localhost:19789/v1/memory/search \
   -d '{"query":"package manager","namespace":"my-project"}'
 ```
 
+## Action Backends (Internal)
+
+Action intents routed by Thalamus (`web_search`, `schedule_task`, `send_message`) are handled by internal `ActionDispatcher` backends. This cycle keeps them internal-only (no new public HTTP/gRPC endpoints).
+
+Behavior contract:
+- Disabled in config -> explicit `disabled by config` failure
+- Enabled but backend missing -> explicit `backend not configured` failure
+- Backend configured -> real execution with structured success output
+
+Default config is platform-agnostic:
+
+```yaml
+actions:
+  web_search:
+    enabled: true
+    endpoint: ""        # configure an HTTP JSON endpoint
+    timeout_ms: 3000
+    default_top_k: 5
+  scheduling:
+    enabled: false
+    mode: "persist_only"
+  messaging:
+    enabled: false
+    timeout_ms: 3000
+    channels: {}        # channel -> webhook URL
+```
+
+Scheduling is persist-only for now: intents are stored in SQLite (`scheduled_intents`) and not executed by an internal cron runner.
+
 ## Export & Import
 
 Back up and restore all memory:
