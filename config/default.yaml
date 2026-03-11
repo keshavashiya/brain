@@ -89,6 +89,11 @@ proactivity:
   quiet_hours:
     start: "22:00"
     end: "08:00"
+  delivery:
+    outbox: true               # Always write to outbox; drain on next interaction
+    broadcast: true            # Push to live WS/SSE sessions
+    webhook_channels: []       # Channel keys from actions.messaging.channels to receive proactive notifications
+    max_outbox_age_days: 7     # Prune stale undelivered outbox items during consolidation
 
 adapters:
   http:

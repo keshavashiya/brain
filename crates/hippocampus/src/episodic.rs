@@ -31,6 +31,8 @@ pub struct Episode {
     pub decay_rate: f64,
     pub reinforcement_count: i32,
     pub last_accessed: Option<String>,
+    /// Originating AI agent (e.g. "claude-code", "opencode"). None for direct user input.
+    pub agent: Option<String>,
 }
 
 /// A conversation session.
@@ -150,6 +152,7 @@ impl EpisodicStore {
         content: &str,
         importance: f64,
         namespace: Option<&str>,
+        agent: Option<&str>,
     ) -> Result<String, EpisodicError> {
         let id = Uuid::new_v4().to_string();
         let encrypted_content = self.db.encrypt_content(content);
@@ -157,15 +160,16 @@ impl EpisodicStore {
         let namespace = namespace.unwrap_or("personal");
         self.db.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO episodes (id, session_id, namespace, role, content, importance)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO episodes (id, session_id, namespace, role, content, importance, agent)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
                     id,
                     session_id,
                     namespace,
                     role,
                     encrypted_content,
-                    importance
+                    importance,
+                    agent
                 ],
             )?;
 
@@ -194,7 +198,7 @@ impl EpisodicStore {
         Ok(self.db.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, session_id, role, content, timestamp,
-                        namespace, importance, decay_rate, reinforcement_count, last_accessed
+                        namespace, importance, decay_rate, reinforcement_count, last_accessed, agent
                  FROM episodes
                  WHERE session_id = ?1
                  ORDER BY timestamp ASC
@@ -215,6 +219,7 @@ impl EpisodicStore {
                         decay_rate: row.get(7)?,
                         reinforcement_count: row.get(8)?,
                         last_accessed: row.get(9)?,
+                        agent: row.get(10)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -323,7 +328,7 @@ impl EpisodicStore {
             if let Some(ns) = namespace {
                 let mut stmt = conn.prepare(
                     "SELECT id, session_id, role, content, timestamp,
-                            namespace, importance, decay_rate, reinforcement_count, last_accessed
+                            namespace, importance, decay_rate, reinforcement_count, last_accessed, agent
                      FROM episodes
                      WHERE namespace = ?1
                      ORDER BY timestamp DESC
@@ -343,6 +348,7 @@ impl EpisodicStore {
                             decay_rate: row.get(7)?,
                             reinforcement_count: row.get(8)?,
                             last_accessed: row.get(9)?,
+                            agent: row.get(10)?,
                         })
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -350,7 +356,7 @@ impl EpisodicStore {
             } else {
                 let mut stmt = conn.prepare(
                     "SELECT id, session_id, role, content, timestamp,
-                            namespace, importance, decay_rate, reinforcement_count, last_accessed
+                            namespace, importance, decay_rate, reinforcement_count, last_accessed, agent
                      FROM episodes
                      ORDER BY timestamp DESC
                      LIMIT ?1",
@@ -370,6 +376,7 @@ impl EpisodicStore {
                             decay_rate: row.get(7)?,
                             reinforcement_count: row.get(8)?,
                             last_accessed: row.get(9)?,
+                            agent: row.get(10)?,
                         })
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
@@ -415,13 +422,13 @@ mod tests {
         let session = store.create_session("cli").unwrap();
 
         store
-            .store_episode(&session, "user", "Hello Brain!", 0.5, None)
+            .store_episode(&session, "user", "Hello Brain!", 0.5, None, None)
             .unwrap();
         store
-            .store_episode(&session, "assistant", "Hello! How can I help?", 0.5, None)
+            .store_episode(&session, "assistant", "Hello! How can I help?", 0.5, None, None)
             .unwrap();
         store
-            .store_episode(&session, "user", "What's the weather?", 0.3, None)
+            .store_episode(&session, "user", "What's the weather?", 0.3, None, None)
             .unwrap();
 
         let history = store.get_session_history(&session, 10).unwrap();
@@ -438,7 +445,7 @@ mod tests {
 
         assert_eq!(store.count().unwrap(), 0);
         store
-            .store_episode(&session, "user", "Test message", 0.5, None)
+            .store_episode(&session, "user", "Test message", 0.5, None, None)
             .unwrap();
         assert_eq!(store.count().unwrap(), 1);
     }
@@ -448,7 +455,7 @@ mod tests {
         let store = test_store();
         let session = store.create_session("cli").unwrap();
         let ep_id = store
-            .store_episode(&session, "user", "Important fact", 0.8, None)
+            .store_episode(&session, "user", "Important fact", 0.8, None, None)
             .unwrap();
 
         // Initial reinforcement count is 0
@@ -470,13 +477,13 @@ mod tests {
         let session = store.create_session("cli").unwrap();
 
         store
-            .store_episode(&session, "user", "I love programming in Rust", 0.7, None)
+            .store_episode(&session, "user", "I love programming in Rust", 0.7, None, None)
             .unwrap();
         store
-            .store_episode(&session, "user", "Python is great for scripting", 0.5, None)
+            .store_episode(&session, "user", "Python is great for scripting", 0.5, None, None)
             .unwrap();
         store
-            .store_episode(&session, "user", "Rust has amazing performance", 0.8, None)
+            .store_episode(&session, "user", "Rust has amazing performance", 0.8, None, None)
             .unwrap();
 
         let results = store.search_bm25("Rust", 10, None).unwrap();
@@ -492,10 +499,10 @@ mod tests {
         let s2 = store.create_session("whatsapp").unwrap();
 
         store
-            .store_episode(&s1, "user", "First message", 0.5, None)
+            .store_episode(&s1, "user", "First message", 0.5, None, None)
             .unwrap();
         store
-            .store_episode(&s2, "user", "Second message", 0.5, None)
+            .store_episode(&s2, "user", "Second message", 0.5, None, None)
             .unwrap();
 
         let recent = store.recent(10, None).unwrap();
@@ -518,6 +525,7 @@ mod tests {
                 "Rust memory model notes",
                 0.7,
                 Some("work"),
+                None,
             )
             .unwrap();
         store
@@ -527,6 +535,7 @@ mod tests {
                 "Rust hobby project",
                 0.7,
                 Some("personal"),
+                None,
             )
             .unwrap();
 

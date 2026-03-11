@@ -2888,6 +2888,7 @@ dependencies = [
  "chrono",
  "core",
  "cortex",
+ "ganglia",
  "hippocampus",
  "serde",
  "serde_json",

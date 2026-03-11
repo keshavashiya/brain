@@ -8,6 +8,9 @@
 //! - Amygdala (importance scoring)
 //! - Hippocampus (episodic + semantic memory)
 //! - Cortex (LLM reasoning + context assembly)
+//! - NotificationRouter (proactive delivery)
+
+pub mod notification;
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -59,6 +62,9 @@ pub struct Signal {
     /// Memory namespace for this signal (default: "personal").
     #[serde(default = "default_namespace")]
     pub namespace: String,
+    /// Originating AI agent (e.g. "claude-code", "opencode"). Optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 fn default_namespace() -> String {
@@ -82,7 +88,14 @@ impl Signal {
             metadata: HashMap::new(),
             timestamp: Utc::now(),
             namespace: "personal".to_string(),
+            agent: None,
         }
+    }
+
+    /// Builder: set the originating agent identity.
+    pub fn with_agent(mut self, agent: impl Into<String>) -> Self {
+        self.agent = Some(agent.into());
+        self
     }
 }
 
@@ -196,6 +209,8 @@ pub struct SignalProcessor {
     context_assembler: cortex::context::ContextAssembler,
     procedures: cerebellum::ProcedureStore,
     events_tx: tokio::sync::broadcast::Sender<SignalProcessedEvent>,
+    /// Notification router for proactive message delivery (set via builder).
+    notification_router: Option<notification::NotificationRouter>,
 }
 
 /// Optional LLM-backed fallback classifier for intent routing.
@@ -416,6 +431,7 @@ impl SignalProcessor {
             context_assembler: cortex::context::ContextAssembler::with_defaults(),
             procedures,
             events_tx,
+            notification_router: None,
         })
     }
 
@@ -436,6 +452,13 @@ impl SignalProcessor {
     )]
     pub async fn process(&self, signal: Signal) -> Result<SignalResponse, SignalError> {
         let signal_id = signal.id;
+
+        // 0. Drain any pending proactive notifications from the outbox
+        let pending_notifications = if let Some(router) = &self.notification_router {
+            router.drain_pending(10)
+        } else {
+            Vec::new()
+        };
 
         // 1. Score importance via Amygdala
         let importance = self.importance.score(&signal.content);
@@ -497,6 +520,7 @@ impl SignalProcessor {
                             importance as f64,
                             None,
                             vector,
+                            signal.agent.as_deref(),
                         )
                         .await
                     {
@@ -572,6 +596,7 @@ impl SignalProcessor {
                         &signal.content,
                         importance as f64,
                         Some(&signal.namespace),
+                        signal.agent.as_deref(),
                     )
                     .map_err(|e| SignalError::Storage(e.to_string()))?;
 
@@ -598,6 +623,7 @@ impl SignalProcessor {
                         &llm_response.content,
                         0.5,
                         Some(&signal.namespace),
+                        signal.agent.as_deref(),
                     )
                     .map_err(|e| SignalError::Storage(e.to_string()))?;
 
@@ -662,7 +688,21 @@ impl SignalProcessor {
                 format!("Intent classified: {:?}", other),
             )),
         };
-        let response = response?;
+        let mut response = response?;
+
+        // Prepend any pending proactive notifications to the response
+        if !pending_notifications.is_empty() {
+            let nudge_text: String = pending_notifications
+                .iter()
+                .map(|n| format!("[nudge] {}", n.content))
+                .collect::<Vec<_>>()
+                .join("\n");
+
+            if let ResponseContent::Text(ref text) = response.response {
+                response.response =
+                    ResponseContent::Text(format!("{nudge_text}\n\n{text}"));
+            }
+        }
 
         self.publish_event(&signal, &response);
         Ok(response)
@@ -864,6 +904,17 @@ impl SignalProcessor {
         self.episodic.recent(limit, namespace).unwrap_or_default()
     }
 
+    /// Attach a notification router (builder pattern).
+    pub fn with_notification_router(mut self, router: notification::NotificationRouter) -> Self {
+        self.notification_router = Some(router);
+        self
+    }
+
+    /// Expose the notification router.
+    pub fn notification_router(&self) -> Option<&notification::NotificationRouter> {
+        self.notification_router.as_ref()
+    }
+
     /// Flush all in-flight writes and checkpoint the SQLite WAL.
     ///
     /// Call this on graceful shutdown to ensure no committed data is lost.
@@ -899,7 +950,7 @@ impl SignalProcessor {
             let vector = self.embed_text(&fact_text).await;
             let id = semantic
                 .store_fact(
-                    namespace, category, subject, predicate, object, 1.0, None, vector,
+                    namespace, category, subject, predicate, object, 1.0, None, vector, None,
                 )
                 .await
                 .map_err(|e| SignalError::Storage(e.to_string()))?;
@@ -978,6 +1029,28 @@ mod tests {
         let back: Signal = serde_json::from_str(&json).unwrap();
         assert_eq!(signal.id, back.id);
         assert_eq!(signal.content, back.content);
+    }
+
+    #[test]
+    fn test_signal_with_agent() {
+        let signal = Signal::new(SignalSource::Http, "http", "apiclient", "hello")
+            .with_agent("claude-code");
+        assert_eq!(signal.agent.as_deref(), Some("claude-code"));
+
+        // Serialization round-trip preserves agent
+        let json = serde_json::to_string(&signal).unwrap();
+        assert!(json.contains("claude-code"));
+        let back: Signal = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.agent.as_deref(), Some("claude-code"));
+    }
+
+    #[test]
+    fn test_signal_without_agent_omits_field() {
+        let signal = Signal::new(SignalSource::Cli, "cli", "user", "hello");
+        assert!(signal.agent.is_none());
+        let json = serde_json::to_string(&signal).unwrap();
+        // skip_serializing_if = "Option::is_none" should omit agent entirely
+        assert!(!json.contains("agent"));
     }
 
     #[test]
@@ -1095,6 +1168,33 @@ mod tests {
         let work = processor.list_facts(Some("work"));
         assert_eq!(personal.len(), 1, "personal namespace fact should remain");
         assert_eq!(work.len(), 0, "work namespace fact should be deleted");
+    }
+
+    #[tokio::test]
+    async fn test_store_fact_preserves_agent() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
+
+        let processor = SignalProcessor::new(config).await.unwrap();
+
+        // Store a fact with agent identity
+        let signal = Signal::new(
+            SignalSource::Http,
+            "http",
+            "apiclient",
+            "Remember that Python is versatile",
+        )
+        .with_agent("open-code");
+
+        let resp = processor.process(signal).await.unwrap();
+        assert_eq!(resp.status, ResponseStatus::Ok);
+
+        // Verify the agent is persisted on the fact
+        let facts = processor.list_facts(None);
+        assert!(!facts.is_empty());
+        let fact = &facts[0];
+        assert_eq!(fact.agent.as_deref(), Some("open-code"));
     }
 
     /// Integration test: chat signal creates episodic memory entries.

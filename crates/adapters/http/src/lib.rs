@@ -62,6 +62,8 @@ pub struct SignalRequest {
     pub metadata: Option<HashMap<String, String>>,
     /// Memory namespace (default: "personal").
     pub namespace: Option<String>,
+    /// Originating agent identity (e.g. "claude-code", "open-code").
+    pub agent: Option<String>,
 }
 
 /// Search request body (POST /v1/memory/search).
@@ -677,6 +679,9 @@ async fn post_signal_handler(
     }
     if let Some(ns) = body.namespace {
         signal.namespace = ns;
+    }
+    if let Some(agent) = body.agent {
+        signal.agent = Some(agent);
     }
 
     let signal_id = signal.id;

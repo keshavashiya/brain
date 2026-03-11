@@ -10,4 +10,4 @@
 
 pub mod config;
 
-pub use config::{AccessConfig, ApiKeyConfig, BrainConfig};
+pub use config::{AccessConfig, ApiKeyConfig, BrainConfig, DeliveryConfig};

@@ -205,6 +205,9 @@ impl MemoryService for MemoryServiceImpl {
         if !req.namespace.is_empty() {
             sig.namespace = req.namespace;
         }
+        if !req.agent.is_empty() {
+            sig.agent = Some(req.agent);
+        }
 
         let processor = self.processor.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(4);
@@ -301,6 +304,9 @@ impl AgentService for AgentServiceImpl {
         sig.metadata = req.metadata;
         if !req.namespace.is_empty() {
             sig.namespace = req.namespace;
+        }
+        if !req.agent.is_empty() {
+            sig.agent = Some(req.agent);
         }
 
         match self.processor.process(sig).await {
@@ -591,6 +597,7 @@ mod tests {
             content: "Remember that Rust is fast".to_string(),
             metadata: std::collections::HashMap::new(),
             namespace: String::new(),
+            agent: String::new(),
         });
         let resp = svc.send_signal(req).await.unwrap();
         let inner = resp.into_inner();
@@ -612,6 +619,7 @@ mod tests {
             content: "Remember that Brain is the central AI OS".to_string(),
             metadata: std::collections::HashMap::new(),
             namespace: String::new(),
+            agent: String::new(),
         });
         let resp = svc.stream_signals(req).await.unwrap();
         let mut stream = resp.into_inner();
@@ -670,6 +678,7 @@ mod tests {
             content: "Remember that fanout works".to_string(),
             metadata: std::collections::HashMap::new(),
             namespace: "personal".to_string(),
+            agent: String::new(),
         });
         let send_resp = agent_svc.send_signal(send_req).await.unwrap().into_inner();
         assert_eq!(send_resp.status, "Ok");

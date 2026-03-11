@@ -249,7 +249,7 @@ mod tests {
 
         // Store a low-importance episode
         store
-            .store_episode(&session_id, "user", "trivial message", 0.01, None)
+            .store_episode(&session_id, "user", "trivial message", 0.01, None, None)
             .unwrap();
         assert_eq!(store.count().unwrap(), 1);
 
@@ -283,6 +283,7 @@ mod tests {
                 "critical: remember this forever",
                 1.0,
                 None,
+                None,
             )
             .unwrap();
         assert_eq!(store.count().unwrap(), 1);
@@ -311,6 +312,7 @@ mod tests {
                 "I love Rust programming",
                 0.8,
                 Some("work"),
+                None,
             )
             .unwrap();
 

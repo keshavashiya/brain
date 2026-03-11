@@ -1,12 +1,14 @@
 # Brain OS 🧠
 
-**Stop giving your AI amnesia.** 
+**Stop giving your AI amnesia.**
 
-Brain OS is a biologically-inspired, central cognitive engine written in pure Rust. Instead of every script, coding assistant, and chat UI keeping its own isolated, fragmented context, Brain OS acts as your single source of truth. 
+Brain OS is a biologically-inspired, central cognitive engine written in pure Rust. Instead of every script, coding assistant, and chat UI keeping its own isolated, fragmented context, Brain OS acts as your single source of truth.
 
 It routes intents through a Thalamus, scores importance via an Amygdala, and stores everything in a unified Hippocampus (FTS5 + HNSW Vector Search). Whether you connect via HTTP, WebSocket, gRPC, or MCP, your AI tools now share one localized, ever-growing memory that runs 24/7 on your machine.
 
 *Your data never leaves your hardware. Your AI never forgets.*
+
+---
 
 ## How It Works
 
@@ -16,11 +18,13 @@ Every input — regardless of protocol — flows through the same pipeline:
 Input → Intent Classification → Importance Scoring → Memory Store/Recall → LLM Response
 ```
 
-The memory engine combines vector search (HNSW) with full-text search (BM25 FTS5), fuses results via Reciprocal Rank Fusion, and reranks by importance and recency.
+The memory engine combines vector search (HNSW) with full-text search (BM25 FTS5), fuses results via Reciprocal Rank Fusion, and reranks by importance and recency. A forgetting curve runs every 24 hours to prune low-value memories and promote reinforced episodes to permanent semantic facts.
+
+---
 
 ## Install
 
-**Requirements:** Rust 1.82+, [Ollama](https://ollama.com) (or any OpenAI-compatible API), Docker (optional, for web search + notifications)
+**Requirements:** Rust 1.82+, [Ollama](https://ollama.com) (or any OpenAI-compatible API), Docker (optional, for web search)
 
 ```bash
 # Install the CLI
@@ -33,7 +37,7 @@ brain init
 ollama pull qwen2.5-coder:7b
 ollama pull nomic-embed-text
 
-# Start external services (SearXNG web search)
+# Start external services (SearXNG web search — optional)
 brain deps up
 ```
 
@@ -42,6 +46,8 @@ brain deps up
 `brain deps up` starts a Docker container for SearXNG (web search, port 8888). This is optional — Brain works without it but web search intents will return "backend not configured".
 
 If the embedding provider is unavailable, Brain uses deterministic normalized fallback vectors so writes and search continue without panics. Semantic quality is lower until the embedding provider is healthy.
+
+---
 
 ## Usage
 
@@ -62,6 +68,8 @@ brain chat
 brain chat "remember that I use dark mode"
 ```
 
+---
+
 ## External Services (Docker)
 
 Brain uses an optional Docker container for web search:
@@ -77,6 +85,8 @@ brain deps down     # Stop
 | SearXNG | 8888 | Web search backend (metasearch engine) |
 
 `brain status` automatically checks if SearXNG is reachable.
+
+---
 
 ## Auto-Start on Login
 
@@ -97,6 +107,8 @@ brain service uninstall
 | Windows | Task Scheduler (ONLOGON) | None |
 
 After installation the daemon starts immediately and will restart after crashes.
+
+---
 
 ## MCP Integration
 
@@ -143,6 +155,8 @@ MCP stdio passes auth in the `_meta` field of every request:
 
 MCP over HTTP uses the `x-api-key` header.
 
+---
+
 ## HTTP API
 
 Default port: `19789`. All `/v1/*` routes require `Authorization: Bearer <key>`.
@@ -154,13 +168,11 @@ curl http://localhost:19789/health
 # Prometheus metrics (no auth)
 curl http://localhost:19789/metrics
 
-# Web UI (no auth)
+# Web UI — diagnostic tool (no auth)
 open http://localhost:19789/ui
 
 # OpenAPI spec
 curl http://localhost:19789/openapi.json
-
-# OpenAPI info.title: "Brain OS — Synapse HTTP API"
 
 # Swagger UI
 open http://localhost:19789/api
@@ -192,7 +204,7 @@ curl http://localhost:19789/v1/memory/namespaces \
 |--------|------|------|-------------|
 | `GET` | `/health` | No | Liveness check |
 | `GET` | `/metrics` | No | Prometheus metrics |
-| `GET` | `/ui` | No | Browser UI |
+| `GET` | `/ui` | No | Browser UI (diagnostic) |
 | `GET` | `/openapi.json` | No | OpenAPI spec |
 | `GET` | `/api` | No | Swagger UI |
 | `POST` | `/v1/signals` | Yes | Submit a signal |
@@ -201,17 +213,19 @@ curl http://localhost:19789/v1/memory/namespaces \
 | `GET` | `/v1/memory/facts` | Yes | List all facts |
 | `GET` | `/v1/memory/namespaces` | Yes | Namespace stats |
 
+---
+
 ## Services & Ports
 
 `brain start` launches all adapters together. They share a single processor so memory is consistent across all protocols.
 
 | Adapter | Default Port | Notes |
 |---------|-------------|-------|
-| HTTP REST | 19789 | REST API + Web UI + Swagger |
-| WebSocket | 19790 | Streaming, real-time |
+| HTTP REST | 19789 | REST API + Web UI + Swagger + OpenAPI |
+| WebSocket | 19790 | Bidirectional streaming, real-time |
 | MCP HTTP | 19791 | MCP over HTTP transport |
-| gRPC | 19792 | Protobuf RPC |
-| MCP stdio | stdin/stdout | `brain mcp` for MCP clients |
+| gRPC | 19792 | Protobuf RPC + server streaming |
+| MCP stdio | stdin/stdout | `brain mcp` for subprocess MCP clients |
 
 ### Adapter Behavior Matrix
 
@@ -231,6 +245,8 @@ brain serve --http --ws   # HTTP + WebSocket
 brain serve --mcp         # MCP HTTP only
 ```
 
+---
+
 ## Memory Namespaces
 
 Scope facts and episodes to a context. The default namespace is `"personal"`.
@@ -249,18 +265,95 @@ curl -X POST http://localhost:19789/v1/memory/search \
   -d '{"query":"package manager","namespace":"my-project"}'
 ```
 
+---
+
+## External Gateway Relay (Brain Bridge)
+
+Brain is a local service — it does not reach outward to external messaging platforms. Instead, a thin external **bridge** connects a platform-specific bot or gateway to Brain's WebSocket API and translates messages in both directions.
+
+```
+External Platform           Bridge (your code / external repo)        Brain OS
+────────────────────        ──────────────────────────────────        ────────────────
+  Slack / Telegram    ────► BridgeClient (crates/bridge library) ──► ws://localhost:19790
+  Custom chat agent          exponential-backoff reconnection          SignalProcessor
+  Any WebSocket bot          thin message translation                  memory + LLM
+```
+
+The `crates/bridge/` library provides a `BridgeClient` for building these relays. It handles reconnection with exponential backoff, ping/pong keep-alive, and JSON message serialization automatically. No platform-specific code lives inside Brain itself.
+
+A minimal bridge connecting an external gateway to Brain:
+
+```rust
+// In your own external relay project — not inside the Brain OS repo
+use bridge::{BridgeClient, BridgeConfig, BridgeMessage};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Connect to YOUR gateway (e.g. a Slack bot WebSocket endpoint)
+    let client = BridgeClient::new(
+        "ws://your-gateway.example.com/brain-relay",
+        BridgeConfig::default(), // exponential backoff: 1s → 2s → 4s → … → 60s
+    );
+
+    // For each inbound message from the gateway, forward to Brain and relay the response
+    client.connect_and_relay(|msg| async move {
+        BridgeMessage::reply(&msg, call_brain_ws(&msg.content).await)
+    }).await?;
+
+    Ok(())
+}
+```
+
+Brain's WebSocket API (`ws://localhost:19790`) is the entry point — the bridge is external and lives in its own repository. This keeps Brain small, stable, and protocol-agnostic.
+
+
+
+---
+
+## Background Intelligence
+
+`brain serve` and `brain start` spawn two optional background tasks alongside the protocol adapters, sharing the same `SignalProcessor`:
+
+### Memory Consolidation (enabled by default)
+
+Runs every 24 hours. Uses an Ebbinghaus forgetting curve to prune low-retention episodes and promote frequently-reinforced episodes to permanent semantic facts with an idempotency guard.
+
+```yaml
+memory:
+  consolidation:
+    enabled: true          # on by default
+    interval_hours: 24
+    forgetting_threshold: 0.05   # episodes with retention < 5% are pruned
+```
+
+### Proactivity Engine (opt-in)
+
+Detects recurring patterns in episodic memory (keyword × day-of-week × hour histograms) and logs proactive suggestions to `~/.brain/logs/proactive.log`. Rate-limited by `max_per_day` and `min_interval_minutes`.
+
+```yaml
+proactivity:
+  enabled: false           # opt-in; set to true to activate
+  max_per_day: 5
+  min_interval_minutes: 60
+  quiet_hours:
+    start: "22:00"
+    end: "08:00"
+```
+
+
+
+---
+
 ## Action Backends (Internal)
 
-Action intents routed by Thalamus (`web_search`, `schedule_task`, `send_message`) are handled by internal `ActionDispatcher` backends. These are internal-only (no public HTTP/gRPC endpoints).
+Action intents routed by Thalamus (`web_search`, `schedule_task`, `send_message`) are handled by internal `ActionDispatcher` backends. These are internal-only — no public HTTP or gRPC endpoints expose them directly.
 
 Behavior contract:
-- Disabled in config -> explicit `disabled by config` failure
-- Enabled but backend missing -> explicit `backend not configured` failure
-- Backend configured -> real execution with structured success output
+- Disabled in config → explicit `disabled by config` error
+- Enabled but backend missing → explicit `backend not configured` error
+- Backend configured → real execution with structured success output
 
 ### Web Search Providers
-
-Set `provider` to choose how web search works:
 
 ```yaml
 actions:
@@ -268,7 +361,7 @@ actions:
     enabled: true
     provider: "searxng"               # searxng | tavily | custom
     endpoint: "http://localhost:8888"  # SearXNG instance URL
-    api_key: ""                       # required for tavily
+    api_key: ""                        # required for tavily
     timeout_ms: 3000
     default_top_k: 5
 ```
@@ -277,11 +370,11 @@ actions:
 |----------|------|-------------|-------|
 | `searxng` | None | Yes | `brain deps up` (or `docker run -d -p 8888:8080 searxng/searxng`) |
 | `tavily` | API key (free, no CC) | No | Sign up at tavily.com, set `api_key` |
-| `custom` | None | — | Set `endpoint` to any JSON search API |
+| `custom` | None | — | Set `endpoint` to any OpenAI-compatible JSON search API |
 
 ### Messaging (Webhooks)
 
-Brain sends messages via configurable webhook URLs. Any service that accepts HTTP POST works — Slack, Discord, Telegram, ntfy.sh, custom endpoints:
+Brain sends messages via configurable webhook URLs. Any service that accepts HTTP POST works — Slack, Discord, Telegram, ntfy.sh, or a custom endpoint. No platform SDK is bundled.
 
 ```yaml
 actions:
@@ -303,30 +396,32 @@ actions:
       simple: "https://example.com/hook"  # shorthand: URL only, default JSON body
 ```
 
-Template placeholders: `{{content}}`, `{{channel}}`, `{{recipient}}`, `{{namespace}}`, `{{timestamp}}`. Values are JSON-escaped automatically. Custom `headers` are optional (useful for APIs requiring auth tokens).
+Template placeholders: `{{content}}`, `{{channel}}`, `{{recipient}}`, `{{namespace}}`, `{{timestamp}}`. Values are JSON-escaped automatically. Custom `headers` are optional (useful for auth-requiring APIs like Telegram).
 
 ### Backend Resilience
 
-All HTTP backends (web search + messaging) share retry and circuit breaker settings:
+All HTTP backends (web search + messaging) share a retry and circuit breaker configuration:
 
 ```yaml
 actions:
   resilience:
-    max_retries: 2                    # retries on 5xx / timeout / connection refused
-    retry_base_ms: 500                # exponential backoff: 500 → 1000 → 2000ms
-    circuit_breaker_threshold: 5      # consecutive failures before circuit opens
-    circuit_breaker_cooldown_secs: 60 # seconds before retrying after circuit opens
+    max_retries: 2                     # retries on 5xx / timeout / connection refused
+    retry_base_ms: 500                 # exponential backoff: 500 → 1000 → 2000ms
+    circuit_breaker_threshold: 5       # consecutive failures before circuit opens
+    circuit_breaker_cooldown_secs: 60  # seconds before retrying after circuit opens
 ```
 
 4xx errors (auth, bad request) fail immediately without retries. When a circuit opens, all requests to that backend return an instant error until the cooldown elapses.
 
-### Other Action Backends
+### Scheduling
 
 ```yaml
   scheduling:
     enabled: false
-    mode: "persist_only"        # intents stored in SQLite, no internal cron
+    mode: "persist_only"    # intents stored in SQLite; no internal cron runner
 ```
+
+---
 
 ## Export & Import
 
@@ -346,7 +441,9 @@ brain import backup.json --dry-run
 brain import backup.json
 ```
 
-The export format is a self-contained JSON file containing all facts and episodes with timestamps, importance scores, and namespace labels.
+The export format is a self-contained JSON file containing all facts and episodes with timestamps, importance scores, and namespace labels. Import is idempotent — re-importing the same backup is safe.
+
+---
 
 ## Authentication
 
@@ -373,6 +470,8 @@ access:
 
 The default key for local use is `demokey123`. Change it before exposing Brain to a network.
 
+---
+
 ## Configuration
 
 Config is loaded from three sources (highest priority wins):
@@ -380,6 +479,8 @@ Config is loaded from three sources (highest priority wins):
 1. **Environment variables** — `BRAIN_LLM__MODEL=gpt-4o brain serve`
 2. **User config** — `~/.brain/config.yaml`
 3. **Defaults** — [`config/default.yaml`](config/default.yaml)
+
+Double-underscore (`__`) is the nesting separator in env var names.
 
 ### LLM Provider
 
@@ -421,7 +522,7 @@ embedding:
 ### Encryption (at-rest)
 
 ```bash
-# Generate a salt and enable encryption setup
+# Generate a salt and enable encryption
 brain init --encrypt
 ```
 
@@ -435,6 +536,8 @@ BRAIN_PASSPHRASE="your-passphrase" brain serve
 brain serve
 ```
 
+---
+
 ## Data Directory
 
 ```
@@ -443,12 +546,14 @@ brain serve
 ├── db/
 │   ├── brain.db       # SQLite — facts, episodes, procedures, FTS5 index
 │   └── salt           # Encryption salt (only if --encrypt was used)
-├── ruvector/          # HNSW vector index files
+├── ruvector/          # HNSW vector index files (ruvector-core)
 ├── logs/
 │   ├── brain.log      # Daemon logs
 │   └── proactive.log  # Proactivity engine output (when enabled)
 └── exports/           # Export output directory
 ```
+
+---
 
 ## Re-initialise
 
@@ -459,6 +564,10 @@ brain init --force
 # Also enable encryption
 brain init --force --encrypt
 ```
+
+---
+
+
 
 ## License
 

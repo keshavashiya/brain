@@ -570,9 +570,39 @@ async fn main() -> anyhow::Result<()> {
 
             let run_all = !http && !ws && !grpc && !mcp;
             let encryptor = resolve_encryptor(&config)?;
-            let processor = Arc::new(
-                signal::SignalProcessor::new_with_encryptor(config.clone(), encryptor).await?,
-            );
+            let mut processor =
+                signal::SignalProcessor::new_with_encryptor(config.clone(), encryptor).await?;
+
+            // Wire the notification router for proactive delivery
+            {
+                let db = processor.episodic().pool().clone();
+                let delivery_config = config.proactivity.delivery.clone();
+                let mut router =
+                    signal::notification::NotificationRouter::new(db, delivery_config);
+
+                // Attach webhook sender if messaging channels are configured
+                if config.actions.messaging.enabled
+                    && !config.actions.messaging.channels.is_empty()
+                {
+                    let res = &config.actions.resilience;
+                    match WebhookMessageBackend::new(
+                        &config.actions.messaging.channels,
+                        config.actions.messaging.timeout_ms,
+                        res,
+                    ) {
+                        Ok(sender) => {
+                            router = router.with_webhook_sender(Box::new(sender));
+                            tracing::info!("Notification webhook sender attached");
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to init notification webhook sender: {e}");
+                        }
+                    }
+                }
+
+                processor = processor.with_notification_router(router);
+            }
+            let processor = Arc::new(processor);
 
             println!("Waking Brain OS...");
 
@@ -613,8 +643,8 @@ async fn main() -> anyhow::Result<()> {
             // ── Proactivity / habit engine background task ────────────────────
             // Runs the HabitEngine on a schedule (default: every 60 min).
             // When a recurring pattern is detected at the current time slot
-            // and all rate limits are met, a proactive message is logged and
-            // written to ~/.brain/logs/proactive.log.
+            // and all rate limits are met, the proactive message is delivered
+            // through the NotificationRouter (outbox + broadcast + webhooks).
             if config.proactivity.enabled {
                 let p = processor.clone();
                 let habit_cfg = ganglia::HabitConfig {
@@ -624,7 +654,6 @@ async fn main() -> anyhow::Result<()> {
                     quiet_end: config.proactivity.quiet_hours.end.clone(),
                     ..Default::default()
                 };
-                let log_path = config.data_dir().join("logs/proactive.log");
                 set.spawn(async move {
                     let engine =
                         ganglia::HabitEngine::new(p.episodic().pool().clone(), habit_cfg.clone());
@@ -646,17 +675,10 @@ async fn main() -> anyhow::Result<()> {
                                     "Proactive: {}",
                                     msg.content
                                 );
-                                // Append to proactive log file
-                                let line =
-                                    format!("[{}] {}\n", msg.created_at.to_rfc3339(), msg.content);
-                                let _ = std::fs::OpenOptions::new()
-                                    .create(true)
-                                    .append(true)
-                                    .open(&log_path)
-                                    .and_then(|mut f| {
-                                        use std::io::Write;
-                                        f.write_all(line.as_bytes())
-                                    });
+                                // Deliver through NotificationRouter (outbox + broadcast + webhooks)
+                                if let Some(router) = p.notification_router() {
+                                    router.deliver(msg.into()).await;
+                                }
                             }
                             Ok(None) => {}
                             Err(e) => tracing::warn!("HabitEngine error: {e}"),
@@ -693,6 +715,11 @@ async fn main() -> anyhow::Result<()> {
                             Ok(r) => {
                                 let promoted_now =
                                     promote_candidates(p.as_ref(), &r.promotion_candidates).await;
+
+                                // Prune delivered/stale outbox notifications
+                                if let Some(router) = p.notification_router() {
+                                    router.prune();
+                                }
 
                                 tracing::info!(
                                     pruned = r.episodes_pruned,
@@ -2008,7 +2035,7 @@ impl cortex::actions::MemoryBackend for CliMemoryBackend {
 
         semantic
             .store_fact(
-                namespace, category, subject, predicate, object, 1.0, None, vector,
+                namespace, category, subject, predicate, object, 1.0, None, vector, None,
             )
             .await
             .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))
@@ -2615,6 +2642,70 @@ impl WebhookMessageBackend {
 }
 
 #[async_trait::async_trait]
+impl signal::notification::WebhookSender for WebhookMessageBackend {
+    async fn send_notification(
+        &self,
+        channel: &str,
+        content: &str,
+        namespace: &str,
+    ) -> Result<(), String> {
+        let channel_cfg = self
+            .channels
+            .get(&channel.to_ascii_lowercase())
+            .ok_or_else(|| format!("No webhook mapping for channel '{channel}'"))?
+            .clone();
+
+        let client = self.client.clone();
+        let template = if channel_cfg.body.is_empty() {
+            DEFAULT_MESSAGE_BODY.to_string()
+        } else {
+            channel_cfg.body.clone()
+        };
+        let url = channel_cfg.url.clone();
+        let headers = channel_cfg.headers.clone();
+        let channel_owned = channel.to_string();
+        let content_owned = content.to_string();
+        let namespace_owned = namespace.to_string();
+
+        let response = resilient_send(
+            || {
+                let timestamp = chrono::Utc::now().to_rfc3339();
+                let rendered = render_message_template(
+                    &template,
+                    &channel_owned,
+                    "",
+                    &content_owned,
+                    &namespace_owned,
+                    &timestamp,
+                );
+                let mut req = client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .body(rendered);
+                for (key, value) in &headers {
+                    req = req.header(key.as_str(), value.as_str());
+                }
+                req
+            },
+            &self.circuit_breaker,
+            self.max_retries,
+            self.retry_base_ms,
+        )
+        .await
+        .map_err(|e| format!("webhook send failed: {e}"))?;
+
+        if !response.status().is_success() {
+            return Err(format!(
+                "webhook for channel '{}' returned HTTP {}",
+                channel,
+                response.status()
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
 impl cortex::actions::MessageBackend for WebhookMessageBackend {
     async fn send(
         &self,
@@ -2927,6 +3018,7 @@ impl BrainSession {
             message,
             importance,
             Some(&self.namespace),
+            None,
         )?;
 
         let thalamus = thalamus::SignalRouter::new();
@@ -3012,6 +3104,7 @@ impl BrainSession {
             assistant_content,
             0.5,
             Some(&self.namespace),
+            None,
         )?;
 
         self.conversation_history.push(Message {
@@ -3059,7 +3152,7 @@ mod tests {
         let session_id = processor.episodic().create_session("test").unwrap();
         let episode_id = processor
             .episodic()
-            .store_episode(&session_id, "user", "project uses bun", 0.9, Some("work"))
+            .store_episode(&session_id, "user", "project uses bun", 0.9, Some("work"), None)
             .unwrap();
 
         let candidates = vec![hippocampus::PromotionCandidate {

@@ -13,6 +13,7 @@ cortex = { workspace = true }
 thalamus = { workspace = true }
 amygdala = { workspace = true }
 cerebellum = { workspace = true }
+ganglia = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

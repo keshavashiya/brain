@@ -57,6 +57,8 @@ pub struct ClientMessage {
     pub metadata: Option<HashMap<String, String>>,
     /// Optional memory namespace (default: `"personal"`).
     pub namespace: Option<String>,
+    /// Originating agent identity (e.g. "claude-code", "open-code").
+    pub agent: Option<String>,
 }
 
 /// Server-to-client auth result frame.
@@ -217,38 +219,73 @@ async fn handle_connection(
         return;
     }
 
-    // ── Phase 2: process signal frames ───────────────────────────────────────
-    while let Some(result) = ws_rx.next().await {
-        let msg = match result {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::debug!(conn_id = %conn_id, "WebSocket receive error: {e}");
-                break;
+    // ── Phase 2: process signal frames + proactive push ─────────────────────
+    // Subscribe to proactive notifications (if router is available).
+    let mut proactive_rx = processor
+        .notification_router()
+        .map(|r| r.subscribe());
+
+    loop {
+        // Build a future that resolves when a proactive notification arrives,
+        // or pends forever if no router is configured.
+        let proactive_fut = async {
+            match proactive_rx.as_mut() {
+                Some(rx) => rx.recv().await.ok(),
+                None => std::future::pending().await,
             }
         };
 
-        match msg {
-            Message::Text(text) => {
-                let response = process_text_frame(text.as_str(), conn_id, &processor).await;
-                let json = match serde_json::to_string(&response) {
-                    Ok(j) => j,
+        tokio::select! {
+            // Incoming client frame
+            result = ws_rx.next() => {
+                let Some(result) = result else { break };
+                let msg = match result {
+                    Ok(m) => m,
                     Err(e) => {
-                        tracing::error!(conn_id = %conn_id, "Failed to serialize response: {e}");
-                        continue;
+                        tracing::debug!(conn_id = %conn_id, "WebSocket receive error: {e}");
+                        break;
                     }
                 };
-                if ws_tx.send(Message::Text(json.into())).await.is_err() {
-                    break;
+                match msg {
+                    Message::Text(text) => {
+                        let response = process_text_frame(text.as_str(), conn_id, &processor).await;
+                        let json = match serde_json::to_string(&response) {
+                            Ok(j) => j,
+                            Err(e) => {
+                                tracing::error!(conn_id = %conn_id, "Failed to serialize response: {e}");
+                                continue;
+                            }
+                        };
+                        if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Message::Ping(data) => {
+                        let _ = ws_tx.send(Message::Pong(data)).await;
+                    }
+                    Message::Close(_) => {
+                        tracing::debug!(conn_id = %conn_id, "Client sent Close frame");
+                        break;
+                    }
+                    _ => {}
                 }
             }
-            Message::Ping(data) => {
-                let _ = ws_tx.send(Message::Pong(data)).await;
+            // Proactive notification push
+            notification = proactive_fut => {
+                if let Some(notification) = notification {
+                    let frame = serde_json::json!({
+                        "type": "proactive",
+                        "content": notification.content,
+                        "triggered_by": notification.triggered_by,
+                        "priority": notification.priority,
+                    });
+                    if let Ok(json) = serde_json::to_string(&frame) {
+                        if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
             }
-            Message::Close(_) => {
-                tracing::debug!(conn_id = %conn_id, "Client sent Close frame");
-                break;
-            }
-            _ => {}
         }
     }
 }
@@ -300,6 +337,9 @@ async fn process_text_frame(
     }
     if let Some(ns) = client_msg.namespace {
         signal.namespace = ns;
+    }
+    if let Some(agent) = client_msg.agent {
+        signal.agent = Some(agent);
     }
 
     let signal_id = signal.id;

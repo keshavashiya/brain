@@ -38,6 +38,8 @@ message SignalRequest {
   map<string, string> metadata = 5;
   // Optional namespace (default: "personal").
   string namespace = 6;
+  // Originating agent identity (e.g. "claude-code", "open-code").
+  string agent = 7;
 }
 
 message SignalResponse {

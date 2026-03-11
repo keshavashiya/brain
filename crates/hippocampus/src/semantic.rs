@@ -31,6 +31,8 @@ pub struct Fact {
     pub object: String,
     pub confidence: f64,
     pub source_episode_id: Option<String>,
+    /// Originating AI agent (e.g. "claude-code", "opencode"). None for direct user input.
+    pub agent: Option<String>,
 }
 
 /// A vector search result with the associated fact.
@@ -74,6 +76,7 @@ impl SemanticStore {
         confidence: f64,
         source_episode_id: Option<&str>,
         vector: Vec<f32>,
+        agent: Option<&str>,
     ) -> Result<String, SemanticError> {
         let id = Uuid::new_v4().to_string();
         let content = format!("{subject} {predicate} {object}");
@@ -85,9 +88,9 @@ impl SemanticStore {
         // Write to SQLite
         self.db.with_conn(|conn| {
             conn.execute(
-                "INSERT INTO semantic_facts (id, namespace, category, subject, predicate, object, confidence, source_episode_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                rusqlite::params![id, namespace, category, subject, predicate, stored_object, confidence, source_episode_id],
+                "INSERT INTO semantic_facts (id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                rusqlite::params![id, namespace, category, subject, predicate, stored_object, confidence, source_episode_id, agent],
             )?;
             Ok(())
         })?;
@@ -154,7 +157,7 @@ impl SemanticStore {
         let pool = &self.db;
         Ok(self.db.with_conn(|conn| {
             let result = conn.query_row(
-                "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id
+                "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
                  FROM semantic_facts WHERE id = ?1",
                 [fact_id],
                 |row| {
@@ -168,6 +171,7 @@ impl SemanticStore {
                         object: pool.decrypt_content(&raw_object),
                         confidence: row.get(6)?,
                         source_episode_id: row.get(7)?,
+                        agent: row.get(8)?,
                     })
                 },
             );
@@ -187,7 +191,7 @@ impl SemanticStore {
         let pool = &self.db;
         Ok(self.db.with_conn(|conn| {
             let result = conn.query_row(
-                "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, updated_at
+                "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, updated_at, agent
                  FROM semantic_facts WHERE id = ?1",
                 [fact_id],
                 |row| {
@@ -202,6 +206,7 @@ impl SemanticStore {
                         object: pool.decrypt_content(&raw_object),
                         confidence: row.get(6)?,
                         source_episode_id: row.get(7)?,
+                        agent: row.get(9)?,
                     }, updated_at))
                 },
             );
@@ -218,7 +223,7 @@ impl SemanticStore {
         let pool = &self.db;
         Ok(self.db.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id
+                "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
                  FROM semantic_facts WHERE category = ?1
                  ORDER BY updated_at DESC",
             )?;
@@ -235,6 +240,7 @@ impl SemanticStore {
                         object: pool.decrypt_content(&raw_object),
                         confidence: row.get(6)?,
                         source_episode_id: row.get(7)?,
+                        agent: row.get(8)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
@@ -267,12 +273,13 @@ impl SemanticStore {
                     object: pool.decrypt_content(&raw_object),
                     confidence: row.get(6)?,
                     source_episode_id: row.get(7)?,
+                    agent: row.get(8)?,
                 })
             };
 
             let facts: Vec<Fact> = if let Some(ns) = namespace {
                 let mut stmt = conn.prepare(
-                    "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id
+                    "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
                      FROM semantic_facts
                      WHERE subject = ?1 AND namespace = ?2
                      ORDER BY confidence DESC",
@@ -281,7 +288,7 @@ impl SemanticStore {
                 rows.collect::<Result<Vec<_>, _>>()?
             } else {
                 let mut stmt = conn.prepare(
-                    "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id
+                    "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
                      FROM semantic_facts
                      WHERE subject = ?1
                      ORDER BY confidence DESC",
@@ -306,7 +313,7 @@ impl SemanticStore {
             .get_fact(old_fact_id)?
             .ok_or_else(|| SemanticError::NotFound(old_fact_id.to_string()))?;
 
-        // Store new fact (preserve namespace)
+        // Store new fact (preserve namespace and agent)
         let new_id = self
             .store_fact(
                 &old_fact.namespace,
@@ -317,6 +324,7 @@ impl SemanticStore {
                 old_fact.confidence,
                 old_fact.source_episode_id.as_deref(),
                 new_vector,
+                old_fact.agent.as_deref(),
             )
             .await?;
 
@@ -352,12 +360,13 @@ impl SemanticStore {
                     object: pool.decrypt_content(&raw_object),
                     confidence: row.get(6)?,
                     source_episode_id: row.get(7)?,
+                    agent: row.get(8)?,
                 })
             };
 
             let facts: Vec<Fact> = if let Some(ns) = namespace {
                 let mut stmt = conn.prepare(
-                    "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id
+                    "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
                      FROM semantic_facts WHERE superseded_by IS NULL AND namespace = ?1
                      ORDER BY rowid DESC",
                 )?;
@@ -365,7 +374,7 @@ impl SemanticStore {
                 rows
             } else {
                 let mut stmt = conn.prepare(
-                    "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id
+                    "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
                      FROM semantic_facts WHERE superseded_by IS NULL
                      ORDER BY rowid DESC",
                 )?;
@@ -457,12 +466,13 @@ impl SemanticStore {
                     object: pool.decrypt_content(&raw_object),
                     confidence: row.get(6)?,
                     source_episode_id: row.get(7)?,
+                    agent: row.get(8)?,
                 })
             };
 
             let facts: Vec<Fact> = if let Some(ns) = namespace {
                 let mut stmt = conn.prepare(
-                    "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id
+                    "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
                      FROM semantic_facts
                      WHERE superseded_by IS NULL
                        AND namespace = ?2
@@ -474,7 +484,7 @@ impl SemanticStore {
                 rows.collect::<Result<Vec<_>, _>>()?
             } else {
                 let mut stmt = conn.prepare(
-                    "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id
+                    "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
                      FROM semantic_facts
                      WHERE superseded_by IS NULL
                        AND (subject LIKE ?1 OR predicate LIKE ?1 OR object LIKE ?1)
@@ -540,6 +550,7 @@ mod tests {
                 1.0,
                 None,
                 dummy_vector(),
+                None,
             )
             .await
             .unwrap();
@@ -566,6 +577,7 @@ mod tests {
                 1.0,
                 None,
                 dummy_vector(),
+                None,
             )
             .await
             .unwrap();
@@ -579,6 +591,7 @@ mod tests {
                 0.9,
                 None,
                 dummy_vector(),
+                None,
             )
             .await
             .unwrap();
@@ -592,6 +605,7 @@ mod tests {
                 0.8,
                 None,
                 dummy_vector(),
+                None,
             )
             .await
             .unwrap();
@@ -617,6 +631,7 @@ mod tests {
                 1.0,
                 None,
                 dummy_vector(),
+                None,
             )
             .await
             .unwrap();
@@ -630,6 +645,7 @@ mod tests {
                 0.9,
                 None,
                 dummy_vector(),
+                None,
             )
             .await
             .unwrap();
@@ -643,6 +659,7 @@ mod tests {
                 0.5,
                 None,
                 dummy_vector(),
+                None,
             )
             .await
             .unwrap();
@@ -657,7 +674,7 @@ mod tests {
 
         assert_eq!(store.count().unwrap(), 0);
         store
-            .store_fact("personal", "test", "a", "b", "c", 1.0, None, dummy_vector())
+            .store_fact("personal", "test", "a", "b", "c", 1.0, None, dummy_vector(), None)
             .await
             .unwrap();
         assert_eq!(store.count().unwrap(), 1);
@@ -683,11 +700,12 @@ mod tests {
                 1.0,
                 None,
                 v1.clone(),
+                None,
             )
             .await
             .unwrap();
         store
-            .store_fact("personal", "test", "python", "is", "popular", 1.0, None, v2)
+            .store_fact("personal", "test", "python", "is", "popular", 1.0, None, v2, None)
             .await
             .unwrap();
 
@@ -711,6 +729,7 @@ mod tests {
                 1.0,
                 None,
                 dummy_vector(),
+                None,
             )
             .await
             .unwrap();
@@ -744,6 +763,7 @@ mod tests {
                 1.0,
                 None,
                 dummy_vector(),
+                None,
             )
             .await
             .unwrap();
@@ -757,6 +777,7 @@ mod tests {
                 1.0,
                 None,
                 dummy_vector(),
+                None,
             )
             .await
             .unwrap();
@@ -789,6 +810,7 @@ mod tests {
                 1.0,
                 None,
                 dummy_vector(),
+                None,
             )
             .await
             .unwrap();
@@ -802,6 +824,7 @@ mod tests {
                 1.0,
                 None,
                 dummy_vector(),
+                None,
             )
             .await
             .unwrap();
@@ -815,6 +838,7 @@ mod tests {
                 1.0,
                 None,
                 dummy_vector(),
+                None,
             )
             .await
             .unwrap();

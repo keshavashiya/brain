@@ -29,6 +29,18 @@ pub enum SqliteError {
     Migration(String),
 }
 
+/// A notification queued for delivery to the user.
+#[derive(Debug, Clone)]
+pub struct Notification {
+    pub id: String,
+    pub content: String,
+    pub priority: i32,
+    pub triggered_by: String,
+    pub created_at: String,
+    pub delivered_at: Option<String>,
+    pub channel: Option<String>,
+}
+
 /// Thread-safe SQLite connection wrapper.
 ///
 /// Uses a `Mutex<Connection>` — sufficient for our single-process,
@@ -484,6 +496,32 @@ impl SqlitePool {
                     ON scheduled_intents(status);
             ",
             ),
+            (
+                15,
+                "create_notification_outbox",
+                "
+                CREATE TABLE IF NOT EXISTS notification_outbox (
+                    id TEXT PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    priority INTEGER NOT NULL DEFAULT 1,
+                    triggered_by TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    delivered_at TEXT,
+                    channel TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_outbox_pending
+                    ON notification_outbox(delivered_at, priority, created_at)
+                    WHERE delivered_at IS NULL;
+            ",
+            ),
+            (
+                16,
+                "add_agent_column",
+                "
+                ALTER TABLE episodes ADD COLUMN agent TEXT;
+                ALTER TABLE semantic_facts ADD COLUMN agent TEXT;
+            ",
+            ),
         ]
     }
 
@@ -501,6 +539,77 @@ impl SqlitePool {
         })
     }
 
+    /// Insert a notification into the outbox for later delivery.
+    pub fn insert_notification(
+        &self,
+        content: &str,
+        priority: i32,
+        triggered_by: &str,
+        channel: Option<&str>,
+    ) -> Result<String, SqliteError> {
+        let id = Uuid::new_v4().to_string();
+        self.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO notification_outbox (id, content, priority, triggered_by, channel)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                rusqlite::params![id, content, priority, triggered_by, channel],
+            )?;
+            Ok(())
+        })?;
+        Ok(id)
+    }
+
+    /// Fetch all pending (undelivered) notifications, ordered by priority then age.
+    pub fn pending_notifications(&self, limit: usize) -> Result<Vec<Notification>, SqliteError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, content, priority, triggered_by, created_at, delivered_at, channel
+                 FROM notification_outbox
+                 WHERE delivered_at IS NULL
+                 ORDER BY priority DESC, created_at ASC
+                 LIMIT ?1",
+            )?;
+            let rows = stmt
+                .query_map([limit as i64], |row| {
+                    Ok(Notification {
+                        id: row.get(0)?,
+                        content: row.get(1)?,
+                        priority: row.get(2)?,
+                        triggered_by: row.get(3)?,
+                        created_at: row.get(4)?,
+                        delivered_at: row.get(5)?,
+                        channel: row.get(6)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Mark a notification as delivered (sets `delivered_at` to now).
+    pub fn mark_notification_delivered(&self, id: &str) -> Result<bool, SqliteError> {
+        self.with_conn(|conn| {
+            let affected = conn.execute(
+                "UPDATE notification_outbox SET delivered_at = datetime('now') WHERE id = ?1 AND delivered_at IS NULL",
+                [id],
+            )?;
+            Ok(affected > 0)
+        })
+    }
+
+    /// Prune old delivered notifications and stale undelivered ones.
+    pub fn prune_notifications(&self, max_age_days: u32) -> Result<usize, SqliteError> {
+        self.with_conn(|conn| {
+            let deleted = conn.execute(
+                "DELETE FROM notification_outbox
+                 WHERE delivered_at IS NOT NULL
+                    OR created_at < datetime('now', ?1)",
+                [format!("-{max_age_days} days")],
+            )?;
+            Ok(deleted)
+        })
+    }
+
     /// Get table row counts for status display.
     pub fn table_stats(&self) -> Result<Vec<(String, i64)>, SqliteError> {
         self.with_conn(|conn| {
@@ -510,6 +619,7 @@ impl SqlitePool {
                 "semantic_facts",
                 "episode_promotions",
                 "scheduled_intents",
+                "notification_outbox",
                 "user_profile",
                 "procedures",
                 "audit_log",
@@ -538,7 +648,7 @@ mod tests {
     fn test_open_memory() {
         let pool = SqlitePool::open_memory().unwrap();
         let version = pool.schema_version().unwrap();
-        assert_eq!(version, 14); // All migrations applied
+        assert_eq!(version, 16); // All migrations applied
     }
 
     #[test]
@@ -546,14 +656,14 @@ mod tests {
         let pool = SqlitePool::open_memory().unwrap();
         // Running migrate again should be a no-op
         pool.migrate().unwrap();
-        assert_eq!(pool.schema_version().unwrap(), 14);
+        assert_eq!(pool.schema_version().unwrap(), 16);
     }
 
     #[test]
     fn test_table_stats_empty() {
         let pool = SqlitePool::open_memory().unwrap();
         let stats = pool.table_stats().unwrap();
-        assert_eq!(stats.len(), 8);
+        assert_eq!(stats.len(), 9);
         for (_, count) in &stats {
             assert_eq!(*count, 0);
         }
@@ -744,6 +854,52 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn test_notification_outbox_lifecycle() {
+        let pool = SqlitePool::open_memory().unwrap();
+
+        // Insert two notifications at different priorities
+        let id1 = pool
+            .insert_notification("Low priority nudge", 1, "habit:morning_review", None)
+            .unwrap();
+        let id2 = pool
+            .insert_notification("High priority reminder", 3, "open_loop:todo", Some("slack"))
+            .unwrap();
+
+        // Pending should return both, highest priority first
+        let pending = pool.pending_notifications(10).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].id, id2, "higher priority should come first");
+        assert_eq!(pending[1].id, id1);
+        assert!(pending[0].delivered_at.is_none());
+        assert_eq!(pending[1].channel, None);
+        assert_eq!(pending[0].channel.as_deref(), Some("slack"));
+
+        // Mark one as delivered
+        assert!(pool.mark_notification_delivered(&id2).unwrap());
+        let pending = pool.pending_notifications(10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].id, id1);
+
+        // Idempotency: marking the same one again returns false
+        assert!(!pool.mark_notification_delivered(&id2).unwrap());
+    }
+
+    #[test]
+    fn test_notification_prune() {
+        let pool = SqlitePool::open_memory().unwrap();
+        let id = pool
+            .insert_notification("test", 1, "test", None)
+            .unwrap();
+        pool.mark_notification_delivered(&id).unwrap();
+
+        // Prune delivered notifications (max_age_days=0 would prune nothing recent,
+        // but delivered_at IS NOT NULL clause catches delivered ones)
+        let pruned = pool.prune_notifications(365).unwrap();
+        assert_eq!(pruned, 1);
+        assert!(pool.pending_notifications(10).unwrap().is_empty());
     }
 
     #[test]

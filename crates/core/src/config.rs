@@ -240,6 +240,32 @@ pub struct ProactivityConfig {
     pub max_per_day: u32,
     pub min_interval_minutes: u32,
     pub quiet_hours: QuietHoursConfig,
+    #[serde(default)]
+    pub delivery: DeliveryConfig,
+}
+
+/// Configuration for proactive notification delivery.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeliveryConfig {
+    /// Always write to outbox (drain on next interaction).
+    pub outbox: bool,
+    /// Push to live sessions via broadcast channel.
+    pub broadcast: bool,
+    /// Messaging channel keys (from actions.messaging.channels) to push proactive notifications.
+    pub webhook_channels: Vec<String>,
+    /// Maximum age (days) before undelivered outbox items are pruned.
+    pub max_outbox_age_days: u32,
+}
+
+impl Default for DeliveryConfig {
+    fn default() -> Self {
+        Self {
+            outbox: true,
+            broadcast: true,
+            webhook_channels: Vec::new(),
+            max_outbox_age_days: 7,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -651,6 +677,7 @@ impl Default for BrainConfig {
                     start: "22:00".to_string(),
                     end: "08:00".to_string(),
                 },
+                delivery: DeliveryConfig::default(),
             },
             adapters: AdaptersConfig {
                 http: HttpAdapterConfig {
