@@ -57,7 +57,7 @@ brain/
 │   │                     State persisted in SQLite (habit_state table)
 │   │
 │   ├── storage/        # Storage abstraction layer
-│   │   ├── sqlite      # SqlitePool: 14 migrations, WAL mode, thread-safe Mutex<Connection>
+│   │   ├── sqlite      # SqlitePool: 16 migrations, WAL mode, thread-safe Mutex<Connection>
 │   │   │                 Tables: semantic_facts, episodes, procedures, scheduled_intents,
 │   │   │                 _migrations, FTS5 virtual tables (episodes_fts)
 │   │   ├── ruvector    # RuVectorStore: wraps ruvector-core (external crate, crates.io)
@@ -203,6 +203,7 @@ pub struct Signal {
     pub metadata: HashMap<String, String>,
     pub timestamp: DateTime<Utc>,
     pub namespace: String,       // default: "personal"
+    pub agent: Option<String>,   // originating AI agent (e.g. "claude-code")
 }
 ```
 
@@ -277,10 +278,13 @@ Migration-based schema versioned in a `MIGRATIONS` slice. The runner compares `M
 
 | Table | Purpose |
 |-------|---------|
+| `sessions` | Chat session tracking (id, channel, namespace, timestamps) |
 | `semantic_facts` | S-P-O triples with namespace, importance, source_episode_id |
 | `episodes` | Conversation history with role, importance, decay_rate, reinforcement_count |
 | `episodes_fts` | FTS5 virtual table (BM25 full-text search over episode content) |
+| `user_profile` | Key-value store for user preferences |
 | `procedures` | trigger_pattern → steps_json automation rules |
+| `audit_log` | Action audit trail (action type, input, output, timestamps) |
 | `scheduled_intents` | Persisted scheduling intents (persist-only mode) |
 | `episode_promotions` | Idempotency log for episode → semantic-fact promotions |
 | `notification_outbox` | Proactive notification queue with priority and delivery status |

@@ -177,29 +177,29 @@ curl http://localhost:19789/openapi.json
 # Swagger UI
 open http://localhost:19789/api
 
-# Store a fact
+# Store a fact (only "content" is required; source/sender/namespace/agent are optional)
 curl -X POST http://localhost:19789/v1/signals \
-  -H "Authorization: Bearer demokey123" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"source":"http","sender":"user","content":"I prefer dark mode"}'
+  -d '{"content":"I prefer dark mode"}'
 
 # Search memory
 curl -X POST http://localhost:19789/v1/memory/search \
-  -H "Authorization: Bearer demokey123" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"query":"UI preferences","top_k":5}'
 
 # List all facts
 curl http://localhost:19789/v1/memory/facts \
-  -H "Authorization: Bearer demokey123"
+  -H "Authorization: Bearer YOUR_API_KEY"
 
 # Namespace statistics
 curl http://localhost:19789/v1/memory/namespaces \
-  -H "Authorization: Bearer demokey123"
+  -H "Authorization: Bearer YOUR_API_KEY"
 
 # SSE stream of proactive notifications (open loop reminders, habit nudges)
 curl -N http://localhost:19789/v1/events \
-  -H "Authorization: Bearer demokey123"
+  -H "Authorization: Bearer YOUR_API_KEY"
 ```
 
 ### Routes
@@ -259,13 +259,13 @@ Scope facts and episodes to a context. The default namespace is `"personal"`.
 ```bash
 # Store a project-specific fact
 curl -X POST http://localhost:19789/v1/signals \
-  -H "Authorization: Bearer demokey123" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"source":"http","sender":"user","content":"use bun not npm","namespace":"my-project"}'
+  -d '{"content":"use bun not npm","namespace":"my-project"}'
 
 # Search only within that namespace
 curl -X POST http://localhost:19789/v1/memory/search \
-  -H "Authorization: Bearer demokey123" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"query":"package manager","namespace":"my-project"}'
 ```
@@ -370,7 +370,7 @@ Every signal can carry an `agent` field identifying the originating AI tool (e.g
 
 ```bash
 curl -X POST http://localhost:19789/v1/signals \
-  -H "Authorization: Bearer demokey123" \
+  -H "Authorization: Bearer YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"content":"deploy staging server","agent":"devops-agent"}'
 ```
@@ -502,7 +502,7 @@ access:
       permissions: [read]
 ```
 
-The default key for local use is `demokey123`. Change it before exposing Brain to a network.
+`brain init` generates a unique API key (prefixed `brk_`) and prints it to the terminal. Find your key in `~/.brain/config.yaml` under `access.api_keys`.
 
 ---
 
@@ -591,12 +591,14 @@ brain serve
 ## Re-initialise
 
 ```bash
-# Wipe and re-create all data directories (keeps config)
+# Regenerate config with a new API key (data directories are preserved)
 brain init --force
 
 # Also enable encryption
 brain init --force --encrypt
 ```
+
+`--force` overwrites `~/.brain/config.yaml` with defaults and a fresh API key. Your database, vector index, and exports remain untouched.
 
 ---
 
