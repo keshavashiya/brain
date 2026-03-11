@@ -368,6 +368,227 @@ impl HabitEngine {
     }
 }
 
+// ─── Open-loop Detection ─────────────────────────────────────────────────────
+
+/// Configuration for open-loop (unresolved commitment) detection.
+#[derive(Debug, Clone)]
+pub struct OpenLoopConfig {
+    /// How many hours back to scan for commitments.
+    pub scan_window_hours: u32,
+    /// Hours after a commitment before it's flagged as unresolved.
+    pub resolution_window_hours: u32,
+    /// Maximum reminders to generate per check cycle.
+    pub max_reminders: usize,
+}
+
+impl Default for OpenLoopConfig {
+    fn default() -> Self {
+        Self {
+            scan_window_hours: 72,
+            resolution_window_hours: 24,
+            max_reminders: 3,
+        }
+    }
+}
+
+/// An unresolved commitment found in episodic memory.
+#[derive(Debug, Clone)]
+pub struct OpenLoop {
+    pub commitment: String,
+    pub topic: String,
+    pub committed_at: String,
+    pub agent: Option<String>,
+}
+
+/// Detects unresolved commitments ("open loops") in episodic memory.
+///
+/// Scans for commitment phrases like "I need to", "remind me to", etc.
+/// and checks whether a subsequent episode references the same topic.
+/// If no resolution is found within `resolution_window_hours`, a
+/// reminder is surfaced.
+pub struct OpenLoopDetector {
+    db: SqlitePool,
+    config: OpenLoopConfig,
+}
+
+/// Phrases that signal a user commitment or intention.
+const COMMITMENT_PHRASES: &[&str] = &[
+    "i'll",
+    "i will",
+    "i need to",
+    "i should",
+    "i must",
+    "remind me to",
+    "don't forget",
+    "need to remember",
+    "going to",
+    "plan to",
+    "want to",
+    "have to",
+    "todo",
+    "to-do",
+];
+
+/// Words that signal a commitment has been resolved.
+const RESOLUTION_MARKERS: &[&str] = &[
+    "done", "finished", "completed", "did it", "checked off", "resolved",
+    "took care", "handled", "sorted", "already",
+];
+
+impl OpenLoopDetector {
+    pub fn new(db: SqlitePool, config: OpenLoopConfig) -> Self {
+        Self { db, config }
+    }
+
+    /// Scan episodic memory for unresolved commitments.
+    pub fn detect_open_loops(&self) -> Result<Vec<OpenLoop>, GangliaError> {
+        let now = Utc::now();
+        let scan_cutoff = now - chrono::Duration::hours(self.config.scan_window_hours as i64);
+        let resolution_cutoff =
+            now - chrono::Duration::hours(self.config.resolution_window_hours as i64);
+        let scan_str = scan_cutoff.to_rfc3339();
+
+        let episodes: Vec<(String, String, String, Option<String>)> =
+            self.db.with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, content, timestamp, agent FROM episodes
+                     WHERE timestamp >= ?1 AND role = 'user'
+                     ORDER BY timestamp ASC",
+                )?;
+                let rows = stmt
+                    .query_map([&scan_str], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })?;
+
+        let mut open_loops = Vec::new();
+
+        for (id, content, timestamp, agent) in &episodes {
+            let lower = content.to_lowercase();
+
+            // Extract topic from commitment phrase
+            let topic = COMMITMENT_PHRASES.iter().find_map(|phrase| {
+                lower.find(phrase).map(|pos| {
+                    let after = &content[pos + phrase.len()..];
+                    let trimmed = after
+                        .trim()
+                        .trim_start_matches(|c: char| !c.is_alphanumeric());
+                    trimmed
+                        .split_whitespace()
+                        .take(8)
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+            });
+
+            let topic = match topic {
+                Some(t) if t.len() >= 3 => t,
+                _ => continue,
+            };
+
+            // Only flag commitments that are old enough
+            let committed_dt = DateTime::parse_from_rfc3339(timestamp)
+                .map(|d| d.with_timezone(&Utc))
+                .unwrap_or(now);
+            if committed_dt > resolution_cutoff {
+                continue;
+            }
+
+            // Extract meaningful keywords from the topic for matching
+            let topic_words: Vec<String> = topic
+                .split_whitespace()
+                .map(|w| {
+                    w.trim_matches(|c: char| !c.is_alphanumeric())
+                        .to_lowercase()
+                })
+                .filter(|w| w.len() >= 4)
+                .collect();
+            if topic_words.is_empty() {
+                continue;
+            }
+
+            // Check if any later episode resolves this commitment
+            let resolved = episodes.iter().any(|(eid, econtent, ets, _)| {
+                if eid == id {
+                    return false;
+                }
+                let edt = DateTime::parse_from_rfc3339(ets)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or(now);
+                if edt <= committed_dt {
+                    return false;
+                }
+                let elower = econtent.to_lowercase();
+
+                // Check for resolution markers alongside topic words
+                let has_topic_ref = topic_words
+                    .iter()
+                    .filter(|w| elower.contains(w.as_str()))
+                    .count()
+                    >= topic_words.len().clamp(1, 2);
+
+                let has_resolution_marker =
+                    RESOLUTION_MARKERS.iter().any(|m| elower.contains(m));
+
+                // Resolved if topic is referenced with a resolution marker,
+                // or if most topic words appear (likely a follow-up)
+                (has_topic_ref && has_resolution_marker)
+                    || topic_words
+                        .iter()
+                        .filter(|w| elower.contains(w.as_str()))
+                        .count()
+                        >= topic_words.len().max(2)
+            });
+
+            if !resolved {
+                open_loops.push(OpenLoop {
+                    commitment: content.clone(),
+                    topic: topic.clone(),
+                    committed_at: timestamp.clone(),
+                    agent: agent.clone(),
+                });
+            }
+        }
+
+        open_loops.truncate(self.config.max_reminders);
+        Ok(open_loops)
+    }
+
+    /// Generate proactive reminder messages for unresolved commitments.
+    pub fn generate_reminders(&self) -> Result<Vec<ProactiveMessage>, GangliaError> {
+        let loops = self.detect_open_loops()?;
+        Ok(loops
+            .into_iter()
+            .map(|ol| {
+                let content = if let Some(ref agent) = ol.agent {
+                    format!(
+                        "Open loop from {}: you mentioned \"{}\" — still pending. Want to follow up?",
+                        agent, ol.topic
+                    )
+                } else {
+                    format!(
+                        "Open loop: you mentioned \"{}\" — still pending. Want to follow up?",
+                        ol.topic
+                    )
+                };
+                ProactiveMessage {
+                    content,
+                    triggered_by: format!("open_loop:{}", ol.topic),
+                    created_at: Utc::now(),
+                    agent: ol.agent,
+                }
+            })
+            .collect())
+    }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -478,5 +699,186 @@ mod tests {
         // No episodes → no patterns → no proactive message
         let result = engine.generate_proactive().unwrap();
         assert!(result.is_none());
+    }
+
+    // ── Open-loop detector tests ─────────────────────────────────────────────
+
+    /// Helper: create an OpenLoopDetector with an in-memory DB and a test session.
+    /// Returns (detector, pool) so callers can insert episodes.
+    fn test_detector() -> (OpenLoopDetector, SqlitePool) {
+        let pool = storage::SqlitePool::open_memory().unwrap();
+        // Create a session so foreign key works
+        pool.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO sessions (id, channel) VALUES ('test-session', 'test')",
+                [],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+        let config = OpenLoopConfig {
+            scan_window_hours: 72,
+            resolution_window_hours: 1, // 1 hour for easy testing
+            max_reminders: 5,
+        };
+        let detector = OpenLoopDetector::new(pool.clone(), config);
+        (detector, pool)
+    }
+
+    /// Insert a test episode with a given content and hours-ago timestamp.
+    fn insert_episode(pool: &SqlitePool, id: &str, content: &str, hours_ago: i64) {
+        let ts = (Utc::now() - chrono::Duration::hours(hours_ago)).to_rfc3339();
+        pool.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO episodes (id, session_id, role, content, timestamp)
+                 VALUES (?1, 'test-session', 'user', ?2, ?3)",
+                rusqlite::params![id, content, ts],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_open_loop_no_episodes() {
+        let (detector, _) = test_detector();
+        let loops = detector.detect_open_loops().unwrap();
+        assert!(loops.is_empty());
+    }
+
+    #[test]
+    fn test_open_loop_unresolved_commitment() {
+        let (detector, pool) = test_detector();
+        // Commitment from 2 hours ago (beyond 1-hour resolution window)
+        insert_episode(&pool, "e1", "I need to update the documentation for the API", 2);
+
+        let loops = detector.detect_open_loops().unwrap();
+        assert_eq!(loops.len(), 1);
+        assert!(loops[0].topic.contains("update"));
+        assert!(loops[0].topic.contains("documentation"));
+    }
+
+    #[test]
+    fn test_open_loop_resolved_commitment() {
+        let (detector, pool) = test_detector();
+        // Commitment from 3 hours ago
+        insert_episode(
+            &pool,
+            "e1",
+            "I need to update the documentation for the API",
+            3,
+        );
+        // Resolution — references same topic keywords + resolution marker
+        insert_episode(
+            &pool,
+            "e2",
+            "I finished the documentation update for the API",
+            0, // recent
+        );
+
+        let loops = detector.detect_open_loops().unwrap();
+        assert!(
+            loops.is_empty(),
+            "should be resolved, but got: {:?}",
+            loops
+        );
+    }
+
+    #[test]
+    fn test_open_loop_too_recent_not_flagged() {
+        let (detector, pool) = test_detector();
+        // Commitment from 30 minutes ago — within the 1-hour resolution window
+        let ts = (Utc::now() - chrono::Duration::minutes(30)).to_rfc3339();
+        pool.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO episodes (id, session_id, role, content, timestamp)
+                 VALUES ('e1', 'test-session', 'user', 'I need to review the pull request', ?1)",
+                [&ts],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+        let loops = detector.detect_open_loops().unwrap();
+        assert!(loops.is_empty(), "recent commitment should not be flagged");
+    }
+
+    #[test]
+    fn test_open_loop_generate_reminders() {
+        let (detector, pool) = test_detector();
+        insert_episode(&pool, "e1", "I should refactor the authentication module", 5);
+
+        let reminders = detector.generate_reminders().unwrap();
+        assert_eq!(reminders.len(), 1);
+        assert!(reminders[0].content.contains("Open loop"));
+        assert!(reminders[0].content.contains("refactor"));
+        assert!(reminders[0].triggered_by.starts_with("open_loop:"));
+    }
+
+    #[test]
+    fn test_open_loop_max_reminders_cap() {
+        let (detector, pool) = test_detector();
+        // Insert more commitments than max_reminders (5)
+        for i in 0..8 {
+            insert_episode(
+                &pool,
+                &format!("e{i}"),
+                &format!("I need to handle task_{i:04} in the project"),
+                10 + i as i64,
+            );
+        }
+
+        let loops = detector.detect_open_loops().unwrap();
+        assert!(
+            loops.len() <= 5,
+            "should cap at max_reminders, got {}",
+            loops.len()
+        );
+    }
+
+    #[test]
+    fn test_open_loop_assistant_messages_ignored() {
+        let (detector, pool) = test_detector();
+        // Insert an assistant message with commitment phrasing — should be ignored
+        let ts = (Utc::now() - chrono::Duration::hours(5)).to_rfc3339();
+        pool.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO episodes (id, session_id, role, content, timestamp)
+                 VALUES ('e1', 'test-session', 'assistant', 'I will help you with that task', ?1)",
+                [&ts],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+        let loops = detector.detect_open_loops().unwrap();
+        assert!(loops.is_empty(), "assistant messages should be ignored");
+    }
+
+    #[test]
+    fn test_open_loop_with_agent_attribution() {
+        let (detector, pool) = test_detector();
+        let ts = (Utc::now() - chrono::Duration::hours(5)).to_rfc3339();
+        pool.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO episodes (id, session_id, role, content, timestamp, agent)
+                 VALUES ('e1', 'test-session', 'user', 'I need to deploy the staging server', ?1, 'devops-agent')",
+                [&ts],
+            )
+            .unwrap();
+            Ok(())
+        })
+        .unwrap();
+
+        let loops = detector.detect_open_loops().unwrap();
+        assert_eq!(loops.len(), 1);
+        assert_eq!(loops[0].agent.as_deref(), Some("devops-agent"));
+
+        let reminders = detector.generate_reminders().unwrap();
+        assert!(reminders[0].content.contains("devops-agent"));
     }
 }

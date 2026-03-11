@@ -242,6 +242,32 @@ pub struct ProactivityConfig {
     pub quiet_hours: QuietHoursConfig,
     #[serde(default)]
     pub delivery: DeliveryConfig,
+    #[serde(default)]
+    pub open_loop: OpenLoopDetectionConfig,
+}
+
+/// Configuration for open-loop (unresolved commitment) detection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OpenLoopDetectionConfig {
+    /// Enable open-loop detection.
+    pub enabled: bool,
+    /// How many hours back to scan for commitments.
+    pub scan_window_hours: u32,
+    /// Hours after a commitment before it's flagged as unresolved.
+    pub resolution_window_hours: u32,
+    /// Check interval in minutes.
+    pub check_interval_minutes: u32,
+}
+
+impl Default for OpenLoopDetectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            scan_window_hours: 72,
+            resolution_window_hours: 24,
+            check_interval_minutes: 120,
+        }
+    }
 }
 
 /// Configuration for proactive notification delivery.
@@ -678,6 +704,7 @@ impl Default for BrainConfig {
                     end: "08:00".to_string(),
                 },
                 delivery: DeliveryConfig::default(),
+                open_loop: OpenLoopDetectionConfig::default(),
             },
             adapters: AdaptersConfig {
                 http: HttpAdapterConfig {

@@ -691,6 +691,53 @@ async fn main() -> anyhow::Result<()> {
                 );
             }
 
+            // ── Open-loop detection background task ───────────────────────────
+            // Scans episodic memory for unresolved commitments ("I need to...",
+            // "remind me to...") and generates reminders when no resolution is
+            // found within the configured window.
+            if config.proactivity.enabled && config.proactivity.open_loop.enabled {
+                let p = processor.clone();
+                let ol_cfg = config.proactivity.open_loop.clone();
+                set.spawn(async move {
+                    let detector = ganglia::OpenLoopDetector::new(
+                        p.episodic().pool().clone(),
+                        ganglia::OpenLoopConfig {
+                            scan_window_hours: ol_cfg.scan_window_hours,
+                            resolution_window_hours: ol_cfg.resolution_window_hours,
+                            max_reminders: 3,
+                        },
+                    );
+                    let check_interval = tokio::time::Duration::from_secs(
+                        ol_cfg.check_interval_minutes as u64 * 60,
+                    );
+                    let mut ticker = tokio::time::interval(check_interval);
+                    ticker.tick().await; // skip first tick
+                    loop {
+                        ticker.tick().await;
+                        match detector.generate_reminders() {
+                            Ok(reminders) if !reminders.is_empty() => {
+                                if let Some(router) = p.notification_router() {
+                                    for msg in reminders {
+                                        tracing::info!(
+                                            triggered_by = %msg.triggered_by,
+                                            "Open loop: {}",
+                                            msg.content
+                                        );
+                                        router.deliver(msg.into()).await;
+                                    }
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!("OpenLoopDetector error: {e}"),
+                        }
+                    }
+                });
+                tracing::info!(
+                    interval_minutes = ol_cfg.check_interval_minutes,
+                    "Open-loop detector scheduled"
+                );
+            }
+
             // ── Memory consolidation background task ──────────────────────────
             // Runs the forgetting-curve pruner on a schedule (default: every 24h).
             // Aborted cleanly alongside adapters on shutdown.
