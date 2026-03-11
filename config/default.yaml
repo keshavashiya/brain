@@ -95,7 +95,7 @@ proactivity:
     webhook_channels: []       # Channel keys from actions.messaging.channels to receive proactive notifications
     max_outbox_age_days: 7     # Prune stale undelivered outbox items during consolidation
   open_loop:
-    enabled: true              # Detect unresolved commitments ("I need to...", "remind me to...")
+    enabled: true              # Detect unresolved commitments (requires proactivity.enabled: true)
     scan_window_hours: 72      # How far back to scan for commitments
     resolution_window_hours: 24  # Hours before an unresolved commitment triggers a reminder
     check_interval_minutes: 120  # How often to check for open loops

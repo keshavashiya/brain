@@ -196,6 +196,10 @@ curl http://localhost:19789/v1/memory/facts \
 # Namespace statistics
 curl http://localhost:19789/v1/memory/namespaces \
   -H "Authorization: Bearer demokey123"
+
+# SSE stream of proactive notifications (open loop reminders, habit nudges)
+curl -N http://localhost:19789/v1/events \
+  -H "Authorization: Bearer demokey123"
 ```
 
 ### Routes
@@ -212,6 +216,7 @@ curl http://localhost:19789/v1/memory/namespaces \
 | `POST` | `/v1/memory/search` | Yes | Hybrid semantic search |
 | `GET` | `/v1/memory/facts` | Yes | List all facts |
 | `GET` | `/v1/memory/namespaces` | Yes | Namespace stats |
+| `GET` | `/v1/events` | Yes | SSE stream of proactive notifications |
 
 ---
 
@@ -312,7 +317,7 @@ Brain's WebSocket API (`ws://localhost:19790`) is the entry point — the bridge
 
 ## Background Intelligence
 
-`brain serve` and `brain start` spawn two optional background tasks alongside the protocol adapters, sharing the same `SignalProcessor`:
+`brain serve` and `brain start` spawn background tasks alongside the protocol adapters, sharing the same `SignalProcessor`:
 
 ### Memory Consolidation (enabled by default)
 
@@ -328,7 +333,16 @@ memory:
 
 ### Proactivity Engine (opt-in)
 
-Detects recurring patterns in episodic memory (keyword × day-of-week × hour histograms) and logs proactive suggestions to `~/.brain/logs/proactive.log`. Rate-limited by `max_per_day` and `min_interval_minutes`.
+When enabled, Brain becomes bidirectional — it proactively reminds you of things instead of only responding when asked.
+
+**Habit Detection** — scans episodic memory for recurring patterns (keyword × day-of-week × hour histograms) and nudges you when a pattern matches the current time slot.
+
+**Open-Loop Detection** — scans for unresolved commitments ("I need to...", "remind me to...", "I should...") and generates reminders when no resolution is found within the configured window.
+
+**Delivery** — proactive messages are delivered through three tiers:
+1. **Outbox** — written to SQLite, drained on next `brain chat` session
+2. **Broadcast** — pushed to live WebSocket and SSE (`GET /v1/events`) sessions
+3. **Webhooks** — pushed to configured messaging channels (Slack, Discord, Telegram, etc.)
 
 ```yaml
 proactivity:
@@ -338,8 +352,28 @@ proactivity:
   quiet_hours:
     start: "22:00"
     end: "08:00"
+  delivery:
+    outbox: true           # always write to outbox; drain on next interaction
+    broadcast: true        # push to live WS/SSE sessions
+    webhook_channels: []   # channel keys from actions.messaging.channels
+    max_outbox_age_days: 7
+  open_loop:
+    enabled: true          # detect unresolved commitments (requires proactivity.enabled)
+    scan_window_hours: 72
+    resolution_window_hours: 24
+    check_interval_minutes: 120
 ```
 
+### Agent Identity
+
+Every signal can carry an `agent` field identifying the originating AI tool (e.g. `"claude-code"`, `"cursor"`). Agent identity flows through the entire pipeline — recall, habit detection, and proactive messages reference the originating agent when known.
+
+```bash
+curl -X POST http://localhost:19789/v1/signals \
+  -H "Authorization: Bearer demokey123" \
+  -H "Content-Type: application/json" \
+  -d '{"content":"deploy staging server","agent":"devops-agent"}'
+```
 
 
 ---
@@ -548,8 +582,7 @@ brain serve
 │   └── salt           # Encryption salt (only if --encrypt was used)
 ├── ruvector/          # HNSW vector index files (ruvector-core)
 ├── logs/
-│   ├── brain.log      # Daemon logs
-│   └── proactive.log  # Proactivity engine output (when enabled)
+│   └── brain.log      # Daemon logs
 └── exports/           # Export output directory
 ```
 

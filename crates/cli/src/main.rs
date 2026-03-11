@@ -53,6 +53,10 @@ enum Commands {
     /// With no flags all four synapses start concurrently.
     /// Use flags to activate only specific synapses.
     ///
+    /// Background tasks also start when configured:
+    /// - Memory consolidation (enabled by default, every 24h)
+    /// - Habit detection + open-loop reminders (opt-in: proactivity.enabled)
+    ///
     /// Examples:
     ///   brain serve                  # all synapses
     ///   brain serve --http           # HTTP only
@@ -1748,6 +1752,9 @@ async fn chat_non_interactive(
     use futures::StreamExt;
 
     let mut brain = BrainSession::new(config).await?;
+
+    // Drain pending outbox notifications before responding
+    show_proactive_nudges(&brain, config);
 
     match brain.prepare_context(message).await? {
         PrepareResult::ActionResult(text) => {

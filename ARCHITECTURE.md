@@ -50,8 +50,9 @@ brain/
 │   ├── cerebellum/     # ProcedureStore — trigger-pattern → steps_json automation rules
 │   │                     CRUD operations, case-insensitive trigger matching, use-count tracking
 │   │
-│   ├── ganglia/        # Proactivity / habit engine
+│   ├── ganglia/        # Proactivity / habit engine + open-loop detection
 │   │                     HabitEngine: keyword × day-of-week × hour pattern detection
+│   │                     OpenLoopDetector: unresolved commitment scanning + reminders
 │   │                     Rate limits: max_per_day, min_interval_minutes, quiet_hours
 │   │                     State persisted in SQLite (habit_state table)
 │   │
@@ -93,9 +94,9 @@ brain/
 └── crates/bridge/      # External gateway relay library.
                           BridgeClient: WebSocket client with exponential-backoff reconnection,
                           ping/pong keep-alive, JSON message serialization.
+                          Bidirectional: connect_and_relay_bidirectional() pushes proactive
+                          notifications outbound alongside inbound message relay.
                           Used by external relay projects to connect messaging platforms to Brain.
-                          Not a workspace member — intended for use as a standalone dependency
-                          in external relay repos, not inside Brain itself.
 ```
 
 ### Workspace Members (`Cargo.toml`)
@@ -103,10 +104,8 @@ brain/
 ```
 core  storage  hippocampus  cortex  thalamus  amygdala  signal
 adapters/http  adapters/ws  adapters/grpc  adapters/mcp
-cerebellum  ganglia  cli
+cerebellum  ganglia  bridge  cli
 ```
-
-`crates/bridge` is a standalone library for building external relay processes. It is not a workspace member and is not compiled by `cargo build --workspace`.
 
 ### Dependency Graph
 
@@ -284,6 +283,8 @@ Migration-based schema versioned in a `MIGRATIONS` slice. The runner compares `M
 | `procedures` | trigger_pattern → steps_json automation rules |
 | `scheduled_intents` | Persisted scheduling intents (persist-only mode) |
 | `episode_promotions` | Idempotency log for episode → semantic-fact promotions |
+| `notification_outbox` | Proactive notification queue with priority and delivery status |
+| `habit_state` | Rate-limit state for proactivity engine (daily count, last sent) |
 | `_migrations` | Applied migration version log |
 
 **WAL mode** is enabled for concurrent reads alongside writes.  
@@ -371,7 +372,22 @@ if config.proactivity.enabled {
         loop {
             ticker.tick().await;
             if let Some(msg) = engine.generate_proactive()? {
-                append_to_proactive_log(&msg);
+                router.deliver(msg.into()).await;  // outbox + broadcast + webhooks
+            }
+        }
+    });
+}
+
+// ── Open-loop detection (enabled: true under proactivity) ────────────────────
+if config.proactivity.enabled && config.proactivity.open_loop.enabled {
+    set.spawn(async move {
+        let detector = OpenLoopDetector::new(db, open_loop_cfg);
+        let mut ticker = interval(Duration::from_secs(check_interval_minutes * 60));
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            for msg in detector.generate_reminders()? {
+                router.deliver(msg.into()).await;
             }
         }
     });
@@ -393,6 +409,7 @@ processor.shutdown();           // WAL checkpoint
 |------|--------------------|----------|
 | Memory consolidation | Yes | 24 hours |
 | Proactivity / habit detection | No (opt-in) | `min_interval_minutes` (60) |
+| Open-loop detection | No (opt-in, under proactivity) | `check_interval_minutes` (120) |
 
 ---
 
@@ -502,6 +519,12 @@ impl BridgeClient {
     where
         F: Fn(BridgeMessage) -> Fut + Clone,
         Fut: Future<Output = BridgeMessage>;
+
+    /// Bidirectional: relay inbound messages AND push proactive notifications outbound.
+    pub async fn connect_and_relay_bidirectional<F, Fut>(
+        &self, handler: F,
+        proactive_rx: Option<broadcast::Receiver<BridgeMessage>>,
+    ) -> Result<(), BridgeError>;
 }
 
 pub struct BridgeConfig {
@@ -830,11 +853,17 @@ The `BrainConfig` struct in `crates/core/src/config.rs` maps 1-to-1 with the YAM
 
 ## Proactivity Engine (`crates/ganglia`)
 
-`HabitEngine` detects recurring patterns in episodic memory using keyword × day-of-week × hour histograms and generates proactive suggestions. **Disabled by default** (`proactivity.enabled: false`).
+`HabitEngine` detects recurring patterns in episodic memory using keyword × day-of-week × hour histograms and generates proactive suggestions. `OpenLoopDetector` scans for unresolved commitments and generates reminders. Both are **disabled by default** (`proactivity.enabled: false`).
 
-When enabled, `brain serve` spawns a background task on the `JoinSet` that fires every `min_interval_minutes`. If a recurring pattern matches the current time slot and all rate limits pass (`max_per_day`, `min_interval_minutes`, quiet hours), the engine calls `record_sent()` and logs the proactive message to `~/.brain/logs/proactive.log`.
+When enabled, `brain serve` spawns background tasks on the `JoinSet`:
+- **HabitEngine** fires every `min_interval_minutes`. If a recurring pattern matches the current time slot and all rate limits pass, it delivers through the `NotificationRouter` (outbox + broadcast + webhooks).
+- **OpenLoopDetector** fires every `check_interval_minutes`. It scans for commitment phrases ("I need to", "remind me to", "I should", etc.) in episodic memory and checks whether a later episode resolves the commitment. Unresolved items older than `resolution_window_hours` trigger a reminder.
+
+Both engines share the `NotificationRouter` for delivery and the `HabitEngine` rate limits (`max_per_day`, `min_interval_minutes`, quiet hours).
 
 Rate-limit state (`last_sent`, `daily_count`) is persisted in a `habit_state` SQLite table, so limits survive daemon restarts.
+
+At `brain chat` session start, pending outbox notifications are drained and displayed as nudges. Open-loop detection also runs inline for immediate feedback.
 
 > **Note:** Quiet hours are evaluated in UTC. If you are not in UTC, adjust `start`/`end` by your UTC offset.
 
