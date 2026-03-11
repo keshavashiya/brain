@@ -1789,6 +1789,44 @@ async fn chat_non_interactive(
     Ok(())
 }
 
+/// Display proactive nudges at session start: pending outbox items and open loops.
+fn show_proactive_nudges(brain: &BrainSession, config: &brain_core::BrainConfig) {
+    let mut nudges: Vec<String> = Vec::new();
+
+    // 1. Drain pending outbox notifications
+    if let Ok(pending) = brain.db().pending_notifications(5) {
+        for n in &pending {
+            nudges.push(n.content.clone());
+            let _ = brain.db().mark_notification_delivered(&n.id);
+        }
+    }
+
+    // 2. Run open-loop detector inline (if enabled)
+    if config.proactivity.enabled && config.proactivity.open_loop.enabled {
+        let detector = ganglia::OpenLoopDetector::new(
+            brain.db().clone(),
+            ganglia::OpenLoopConfig {
+                scan_window_hours: config.proactivity.open_loop.scan_window_hours,
+                resolution_window_hours: config.proactivity.open_loop.resolution_window_hours,
+                max_reminders: 3,
+            },
+        );
+        if let Ok(reminders) = detector.generate_reminders() {
+            for r in reminders {
+                nudges.push(r.content);
+            }
+        }
+    }
+
+    if !nudges.is_empty() {
+        println!("\x1b[33m📌 Nudges:\x1b[0m");
+        for nudge in &nudges {
+            println!("  \x1b[33m• {nudge}\x1b[0m");
+        }
+        println!();
+    }
+}
+
 async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()> {
     let ver = env!("CARGO_PKG_VERSION");
     let title = format!("Brain v{ver}");
@@ -1809,6 +1847,9 @@ async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()
     let mut rl = DefaultEditor::new()?;
     let history_path = config.data_dir().join("history.txt");
     let _ = rl.load_history(&history_path);
+
+    // Show proactive nudges at session start (open loops + pending outbox)
+    show_proactive_nudges(&brain, config);
 
     loop {
         match rl.readline("You: ") {
@@ -2845,7 +2886,7 @@ impl cortex::actions::MessageBackend for WebhookMessageBackend {
 #[allow(dead_code)]
 struct BrainSession {
     _config: brain_core::BrainConfig,
-    _db: storage::SqlitePool,
+    db: storage::SqlitePool,
     episodic: hippocampus::EpisodicStore,
     semantic: Option<hippocampus::SemanticStore>,
     embedder: Arc<tokio::sync::Mutex<Option<hippocampus::Embedder>>>,
@@ -3016,7 +3057,7 @@ impl BrainSession {
 
         Ok(Self {
             _config: config.clone(),
-            _db: db,
+            db,
             episodic,
             semantic,
             embedder,
@@ -3029,6 +3070,10 @@ impl BrainSession {
             conversation_history: Vec::new(),
             session_id,
         })
+    }
+
+    fn db(&self) -> &storage::SqlitePool {
+        &self.db
     }
 
     fn clear_history(&mut self) {

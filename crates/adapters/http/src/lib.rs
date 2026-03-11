@@ -12,6 +12,7 @@
 //! - `GET  /v1/signals/:id`     — retrieve cached signal response (requires read)
 //! - `POST /v1/memory/search`   — semantic search over stored facts (requires read)
 //! - `GET  /v1/memory/facts`    — list all semantic facts (requires read)
+//! - `GET  /v1/events`          — SSE stream of proactive notifications (requires read)
 //!
 //! ## Authentication
 //! All `/v1/*` routes require `Authorization: Bearer <api-key>` header.
@@ -30,7 +31,10 @@ use std::{
 use axum::{
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Json},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Json,
+    },
     routing::{get, post},
     Router,
 };
@@ -244,6 +248,7 @@ pub fn create_router(
         .route("/v1/memory/search", post(search_memory_handler))
         .route("/v1/memory/facts", get(get_facts_handler))
         .route("/v1/memory/namespaces", get(get_namespaces_handler))
+        .route("/v1/events", get(sse_events_handler))
         .with_state(state)
         .layer(localhost_cors())
 }
@@ -831,6 +836,59 @@ async fn get_namespaces_handler(
         .collect();
 
     Ok(Json(namespaces))
+}
+
+// ─── SSE event stream ───────────────────────────────────────────────────────
+
+/// `GET /v1/events` — Server-Sent Events stream of proactive notifications.
+///
+/// Subscribes to the NotificationRouter broadcast channel and streams
+/// each notification as a JSON SSE event. The connection stays open
+/// until the client disconnects.
+async fn sse_events_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>>, (StatusCode, String)>
+{
+    check_auth(&state, &headers, "read")?;
+
+    let router = state.processor.notification_router().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Proactive notifications not configured".to_string(),
+        )
+    })?;
+
+    let mut rx = router.subscribe();
+
+    let stream = async_stream::stream! {
+        loop {
+            match rx.recv().await {
+                Ok(notification) => {
+                    let payload = serde_json::json!({
+                        "type": "proactive",
+                        "content": notification.content,
+                        "triggered_by": notification.triggered_by,
+                        "priority": notification.priority,
+                        "agent": notification.agent,
+                    });
+                    yield Ok(Event::default()
+                        .event("notification")
+                        .json_data(payload)
+                        .unwrap_or_else(|_| Event::default().data("{}")));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(skipped = n, "SSE client lagged behind");
+                    yield Ok(Event::default()
+                        .event("error")
+                        .data(format!("{{\"lagged\":{n}}}")));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+
+    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
