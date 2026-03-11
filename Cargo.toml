@@ -14,6 +14,7 @@ members = [
     "crates/adapters/mcp",
     "crates/cerebellum",
     "crates/ganglia",
+    "crates/bridge",
     "crates/cli",
 ]
 

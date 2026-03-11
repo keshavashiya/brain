@@ -142,6 +142,23 @@ impl BridgeClient {
         F: Fn(BridgeMessage) -> Fut + Clone,
         Fut: Future<Output = BridgeMessage>,
     {
+        self.connect_and_relay_bidirectional(handler, None).await
+    }
+
+    /// Connect with optional proactive push channel.
+    ///
+    /// When `proactive_rx` is provided, proactive notifications are forwarded
+    /// to the gateway as outbound `BridgeMessage` frames alongside the normal
+    /// request-response relay.
+    pub async fn connect_and_relay_bidirectional<F, Fut>(
+        &self,
+        handler: F,
+        mut proactive_rx: Option<tokio::sync::broadcast::Receiver<BridgeMessage>>,
+    ) -> Result<(), BridgeError>
+    where
+        F: Fn(BridgeMessage) -> Fut + Clone,
+        Fut: Future<Output = BridgeMessage>,
+    {
         use futures_util::{SinkExt, StreamExt};
         use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -185,54 +202,82 @@ impl BridgeClient {
             let (mut sink, mut stream) = ws_stream.split();
 
             loop {
-                match stream.next().await {
-                    None => {
-                        tracing::warn!(url = %self.url, "Bridge stream ended (EOF)");
-                        break;
-                    }
-                    Some(Err(e)) => {
-                        tracing::warn!(url = %self.url, error = %e, "Bridge WebSocket error");
-                        break;
-                    }
-                    Some(Ok(Message::Ping(data))) => {
-                        // Respond to keep-alive pings to avoid timeout disconnects
-                        if sink.send(Message::Pong(data)).await.is_err() {
-                            break;
-                        }
-                    }
-                    Some(Ok(Message::Close(_))) => {
-                        tracing::info!(url = %self.url, "Bridge connection closed by remote");
-                        break;
-                    }
-                    Some(Ok(Message::Text(text))) => {
-                        let msg: BridgeMessage = match serde_json::from_str(&text) {
-                            Ok(m) => m,
-                            Err(e) => {
-                                tracing::warn!(
-                                    error = %e,
-                                    raw = %text,
-                                    "Ignoring unparseable bridge message"
-                                );
-                                continue;
+                tokio::select! {
+                    ws_msg = stream.next() => {
+                        match ws_msg {
+                            None => {
+                                tracing::warn!(url = %self.url, "Bridge stream ended (EOF)");
+                                break;
                             }
-                        };
-
-                        let msg_id = msg.id.clone();
-                        let response = handler.clone()(msg).await;
-
-                        match serde_json::to_string(&response) {
-                            Ok(payload) => {
-                                if sink.send(Message::Text(payload.into())).await.is_err() {
-                                    tracing::warn!(id = %msg_id, "Failed to send bridge response");
+                            Some(Err(e)) => {
+                                tracing::warn!(url = %self.url, error = %e, "Bridge WebSocket error");
+                                break;
+                            }
+                            Some(Ok(Message::Ping(data))) => {
+                                if sink.send(Message::Pong(data)).await.is_err() {
                                     break;
                                 }
                             }
-                            Err(e) => {
-                                tracing::error!(id = %msg_id, error = %e, "Failed to serialise response");
+                            Some(Ok(Message::Close(_))) => {
+                                tracing::info!(url = %self.url, "Bridge connection closed by remote");
+                                break;
+                            }
+                            Some(Ok(Message::Text(text))) => {
+                                let msg: BridgeMessage = match serde_json::from_str(&text) {
+                                    Ok(m) => m,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            error = %e,
+                                            raw = %text,
+                                            "Ignoring unparseable bridge message"
+                                        );
+                                        continue;
+                                    }
+                                };
+
+                                let msg_id = msg.id.clone();
+                                let response = handler.clone()(msg).await;
+
+                                match serde_json::to_string(&response) {
+                                    Ok(payload) => {
+                                        if sink.send(Message::Text(payload.into())).await.is_err() {
+                                            tracing::warn!(id = %msg_id, "Failed to send bridge response");
+                                            break;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::error!(id = %msg_id, error = %e, "Failed to serialise response");
+                                    }
+                                }
+                            }
+                            Some(Ok(_)) => {} // ignore binary frames and pong
+                        }
+                    }
+                    proactive = async {
+                        match proactive_rx.as_mut() {
+                            Some(rx) => rx.recv().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        match proactive {
+                            Ok(msg) => {
+                                if let Ok(payload) = serde_json::to_string(&msg) {
+                                    if sink.send(Message::Text(payload.into())).await.is_err() {
+                                        tracing::warn!("Failed to push proactive to bridge");
+                                        break;
+                                    }
+                                    tracing::debug!(id = %msg.id, "Proactive pushed to bridge");
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                                tracing::warn!(skipped = n, "Bridge proactive receiver lagged");
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                tracing::info!("Proactive channel closed, bridge continues in relay-only mode");
+                                proactive_rx = None;
                             }
                         }
                     }
-                    Some(Ok(_)) => {} // ignore binary frames and pong
                 }
             }
 
