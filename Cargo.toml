@@ -98,3 +98,4 @@ grpcadapter = { path = "crates/adapters/grpc" }
 mcp = { path = "crates/adapters/mcp" }
 cerebellum = { path = "crates/cerebellum" }
 ganglia = { path = "crates/ganglia" }
+bridge = { path = "crates/bridge" }

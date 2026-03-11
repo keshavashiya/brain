@@ -112,7 +112,9 @@ After installation the daemon starts immediately and will restart after crashes.
 
 ## MCP Integration
 
-Any MCP-compatible client can connect to Brain as a stdio MCP server:
+Any MCP-compatible client can connect to Brain as a stdio MCP server. MCP (Model Context Protocol) is an open standard for connecting AI assistants to tools and data sources.
+
+Configure your MCP client to spawn Brain as a subprocess:
 
 ```json
 {
@@ -311,7 +313,25 @@ async fn main() -> anyhow::Result<()> {
 
 Brain's WebSocket API (`ws://localhost:19790`) is the entry point — the bridge is external and lives in its own repository. This keeps Brain small, stable, and protocol-agnostic.
 
+### Bridge CLI Command
 
+Brain provides a built-in `brain bridge` command that simplifies connecting external gateways:
+
+```bash
+# Connect to an external WebSocket gateway
+brain bridge ws://localhost:8080/gateway
+
+# With custom API key
+brain bridge ws://localhost:8080/gateway --api-key YOUR_KEY
+```
+
+The bridge command:
+1. Connects to your external WebSocket gateway
+2. Connects to Brain's WebSocket synapse internally
+3. Relays messages bidirectionally between the gateway and Brain
+4. Automatically handles reconnection with exponential backoff
+
+This is useful for quickly testing bridge connections or for simple relay setups without writing custom code.
 
 ---
 
@@ -374,7 +394,6 @@ curl -X POST http://localhost:19789/v1/signals \
   -H "Content-Type: application/json" \
   -d '{"content":"deploy staging server","agent":"devops-agent"}'
 ```
-
 
 ---
 
@@ -601,8 +620,6 @@ brain init --force --encrypt
 `--force` overwrites `~/.brain/config.yaml` with defaults and a fresh API key. Your database, vector index, and exports remain untouched.
 
 ---
-
-
 
 ## License
 

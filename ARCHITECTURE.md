@@ -684,119 +684,36 @@ If you want to connect a messaging platform, CLI tool, or AI agent to Brain, cal
 
 ### When to add a new protocol adapter
 
-Add a new adapter when you need a transport that Brain doesn't yet speak — for example Server-Sent Events (SSE), Unix domain sockets, AMQP, or a custom binary protocol.
+Add a new adapter when you need a transport that Brain doesn't yet speak — for example Unix domain sockets, AMQP, or a custom binary protocol.
 
-### Step-by-step: SSE (Server-Sent Events) Adapter
+### SSE (Server-Sent Events) — Already Implemented
 
-SSE is one-directional (server pushes, client reads), making it ideal for streaming LLM responses to browser clients.
+SSE is built into the HTTP adapter and provides one-directional streaming (server pushes, client reads) for proactive notifications. It's ideal for browser clients that want to receive real-time nudges without maintaining a WebSocket connection.
 
-**1. Create the crate**
+**Endpoint:** `GET /v1/events`
 
-```
-crates/adapters/sse/
-├── Cargo.toml
-└── src/lib.rs
-```
-
-`Cargo.toml`:
-
-```toml
-[package]
-name = "sseadapter"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-signal     = { workspace = true }
-core       = { workspace = true }
-tokio      = { workspace = true }
-axum       = { workspace = true }
-serde      = { workspace = true }
-serde_json = { workspace = true }
-futures    = { workspace = true }
+```bash
+# Authenticated SSE stream
+curl -N http://localhost:19789/v1/events \
+  -H "Authorization: Bearer YOUR_API_KEY"
 ```
 
-Add to workspace `Cargo.toml` `members` and `[workspace.dependencies]`.
-
-**2. Implement the adapter**
-
-```rust
-// crates/adapters/sse/src/lib.rs
-use std::sync::Arc;
-use axum::{
-    extract::State, http::{HeaderMap, StatusCode},
-    response::sse::{Event, Sse}, routing::get, Router,
-};
-use signal::SignalProcessor;
-
-pub struct SseAdapterState {
-    pub processor: Arc<SignalProcessor>,
-    pub api_keys: Vec<core::ApiKeyConfig>,
-}
-
-pub fn router(state: Arc<SseAdapterState>) -> Router {
-    Router::new()
-        .route("/v1/stream", get(stream_handler))
-        .with_state(state)
-}
-
-async fn stream_handler(
-    State(state): State<Arc<SseAdapterState>>,
-    headers: HeaderMap,
-) -> Result<Sse<impl futures::Stream<Item = Result<Event, std::convert::Infallible>>>, StatusCode> {
-    // 1. Authenticate
-    let key = headers.get("x-api-key")
-        .and_then(|v| v.to_str().ok()).unwrap_or("");
-    if !state.api_keys.iter().any(|k| k.key == key && k.has_permission("read")) {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    // 2. Subscribe to the live event bus
-    let mut rx = state.processor.subscribe_events();
-    let stream = async_stream::stream! {
-        while let Ok(event) = rx.recv().await {
-            let data = serde_json::json!({
-                "signal_id": event.signal_id,
-                "response":  event.response,
-                "namespace": event.namespace,
-            });
-            yield Ok(Event::default().data(data.to_string()));
-        }
-    };
-
-    Ok(Sse::new(stream))
-}
-
-pub async fn serve(
-    processor: Arc<SignalProcessor>,
-    host: &str,
-    port: u16,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let state = Arc::new(SseAdapterState {
-        api_keys: processor.config().access.api_keys.clone(),
-        processor,
-    });
-    let app = router(state);
-    let listener = tokio::net::TcpListener::bind((host, port)).await?;
-    axum::serve(listener, app).await?;
-    Ok(())
-}
+**Response format:**
+```json
+event: notification
+data: {"type":"proactive","content":"You usually work on \"auth\" around this time...","triggered_by":"habit:auth","priority":1,"agent":null}
 ```
 
-**3. Wire into `brain serve`**
+**Implementation:**
+- Route registered in `crates/adapters/http/src/lib.rs`
+- Handler at `sse_events_handler`
+- Subscribes to `NotificationRouter::subscribe()` broadcast channel
+- Streams proactive notifications as SSE events
+- Supports keep-alive and lagged client detection
 
-In `crates/cli/src/main.rs`, add a `--sse` flag to the `Serve` command and spawn the adapter into the `JoinSet`:
-
-```rust
-// In the Commands::Serve arm:
-if run_all || sse {
-    let p = processor.clone();
-    let h = host.clone();
-    let port = config.adapters.sse.port;  // add to AdaptersConfig + default.yaml
-    println!("  Synapse SSE   → http://{}:{}", h, port);
-    set.spawn(async move { sseadapter::serve(p, &h, port).await.map_err(|e| e.to_string().into()) });
-}
-```
+The SSE endpoint is used by:
+- Browser-based clients that want real-time proactive notifications
+- `brain chat` for displaying nudges at session start
 
 **Key insight:** all adapters follow the same contract: receive input → build `Signal` → call `processor.process()` → return output. The `SignalProcessor` is shared by `Arc` so memory is consistent regardless of which adapter handled the request.
 
@@ -897,7 +814,7 @@ The daemon loop in `brain serve` calls `promote_candidates()` after each consoli
 
 ```rust
 impl ProcedureStore {
-    fn store_procedure(trigger: &str, steps: &[String]) -> Result<String>;  // returns id
+    fn store_procedure(trigger: &str, steps: &[String]) -> Result<String, Result<(), SignalError>;  // returns id
     fn match_trigger(input: &str)  -> Result<Vec<Procedure>>;
     fn get_procedure(id: &str)     -> Result<Procedure>;
     fn list_procedures()           -> Result<Vec<Procedure>>;
@@ -909,6 +826,3 @@ impl ProcedureStore {
 ```
 
 Managed via the MCP `memory_procedures` tool (`list` / `store` / `delete` actions).
-
----
-

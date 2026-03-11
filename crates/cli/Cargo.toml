@@ -22,6 +22,9 @@ httpadapter = { workspace = true }
 wsadapter = { workspace = true }
 grpcadapter = { workspace = true }
 mcp = { workspace = true }
+bridge = { workspace = true }
+tokio-tungstenite = { workspace = true }
+futures-util = "0.3"
 clap = { workspace = true }
 rustyline = { workspace = true }
 crossterm = { workspace = true }
