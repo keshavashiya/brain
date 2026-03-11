@@ -2074,7 +2074,7 @@ impl cortex::actions::MemoryBackend for CliMemoryBackend {
         };
 
         let results = semantic
-            .search_similar(vector, top_k.max(1), namespace)
+            .search_similar(vector, top_k.max(1), namespace, None)
             .await
             .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))?;
 
@@ -3058,6 +3058,7 @@ impl BrainSession {
                     semantic,
                     10,
                     Some(&self.namespace),
+                    None,
                 )
                 .await
             {
@@ -3069,7 +3070,7 @@ impl BrainSession {
             }
         } else {
             self.episodic
-                .search_bm25(message, 10, Some(&self.namespace))
+                .search_bm25(message, 10, Some(&self.namespace), None)
                 .unwrap_or_default()
                 .into_iter()
                 .map(|r| hippocampus::search::Memory {
@@ -3079,6 +3080,7 @@ impl BrainSession {
                     score: r.rank,
                     importance: 0.5,
                     timestamp: r.timestamp,
+                    agent: r.agent,
                 })
                 .collect()
         };

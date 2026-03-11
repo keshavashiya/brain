@@ -273,12 +273,15 @@ async fn handle_connection(
             // Proactive notification push
             notification = proactive_fut => {
                 if let Some(notification) = notification {
-                    let frame = serde_json::json!({
+                    let mut frame = serde_json::json!({
                         "type": "proactive",
                         "content": notification.content,
                         "triggered_by": notification.triggered_by,
                         "priority": notification.priority,
                     });
+                    if let Some(agent) = &notification.agent {
+                        frame["agent"] = serde_json::json!(agent);
+                    }
                     if let Ok(json) = serde_json::to_string(&frame) {
                         if ws_tx.send(Message::Text(json.into())).await.is_err() {
                             break;

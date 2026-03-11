@@ -15,6 +15,8 @@ pub struct ProactiveNotification {
     pub content: String,
     pub triggered_by: String,
     pub priority: i32,
+    /// Originating agent (if the notification is agent-attributed).
+    pub agent: Option<String>,
 }
 
 impl From<ganglia::ProactiveMessage> for ProactiveNotification {
@@ -23,6 +25,7 @@ impl From<ganglia::ProactiveMessage> for ProactiveNotification {
             content: msg.content,
             triggered_by: msg.triggered_by,
             priority: 1,
+            agent: msg.agent,
         }
     }
 }
@@ -161,6 +164,7 @@ mod tests {
             content: "Time to review your PRs".into(),
             triggered_by: "habit:pr_review".into(),
             priority: 2,
+            agent: None,
         };
         router.deliver(notification).await;
 
@@ -180,6 +184,7 @@ mod tests {
             content: "Don't forget your standup".into(),
             triggered_by: "habit:standup".into(),
             priority: 1,
+            agent: None,
         };
         router.deliver(notification).await;
 
@@ -194,6 +199,7 @@ mod tests {
             content: "Test".into(),
             triggered_by: "test".into(),
             priority: 1,
+            agent: None,
         };
         router.deliver(notification).await;
 
@@ -215,6 +221,7 @@ mod tests {
             content: "Old nudge".into(),
             triggered_by: "test".into(),
             priority: 1,
+            agent: None,
         };
         router.deliver(notification).await;
         let drained = router.drain_pending(10);
@@ -271,6 +278,7 @@ mod tests {
             content: "Time to hydrate".into(),
             triggered_by: "habit:water".into(),
             priority: 1,
+            agent: None,
         };
         router.deliver(notification).await;
 
@@ -314,6 +322,7 @@ mod tests {
             content: "Should not trigger webhook".into(),
             triggered_by: "test".into(),
             priority: 1,
+            agent: None,
         };
         router.deliver(notification).await;
 
@@ -327,6 +336,7 @@ mod tests {
             content: "You usually check email around now".into(),
             triggered_by: "email".into(),
             created_at: chrono::Utc::now(),
+            agent: None,
         };
         let notification: ProactiveNotification = msg.into();
         assert_eq!(notification.content, "You usually check email around now");

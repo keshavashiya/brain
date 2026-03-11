@@ -275,6 +275,7 @@ mod tests {
             score: 0.9,
             importance: 0.8,
             timestamp: "2026-01-01".to_string(),
+            agent: None,
         }];
 
         let history = vec![];

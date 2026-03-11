@@ -754,6 +754,7 @@ impl SignalProcessor {
                     semantic,
                     top_k,
                     namespace,
+                    None,
                 )
                 .await
             {
@@ -777,7 +778,7 @@ impl SignalProcessor {
             // Semantic store unavailable — fall back to episodic BM25 only
             let bm25 = self
                 .episodic
-                .search_bm25(query, top_k, namespace)
+                .search_bm25(query, top_k, namespace, None)
                 .unwrap_or_default();
             let episodes_used = bm25.len();
             let memories = bm25
@@ -789,6 +790,7 @@ impl SignalProcessor {
                     score: r.rank,
                     importance: 0.5,
                     timestamp: r.timestamp,
+                    agent: r.agent,
                 })
                 .collect();
             (memories, 0, episodes_used)
@@ -854,7 +856,7 @@ impl SignalProcessor {
     ) -> Vec<hippocampus::SemanticResult> {
         if let Some(semantic) = &self.semantic {
             let qv = self.embed_text(query).await;
-            match semantic.search_similar(qv, top_k, namespace).await {
+            match semantic.search_similar(qv, top_k, namespace, None).await {
                 Ok(results) => results,
                 Err(e) => {
                     tracing::warn!("search_facts failed: {e}");

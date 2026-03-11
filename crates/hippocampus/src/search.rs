@@ -18,6 +18,8 @@ pub struct Memory {
     pub score: f64,
     pub importance: f64,
     pub timestamp: String,
+    /// Originating agent that stored this memory (if known).
+    pub agent: Option<String>,
 }
 
 /// Where this memory came from.
@@ -105,6 +107,7 @@ impl RecallEngine {
     /// 3. Fuse with Reciprocal Rank Fusion (k=60)
     /// 4. Rerank by importance × recency (forgetting curve)
     /// 5. Return top_k results
+    #[allow(clippy::too_many_arguments)]
     pub async fn recall(
         &self,
         query: &str,
@@ -113,12 +116,13 @@ impl RecallEngine {
         semantic: &SemanticStore,
         top_k: usize,
         namespace: Option<&str>,
+        agent: Option<&str>,
     ) -> Result<Vec<Memory>, RecallError> {
         let limit = self.config.pre_fusion_limit;
 
         // 1. BM25 search on episodic store
         let bm25_results = episodic
-            .search_bm25(query, limit, namespace)
+            .search_bm25(query, limit, namespace, agent)
             .map_err(RecallError::Episodic)?;
 
         let bm25_ranked: Vec<(String, f64)> = bm25_results
@@ -126,9 +130,9 @@ impl RecallEngine {
             .map(|r| (r.episode_id.clone(), r.rank))
             .collect();
 
-        // 2. ANN search on semantic store (filtered by namespace if provided)
+        // 2. ANN search on semantic store (filtered by namespace and/or agent if provided)
         let ann_results = semantic
-            .search_similar(query_vector, limit, namespace)
+            .search_similar(query_vector, limit, namespace, agent)
             .await
             .map_err(RecallError::Semantic)?;
 
@@ -161,6 +165,7 @@ impl RecallEngine {
                     score: final_score,
                     importance,
                     timestamp: fts.timestamp.clone(),
+                    agent: fts.agent.clone(),
                 });
                 continue;
             }
@@ -186,6 +191,7 @@ impl RecallEngine {
                     score: final_score,
                     importance,
                     timestamp: sr.created_at.clone(),
+                    agent: sr.fact.agent.clone(),
                 });
             }
         }

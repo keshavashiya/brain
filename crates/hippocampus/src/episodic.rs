@@ -52,6 +52,8 @@ pub struct FtsResult {
     pub rank: f64,
     /// ISO 8601 timestamp of when this episode was stored.
     pub timestamp: String,
+    /// Originating agent (if known).
+    pub agent: Option<String>,
 }
 
 /// Sanitize user input for FTS5 MATCH queries.
@@ -254,6 +256,7 @@ impl EpisodicStore {
         query: &str,
         limit: usize,
         namespace: Option<&str>,
+        agent: Option<&str>,
     ) -> Result<Vec<FtsResult>, EpisodicError> {
         let sanitized = sanitize_fts5_query(query);
         if sanitized.is_empty() {
@@ -261,50 +264,43 @@ impl EpisodicStore {
         }
 
         Ok(self.db.with_conn(|conn| {
+            // Build WHERE clause dynamically based on optional filters
+            let mut sql = String::from(
+                "SELECT e.id, f.content, f.rank, e.timestamp, e.agent
+                 FROM episodes_fts f
+                 JOIN episodes e ON e.rowid = f.rowid
+                 WHERE episodes_fts MATCH ?1",
+            );
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                vec![Box::new(sanitized)];
+
             if let Some(ns) = namespace {
-                let mut stmt = conn.prepare(
-                    "SELECT e.id, f.content, f.rank, e.timestamp
-                     FROM episodes_fts f
-                     JOIN episodes e ON e.rowid = f.rowid
-                     WHERE episodes_fts MATCH ?1
-                       AND e.namespace = ?2
-                     ORDER BY f.rank
-                     LIMIT ?3",
-                )?;
-
-                let results = stmt
-                    .query_map(rusqlite::params![sanitized, ns, limit as i64], |row| {
-                        Ok(FtsResult {
-                            episode_id: row.get(0)?,
-                            content: row.get(1)?,
-                            rank: row.get(2)?,
-                            timestamp: row.get(3)?,
-                        })
-                    })?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(results)
-            } else {
-                let mut stmt = conn.prepare(
-                    "SELECT e.id, f.content, f.rank, e.timestamp
-                     FROM episodes_fts f
-                     JOIN episodes e ON e.rowid = f.rowid
-                     WHERE episodes_fts MATCH ?1
-                     ORDER BY f.rank
-                     LIMIT ?2",
-                )?;
-
-                let results = stmt
-                    .query_map(rusqlite::params![sanitized, limit as i64], |row| {
-                        Ok(FtsResult {
-                            episode_id: row.get(0)?,
-                            content: row.get(1)?,
-                            rank: row.get(2)?,
-                            timestamp: row.get(3)?,
-                        })
-                    })?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(results)
+                sql.push_str(&format!(" AND e.namespace = ?{}", params.len() + 1));
+                params.push(Box::new(ns.to_string()));
             }
+            if let Some(a) = agent {
+                sql.push_str(&format!(" AND e.agent = ?{}", params.len() + 1));
+                params.push(Box::new(a.to_string()));
+            }
+
+            sql.push_str(&format!(" ORDER BY f.rank LIMIT ?{}", params.len() + 1));
+            params.push(Box::new(limit as i64));
+
+            let mut stmt = conn.prepare(&sql)?;
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|p| p.as_ref()).collect();
+            let results = stmt
+                .query_map(param_refs.as_slice(), |row| {
+                    Ok(FtsResult {
+                        episode_id: row.get(0)?,
+                        content: row.get(1)?,
+                        rank: row.get(2)?,
+                        timestamp: row.get(3)?,
+                        agent: row.get(4)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(results)
         })?)
     }
 
@@ -486,7 +482,7 @@ mod tests {
             .store_episode(&session, "user", "Rust has amazing performance", 0.8, None, None)
             .unwrap();
 
-        let results = store.search_bm25("Rust", 10, None).unwrap();
+        let results = store.search_bm25("Rust", 10, None, None).unwrap();
         assert_eq!(results.len(), 2);
         // Both results should contain "Rust"
         assert!(results.iter().all(|r| r.content.contains("Rust")));
@@ -539,7 +535,7 @@ mod tests {
             )
             .unwrap();
 
-        let work_hits = store.search_bm25("Rust", 10, Some("work")).unwrap();
+        let work_hits = store.search_bm25("Rust", 10, Some("work"), None).unwrap();
         assert_eq!(work_hits.len(), 1);
         assert!(work_hits[0].content.contains("memory model"));
 

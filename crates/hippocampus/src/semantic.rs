@@ -119,9 +119,10 @@ impl SemanticStore {
         query_vector: Vec<f32>,
         top_k: usize,
         namespace: Option<&str>,
+        agent: Option<&str>,
     ) -> Result<Vec<SemanticResult>, SemanticError> {
-        // Fetch more candidates so we have enough after namespace filtering
-        let fetch_k = if namespace.is_some() {
+        // Fetch more candidates so we have enough after filtering
+        let fetch_k = if namespace.is_some() || agent.is_some() {
             top_k * 4
         } else {
             top_k
@@ -139,6 +140,10 @@ impl SemanticStore {
             if let Some((fact, created_at)) = fact_opt {
                 // Filter by namespace if specified
                 if namespace.is_some_and(|ns| ns != fact.namespace) {
+                    continue;
+                }
+                // Filter by agent if specified
+                if agent.is_some_and(|a| fact.agent.as_deref() != Some(a)) {
                     continue;
                 }
                 results.push(SemanticResult {
@@ -710,7 +715,7 @@ mod tests {
             .unwrap();
 
         // Search with v1 — should find "rust is fast" first
-        let results = store.search_similar(v1, 2, None).await.unwrap();
+        let results = store.search_similar(v1, 2, None, None).await.unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].fact.subject, "rust");
     }
