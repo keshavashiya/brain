@@ -211,6 +211,8 @@ pub struct SignalProcessor {
     events_tx: tokio::sync::broadcast::Sender<SignalProcessedEvent>,
     /// Notification router for proactive message delivery (set via builder).
     notification_router: Option<notification::NotificationRouter>,
+    /// Action dispatcher for executing tool intents (set via builder).
+    action_dispatcher: Option<cortex::actions::ActionDispatcher>,
 }
 
 /// Optional LLM-backed fallback classifier for intent routing.
@@ -289,7 +291,11 @@ impl thalamus::IntentFallback for LlmIntentFallback {
     }
 }
 
-fn llm_intent_fallback_enabled() -> bool {
+fn llm_intent_fallback_enabled(config: &brain_core::BrainConfig) -> bool {
+    // Config-driven; env var override preserved for backwards compatibility.
+    if config.llm.intent_llm_fallback {
+        return true;
+    }
     std::env::var("BRAIN_INTENT_LLM_FALLBACK")
         .ok()
         .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
@@ -410,7 +416,7 @@ impl SignalProcessor {
         let recall_engine = hippocampus::RecallEngine::with_defaults();
         let (events_tx, _) = tokio::sync::broadcast::channel(512);
 
-        let classifier = if llm_intent_fallback_enabled() {
+        let classifier = if llm_intent_fallback_enabled(&config) {
             tracing::info!("LLM intent fallback enabled");
             thalamus::IntentClassifier::new()
                 .with_llm_fallback(Arc::new(LlmIntentFallback::new(llm.clone())))
@@ -432,6 +438,7 @@ impl SignalProcessor {
             procedures,
             events_tx,
             notification_router: None,
+            action_dispatcher: None,
         })
     }
 
@@ -682,11 +689,57 @@ impl SignalProcessor {
                 })
             }
 
-            // ── Other intents: route acknowledgement ─────────────────────────
-            other => Ok(SignalResponse::ok(
-                signal_id,
-                format!("Intent classified: {:?}", other),
-            )),
+            // ── SystemStatus: basic status report ────────────────────────────
+            thalamus::Intent::SystemStatus => {
+                let semantic_count = self
+                    .semantic
+                    .as_ref()
+                    .and_then(|s| s.count().ok())
+                    .unwrap_or(0);
+                let episode_count = self.episodic.count().unwrap_or(0);
+
+                Ok(SignalResponse::ok(
+                    signal_id,
+                    format!(
+                        "Brain status: {semantic_count} facts, {episode_count} episodes"
+                    ),
+                ))
+            }
+
+            // ── Action intents: dispatch via ActionDispatcher ────────────────
+            ref intent @ (thalamus::Intent::WebSearch { .. }
+            | thalamus::Intent::Schedule { .. }
+            | thalamus::Intent::SendMessage { .. }
+            | thalamus::Intent::ExecuteCommand { .. }) => {
+                let router = thalamus::SignalRouter::new();
+                match (router.intent_to_action(intent), &self.action_dispatcher) {
+                    (Some(action), Some(dispatcher)) => {
+                        let result = dispatcher.dispatch(&action).await;
+                        if result.success {
+                            Ok(SignalResponse::ok(signal_id, result.output))
+                        } else {
+                            Ok(SignalResponse::error(
+                                signal_id,
+                                result
+                                    .error
+                                    .unwrap_or_else(|| "Action failed".to_string()),
+                            ))
+                        }
+                    }
+                    (Some(_action), None) => Ok(SignalResponse::error(
+                        signal_id,
+                        format!(
+                            "Action {:?} recognized but no dispatcher configured — \
+                             enable the relevant backend in config",
+                            intent
+                        ),
+                    )),
+                    (None, _) => Ok(SignalResponse::ok(
+                        signal_id,
+                        format!("Intent classified: {:?}", intent),
+                    )),
+                }
+            }
         };
         let mut response = response?;
 
@@ -915,6 +968,12 @@ impl SignalProcessor {
     /// Expose the notification router.
     pub fn notification_router(&self) -> Option<&notification::NotificationRouter> {
         self.notification_router.as_ref()
+    }
+
+    /// Attach an action dispatcher for executing tool intents (builder pattern).
+    pub fn with_action_dispatcher(mut self, dispatcher: cortex::actions::ActionDispatcher) -> Self {
+        self.action_dispatcher = Some(dispatcher);
+        self
     }
 
     /// Flush all in-flight writes and checkpoint the SQLite WAL.

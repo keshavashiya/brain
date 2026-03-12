@@ -43,6 +43,7 @@ brain/
 │   │   ├── context     # ContextAssembler: token-budgeted prompt builder
 │   │   │                 Budget: system(500) + user_model(300) + history(2000) +
 │   │   │                 response_buffer(400) + memories(remainder of 8192)
+│   │   │                 Agent-attributed memories rendered as [source, agent: X]
 │   │   └── actions     # ActionDispatcher: pluggable backend traits
 │   │                     MemoryBackend, WebSearchBackend, SchedulingBackend, MessageBackend
 │   │                     Deterministic dispatch contract (disabled / not-configured / real)
@@ -146,7 +147,8 @@ SignalProcessor::process(&signal)
      ├─ 1. Amygdala: score importance (keyword heuristics + novelty) → f32 [0.0–1.0]
      │
      ├─ 2. Thalamus: classify intent
-     │         Regex fast-path first → async LLM fallback (timeout-bounded) if no match
+     │         Regex fast-path first → async LLM fallback (config: llm.intent_llm_fallback
+     │         or env BRAIN_INTENT_LLM_FALLBACK) if no match
      │         → Classification { intent, confidence, method: Regex|Llm|Fallback }
      │
      ├─ 3. Cerebellum: match stored procedure triggers (case-insensitive substring)
@@ -173,7 +175,7 @@ SignalProcessor::process(&signal)
      │                 → EpisodicStore::store_episode(assistant turn)
      │
      │     WebSearch   → ActionDispatcher::web_search (SearXNG / Tavily / custom HTTP)
-     │     Schedule    → ActionDispatcher::schedule_task (SQLite persist-only)
+     │     Schedule    → ActionDispatcher::schedule_task (SQLite persist + background poller)
      │     SendMessage → ActionDispatcher::send_message (webhook POST with template)
      │     Command     → ActionDispatcher::execute_command (allowlist + timeout)
      │
@@ -251,6 +253,10 @@ impl SignalProcessor {
     pub async fn search_facts(&self, query: &str, top_k: usize,
         namespace: Option<&str>) -> Vec<SemanticResult>;
 
+    // Builder methods — attach optional subsystems before wrapping in Arc
+    pub fn with_notification_router(self, router: NotificationRouter) -> Self;
+    pub fn with_action_dispatcher(self, dispatcher: ActionDispatcher) -> Self;
+
     // Inspector accessors used by adapter route handlers
     pub fn list_facts(&self, namespace: Option<&str>) -> Vec<Fact>;
     pub fn facts_about(&self, subject: &str) -> Vec<Fact>;
@@ -285,7 +291,7 @@ Migration-based schema versioned in a `MIGRATIONS` slice. The runner compares `M
 | `user_profile` | Key-value store for user preferences |
 | `procedures` | trigger_pattern → steps_json automation rules |
 | `audit_log` | Action audit trail (action type, input, output, timestamps) |
-| `scheduled_intents` | Persisted scheduling intents (persist-only mode) |
+| `scheduled_intents` | Persisted scheduling intents (background poller fires & delivers via NotificationRouter) |
 | `episode_promotions` | Idempotency log for episode → semantic-fact promotions |
 | `notification_outbox` | Proactive notification queue with priority and delivery status |
 | `habit_state` | Rate-limit state for proactivity engine (daily count, last sent) |
@@ -443,7 +449,7 @@ trait MessageBackend   { async fn send(channel, recipient, content, namespace) -
 | Backend | Implementation |
 |---------|---------------|
 | Web search | `SearxngSearchBackend`, `TavilySearchBackend`, `CustomSearchBackend` |
-| Scheduling | `CliSchedulingBackend` (SQLite persist-only) |
+| Scheduling | `CliSchedulingBackend` (SQLite persist + 60s background poller) |
 | Messaging | `WebhookMessageBackend` (configurable channel → webhook URL + body template) |
 | Memory | `CliMemoryBackend` (wraps `SemanticStore` + `Embedder`) |
 

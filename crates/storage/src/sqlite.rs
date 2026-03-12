@@ -272,6 +272,30 @@ impl SqlitePool {
         })
     }
 
+    /// Return all scheduled intents with status `"scheduled"` (i.e. pending execution).
+    pub fn due_scheduled_intents(&self) -> Result<Vec<ScheduledIntent>, SqliteError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, description, cron, namespace, created_at, status, metadata
+                 FROM scheduled_intents
+                 WHERE status = 'scheduled'
+                 ORDER BY created_at ASC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(ScheduledIntent {
+                    id: row.get(0)?,
+                    description: row.get(1)?,
+                    cron: row.get(2)?,
+                    namespace: row.get(3)?,
+                    created_at: row.get(4)?,
+                    status: row.get(5)?,
+                    metadata: row.get(6)?,
+                })
+            })?;
+            Ok(rows.filter_map(|r| r.ok()).collect())
+        })
+    }
+
     /// Run all schema migrations.
     fn migrate(&self) -> Result<(), SqliteError> {
         self.with_conn(|conn| {

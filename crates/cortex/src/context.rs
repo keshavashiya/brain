@@ -176,7 +176,11 @@ You are running locally on the user's machine with full privacy."#
         let mut memory_context = String::new();
 
         for memory in memories {
-            let memory_text = format!("- [{:?}] {}\n", memory.source, memory.content);
+            let memory_text = if let Some(ref agent) = memory.agent {
+                format!("- [{:?}, agent: {}] {}\n", memory.source, agent, memory.content)
+            } else {
+                format!("- [{:?}] {}\n", memory.source, memory.content)
+            };
             let memory_tokens = memory_text.len() / 4;
 
             if current_tokens + memory_tokens > memory_budget {
@@ -288,6 +292,50 @@ mod tests {
             "What language should I learn?"
         );
         assert_eq!(messages.last().unwrap().role, Role::User);
+    }
+
+    #[test]
+    fn test_context_assembler_agent_attribution() {
+        use hippocampus::search::MemorySource;
+
+        let assembler = ContextAssembler::with_defaults();
+
+        let memories = vec![
+            Memory {
+                id: "1".to_string(),
+                content: "User likes coffee".to_string(),
+                source: MemorySource::Episodic,
+                score: 0.9,
+                importance: 0.8,
+                timestamp: "2026-01-01".to_string(),
+                agent: Some("slack-bot".to_string()),
+            },
+            Memory {
+                id: "2".to_string(),
+                content: "User works remotely".to_string(),
+                source: MemorySource::Semantic,
+                score: 0.85,
+                importance: 0.7,
+                timestamp: "2026-01-02".to_string(),
+                agent: None,
+            },
+        ];
+
+        let messages = assembler.assemble("Tell me about the user", &memories, &[]);
+
+        let memory_msg = messages
+            .iter()
+            .find(|m| m.content.contains("Relevant memories"))
+            .expect("should have memory context message");
+
+        assert!(
+            memory_msg.content.contains("agent: slack-bot"),
+            "memory with agent should include attribution"
+        );
+        assert!(
+            !memory_msg.content.contains("agent: ") || memory_msg.content.matches("agent: ").count() == 1,
+            "memory without agent should NOT include agent label"
+        );
     }
 
     #[test]

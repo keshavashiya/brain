@@ -63,6 +63,9 @@ pub struct LlmConfig {
     pub base_url: String,
     pub temperature: f64,
     pub max_tokens: u32,
+    /// Enable LLM-based intent classification fallback when regex is uncertain.
+    #[serde(default)]
+    pub intent_llm_fallback: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -638,6 +641,7 @@ impl Default for BrainConfig {
                 base_url: "http://localhost:11434".to_string(),
                 temperature: 0.7,
                 max_tokens: 4096,
+                intent_llm_fallback: false,
             },
             embedding: EmbeddingConfig {
                 model: "nomic-embed-text".to_string(),

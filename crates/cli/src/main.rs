@@ -628,6 +628,105 @@ async fn main() -> anyhow::Result<()> {
 
                 processor = processor.with_notification_router(router);
             }
+
+            // Wire action dispatcher for tool intents (WebSearch, Schedule, SendMessage, ExecuteCommand)
+            {
+                let action_config = cortex::actions::ActionConfig {
+                    command_allowlist: config.security.exec_allowlist.clone(),
+                    command_timeout_secs: config.security.exec_timeout_seconds as u64,
+                    enable_web_search: config.actions.web_search.enabled,
+                    enable_scheduling: config.actions.scheduling.enabled,
+                    enable_channel_send: config.actions.messaging.enabled,
+                    web_search_top_k: config.actions.web_search.default_top_k,
+                };
+                let mut dispatcher = cortex::actions::ActionDispatcher::new(action_config);
+
+                if config.actions.web_search.enabled {
+                    let ws = &config.actions.web_search;
+                    let timeout = ws.timeout_ms;
+                    let endpoint = ws.endpoint.trim();
+                    let res = &config.actions.resilience;
+
+                    let backend_result: Result<
+                        Option<Arc<dyn cortex::actions::WebSearchBackend>>,
+                        anyhow::Error,
+                    > = match ws.provider {
+                        brain_core::config::WebSearchProvider::Searxng => {
+                            let ep = if endpoint.is_empty() {
+                                "http://localhost:8888"
+                            } else {
+                                endpoint
+                            };
+                            SearxngSearchBackend::new(ep, timeout, res)
+                                .map(|b| Some(Arc::new(b) as _))
+                        }
+                        brain_core::config::WebSearchProvider::Tavily => {
+                            let api_key = ws.api_key.trim();
+                            if api_key.is_empty() {
+                                tracing::warn!("actions.web_search.provider=tavily but api_key is empty; backend not configured");
+                                Ok(None)
+                            } else {
+                                let ep = if endpoint.is_empty() {
+                                    "https://api.tavily.com"
+                                } else {
+                                    endpoint
+                                };
+                                TavilySearchBackend::new(ep, api_key, timeout, res)
+                                    .map(|b| Some(Arc::new(b) as _))
+                            }
+                        }
+                        brain_core::config::WebSearchProvider::Custom => {
+                            if endpoint.is_empty() {
+                                tracing::warn!("actions.web_search.provider=custom but endpoint is empty; backend not configured");
+                                Ok(None)
+                            } else {
+                                CustomSearchBackend::new(endpoint, timeout, res)
+                                    .map(|b| Some(Arc::new(b) as _))
+                            }
+                        }
+                    };
+
+                    match backend_result {
+                        Ok(Some(backend)) => {
+                            tracing::info!(
+                                provider = %serde_json::to_string(&ws.provider).unwrap_or_default().trim_matches('"'),
+                                "Web search backend configured for serve"
+                            );
+                            dispatcher = dispatcher.with_web_search_backend(backend);
+                        }
+                        Ok(None) => {}
+                        Err(e) => tracing::warn!("Web search backend init failed: {e}"),
+                    }
+                }
+
+                if config.actions.scheduling.enabled {
+                    let db = processor.episodic().pool().clone();
+                    let backend = CliSchedulingBackend {
+                        db,
+                        mode: config.actions.scheduling.mode.clone(),
+                    };
+                    dispatcher = dispatcher.with_scheduling_backend(Arc::new(backend));
+                }
+
+                if config.actions.messaging.enabled
+                    && !config.actions.messaging.channels.is_empty()
+                {
+                    let res = &config.actions.resilience;
+                    match WebhookMessageBackend::new(
+                        &config.actions.messaging.channels,
+                        config.actions.messaging.timeout_ms,
+                        res,
+                    ) {
+                        Ok(backend) => {
+                            tracing::info!("Message backend configured for serve");
+                            dispatcher = dispatcher.with_message_backend(Arc::new(backend));
+                        }
+                        Err(e) => tracing::warn!("Message backend init failed: {e}"),
+                    }
+                }
+
+                processor = processor.with_action_dispatcher(dispatcher);
+            }
             let processor = Arc::new(processor);
 
             println!("Waking Brain OS...");
@@ -762,6 +861,54 @@ async fn main() -> anyhow::Result<()> {
                     interval_minutes = ol_cfg.check_interval_minutes,
                     "Open-loop detector scheduled"
                 );
+            }
+
+            // ── Scheduled intent poller ────────────────────────────────────────
+            // Periodically checks for persisted intents with status "scheduled"
+            // and delivers them as proactive notifications so they surface to the
+            // user on the next interaction (outbox) or immediately (broadcast/webhook).
+            if config.actions.scheduling.enabled {
+                let p = processor.clone();
+                set.spawn(async move {
+                    // Check every 60 seconds
+                    let mut ticker =
+                        tokio::time::interval(tokio::time::Duration::from_secs(60));
+                    ticker.tick().await; // skip first tick
+                    loop {
+                        ticker.tick().await;
+                        let db = p.episodic().pool();
+                        let due = match db.due_scheduled_intents() {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::warn!("Scheduled intent poll failed: {e}");
+                                continue;
+                            }
+                        };
+                        for intent in due {
+                            tracing::info!(
+                                id = %intent.id,
+                                description = %intent.description,
+                                "Firing scheduled intent"
+                            );
+                            // Deliver as proactive notification
+                            if let Some(router) = p.notification_router() {
+                                let notif = signal::notification::ProactiveNotification {
+                                    content: format!(
+                                        "[scheduled] {}",
+                                        intent.description
+                                    ),
+                                    triggered_by: "scheduler".to_string(),
+                                    priority: 1,
+                                    agent: None,
+                                };
+                                router.deliver(notif).await;
+                            }
+                            // Mark as fired
+                            let _ = db.update_scheduled_intent_status(&intent.id, "fired");
+                        }
+                    }
+                });
+                tracing::info!("Scheduled intent poller started (every 60s)");
             }
 
             // ── Memory consolidation background task ──────────────────────────

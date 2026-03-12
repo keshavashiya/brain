@@ -471,8 +471,11 @@ actions:
 ```yaml
   scheduling:
     enabled: false
-    mode: "persist_only"    # intents stored in SQLite; no internal cron runner
+    mode: "persist_only"    # intents stored in SQLite; background poller fires due intents
 ```
+
+When `scheduling.enabled: true`, a background task in `brain serve` polls every 60 seconds for
+pending intents and delivers them as proactive notifications via the `NotificationRouter`.
 
 ---
 
@@ -544,6 +547,7 @@ llm:
   base_url: "http://localhost:11434"
   temperature: 0.7
   max_tokens: 4096
+  intent_llm_fallback: false       # enable LLM fallback when regex intent classification is uncertain
 ```
 
 To use OpenAI or OpenRouter:
