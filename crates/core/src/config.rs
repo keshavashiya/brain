@@ -63,6 +63,10 @@ pub struct LlmConfig {
     pub base_url: String,
     pub temperature: f64,
     pub max_tokens: u32,
+    /// API key for the LLM provider (required for OpenAI, OpenRouter, etc.).
+    /// Can also be set via `BRAIN_LLM__API_KEY` environment variable.
+    #[serde(default)]
+    pub api_key: String,
     /// Enable LLM-based intent classification fallback when regex is uncertain.
     #[serde(default)]
     pub intent_llm_fallback: bool,
@@ -641,6 +645,7 @@ impl Default for BrainConfig {
                 base_url: "http://localhost:11434".to_string(),
                 temperature: 0.7,
                 max_tokens: 4096,
+                api_key: String::new(),
                 intent_llm_fallback: false,
             },
             embedding: EmbeddingConfig {

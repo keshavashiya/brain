@@ -223,18 +223,34 @@ impl SemanticStore {
         })?)
     }
 
-    /// Get all facts by category.
-    pub fn get_facts_by_category(&self, category: &str) -> Result<Vec<Fact>, SemanticError> {
+    /// Get all facts by category, optionally filtered by namespace.
+    pub fn get_facts_by_category(
+        &self,
+        category: &str,
+        namespace: Option<&str>,
+    ) -> Result<Vec<Fact>, SemanticError> {
         let pool = &self.db;
         Ok(self.db.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
-                 FROM semantic_facts WHERE category = ?1
-                 ORDER BY updated_at DESC",
-            )?;
+            let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match namespace {
+                Some(ns) => (
+                    "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
+                     FROM semantic_facts WHERE category = ?1 AND namespace = ?2 AND superseded_by IS NULL
+                     ORDER BY updated_at DESC".to_string(),
+                    vec![Box::new(category.to_string()), Box::new(ns.to_string())],
+                ),
+                None => (
+                    "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
+                     FROM semantic_facts WHERE category = ?1 AND superseded_by IS NULL
+                     ORDER BY updated_at DESC".to_string(),
+                    vec![Box::new(category.to_string())],
+                ),
+            };
+
+            let mut stmt = conn.prepare(&sql)?;
+            let params_ref: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
 
             let facts = stmt
-                .query_map([category], |row| {
+                .query_map(params_ref.as_slice(), |row| {
                     let raw_object: String = row.get(5)?;
                     Ok(Fact {
                         id: row.get(0)?,
@@ -615,11 +631,24 @@ mod tests {
             .await
             .unwrap();
 
-        let personal = store.get_facts_by_category("personal").unwrap();
+        // Without namespace filter — returns all
+        let personal = store.get_facts_by_category("personal", None).unwrap();
         assert_eq!(personal.len(), 2);
 
-        let work = store.get_facts_by_category("work").unwrap();
+        let work = store.get_facts_by_category("work", None).unwrap();
         assert_eq!(work.len(), 1);
+
+        // With namespace filter — scoped correctly
+        let scoped = store
+            .get_facts_by_category("personal", Some("personal"))
+            .unwrap();
+        assert_eq!(scoped.len(), 2);
+
+        // Cross-namespace isolation: "work" category stored under "personal" namespace
+        let cross = store
+            .get_facts_by_category("work", Some("other"))
+            .unwrap();
+        assert_eq!(cross.len(), 0);
     }
 
     #[tokio::test]

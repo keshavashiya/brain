@@ -291,6 +291,15 @@ impl thalamus::IntentFallback for LlmIntentFallback {
     }
 }
 
+/// Resolve the LLM API key from config, with env var fallback for backwards compatibility.
+fn resolve_llm_api_key(config: &brain_core::BrainConfig) -> String {
+    let from_config = config.llm.api_key.trim().to_string();
+    if !from_config.is_empty() {
+        return from_config;
+    }
+    std::env::var("BRAIN_LLM__API_KEY").unwrap_or_default()
+}
+
 fn llm_intent_fallback_enabled(config: &brain_core::BrainConfig) -> bool {
     // Config-driven; env var override preserved for backwards compatibility.
     if config.llm.intent_llm_fallback {
@@ -350,10 +359,15 @@ impl SignalProcessor {
         }
 
         // Create LLM provider
+        let llm_api_key = resolve_llm_api_key(&config);
         let llm_config = cortex::llm::ProviderConfig {
             provider: config.llm.provider.clone(),
             base_url: config.llm.base_url.clone(),
-            api_key: None,
+            api_key: if llm_api_key.is_empty() {
+                None
+            } else {
+                Some(llm_api_key.clone())
+            },
             model: config.llm.model.clone(),
             temperature: config.llm.temperature,
             max_tokens: config.llm.max_tokens as i32,
@@ -366,7 +380,6 @@ impl SignalProcessor {
         let embedding_dim = config.embedding.dimensions as usize;
         let embedder_inner = match config.llm.provider.as_str() {
             "openai" => {
-                let api_key = std::env::var("BRAIN_LLM__API_KEY").unwrap_or_else(|_| String::new());
                 tracing::info!(
                     model = config.embedding.model,
                     dim = embedding_dim,
@@ -375,7 +388,7 @@ impl SignalProcessor {
                 Some(hippocampus::Embedder::for_openai(
                     &config.llm.base_url,
                     &config.embedding.model,
-                    &api_key,
+                    &llm_api_key,
                 ))
             }
             _ => {

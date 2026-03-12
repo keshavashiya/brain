@@ -17,6 +17,7 @@ llm:
   provider: "ollama"
   model: "qwen2.5-coder:7b"
   base_url: "http://localhost:11434"
+  api_key: ""                 # Required for openai provider; also settable via BRAIN_LLM__API_KEY env var
   temperature: 0.7
   max_tokens: 4096
   intent_llm_fallback: false  # Enable LLM fallback for intent classification when regex is uncertain

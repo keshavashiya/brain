@@ -545,6 +545,7 @@ llm:
   provider: "ollama"               # ollama | openai
   model: "qwen2.5-coder:7b"
   base_url: "http://localhost:11434"
+  api_key: ""                      # required for openai provider
   temperature: 0.7
   max_tokens: 4096
   intent_llm_fallback: false       # enable LLM fallback when regex intent classification is uncertain
@@ -559,6 +560,8 @@ llm:
   api_key: "sk-..."
   model: "gpt-4o"
 ```
+
+The `api_key` can also be set via the `BRAIN_LLM__API_KEY` environment variable (takes precedence over config file). Both the LLM and embedding providers use this key.
 
 ### Embedding Model
 
@@ -592,6 +595,8 @@ BRAIN_PASSPHRASE="your-passphrase" brain serve
 # Or Brain will prompt interactively on startup
 brain serve
 ```
+
+**Note:** When encryption is enabled, the FTS5 full-text search index cannot operate on encrypted content. Keyword search (BM25) returns no results — hybrid search relies entirely on vector similarity (HNSW ANN). Search still works but recall quality may be lower for keyword-heavy queries.
 
 ---
 

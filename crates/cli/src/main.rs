@@ -355,6 +355,15 @@ fn write_salt(config: &brain_core::BrainConfig, salt: &[u8; 16]) -> anyhow::Resu
     Ok(())
 }
 
+/// Resolve the LLM API key from config, with env var fallback for backwards compatibility.
+fn resolve_llm_api_key(config: &brain_core::BrainConfig) -> String {
+    let from_config = config.llm.api_key.trim().to_string();
+    if !from_config.is_empty() {
+        return from_config;
+    }
+    std::env::var("BRAIN_LLM__API_KEY").unwrap_or_default()
+}
+
 /// Build an `Encryptor` from config + passphrase, or `None` when encryption is disabled.
 ///
 /// Passphrase is read from `BRAIN_PASSPHRASE` env var (daemon/CI) or prompted
@@ -639,7 +648,30 @@ async fn main() -> anyhow::Result<()> {
                     enable_channel_send: config.actions.messaging.enabled,
                     web_search_top_k: config.actions.web_search.default_top_k,
                 };
-                let mut dispatcher = cortex::actions::ActionDispatcher::new(action_config);
+
+                // Wire MemoryBackend so action-level store/recall works in serve mode
+                let embedding_dim = config.embedding.dimensions as usize;
+                let serve_llm_api_key = resolve_llm_api_key(&config);
+                let serve_embedder = Arc::new(tokio::sync::Mutex::new(
+                    match config.llm.provider.as_str() {
+                        "openai" => Some(hippocampus::Embedder::for_openai(
+                            &config.llm.base_url,
+                            &config.embedding.model,
+                            &serve_llm_api_key,
+                        )),
+                        _ => Some(hippocampus::Embedder::for_ollama(
+                            &config.llm.base_url,
+                            &config.embedding.model,
+                        )),
+                    },
+                ));
+                let action_backend = Arc::new(CliMemoryBackend {
+                    semantic: processor.semantic().cloned(),
+                    embedder: serve_embedder,
+                    embedding_dim,
+                });
+                let mut dispatcher =
+                    cortex::actions::ActionDispatcher::with_memory_backend(action_config, action_backend);
 
                 if config.actions.web_search.enabled {
                     let ws = &config.actions.web_search;
@@ -1121,10 +1153,15 @@ async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Result<()> {
     );
 
     // LLM health
+    let llm_api_key = resolve_llm_api_key(&config);
     let llm_cfg = cortex::llm::ProviderConfig {
         provider: config.llm.provider.clone(),
         base_url: config.llm.base_url.clone(),
-        api_key: None,
+        api_key: if llm_api_key.is_empty() {
+            None
+        } else {
+            Some(llm_api_key)
+        },
         model: config.llm.model.clone(),
         temperature: config.llm.temperature,
         max_tokens: config.llm.max_tokens as i32,
@@ -1848,15 +1885,13 @@ async fn cmd_import(
                 ruv.ensure_tables().await.ok();
 
                 // Create embedder
+                let llm_api_key = resolve_llm_api_key(&config);
                 let embedder = match config.llm.provider.as_str() {
-                    "openai" => {
-                        let api_key = std::env::var("BRAIN_LLM__API_KEY").unwrap_or_default();
-                        hippocampus::Embedder::for_openai(
-                            &config.llm.base_url,
-                            &config.embedding.model,
-                            &api_key,
-                        )
-                    }
+                    "openai" => hippocampus::Embedder::for_openai(
+                        &config.llm.base_url,
+                        &config.embedding.model,
+                        &llm_api_key,
+                    ),
                     _ => hippocampus::Embedder::for_ollama(
                         &config.llm.base_url,
                         &config.embedding.model,
@@ -3178,16 +3213,14 @@ impl BrainSession {
 
         // Create embedder (same logic as SignalProcessor)
         let embedding_dim = config.embedding.dimensions as usize;
+        let llm_api_key = resolve_llm_api_key(&config);
         let embedder = Arc::new(tokio::sync::Mutex::new(
             match config.llm.provider.as_str() {
-                "openai" => {
-                    let api_key = std::env::var("BRAIN_LLM__API_KEY").unwrap_or_default();
-                    Some(hippocampus::Embedder::for_openai(
-                        &config.llm.base_url,
-                        &config.embedding.model,
-                        &api_key,
-                    ))
-                }
+                "openai" => Some(hippocampus::Embedder::for_openai(
+                    &config.llm.base_url,
+                    &config.embedding.model,
+                    &llm_api_key,
+                )),
                 _ => Some(hippocampus::Embedder::for_ollama(
                     &config.llm.base_url,
                     &config.embedding.model,

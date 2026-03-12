@@ -485,7 +485,7 @@ The default namespace is `"personal"`. Namespaces are a first-class schema conce
 | CORS | `localhost_cors()` — only `127.0.0.1` and `localhost` origins allowed |
 | Error exposure | HTTP 500 returns opaque message; real error logged server-side only |
 | Shell execution | `security.exec_allowlist` in config; configurable `exec_timeout_seconds` |
-| Encryption at rest | AES-256-GCM via `brain init --encrypt` (opt-in); Argon2id key derivation |
+| Encryption at rest | AES-256-GCM via `brain init --encrypt` (opt-in); Argon2id key derivation. **Note:** FTS5 full-text search is disabled when encryption is active — hybrid search relies on vector similarity only |
 | LLM client failures | `Result<>` throughout — TLS failures surface as errors, never panics |
 | Embedding fallback | Deterministic non-zero vectors when provider is down — writes never fail silently |
 
@@ -771,6 +771,8 @@ config/default.yaml     (compiled-in defaults via include_str!)
 ```
 
 The `BrainConfig` struct in `crates/core/src/config.rs` maps 1-to-1 with the YAML keys. Double-underscore (`__`) is the env-var nesting separator (e.g. `BRAIN_ACTIONS__WEB_SEARCH__ENABLED=false`).
+
+**LLM API key resolution:** `llm.api_key` in config, with `BRAIN_LLM__API_KEY` env var as fallback. Config takes precedence when non-empty. Both the LLM provider and the embedding provider share this key.
 
 `BrainConfig::validate()` runs before `brain serve` and `brain start`. It returns:
 - `Err(String)` for hard errors that must block startup (port conflicts, invalid LLM URL)
