@@ -179,6 +179,20 @@ impl SemanticStore {
             // Look up the full fact + timestamp from SQLite
             let fact_opt = self.get_fact_with_timestamp(&vr.id)?;
             if let Some((fact, created_at)) = fact_opt {
+                // Skip superseded facts
+                let is_superseded = self.db.with_conn(|conn| {
+                    let superseded: Option<String> = conn.query_row(
+                        "SELECT superseded_by FROM semantic_facts WHERE id = ?1",
+                        [&vr.id],
+                        |row| row.get(0)
+                    ).unwrap_or(None);
+                    Ok(superseded.is_some())
+                }).unwrap_or(false);
+
+                if is_superseded {
+                    continue;
+                }
+
                 // Filter by namespace if specified
                 if namespace.is_some_and(|ns| ns != fact.namespace) {
                     continue;
@@ -431,10 +445,12 @@ impl SemanticStore {
             let facts: Vec<Fact> = if let Some(ns) = namespace {
                 let mut stmt = conn.prepare(
                     "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
-                     FROM semantic_facts WHERE superseded_by IS NULL AND namespace = ?1
+                     FROM semantic_facts 
+                     WHERE superseded_by IS NULL AND (namespace = ?1 OR namespace LIKE ?2)
                      ORDER BY rowid DESC",
                 )?;
-                let rows = stmt.query_map([ns], row_to_fact)?.collect::<Result<Vec<_>, _>>()?;
+                let prefix = format!("{}/%", ns);
+                let rows = stmt.query_map(rusqlite::params![ns, &prefix], row_to_fact)?.collect::<Result<Vec<_>, _>>()?;
                 rows
             } else {
                 let mut stmt = conn.prepare(
@@ -539,12 +555,13 @@ impl SemanticStore {
                     "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
                      FROM semantic_facts
                      WHERE superseded_by IS NULL
-                       AND namespace = ?2
+                       AND (namespace = ?2 OR namespace LIKE ?3)
                        AND (subject LIKE ?1 OR predicate LIKE ?1 OR object LIKE ?1)
                      ORDER BY rowid DESC
                      LIMIT 50",
                 )?;
-                let rows = stmt.query_map(rusqlite::params![&pattern, ns], row_to_fact)?;
+                let prefix = format!("{}/%", ns);
+                let rows = stmt.query_map(rusqlite::params![&pattern, ns, &prefix], row_to_fact)?;
                 rows.collect::<Result<Vec<_>, _>>()?
             } else {
                 let mut stmt = conn.prepare(
@@ -596,8 +613,11 @@ mod tests {
         (SemanticStore::new(db, ruv), ruv_dir)
     }
 
-    fn dummy_vector() -> Vec<f32> {
-        vec![0.1; 384]
+    fn dummy_vector(val: f32) -> Vec<f32> {
+        let mut v = vec![0.0; 384];
+        let idx = (val * 100.0) as usize % 384;
+        v[idx] = 1.0;
+        v
     }
 
     #[tokio::test]
@@ -613,7 +633,7 @@ mod tests {
                 "Keshav",
                 1.0,
                 None,
-                dummy_vector(),
+                dummy_vector(0.1),
                 None,
             )
             .await
@@ -640,7 +660,7 @@ mod tests {
                 "Keshav",
                 1.0,
                 None,
-                dummy_vector(),
+                dummy_vector(0.1),
                 None,
             )
             .await
@@ -654,7 +674,7 @@ mod tests {
                 "Rust",
                 0.9,
                 None,
-                dummy_vector(),
+                dummy_vector(0.2),
                 None,
             )
             .await
@@ -668,7 +688,7 @@ mod tests {
                 "developer",
                 0.8,
                 None,
-                dummy_vector(),
+                dummy_vector(0.3),
                 None,
             )
             .await
@@ -705,7 +725,7 @@ mod tests {
                 "Keshav",
                 1.0,
                 None,
-                dummy_vector(),
+                dummy_vector(0.1),
                 None,
             )
             .await
@@ -719,7 +739,7 @@ mod tests {
                 "Rust",
                 0.9,
                 None,
-                dummy_vector(),
+                dummy_vector(0.2),
                 None,
             )
             .await
@@ -733,7 +753,7 @@ mod tests {
                 "user",
                 0.5,
                 None,
-                dummy_vector(),
+                dummy_vector(0.3),
                 None,
             )
             .await
@@ -757,7 +777,7 @@ mod tests {
                 "c",
                 1.0,
                 None,
-                dummy_vector(),
+                dummy_vector(0.1),
                 None,
             )
             .await
@@ -815,14 +835,14 @@ mod tests {
                 "NYC",
                 1.0,
                 None,
-                dummy_vector(),
+                dummy_vector(0.1),
                 None,
             )
             .await
             .unwrap();
 
         let new_id = store
-            .update_fact(&old_id, "SF", dummy_vector())
+            .update_fact(&old_id, "SF", dummy_vector(0.2))
             .await
             .unwrap();
 
@@ -849,7 +869,7 @@ mod tests {
                 "coding",
                 1.0,
                 None,
-                dummy_vector(),
+                dummy_vector(0.1),
                 None,
             )
             .await
@@ -863,7 +883,7 @@ mod tests {
                 "developer",
                 1.0,
                 None,
-                dummy_vector(),
+                dummy_vector(0.2),
                 None,
             )
             .await
@@ -896,7 +916,7 @@ mod tests {
                 "coding",
                 1.0,
                 None,
-                dummy_vector(),
+                dummy_vector(0.1),
                 None,
             )
             .await
@@ -910,7 +930,7 @@ mod tests {
                 "Keshav",
                 1.0,
                 None,
-                dummy_vector(),
+                dummy_vector(0.2),
                 None,
             )
             .await
@@ -924,7 +944,7 @@ mod tests {
                 "developer",
                 1.0,
                 None,
-                dummy_vector(),
+                dummy_vector(0.3),
                 None,
             )
             .await

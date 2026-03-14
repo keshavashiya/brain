@@ -378,11 +378,12 @@ mod tests {
         let system = &messages[0].content;
 
         assert!(system.contains("Brain"));
-        assert!(system.contains("memory assistant"));
-        assert!(system.contains("Episodic memory"));
-        assert!(system.contains("Semantic memory"));
-        assert!(system.contains("Web search"));
-        assert!(system.contains("don't know"));
+        assert!(system.contains("SOUL"));
+        assert!(system.contains("biologically-inspired"));
+        assert!(system.contains("Episodic Memory"));
+        assert!(system.contains("Semantic Memory"));
+        assert!(system.contains("Proactivity"));
+        assert!(system.contains("TRUTH OVER HALLUCINATION"));
     }
 
     #[test]
