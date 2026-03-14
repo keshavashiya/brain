@@ -52,10 +52,7 @@ pub trait WebhookSender: Send + Sync {
 
 impl NotificationRouter {
     /// Create a new notification router.
-    pub fn new(
-        db: SqlitePool,
-        delivery_config: brain_core::DeliveryConfig,
-    ) -> Self {
+    pub fn new(db: SqlitePool, delivery_config: brain_core::DeliveryConfig) -> Self {
         let (proactive_tx, _) = broadcast::channel(256);
         Self {
             db,

@@ -8,6 +8,7 @@
 //! gates pass, a proactive message is emitted.
 
 use chrono::{DateTime, Datelike, NaiveTime, Timelike, Utc};
+use chrono_tz::Tz;
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use storage::SqlitePool;
@@ -64,6 +65,8 @@ pub struct HabitConfig {
     pub quiet_start: String,
     /// Quiet-hours end (HH:MM, UTC).
     pub quiet_end: String,
+    /// User's local timezone (e.g. "America/New_York", "Europe/London").
+    pub timezone: String,
     /// Minimum observations before a pattern is considered stable.
     pub min_occurrences: usize,
     /// How many days back to scan for patterns.
@@ -77,6 +80,7 @@ impl Default for HabitConfig {
             min_interval_minutes: 60,
             quiet_start: "22:00".to_string(),
             quiet_end: "08:00".to_string(),
+            timezone: "UTC".to_string(),
             min_occurrences: 3,
             lookback_days: 30,
         }
@@ -169,9 +173,9 @@ impl HabitEngine {
                     .trim_matches(|c: char| !c.is_alphanumeric())
                     .to_lowercase();
                 if kw.len() >= 4 && !STOPWORDS.contains(&kw.as_str()) && seen.insert(kw.clone()) {
-                    let entry = counts.entry((kw, dow, hour)).or_insert_with(|| {
-                        (0, HashSet::new())
-                    });
+                    let entry = counts
+                        .entry((kw, dow, hour))
+                        .or_insert_with(|| (0, HashSet::new()));
                     entry.0 += 1;
                     entry.1.insert(agent.clone());
                 }
@@ -204,9 +208,10 @@ impl HabitEngine {
 
     // ── Rate limiting ─────────────────────────────────────────────────────────
 
-    /// Returns `true` if the current UTC time is within quiet hours.
+    /// Returns `true` if the current time in the configured timezone is within quiet hours.
     pub fn is_quiet_time(&self) -> bool {
-        let now = Utc::now();
+        let tz: Tz = self.config.timezone.parse().unwrap_or(chrono_tz::UTC);
+        let now = Utc::now().with_timezone(&tz);
         let current = NaiveTime::from_hms_opt(now.hour(), now.minute(), 0).unwrap_or_default();
 
         let parse = |s: &str| NaiveTime::parse_from_str(s, "%H:%M").unwrap_or_default();
@@ -431,8 +436,16 @@ const COMMITMENT_PHRASES: &[&str] = &[
 
 /// Words that signal a commitment has been resolved.
 const RESOLUTION_MARKERS: &[&str] = &[
-    "done", "finished", "completed", "did it", "checked off", "resolved",
-    "took care", "handled", "sorted", "already",
+    "done",
+    "finished",
+    "completed",
+    "did it",
+    "checked off",
+    "resolved",
+    "took care",
+    "handled",
+    "sorted",
+    "already",
 ];
 
 impl OpenLoopDetector {
@@ -534,8 +547,7 @@ impl OpenLoopDetector {
                     .count()
                     >= topic_words.len().clamp(1, 2);
 
-                let has_resolution_marker =
-                    RESOLUTION_MARKERS.iter().any(|m| elower.contains(m));
+                let has_resolution_marker = RESOLUTION_MARKERS.iter().any(|m| elower.contains(m));
 
                 // Resolved if topic is referenced with a resolution marker,
                 // or if most topic words appear (likely a follow-up)
@@ -752,7 +764,12 @@ mod tests {
     fn test_open_loop_unresolved_commitment() {
         let (detector, pool) = test_detector();
         // Commitment from 2 hours ago (beyond 1-hour resolution window)
-        insert_episode(&pool, "e1", "I need to update the documentation for the API", 2);
+        insert_episode(
+            &pool,
+            "e1",
+            "I need to update the documentation for the API",
+            2,
+        );
 
         let loops = detector.detect_open_loops().unwrap();
         assert_eq!(loops.len(), 1);
@@ -779,11 +796,7 @@ mod tests {
         );
 
         let loops = detector.detect_open_loops().unwrap();
-        assert!(
-            loops.is_empty(),
-            "should be resolved, but got: {:?}",
-            loops
-        );
+        assert!(loops.is_empty(), "should be resolved, but got: {:?}", loops);
     }
 
     #[test]
@@ -809,7 +822,12 @@ mod tests {
     #[test]
     fn test_open_loop_generate_reminders() {
         let (detector, pool) = test_detector();
-        insert_episode(&pool, "e1", "I should refactor the authentication module", 5);
+        insert_episode(
+            &pool,
+            "e1",
+            "I should refactor the authentication module",
+            5,
+        );
 
         let reminders = detector.generate_reminders().unwrap();
         assert_eq!(reminders.len(), 1);

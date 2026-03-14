@@ -848,8 +848,10 @@ async fn get_namespaces_handler(
 async fn sse_events_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>>, (StatusCode, String)>
-{
+) -> Result<
+    Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>>,
+    (StatusCode, String),
+> {
     check_auth(&state, &headers, "read")?;
 
     let router = state.processor.notification_router().ok_or_else(|| {

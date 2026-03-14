@@ -215,10 +215,11 @@ impl SqlitePool {
                 let mut stmt = conn.prepare(
                     "SELECT id, description, cron, namespace, created_at, status, metadata
                      FROM scheduled_intents
-                     WHERE namespace = ?1
+                     WHERE namespace = ?1 OR namespace LIKE ?2
                      ORDER BY created_at DESC",
                 )?;
-                let rows = stmt.query_map([ns], |row| {
+                let prefix = format!("{}/%", ns);
+                let rows = stmt.query_map([ns, &prefix], |row| {
                     Ok(ScheduledIntent {
                         id: row.get(0)?,
                         description: row.get(1)?,
@@ -270,6 +271,11 @@ impl SqlitePool {
             )?;
             Ok(affected > 0)
         })
+    }
+
+    /// Cancel a scheduled intent (set status to "cancelled").
+    pub fn cancel_scheduled_intent(&self, id: &str) -> Result<bool, SqliteError> {
+        self.update_scheduled_intent_status(id, "cancelled")
     }
 
     /// Return all scheduled intents with status `"scheduled"` (i.e. pending execution).
@@ -914,9 +920,7 @@ mod tests {
     #[test]
     fn test_notification_prune() {
         let pool = SqlitePool::open_memory().unwrap();
-        let id = pool
-            .insert_notification("test", 1, "test", None)
-            .unwrap();
+        let id = pool.insert_notification("test", 1, "test", None).unwrap();
         pool.mark_notification_delivered(&id).unwrap();
 
         // Prune delivered notifications (max_age_days=0 would prune nothing recent,

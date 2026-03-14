@@ -67,7 +67,8 @@ pub struct LlmConfig {
     /// Can also be set via `BRAIN_LLM__API_KEY` environment variable.
     #[serde(default)]
     pub api_key: String,
-    /// Enable LLM-based intent classification fallback when regex is uncertain.
+    /// Deprecated toggle: intent routing now uses LLM-first classification when
+    /// an LLM provider is available. Kept for backwards-compatible config parsing.
     #[serde(default)]
     pub intent_llm_fallback: bool,
 }
@@ -211,9 +212,7 @@ pub struct MessagingActionConfig {
 }
 
 /// Deserialize channels supporting both old format (string URL) and new format (ChannelConfig).
-fn deserialize_channels<'de, D>(
-    deserializer: D,
-) -> Result<HashMap<String, ChannelConfig>, D::Error>
+fn deserialize_channels<'de, D>(deserializer: D) -> Result<HashMap<String, ChannelConfig>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -305,6 +304,12 @@ impl Default for DeliveryConfig {
 pub struct QuietHoursConfig {
     pub start: String,
     pub end: String,
+    #[serde(default = "default_timezone")]
+    pub timezone: String,
+}
+
+fn default_timezone() -> String {
+    "UTC".to_string()
 }
 
 /// A single API key entry.
@@ -604,9 +609,14 @@ impl BrainConfig {
             ("messaging.timeout_ms", self.actions.messaging.timeout_ms),
         ] {
             if ms == 0 {
-                warnings.push(format!("actions.{name} is 0; will be clamped to 1ms at runtime."));
+                warnings.push(format!(
+                    "actions.{name} is 0; will be clamped to 1ms at runtime."
+                ));
             } else if ms > 30_000 {
-                warnings.push(format!("actions.{name} is {}ms (>30s) — requests may block for a long time.", ms));
+                warnings.push(format!(
+                    "actions.{name} is {}ms (>30s) — requests may block for a long time.",
+                    ms
+                ));
             }
         }
 
@@ -711,6 +721,7 @@ impl Default for BrainConfig {
                 quiet_hours: QuietHoursConfig {
                     start: "22:00".to_string(),
                     end: "08:00".to_string(),
+                    timezone: "UTC".to_string(),
                 },
                 delivery: DeliveryConfig::default(),
                 open_loop: OpenLoopDetectionConfig::default(),
@@ -774,7 +785,10 @@ mod tests {
         assert_eq!(config.llm.provider, "ollama");
         assert_eq!(config.embedding.dimensions, 768); // nomic-embed-text default
         assert!(!config.encryption.enabled); // Deferred to v1.1
-        assert_eq!(config.actions.web_search.provider, WebSearchProvider::Searxng);
+        assert_eq!(
+            config.actions.web_search.provider,
+            WebSearchProvider::Searxng
+        );
         assert_eq!(config.actions.scheduling.mode, SchedulingMode::PersistOnly);
         assert!(!config.proactivity.enabled);
         assert!(config.adapters.http.enabled);
@@ -905,7 +919,10 @@ mod tests {
     fn test_actions_defaults_deserialize() {
         let config = BrainConfig::load().expect("embedded defaults should load");
         assert!(config.actions.web_search.enabled);
-        assert_eq!(config.actions.web_search.provider, WebSearchProvider::Searxng);
+        assert_eq!(
+            config.actions.web_search.provider,
+            WebSearchProvider::Searxng
+        );
         assert_eq!(config.actions.web_search.default_top_k, 5);
         assert_eq!(config.actions.scheduling.mode, SchedulingMode::PersistOnly);
         assert!(!config.actions.messaging.enabled);
@@ -932,7 +949,9 @@ mod tests {
         config.actions.web_search.api_key.clear();
         let warnings = config.validate().expect("config should still be valid");
         assert!(
-            warnings.iter().any(|w| w.contains("'tavily'") && w.contains("api_key")),
+            warnings
+                .iter()
+                .any(|w| w.contains("'tavily'") && w.contains("api_key")),
             "expected tavily api_key warning, got: {:?}",
             warnings
         );
@@ -974,7 +993,9 @@ mod tests {
         config.actions.web_search.timeout_ms = 0;
         let warnings = config.validate().expect("should be valid");
         assert!(
-            warnings.iter().any(|w| w.contains("timeout_ms") && w.contains("0")),
+            warnings
+                .iter()
+                .any(|w| w.contains("timeout_ms") && w.contains("0")),
             "expected timeout_ms=0 warning, got: {:?}",
             warnings
         );
@@ -986,7 +1007,9 @@ mod tests {
         config.actions.messaging.timeout_ms = 60_000;
         let warnings = config.validate().expect("should be valid");
         assert!(
-            warnings.iter().any(|w| w.contains("timeout_ms") && w.contains("60000")),
+            warnings
+                .iter()
+                .any(|w| w.contains("timeout_ms") && w.contains("60000")),
             "expected high timeout warning, got: {:?}",
             warnings
         );
@@ -998,7 +1021,9 @@ mod tests {
         config.actions.resilience.max_retries = 15;
         let warnings = config.validate().expect("should be valid");
         assert!(
-            warnings.iter().any(|w| w.contains("max_retries") && w.contains("15")),
+            warnings
+                .iter()
+                .any(|w| w.contains("max_retries") && w.contains("15")),
             "expected max_retries warning, got: {:?}",
             warnings
         );
@@ -1010,7 +1035,9 @@ mod tests {
         config.actions.resilience.circuit_breaker_threshold = 0;
         let warnings = config.validate().expect("should be valid");
         assert!(
-            warnings.iter().any(|w| w.contains("circuit_breaker_threshold")),
+            warnings
+                .iter()
+                .any(|w| w.contains("circuit_breaker_threshold")),
             "expected circuit_breaker_threshold=0 warning, got: {:?}",
             warnings
         );
@@ -1100,7 +1127,9 @@ mod tests {
         );
         let warnings = config.validate().expect("should be valid");
         assert!(
-            warnings.iter().any(|w| w.contains("channels.bad") && w.contains("url is empty")),
+            warnings
+                .iter()
+                .any(|w| w.contains("channels.bad") && w.contains("url is empty")),
             "expected empty-url warning, got: {:?}",
             warnings
         );

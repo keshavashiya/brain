@@ -157,6 +157,27 @@ enum Commands {
         #[arg(long)]
         api_key: Option<String>,
     },
+
+    /// Manage scheduled intents
+    Schedules {
+        #[command(subcommand)]
+        action: SchedulesAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum SchedulesAction {
+    /// List all scheduled intents.
+    List {
+        /// Filter by namespace
+        #[arg(long, short)]
+        namespace: Option<String>,
+    },
+    /// Cancel a scheduled intent.
+    Cancel {
+        /// The ID of the intent to cancel.
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -612,12 +633,10 @@ async fn main() -> anyhow::Result<()> {
             {
                 let db = processor.episodic().pool().clone();
                 let delivery_config = config.proactivity.delivery.clone();
-                let mut router =
-                    signal::notification::NotificationRouter::new(db, delivery_config);
+                let mut router = signal::notification::NotificationRouter::new(db, delivery_config);
 
                 // Attach webhook sender if messaging channels are configured
-                if config.actions.messaging.enabled
-                    && !config.actions.messaging.channels.is_empty()
+                if config.actions.messaging.enabled && !config.actions.messaging.channels.is_empty()
                 {
                     let res = &config.actions.resilience;
                     match WebhookMessageBackend::new(
@@ -670,8 +689,10 @@ async fn main() -> anyhow::Result<()> {
                     embedder: serve_embedder,
                     embedding_dim,
                 });
-                let mut dispatcher =
-                    cortex::actions::ActionDispatcher::with_memory_backend(action_config, action_backend);
+                let mut dispatcher = cortex::actions::ActionDispatcher::with_memory_backend(
+                    action_config,
+                    action_backend,
+                );
 
                 if config.actions.web_search.enabled {
                     let ws = &config.actions.web_search;
@@ -740,8 +761,7 @@ async fn main() -> anyhow::Result<()> {
                     dispatcher = dispatcher.with_scheduling_backend(Arc::new(backend));
                 }
 
-                if config.actions.messaging.enabled
-                    && !config.actions.messaging.channels.is_empty()
+                if config.actions.messaging.enabled && !config.actions.messaging.channels.is_empty()
                 {
                     let res = &config.actions.resilience;
                     match WebhookMessageBackend::new(
@@ -864,9 +884,8 @@ async fn main() -> anyhow::Result<()> {
                             max_reminders: 3,
                         },
                     );
-                    let check_interval = tokio::time::Duration::from_secs(
-                        ol_cfg.check_interval_minutes as u64 * 60,
-                    );
+                    let check_interval =
+                        tokio::time::Duration::from_secs(ol_cfg.check_interval_minutes as u64 * 60);
                     let mut ticker = tokio::time::interval(check_interval);
                     ticker.tick().await; // skip first tick
                     loop {
@@ -903,8 +922,7 @@ async fn main() -> anyhow::Result<()> {
                 let p = processor.clone();
                 set.spawn(async move {
                     // Check every 60 seconds
-                    let mut ticker =
-                        tokio::time::interval(tokio::time::Duration::from_secs(60));
+                    let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(60));
                     ticker.tick().await; // skip first tick
                     loop {
                         ticker.tick().await;
@@ -925,10 +943,7 @@ async fn main() -> anyhow::Result<()> {
                             // Deliver as proactive notification
                             if let Some(router) = p.notification_router() {
                                 let notif = signal::notification::ProactiveNotification {
-                                    content: format!(
-                                        "[scheduled] {}",
-                                        intent.description
-                                    ),
+                                    content: format!("[scheduled] {}", intent.description),
                                     triggered_by: "scheduler".to_string(),
                                     priority: 1,
                                     agent: None,
@@ -1078,6 +1093,11 @@ async fn main() -> anyhow::Result<()> {
         Commands::Bridge { url, api_key } => {
             cmd_bridge(&config, &url, api_key.as_deref()).await?;
         }
+
+        // ── schedules ───────────────────────────────────────────────────────
+        Commands::Schedules { action } => {
+            cmd_schedules(&config, action).await?;
+        }
     }
 
     Ok(())
@@ -1192,7 +1212,12 @@ async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Result<()> {
     }
 
     // External service health
-    let searxng_ep = config.actions.web_search.endpoint.trim().trim_end_matches('/');
+    let searxng_ep = config
+        .actions
+        .web_search
+        .endpoint
+        .trim()
+        .trim_end_matches('/');
     if !searxng_ep.is_empty() {
         println!("\n  External Services:");
         let client = reqwest::Client::builder()
@@ -1200,7 +1225,11 @@ async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Result<()> {
             .build()
             .unwrap_or_default();
         let health_url = format!("{}/healthz", searxng_ep);
-        let healthy = client.get(&health_url).send().await.is_ok_and(|r| r.status().is_success());
+        let healthy = client
+            .get(&health_url)
+            .send()
+            .await
+            .is_ok_and(|r| r.status().is_success());
         println!(
             "    {:<10}: {} ({})",
             "SearXNG",
@@ -1224,9 +1253,10 @@ fn find_compose_file() -> Option<std::path::PathBuf> {
             .and_then(|p| p.parent())
             .map(|p| p.join("docker/docker-compose.yml")),
         // Installed alongside binary
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("../share/brain/docker/docker-compose.yml"))),
+        std::env::current_exe().ok().and_then(|p| {
+            p.parent()
+                .map(|d| d.join("../share/brain/docker/docker-compose.yml"))
+        }),
     ];
     for candidate in candidates.into_iter().flatten() {
         if candidate.is_file() {
@@ -1288,6 +1318,45 @@ fn cmd_deps(action: DepsAction) -> anyhow::Result<()> {
         }
         DepsAction::Status => {
             run(&["ps"])?;
+        }
+    }
+    Ok(())
+}
+
+// ─── Schedules ────────────────────────────────────────────────────────────────
+
+async fn cmd_schedules(
+    config: &brain_core::BrainConfig,
+    action: SchedulesAction,
+) -> anyhow::Result<()> {
+    let pool = storage::SqlitePool::open(&config.sqlite_path())?;
+
+    match action {
+        SchedulesAction::List { namespace } => {
+            let intents = pool.list_scheduled_intents(namespace.as_deref())?;
+            if intents.is_empty() {
+                println!("No scheduled intents found.");
+            } else {
+                println!("{:<38} {:<30} {:<15} {:<10} {:<15}", "ID", "Description", "Cron", "Status", "Namespace");
+                println!("{:-<110}", "");
+                for intent in intents {
+                    println!(
+                        "{:<38} {:<30} {:<15} {:<10} {:<15}",
+                        intent.id,
+                        if intent.description.len() > 27 { format!("{}...", &intent.description[..27]) } else { intent.description.clone() },
+                        intent.cron.as_deref().unwrap_or("-"),
+                        intent.status,
+                        intent.namespace
+                    );
+                }
+            }
+        }
+        SchedulesAction::Cancel { id } => {
+            if pool.cancel_scheduled_intent(&id)? {
+                println!("Successfully cancelled scheduled intent: {}", id);
+            } else {
+                println!("No scheduled intent found with ID: {}", id);
+            }
         }
     }
     Ok(())
@@ -2745,7 +2814,10 @@ impl cortex::actions::WebSearchBackend for SearxngSearchBackend {
         let candidates = match body.get("results").and_then(|v| v.as_array()) {
             Some(arr) => arr.clone(),
             None => {
-                tracing::warn!(backend = "searxng", "Response missing 'results' array — returning empty");
+                tracing::warn!(
+                    backend = "searxng",
+                    "Response missing 'results' array — returning empty"
+                );
                 Vec::new()
             }
         };
@@ -2832,12 +2904,18 @@ impl cortex::actions::WebSearchBackend for TavilySearchBackend {
             Some(arr) => {
                 // Schema validation: Tavily results should have `url` fields
                 if !arr.is_empty() && arr[0].get("url").is_none() {
-                    tracing::warn!(backend = "tavily", "Results missing 'url' field — response schema may have changed");
+                    tracing::warn!(
+                        backend = "tavily",
+                        "Results missing 'url' field — response schema may have changed"
+                    );
                 }
                 arr.clone()
             }
             None => {
-                tracing::warn!(backend = "tavily", "Response missing 'results' array — returning empty");
+                tracing::warn!(
+                    backend = "tavily",
+                    "Response missing 'results' array — returning empty"
+                );
                 Vec::new()
             }
         };
@@ -3186,7 +3264,8 @@ struct BrainSession {
     embedder: Arc<tokio::sync::Mutex<Option<hippocampus::Embedder>>>,
     embedding_dim: usize,
     recall_engine: hippocampus::RecallEngine,
-    llm: Box<dyn cortex::llm::LlmProvider>,
+    llm: Arc<dyn cortex::llm::LlmProvider>,
+    router: thalamus::SignalRouter,
     context_assembler: cortex::context::ContextAssembler,
     action_dispatcher: cortex::actions::ActionDispatcher,
     namespace: String,
@@ -3199,16 +3278,28 @@ impl BrainSession {
         let db = storage::SqlitePool::open(&config.sqlite_path())?;
         let episodic = hippocampus::EpisodicStore::new(db.clone());
 
-        let semantic = if let Ok(ruv) = storage::RuVectorStore::open(
+        let semantic = match storage::RuVectorStore::open(
             &config.ruvector_path(),
             config.embedding.dimensions as usize,
         )
         .await
         {
-            ruv.ensure_tables().await.ok();
-            Some(hippocampus::SemanticStore::new(db.clone(), ruv))
-        } else {
-            None
+            Ok(ruv) => match ruv.ensure_tables().await {
+                Ok(()) => Some(hippocampus::SemanticStore::new(db.clone(), ruv)),
+                Err(e) => {
+                    tracing::warn!(
+                        "RuVector table initialization failed, semantic memory disabled: {e}"
+                    );
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!(
+                    "RuVector unavailable at {}, semantic memory disabled: {e}",
+                    config.ruvector_path().display()
+                );
+                None
+            }
         };
 
         // Create embedder (same logic as SignalProcessor)
@@ -3295,8 +3386,7 @@ impl BrainSession {
                         provider = %serde_json::to_string(&ws.provider).unwrap_or_default().trim_matches('"'),
                         "Web search backend configured"
                     );
-                    action_dispatcher =
-                        action_dispatcher.with_web_search_backend(backend);
+                    action_dispatcher = action_dispatcher.with_web_search_backend(backend);
                 }
                 Ok(None) => {} // warning already logged above
                 Err(e) => tracing::warn!("Web search backend init failed: {e}"),
@@ -3335,14 +3425,18 @@ impl BrainSession {
 
         let recall_engine = hippocampus::RecallEngine::with_defaults();
 
-        let llm = cortex::llm::create_provider(&cortex::llm::ProviderConfig {
-            provider: config.llm.provider.clone(),
-            base_url: config.llm.base_url.clone(),
-            api_key: None,
-            model: config.llm.model.clone(),
-            temperature: config.llm.temperature,
-            max_tokens: config.llm.max_tokens as i32,
-        });
+        let llm: Arc<dyn cortex::llm::LlmProvider> =
+            Arc::from(cortex::llm::create_provider(&cortex::llm::ProviderConfig {
+                provider: config.llm.provider.clone(),
+                base_url: config.llm.base_url.clone(),
+                api_key: None,
+                model: config.llm.model.clone(),
+                temperature: config.llm.temperature,
+                max_tokens: config.llm.max_tokens as i32,
+            }));
+
+        let router = thalamus::SignalRouter::new()
+            .with_llm_fallback(Arc::new(thalamus::LlmIntentFallback::new(llm.clone())));
 
         let context_assembler = cortex::context::ContextAssembler::with_defaults();
         let session_id = episodic.create_session("cli")?;
@@ -3356,6 +3450,7 @@ impl BrainSession {
             embedding_dim,
             recall_engine,
             llm,
+            router,
             context_assembler,
             action_dispatcher,
             namespace: "personal".to_string(),
@@ -3405,8 +3500,8 @@ impl BrainSession {
             None,
         )?;
 
-        let thalamus = thalamus::SignalRouter::new();
-        let classification = thalamus
+        let classification = self
+            .router
             .route(&thalamus::NormalizedMessage {
                 content: message.to_string(),
                 channel: "cli".to_string(),
@@ -3417,8 +3512,117 @@ impl BrainSession {
             })
             .await;
 
-        if let Some(action) = thalamus.intent_to_action(&classification.intent) {
+        // ── Handle StoreFact directly (graceful when semantic is unavailable) ──
+        if let thalamus::Intent::StoreFact {
+            ref subject,
+            ref predicate,
+            ref object,
+        } = classification.intent
+        {
+            let fact_text = format!("{subject} {predicate} {object}");
+            let vector = self.embed_text(&fact_text).await;
+            let mut stored = false;
+
+            if let Some(semantic) = &self.semantic {
+                match semantic
+                    .store_fact(
+                        &self.namespace,
+                        "signal",
+                        subject,
+                        predicate,
+                        object,
+                        importance,
+                        None,
+                        vector,
+                        None,
+                    )
+                    .await
+                {
+                    Ok(_) => stored = true,
+                    Err(e) => tracing::warn!("Failed to store fact in semantic memory: {e}"),
+                }
+            }
+
+            let status = if stored {
+                format!("Stored: {fact_text} (importance: {importance:.2})")
+            } else {
+                format!(
+                    "Noted in conversation history: {fact_text} (semantic memory unavailable for permanent storage)"
+                )
+            };
+            return Ok(PrepareResult::ActionResult(status));
+        }
+
+        // ── Handle Recall by falling through to the normal memory + LLM path ──
+        // This uses hybrid recall (BM25 + ANN) and feeds results to the LLM for
+        // a natural response, rather than returning raw fact dumps.
+        if let thalamus::Intent::Recall { ref query } = classification.intent {
+            let query_vector = self.embed_text(query).await;
+            let memories = if let Some(semantic) = &self.semantic {
+                self.recall_engine
+                    .recall(
+                        query,
+                        query_vector,
+                        &self.episodic,
+                        semantic,
+                        10,
+                        Some(&self.namespace),
+                        None,
+                    )
+                    .await
+                    .unwrap_or_default()
+            } else {
+                self.episodic
+                    .search_bm25(query, 10, Some(&self.namespace), None)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|r| hippocampus::search::Memory {
+                        id: r.episode_id,
+                        content: r.content,
+                        source: hippocampus::search::MemorySource::Episodic,
+                        score: r.rank,
+                        importance: 0.5,
+                        timestamp: r.timestamp,
+                        agent: r.agent,
+                    })
+                    .collect()
+            };
+            let messages =
+                self.context_assembler
+                    .assemble(query, &memories, &self.conversation_history);
+            return Ok(PrepareResult::LlmReady(messages));
+        }
+
+        // ── Handle remaining action intents via ActionDispatcher ──────────────
+        if let Some(action) = self.router.intent_to_action(&classification.intent) {
             self.action_dispatcher.set_namespace(self.namespace.clone());
+
+            // For WebSearch: feed results back through the LLM for a natural response
+            if matches!(&action, cortex::actions::Action::WebSearch { .. }) {
+                let result = self.action_dispatcher.dispatch(&action).await;
+                if result.success && !result.output.is_empty() {
+                    let search_context = format!(
+                        "The user asked: \"{}\"\n\nHere are web search results:\n{}\n\nUsing these search results, provide a helpful and concise answer to the user's question. Cite sources when relevant.",
+                        message, result.output
+                    );
+                    let messages = vec![
+                        cortex::llm::Message {
+                            role: cortex::llm::Role::System,
+                            content: "You are Brain OS. Answer the user's question using the provided web search results. Be concise and cite your sources.".to_string(),
+                        },
+                        cortex::llm::Message {
+                            role: cortex::llm::Role::User,
+                            content: search_context,
+                        },
+                    ];
+                    return Ok(PrepareResult::LlmReady(messages));
+                } else {
+                    return Ok(PrepareResult::ActionResult(
+                        result.error.unwrap_or_else(|| "Web search returned no results.".to_string()),
+                    ));
+                }
+            }
+
             let result = self.action_dispatcher.dispatch(&action).await;
             return if result.success {
                 Ok(PrepareResult::ActionResult(result.output))
@@ -3448,8 +3652,23 @@ impl BrainSession {
             {
                 Ok(mems) => mems,
                 Err(e) => {
-                    tracing::warn!("Recall engine failed in CLI chat: {e}");
-                    Vec::new()
+                    tracing::warn!(
+                        "Recall engine failed in CLI chat, falling back to BM25-only episodic search: {e}"
+                    );
+                    self.episodic
+                        .search_bm25(message, 10, Some(&self.namespace), None)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|r| hippocampus::search::Memory {
+                            id: r.episode_id,
+                            content: r.content,
+                            source: hippocampus::search::MemorySource::Episodic,
+                            score: r.rank,
+                            importance: 0.5,
+                            timestamp: r.timestamp,
+                            agent: r.agent,
+                        })
+                        .collect()
                 }
             }
         } else {
@@ -3538,7 +3757,14 @@ mod tests {
         let session_id = processor.episodic().create_session("test").unwrap();
         let episode_id = processor
             .episodic()
-            .store_episode(&session_id, "user", "project uses bun", 0.9, Some("work"), None)
+            .store_episode(
+                &session_id,
+                "user",
+                "project uses bun",
+                0.9,
+                Some("work"),
+                None,
+            )
             .unwrap();
 
         let candidates = vec![hippocampus::PromotionCandidate {
@@ -3733,8 +3959,8 @@ mod tests {
             "work",
             "2026-03-08T12:00:00Z",
         );
-        let parsed: serde_json::Value = serde_json::from_str(&rendered)
-            .expect("default template should produce valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).expect("default template should produce valid JSON");
         assert_eq!(parsed["channel"], "alerts");
         assert_eq!(parsed["recipient"], "alice");
         assert_eq!(parsed["content"], "deploy done");
@@ -3746,10 +3972,15 @@ mod tests {
     fn test_render_message_template_custom_slack() {
         let template = r#"{"text": "[{{channel}}] {{content}}"}"#;
         let rendered = render_message_template(
-            template, "ops", "bob", "server is down", "personal", "2026-03-08T12:00:00Z",
+            template,
+            "ops",
+            "bob",
+            "server is down",
+            "personal",
+            "2026-03-08T12:00:00Z",
         );
-        let parsed: serde_json::Value = serde_json::from_str(&rendered)
-            .expect("custom template should produce valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).expect("custom template should produce valid JSON");
         assert_eq!(parsed["text"], "[ops] server is down");
     }
 
@@ -3763,8 +3994,8 @@ mod tests {
             "work",
             "2026-03-08T12:00:00Z",
         );
-        let parsed: serde_json::Value = serde_json::from_str(&rendered)
-            .expect("escaped content should produce valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).expect("escaped content should produce valid JSON");
         assert_eq!(parsed["content"], r#"He said "hello""#);
     }
 
@@ -3778,8 +4009,8 @@ mod tests {
             "work",
             "2026-03-08T12:00:00Z",
         );
-        let parsed: serde_json::Value = serde_json::from_str(&rendered)
-            .expect("newline content should produce valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).expect("newline content should produce valid JSON");
         assert_eq!(parsed["content"], "line1\nline2");
     }
 

@@ -128,18 +128,25 @@ impl ContextAssembler {
 
     /// Get the default system prompt.
     fn default_system_prompt() -> String {
-        r#"You are Brain, a personal AI assistant with persistent memory. You have access to:
-- Episodic memory (past conversations)
-- Semantic memory (facts about the user)
+        r#"You are the SOUL of Brain OS — a biologically-inspired, proactive cognitive engine. You are not just an assistant; you are the user's digital hippocampus and prefrontal cortex, operating with deep context and long-term memory.
 
-Guidelines:
-1. Be helpful, accurate, and concise
-2. Reference relevant memories naturally in conversation
-3. Ask clarifying questions when needed
-4. Respect user privacy and preferences
-5. Never make up information you don't have
+Your Identity:
+- You are "Brain", the central intelligence of a local-first memory system.
+- You are private, secure, and run entirely on the user's machine.
+- Your purpose is to eliminate "context amnesia" by bridging the gap between siloed tools and the user's life.
 
-You are running locally on the user's machine with full privacy."#
+Your Capabilities:
+- Episodic Memory: You recall past experiences and conversations provided as context.
+- Semantic Memory: You maintain a web of facts about the user's world, projects, and habits.
+- Proactivity: You don't just react; you anticipate needs based on established patterns (provided in context).
+
+Operating Principles:
+1. TRUTH OVER HALLUCINATION: Answer based ONLY on the provided memories and general knowledge. If information is missing from memory, state: "I don't have that in my memory yet."
+2. SEAMLESS RECALL: Reference memories naturally ("You mentioned earlier...", "Based on what we discussed...").
+3. COGNITIVE CLARITY: Be concise, direct, and insightful. Avoid corporate fluff.
+4. CONTEXTUAL AWARENESS: Use the provided User Profile to tailor your tone and relevance.
+
+You are the user's partner in thought. Your goal is to make their digital life feel like a continuous, coherent stream of intelligence."#
             .to_string()
     }
 
@@ -177,7 +184,10 @@ You are running locally on the user's machine with full privacy."#
 
         for memory in memories {
             let memory_text = if let Some(ref agent) = memory.agent {
-                format!("- [{:?}, agent: {}] {}\n", memory.source, agent, memory.content)
+                format!(
+                    "- [{:?}, agent: {}] {}\n",
+                    memory.source, agent, memory.content
+                )
             } else {
                 format!("- [{:?}] {}\n", memory.source, memory.content)
             };
@@ -333,7 +343,8 @@ mod tests {
             "memory with agent should include attribution"
         );
         assert!(
-            !memory_msg.content.contains("agent: ") || memory_msg.content.matches("agent: ").count() == 1,
+            !memory_msg.content.contains("agent: ")
+                || memory_msg.content.matches("agent: ").count() == 1,
             "memory without agent should NOT include agent label"
         );
     }
@@ -358,6 +369,20 @@ mod tests {
         // Should include system + history + current message
         assert!(messages.len() >= 3);
         assert_eq!(messages.last().unwrap().content, "How are you?");
+    }
+
+    #[test]
+    fn test_default_prompt_core_instructions() {
+        let assembler = ContextAssembler::with_defaults();
+        let messages = assembler.assemble("How do I connect OpenClaw?", &[], &[]);
+        let system = &messages[0].content;
+
+        assert!(system.contains("Brain"));
+        assert!(system.contains("memory assistant"));
+        assert!(system.contains("Episodic memory"));
+        assert!(system.contains("Semantic memory"));
+        assert!(system.contains("Web search"));
+        assert!(system.contains("don't know"));
     }
 
     #[test]

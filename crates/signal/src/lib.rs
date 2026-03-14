@@ -215,82 +215,6 @@ pub struct SignalProcessor {
     action_dispatcher: Option<cortex::actions::ActionDispatcher>,
 }
 
-/// Optional LLM-backed fallback classifier for intent routing.
-struct LlmIntentFallback {
-    llm: Arc<dyn cortex::LlmProvider>,
-}
-
-#[derive(serde::Deserialize)]
-struct LlmIntentPayload {
-    intent: String,
-    subject: Option<String>,
-    predicate: Option<String>,
-    object: Option<String>,
-    query: Option<String>,
-    target: Option<String>,
-}
-
-impl LlmIntentFallback {
-    fn new(llm: Arc<dyn cortex::LlmProvider>) -> Self {
-        Self { llm }
-    }
-
-    fn parse_json_payload(raw: &str) -> Option<LlmIntentPayload> {
-        let trimmed = raw.trim();
-        if let Ok(payload) = serde_json::from_str::<LlmIntentPayload>(trimmed) {
-            return Some(payload);
-        }
-
-        let start = trimmed.find('{')?;
-        let end = trimmed.rfind('}')?;
-        serde_json::from_str::<LlmIntentPayload>(&trimmed[start..=end]).ok()
-    }
-}
-
-#[async_trait::async_trait]
-impl thalamus::IntentFallback for LlmIntentFallback {
-    async fn classify_with_llm(&self, input: &str) -> Option<thalamus::Classification> {
-        use cortex::llm::{Message, Role};
-        use thalamus::{Classification, ClassificationMethod, Intent};
-
-        let prompt = format!(
-            "Classify the input into one intent: store_fact, recall, forget, or chat.\n\
-             Return JSON with keys: intent, subject, predicate, object, query, target.\n\
-             Keep missing keys null.\n\
-             Input: {input}"
-        );
-        let messages = vec![Message {
-            role: Role::User,
-            content: prompt,
-        }];
-
-        let response = self.llm.generate(&messages).await.ok()?;
-        let payload = Self::parse_json_payload(&response.content)?;
-        let intent = match payload.intent.to_lowercase().as_str() {
-            "store_fact" => Intent::StoreFact {
-                subject: payload.subject.unwrap_or_else(|| "user".to_string()),
-                predicate: payload.predicate.unwrap_or_else(|| "said".to_string()),
-                object: payload.object.unwrap_or_else(|| input.to_string()),
-            },
-            "recall" => Intent::Recall {
-                query: payload.query.unwrap_or_else(|| input.to_string()),
-            },
-            "forget" => Intent::Forget {
-                target: payload.target.unwrap_or_else(|| input.to_string()),
-            },
-            _ => Intent::Chat {
-                content: input.to_string(),
-            },
-        };
-
-        Some(Classification {
-            intent,
-            confidence: 0.6,
-            method: ClassificationMethod::Llm,
-        })
-    }
-}
-
 /// Resolve the LLM API key from config, with env var fallback for backwards compatibility.
 fn resolve_llm_api_key(config: &brain_core::BrainConfig) -> String {
     let from_config = config.llm.api_key.trim().to_string();
@@ -298,17 +222,6 @@ fn resolve_llm_api_key(config: &brain_core::BrainConfig) -> String {
         return from_config;
     }
     std::env::var("BRAIN_LLM__API_KEY").unwrap_or_default()
-}
-
-fn llm_intent_fallback_enabled(config: &brain_core::BrainConfig) -> bool {
-    // Config-driven; env var override preserved for backwards compatibility.
-    if config.llm.intent_llm_fallback {
-        return true;
-    }
-    std::env::var("BRAIN_INTENT_LLM_FALLBACK")
-        .ok()
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false)
 }
 
 fn response_to_text(content: &ResponseContent) -> String {
@@ -416,8 +329,15 @@ impl SignalProcessor {
                 if encryptor.is_some() {
                     tracing::info!("Encryption enabled: vector IDs stored in ruvector-core, content encrypted in SQLite");
                 }
-                let _ = ruv.ensure_tables().await;
-                Some(hippocampus::SemanticStore::new(db.clone(), ruv))
+                match ruv.ensure_tables().await {
+                    Ok(()) => Some(hippocampus::SemanticStore::new(db.clone(), ruv)),
+                    Err(e) => {
+                        tracing::warn!(
+                            "RuVector table initialization failed, semantic memory disabled: {e}"
+                        );
+                        None
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!("RuVector unavailable, semantic memory disabled: {e}");
@@ -429,13 +349,8 @@ impl SignalProcessor {
         let recall_engine = hippocampus::RecallEngine::with_defaults();
         let (events_tx, _) = tokio::sync::broadcast::channel(512);
 
-        let classifier = if llm_intent_fallback_enabled(&config) {
-            tracing::info!("LLM intent fallback enabled");
-            thalamus::IntentClassifier::new()
-                .with_llm_fallback(Arc::new(LlmIntentFallback::new(llm.clone())))
-        } else {
-            thalamus::IntentClassifier::new()
-        };
+        let classifier = thalamus::IntentClassifier::new()
+            .with_llm_fallback(Arc::new(thalamus::LlmIntentFallback::new(llm.clone())));
 
         Ok(Self {
             config,
@@ -562,15 +477,36 @@ impl SignalProcessor {
                 })
             }
 
-            // ── RECALL_MEMORY: hybrid search → Cortex context → LLM response ───
+            // ── RECALL_MEMORY: hybrid search → structured or LLM response ─────
             thalamus::Intent::Recall { query } => {
                 let query_vector = self.embed_text(&query).await;
                 let (memories, facts_used, episodes_used) = self
                     .do_recall(&query, query_vector, 10, Some(&signal.namespace))
                     .await;
 
-                // Build procedure hints as synthetic prior messages so the LLM
-                // knows about automated steps without polluting the memory context.
+                // Agent callers get structured data — they have their own LLM
+                if signal.agent.is_some() {
+                    let text = if memories.is_empty() {
+                        "No relevant memories found.".to_string()
+                    } else {
+                        memories
+                            .iter()
+                            .map(|m| format!("[{:?}] {}", m.source, m.content))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    };
+                    return Ok(SignalResponse {
+                        signal_id,
+                        status: ResponseStatus::Ok,
+                        response: ResponseContent::Text(text),
+                        memory_context: MemoryContext {
+                            facts_used,
+                            episodes_used,
+                        },
+                    });
+                }
+
+                // Human callers get LLM-synthesized response
                 let proc_history: Vec<cortex::llm::Message> = procedure_context
                     .iter()
                     .map(|step| cortex::llm::Message {
@@ -595,7 +531,7 @@ impl SignalProcessor {
                 })
             }
 
-            // ── CHAT: context fetch → LLM response → episode store ───────────
+            // ── CHAT: context fetch → structured or LLM response → episode ──
             thalamus::Intent::Chat { content } => {
                 // Fetch relevant memory context
                 let query_vector = self.embed_text(&content).await;
@@ -620,7 +556,35 @@ impl SignalProcessor {
                     )
                     .map_err(|e| SignalError::Storage(e.to_string()))?;
 
-                // Build procedure hints as synthetic prior messages
+                // Agent callers get structured memory context — skip LLM round-trip.
+                // The calling application's LLM will synthesize its own response.
+                if signal.agent.is_some() {
+                    let response_text = if memories.is_empty() {
+                        format!("Stored episode. No relevant memories found for: {}", content)
+                    } else {
+                        let mem_lines: String = memories
+                            .iter()
+                            .map(|m| format!("[{:?}] {}", m.source, m.content))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        format!(
+                            "Stored episode. Relevant memories:\n{}",
+                            mem_lines
+                        )
+                    };
+
+                    return Ok(SignalResponse {
+                        signal_id,
+                        status: ResponseStatus::Ok,
+                        response: ResponseContent::Text(response_text),
+                        memory_context: MemoryContext {
+                            facts_used,
+                            episodes_used,
+                        },
+                    });
+                }
+
+                // Human callers get full LLM response
                 let proc_history: Vec<cortex::llm::Message> = procedure_context
                     .iter()
                     .map(|step| cortex::llm::Message {
@@ -629,7 +593,6 @@ impl SignalProcessor {
                     })
                     .collect();
 
-                // Generate LLM response with assembled context
                 let messages = self
                     .context_assembler
                     .assemble(&content, &memories, &proc_history);
@@ -713,9 +676,7 @@ impl SignalProcessor {
 
                 Ok(SignalResponse::ok(
                     signal_id,
-                    format!(
-                        "Brain status: {semantic_count} facts, {episode_count} episodes"
-                    ),
+                    format!("Brain status: {semantic_count} facts, {episode_count} episodes"),
                 ))
             }
 
@@ -729,13 +690,35 @@ impl SignalProcessor {
                     (Some(action), Some(dispatcher)) => {
                         let result = dispatcher.dispatch(&action).await;
                         if result.success {
-                            Ok(SignalResponse::ok(signal_id, result.output))
+                            // For WebSearch: synthesize results through LLM for a natural response
+                            if matches!(&action, cortex::actions::Action::WebSearch { .. })
+                                && !result.output.is_empty()
+                            {
+                                let search_context = format!(
+                                    "The user asked: \"{}\"\n\nHere are web search results:\n{}\n\nUsing these search results, provide a helpful and concise answer to the user's question. Cite sources when relevant.",
+                                    signal.content, result.output
+                                );
+                                let messages = vec![
+                                    cortex::llm::Message {
+                                        role: cortex::llm::Role::System,
+                                        content: "You are Brain OS. Answer the user's question using the provided web search results. Be concise and cite your sources.".to_string(),
+                                    },
+                                    cortex::llm::Message {
+                                        role: cortex::llm::Role::User,
+                                        content: search_context,
+                                    },
+                                ];
+                                match self.llm.generate(&messages).await {
+                                    Ok(llm_response) => Ok(SignalResponse::ok(signal_id, llm_response.content)),
+                                    Err(_) => Ok(SignalResponse::ok(signal_id, result.output)),
+                                }
+                            } else {
+                                Ok(SignalResponse::ok(signal_id, result.output))
+                            }
                         } else {
                             Ok(SignalResponse::error(
                                 signal_id,
-                                result
-                                    .error
-                                    .unwrap_or_else(|| "Action failed".to_string()),
+                                result.error.unwrap_or_else(|| "Action failed".to_string()),
                             ))
                         }
                     }
@@ -765,8 +748,7 @@ impl SignalProcessor {
                 .join("\n");
 
             if let ResponseContent::Text(ref text) = response.response {
-                response.response =
-                    ResponseContent::Text(format!("{nudge_text}\n\n{text}"));
+                response.response = ResponseContent::Text(format!("{nudge_text}\n\n{text}"));
             }
         }
 
@@ -836,8 +818,27 @@ impl SignalProcessor {
                     (memories, facts_used, episodes_used)
                 }
                 Err(e) => {
-                    tracing::warn!("Recall engine failed: {e}");
-                    (Vec::new(), 0, 0)
+                    tracing::warn!(
+                        "Recall engine failed, falling back to BM25-only episodic search: {e}"
+                    );
+                    let bm25 = self
+                        .episodic
+                        .search_bm25(query, top_k, namespace, None)
+                        .unwrap_or_default();
+                    let episodes_used = bm25.len();
+                    let memories = bm25
+                        .into_iter()
+                        .map(|r| hippocampus::Memory {
+                            id: r.episode_id,
+                            content: r.content,
+                            source: hippocampus::MemorySource::Episodic,
+                            score: r.rank,
+                            importance: 0.5,
+                            timestamp: r.timestamp,
+                            agent: r.agent,
+                        })
+                        .collect();
+                    (memories, 0, episodes_used)
                 }
             }
         } else {
@@ -1107,8 +1108,8 @@ mod tests {
 
     #[test]
     fn test_signal_with_agent() {
-        let signal = Signal::new(SignalSource::Http, "http", "apiclient", "hello")
-            .with_agent("claude-code");
+        let signal =
+            Signal::new(SignalSource::Http, "http", "apiclient", "hello").with_agent("claude-code");
         assert_eq!(signal.agent.as_deref(), Some("claude-code"));
 
         // Serialization round-trip preserves agent

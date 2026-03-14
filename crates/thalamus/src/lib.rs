@@ -81,12 +81,167 @@ pub enum ClassificationMethod {
     Fallback,
 }
 
-/// Optional LLM fallback hook used when no regex pattern matches.
+/// Optional LLM hook used for intent classification.
 #[async_trait::async_trait]
 pub trait IntentFallback: Send + Sync {
     /// Returns a best-effort classification for ambiguous input.
     /// Return `None` to allow the classifier's normal fallback behavior.
     async fn classify_with_llm(&self, input: &str) -> Option<Classification>;
+}
+
+#[derive(Debug, Deserialize)]
+struct LlmIntentPayload {
+    intent: String,
+    subject: Option<String>,
+    predicate: Option<String>,
+    object: Option<String>,
+    query: Option<String>,
+    target: Option<String>,
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    description: Option<String>,
+    cron: Option<String>,
+    channel: Option<String>,
+    recipient: Option<String>,
+    content: Option<String>,
+}
+
+/// LLM-based intent classifier used as a fallback/override for routing.
+pub struct LlmIntentFallback {
+    llm: Arc<dyn cortex::llm::LlmProvider>,
+}
+
+impl LlmIntentFallback {
+    pub fn new(llm: Arc<dyn cortex::llm::LlmProvider>) -> Self {
+        Self { llm }
+    }
+
+    fn parse_json_payload(raw: &str) -> Option<LlmIntentPayload> {
+        let trimmed = raw.trim();
+        if let Ok(payload) = serde_json::from_str::<LlmIntentPayload>(trimmed) {
+            return Some(payload);
+        }
+
+        let start = trimmed.find('{')?;
+        let end = trimmed.rfind('}')?;
+        serde_json::from_str::<LlmIntentPayload>(&trimmed[start..=end]).ok()
+    }
+
+    fn split_command(raw: &str) -> (String, Vec<String>) {
+        let parts: Vec<&str> = raw.split_whitespace().collect();
+        if parts.is_empty() {
+            return (String::new(), Vec::new());
+        }
+        let command = parts[0].to_string();
+        let args = parts[1..].iter().map(|s| s.to_string()).collect();
+        (command, args)
+    }
+}
+
+#[async_trait::async_trait]
+impl IntentFallback for LlmIntentFallback {
+    async fn classify_with_llm(&self, input: &str) -> Option<Classification> {
+        use cortex::llm::{Message, Role};
+
+        let prompt = format!(
+            "Classify the user input into exactly one intent for Brain OS.\n\
+             Valid intents: store_fact, recall, forget, execute_command, web_search, schedule, send_message, system_status, chat.\n\
+             Rules:\n\
+             - Questions (how/what/why/who/when/where/can/could/is/are) are ALWAYS chat. Never classify a question as execute_command.\n\
+             - execute_command is ONLY for explicit requests like \"run ls\", \"execute cargo build\". The command field must be a real shell command (ls, git, cargo, etc.).\n\
+             - Conversational statements (\"I've done X\", \"I completed X\", \"I like X\") are chat, NOT execute_command or store_fact.\n\
+             - store_fact is ONLY for explicit memory requests like \"remember that ...\", \"note that ...\", \"keep in mind ...\".\n\
+             - recall is ONLY for explicit memory queries like \"what did we discuss\", \"recall ...\", \"what do you remember about ...\".\n\
+             - Prefer web_search for explicit search requests about internet/google/latest/current external info.\n\
+             - For web_search, set 'query' to the exact optimal search terms, stripping conversational fluff.\n\
+             - Use system_status only for explicit status checks like \"/status\".\n\
+             - Use chat when uncertain or for general conversation.\n\
+             Return only JSON with keys: intent, subject, predicate, object, query, target, command, args, description, cron, channel, recipient, content.\n\
+             Missing keys must be null.\n\
+             Input: {input}"
+        );
+
+        let messages = vec![Message {
+            role: Role::User,
+            content: prompt,
+        }];
+
+        let response = self.llm.generate(&messages).await.ok()?;
+        let payload = Self::parse_json_payload(&response.content)?;
+        let key = payload.intent.to_ascii_lowercase();
+
+        let intent = match key.as_str() {
+            "store_fact" => Intent::StoreFact {
+                subject: payload.subject.unwrap_or_else(|| "user".to_string()),
+                predicate: payload.predicate.unwrap_or_else(|| "said".to_string()),
+                object: payload.object.unwrap_or_else(|| input.to_string()),
+            },
+            "recall" => Intent::Recall {
+                query: payload.query.unwrap_or_else(|| input.to_string()),
+            },
+            "forget" => Intent::Forget {
+                target: payload.target.unwrap_or_else(|| input.to_string()),
+            },
+            "execute_command" => {
+                let raw = payload
+                    .command
+                    .or(payload.content)
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                let (command, mut args) = Self::split_command(&raw);
+                if !payload.args.clone().unwrap_or_default().is_empty() {
+                    args = payload.args.unwrap_or_default();
+                }
+                if command.is_empty() {
+                    Intent::Chat {
+                        content: input.to_string(),
+                    }
+                } else {
+                    Intent::ExecuteCommand { command, args }
+                }
+            }
+            "web_search" => Intent::WebSearch {
+                query: payload.query.unwrap_or_else(|| input.to_string()),
+            },
+            "schedule" => {
+                let description = payload
+                    .description
+                    .or(payload.content)
+                    .unwrap_or_else(|| input.to_string());
+                Intent::Schedule {
+                    description,
+                    cron: payload.cron,
+                }
+            }
+            "send_message" => {
+                let channel = payload.channel.unwrap_or_default();
+                let recipient = payload.recipient.unwrap_or_default();
+                let content = payload.content.unwrap_or_default();
+                if channel.is_empty() || recipient.is_empty() || content.is_empty() {
+                    Intent::Chat {
+                        content: input.to_string(),
+                    }
+                } else {
+                    Intent::SendMessage {
+                        channel,
+                        recipient,
+                        content,
+                    }
+                }
+            }
+            "system_status" => Intent::SystemStatus,
+            _ => Intent::Chat {
+                content: input.to_string(),
+            },
+        };
+
+        Some(Classification {
+            intent,
+            confidence: 0.7,
+            method: ClassificationMethod::Llm,
+        })
+    }
 }
 
 // ─── Message Types ──────────────────────────────────────────────────────────
@@ -178,7 +333,7 @@ impl IntentClassifier {
         // Web search patterns
         patterns.push((
             Self::build_pattern(
-                r"(?i)^(?:search|look up|find)\s+(?:for\s+)?(.+?)$",
+                r"(?i)^(?:(?:can you|could you|please|will you|would you)\s+)?(?:search|look up|find|google|web search|look for)\s+(?:for\s+|about\s+|up\s+)?(.+?)(?:\?)?$",
                 &[("query", 1)],
             ),
             Intent::WebSearch {
@@ -331,15 +486,21 @@ impl IntentClassifier {
         }
     }
 
-    /// Classify with optional LLM fallback and final fallback to chat intent.
+    /// Classify with regex-first, LLM-fallback strategy.
+    ///
+    /// Regex patterns catch clear, structured commands deterministically (0ms).
+    /// When no regex matches, the LLM classifies ambiguous input (~300ms–5s).
+    /// This ensures reliable routing for known patterns while handling
+    /// natural language variations through the LLM.
     pub async fn classify(&self, input: &str) -> Classification {
+        // 1. Deterministic fast path — regex patterns for clear commands.
         if let Some(classification) = self.classify_fast(input) {
             return classification;
         }
 
-        // LLM fallback: bounded timeout, fail-open to chat on timeout or error.
+        // 2. LLM fallback — classifies ambiguous/natural language input.
         if let Some(fallback) = &self.llm_fallback {
-            let timeout = tokio::time::Duration::from_millis(1500);
+            let timeout = tokio::time::Duration::from_millis(5000);
             if let Ok(Some(classification)) =
                 tokio::time::timeout(timeout, fallback.classify_with_llm(input)).await
             {
@@ -347,7 +508,7 @@ impl IntentClassifier {
             }
         }
 
-        // Default to chat
+        // 3. Default to chat
         Classification {
             intent: Intent::Chat {
                 content: input.to_string(),
@@ -377,6 +538,12 @@ impl SignalRouter {
         Self {
             classifier: IntentClassifier::new(),
         }
+    }
+
+    /// Attach LLM intent classification to this router.
+    pub fn with_llm_fallback(mut self, fallback: Arc<dyn IntentFallback>) -> Self {
+        self.classifier = self.classifier.with_llm_fallback(fallback);
+        self
     }
 
     /// Route a message and return the classified intent.
@@ -481,6 +648,47 @@ mod tests {
         assert!(
             matches!(result.intent, Intent::WebSearch { .. }),
             "Expected WebSearch, got {:?}",
+            result.intent
+        );
+    }
+
+    #[tokio::test]
+    async fn test_classify_web_search_natural_phrasing() {
+        let classifier = IntentClassifier::new();
+
+        // "can you search about ..."
+        let result = classifier
+            .classify("can you search about Keshav Ashiya")
+            .await;
+        assert!(
+            matches!(result.intent, Intent::WebSearch { .. }),
+            "Expected WebSearch for 'can you search about ...', got {:?}",
+            result.intent
+        );
+
+        // "please look up ..."
+        let result = classifier.classify("please look up Rust language").await;
+        assert!(
+            matches!(result.intent, Intent::WebSearch { .. }),
+            "Expected WebSearch for 'please look up ...', got {:?}",
+            result.intent
+        );
+
+        // "could you find ..."
+        let result = classifier
+            .classify("could you find information about AI")
+            .await;
+        assert!(
+            matches!(result.intent, Intent::WebSearch { .. }),
+            "Expected WebSearch for 'could you find ...', got {:?}",
+            result.intent
+        );
+
+        // "google ..."
+        let result = classifier.classify("google Keshav Ashiya").await;
+        assert!(
+            matches!(result.intent, Intent::WebSearch { .. }),
+            "Expected WebSearch for 'google ...', got {:?}",
             result.intent
         );
     }

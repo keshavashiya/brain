@@ -221,9 +221,7 @@ async fn handle_connection(
 
     // ── Phase 2: process signal frames + proactive push ─────────────────────
     // Subscribe to proactive notifications (if router is available).
-    let mut proactive_rx = processor
-        .notification_router()
-        .map(|r| r.subscribe());
+    let mut proactive_rx = processor.notification_router().map(|r| r.subscribe());
 
     loop {
         // Build a future that resolves when a proactive notification arrives,

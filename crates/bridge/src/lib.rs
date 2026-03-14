@@ -339,7 +339,10 @@ mod tests {
     fn test_bridge_message_reply_shares_id() {
         let original = BridgeMessage::new("what time is it?");
         let reply = BridgeMessage::reply(&original, "It is noon.");
-        assert_eq!(reply.id, original.id, "reply should reuse original message ID");
+        assert_eq!(
+            reply.id, original.id,
+            "reply should reuse original message ID"
+        );
         assert_eq!(reply.content, "It is noon.");
     }
 
@@ -362,7 +365,7 @@ mod tests {
     async fn test_connect_fails_and_hits_max_retries() {
         // Point at an address that will refuse connections immediately.
         let cfg = BridgeConfig {
-            initial_backoff_ms: 1,   // tiny backoff so the test is fast
+            initial_backoff_ms: 1, // tiny backoff so the test is fast
             max_backoff_ms: 1,
             max_reconnect_attempts: Some(3),
         };

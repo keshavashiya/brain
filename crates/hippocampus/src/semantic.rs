@@ -78,9 +78,50 @@ impl SemanticStore {
         vector: Vec<f32>,
         agent: Option<&str>,
     ) -> Result<String, SemanticError> {
-        let id = Uuid::new_v4().to_string();
         let content = format!("{subject} {predicate} {object}");
         let now = chrono::Utc::now().to_rfc3339();
+
+        // Deduplication: check for highly similar facts in the same namespace and category.
+        let similar = self.search_similar(vector.clone(), 1, Some(namespace), agent).await?;
+        if let Some(hit) = similar.first() {
+            // Distance < 0.1 means similarity > 0.9 (cosine distance = 1 - similarity)
+            if hit.distance < 0.1 && hit.fact.category == category {
+                // If the content is identical, just return the existing ID.
+                if hit.fact.subject == subject && hit.fact.predicate == predicate && hit.fact.object == object {
+                    return Ok(hit.fact.id.clone());
+                }
+                // Otherwise, mark the existing fact as superseded and insert the new one.
+                let id = self.do_store_fact(namespace, category, subject, predicate, object, confidence, source_episode_id, vector, agent, &content, &now).await?;
+                self.db.with_conn(|conn| {
+                    conn.execute(
+                        "UPDATE semantic_facts SET superseded_by = ?1 WHERE id = ?2",
+                        rusqlite::params![id, hit.fact.id],
+                    )?;
+                    Ok(())
+                })?;
+                return Ok(id);
+            }
+        }
+
+        self.do_store_fact(namespace, category, subject, predicate, object, confidence, source_episode_id, vector, agent, &content, &now).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn do_store_fact(
+        &self,
+        namespace: &str,
+        category: &str,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+        confidence: f64,
+        source_episode_id: Option<&str>,
+        vector: Vec<f32>,
+        agent: Option<&str>,
+        content: &str,
+        now: &str,
+    ) -> Result<String, SemanticError> {
+        let id = Uuid::new_v4().to_string();
 
         // Encrypt the object field (the main content) if encryption is enabled.
         let stored_object = self.db.encrypt_content(object);
@@ -100,9 +141,9 @@ impl SemanticStore {
             .add_vectors(
                 "facts_vec",
                 vec![id.clone()],
-                vec![content],
+                vec![content.to_string()],
                 vec![vector],
-                vec![now],
+                vec![now.to_string()],
                 "semantic",
             )
             .await?;
@@ -234,9 +275,10 @@ impl SemanticStore {
             let (sql, params): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match namespace {
                 Some(ns) => (
                     "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
-                     FROM semantic_facts WHERE category = ?1 AND namespace = ?2 AND superseded_by IS NULL
+                     FROM semantic_facts 
+                     WHERE category = ?1 AND (namespace = ?2 OR namespace LIKE ?3) AND superseded_by IS NULL
                      ORDER BY updated_at DESC".to_string(),
-                    vec![Box::new(category.to_string()), Box::new(ns.to_string())],
+                    vec![Box::new(category.to_string()), Box::new(ns.to_string()), Box::new(format!("{}/%", ns))],
                 ),
                 None => (
                     "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
@@ -302,10 +344,11 @@ impl SemanticStore {
                 let mut stmt = conn.prepare(
                     "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
                      FROM semantic_facts
-                     WHERE subject = ?1 AND namespace = ?2
+                     WHERE subject = ?1 AND (namespace = ?2 OR namespace LIKE ?3)
                      ORDER BY confidence DESC",
                 )?;
-                let rows = stmt.query_map(rusqlite::params![subject, ns], row_to_fact)?;
+                let prefix = format!("{}/%", ns);
+                let rows = stmt.query_map(rusqlite::params![subject, ns, &prefix], row_to_fact)?;
                 rows.collect::<Result<Vec<_>, _>>()?
             } else {
                 let mut stmt = conn.prepare(
@@ -645,9 +688,7 @@ mod tests {
         assert_eq!(scoped.len(), 2);
 
         // Cross-namespace isolation: "work" category stored under "personal" namespace
-        let cross = store
-            .get_facts_by_category("work", Some("other"))
-            .unwrap();
+        let cross = store.get_facts_by_category("work", Some("other")).unwrap();
         assert_eq!(cross.len(), 0);
     }
 
@@ -708,7 +749,17 @@ mod tests {
 
         assert_eq!(store.count().unwrap(), 0);
         store
-            .store_fact("personal", "test", "a", "b", "c", 1.0, None, dummy_vector(), None)
+            .store_fact(
+                "personal",
+                "test",
+                "a",
+                "b",
+                "c",
+                1.0,
+                None,
+                dummy_vector(),
+                None,
+            )
             .await
             .unwrap();
         assert_eq!(store.count().unwrap(), 1);
@@ -739,7 +790,9 @@ mod tests {
             .await
             .unwrap();
         store
-            .store_fact("personal", "test", "python", "is", "popular", 1.0, None, v2, None)
+            .store_fact(
+                "personal", "test", "python", "is", "popular", 1.0, None, v2, None,
+            )
             .await
             .unwrap();
 

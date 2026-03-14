@@ -182,6 +182,10 @@ impl RuVectorStore {
         query_vector: Vec<f32>,
         top_k: usize,
     ) -> Result<Vec<VectorResult>, RuVectorError> {
+        // Lazy-open on first use so search does not fail with TableNotFound
+        // when callers skipped an explicit ensure_tables() step.
+        self.get_or_create_db(table_name)?;
+
         let tables = self
             .tables
             .read()

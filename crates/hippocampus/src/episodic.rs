@@ -58,18 +58,19 @@ pub struct FtsResult {
 
 /// Sanitize user input for FTS5 MATCH queries.
 ///
-/// Strips characters that are special in FTS5 syntax (`"`, `*`, `+`, `-`,
-/// `(`, `)`, `^`, `/`, `?`, `:`, `~`, `{`, `}`, `[`, `]`) and joins the
-/// remaining alphanumeric tokens with spaces. Returns an empty string if
-/// no searchable tokens remain.
+/// Keeps only alphanumeric characters and whitespace, replacing everything
+/// else with spaces. This avoids FTS5 parser errors on punctuation-heavy
+/// user input (for example apostrophes in words like "I've").
+///
+/// Returns an empty string if no searchable tokens remain.
 fn sanitize_fts5_query(query: &str) -> String {
     query
         .chars()
         .map(|c| {
-            if "\"*+-()^/?:~{}[]".contains(c) {
-                ' '
-            } else {
+            if c.is_alphanumeric() || c.is_whitespace() {
                 c
+            } else {
+                ' '
             }
         })
         .collect::<String>()
@@ -271,12 +272,12 @@ impl EpisodicStore {
                  JOIN episodes e ON e.rowid = f.rowid
                  WHERE episodes_fts MATCH ?1",
             );
-            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
-                vec![Box::new(sanitized)];
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(sanitized)];
 
             if let Some(ns) = namespace {
-                sql.push_str(&format!(" AND e.namespace = ?{}", params.len() + 1));
+                sql.push_str(&format!(" AND (e.namespace = ?{} OR e.namespace LIKE ?{})", params.len() + 1, params.len() + 2));
                 params.push(Box::new(ns.to_string()));
+                params.push(Box::new(format!("{}/%", ns)));
             }
             if let Some(a) = agent {
                 sql.push_str(&format!(" AND e.agent = ?{}", params.len() + 1));
@@ -326,12 +327,13 @@ impl EpisodicStore {
                     "SELECT id, session_id, role, content, timestamp,
                             namespace, importance, decay_rate, reinforcement_count, last_accessed, agent
                      FROM episodes
-                     WHERE namespace = ?1
+                     WHERE namespace = ?1 OR namespace LIKE ?2
                      ORDER BY timestamp DESC
-                     LIMIT ?2",
+                     LIMIT ?3",
                 )?;
+                let prefix = format!("{}/%", ns);
                 let episodes = stmt
-                    .query_map(rusqlite::params![ns, limit as i64], |row| {
+                    .query_map(rusqlite::params![ns, &prefix, limit as i64], |row| {
                         let raw: String = row.get(3)?;
                         Ok(Episode {
                             id: row.get(0)?,
@@ -421,7 +423,14 @@ mod tests {
             .store_episode(&session, "user", "Hello Brain!", 0.5, None, None)
             .unwrap();
         store
-            .store_episode(&session, "assistant", "Hello! How can I help?", 0.5, None, None)
+            .store_episode(
+                &session,
+                "assistant",
+                "Hello! How can I help?",
+                0.5,
+                None,
+                None,
+            )
             .unwrap();
         store
             .store_episode(&session, "user", "What's the weather?", 0.3, None, None)
@@ -473,13 +482,34 @@ mod tests {
         let session = store.create_session("cli").unwrap();
 
         store
-            .store_episode(&session, "user", "I love programming in Rust", 0.7, None, None)
+            .store_episode(
+                &session,
+                "user",
+                "I love programming in Rust",
+                0.7,
+                None,
+                None,
+            )
             .unwrap();
         store
-            .store_episode(&session, "user", "Python is great for scripting", 0.5, None, None)
+            .store_episode(
+                &session,
+                "user",
+                "Python is great for scripting",
+                0.5,
+                None,
+                None,
+            )
             .unwrap();
         store
-            .store_episode(&session, "user", "Rust has amazing performance", 0.8, None, None)
+            .store_episode(
+                &session,
+                "user",
+                "Rust has amazing performance",
+                0.8,
+                None,
+                None,
+            )
             .unwrap();
 
         let results = store.search_bm25("Rust", 10, None, None).unwrap();
@@ -542,5 +572,33 @@ mod tests {
         let personal_recent = store.recent(10, Some("personal")).unwrap();
         assert_eq!(personal_recent.len(), 1);
         assert_eq!(personal_recent[0].namespace, "personal");
+    }
+
+    #[test]
+    fn test_search_bm25_apostrophe_query_no_syntax_error() {
+        let store = test_store();
+        let session = store.create_session("cli").unwrap();
+
+        store
+            .store_episode(
+                &session,
+                "user",
+                "I've completed Brain project using Rust programming language",
+                0.8,
+                None,
+                None,
+            )
+            .unwrap();
+
+        let results = store
+            .search_bm25(
+                "I've completed brain project using rust programing language.",
+                10,
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert!(!results.is_empty());
     }
 }
