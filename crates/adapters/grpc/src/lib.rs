@@ -130,6 +130,7 @@ impl MemoryService for MemoryServiceImpl {
                 &req.subject,
                 &req.predicate,
                 &req.object,
+                None,
             )
             .await
         {
@@ -187,7 +188,7 @@ impl MemoryService for MemoryServiceImpl {
         let req = request.into_inner();
         let source = parse_source(&req.source);
 
-        let mut sig = Signal::new(
+        let sig = Signal::new(
             source,
             if req.channel.is_empty() {
                 "grpc"
@@ -200,14 +201,10 @@ impl MemoryService for MemoryServiceImpl {
                 &req.sender
             },
             req.content.clone(),
-        );
-        sig.metadata = req.metadata;
-        if !req.namespace.is_empty() {
-            sig.namespace = req.namespace;
-        }
-        if !req.agent.is_empty() {
-            sig.agent = Some(req.agent);
-        }
+        )
+        .with_metadata(req.metadata)
+        .with_namespace_opt(if req.namespace.is_empty() { None } else { Some(req.namespace) })
+        .with_agent_opt(if req.agent.is_empty() { None } else { Some(req.agent) });
 
         let processor = self.processor.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(4);
@@ -287,7 +284,7 @@ impl AgentService for AgentServiceImpl {
         let req = request.into_inner();
         let source = parse_source(&req.source);
 
-        let mut sig = Signal::new(
+        let sig = Signal::new(
             source,
             if req.channel.is_empty() {
                 "grpc"
@@ -300,14 +297,10 @@ impl AgentService for AgentServiceImpl {
                 &req.sender
             },
             req.content.clone(),
-        );
-        sig.metadata = req.metadata;
-        if !req.namespace.is_empty() {
-            sig.namespace = req.namespace;
-        }
-        if !req.agent.is_empty() {
-            sig.agent = Some(req.agent);
-        }
+        )
+        .with_metadata(req.metadata)
+        .with_namespace_opt(if req.namespace.is_empty() { None } else { Some(req.namespace) })
+        .with_agent_opt(if req.agent.is_empty() { None } else { Some(req.agent) });
 
         match self.processor.process(sig).await {
             Ok(resp) => Ok(Response::new(AgentSignalResponse {

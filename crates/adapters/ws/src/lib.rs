@@ -327,21 +327,15 @@ async fn process_text_frame(
     };
 
     let source = parse_source(client_msg.source.as_deref());
-    let mut signal = Signal::new(
+    let signal = Signal::new(
         source,
         format!("ws:{conn_id}"),
         client_msg.sender.unwrap_or_else(|| "wsclient".to_string()),
         client_msg.content,
-    );
-    if let Some(meta) = client_msg.metadata {
-        signal.metadata = meta;
-    }
-    if let Some(ns) = client_msg.namespace {
-        signal.namespace = ns;
-    }
-    if let Some(agent) = client_msg.agent {
-        signal.agent = Some(agent);
-    }
+    )
+    .with_metadata(client_msg.metadata.unwrap_or_default())
+    .with_namespace_opt(client_msg.namespace)
+    .with_agent_opt(client_msg.agent);
 
     let signal_id = signal.id;
     match processor.process(signal).await {

@@ -97,6 +97,34 @@ impl Signal {
         self.agent = Some(agent.into());
         self
     }
+
+    /// Builder: set the memory namespace.
+    pub fn with_namespace(mut self, ns: impl Into<String>) -> Self {
+        self.namespace = ns.into();
+        self
+    }
+
+    /// Builder: set the metadata map.
+    pub fn with_metadata(mut self, meta: HashMap<String, String>) -> Self {
+        self.metadata = meta;
+        self
+    }
+
+    /// Builder: set namespace from an Option (no-op if None).
+    pub fn with_namespace_opt(mut self, ns: Option<String>) -> Self {
+        if let Some(n) = ns {
+            self.namespace = n;
+        }
+        self
+    }
+
+    /// Builder: set agent from an Option (no-op if None).
+    pub fn with_agent_opt(mut self, agent: Option<String>) -> Self {
+        if let Some(a) = agent {
+            self.agent = Some(a);
+        }
+        self
+    }
 }
 
 // ─── Response Types ───────────────────────────────────────────────────────────
@@ -173,6 +201,29 @@ pub struct SignalProcessedEvent {
     pub timestamp: DateTime<Utc>,
 }
 
+// ─── Pipeline Result ─────────────────────────────────────────────────────────
+
+/// Result of the `prepare()` pipeline phase.
+///
+/// Either the intent was handled directly (StoreFact, Forget, SystemStatus, Actions)
+/// and a complete response is returned, or the pipeline assembled LLM messages
+/// and the caller decides whether to use streaming or batch generation.
+pub enum PipelineResult {
+    /// Intent handled directly. Response is complete.
+    Complete(SignalResponse),
+    /// Chat/Recall: pipeline done, LLM messages assembled.
+    /// Caller chooses streaming vs batch generation.
+    LlmReady {
+        signal_id: Uuid,
+        messages: Vec<cortex::llm::Message>,
+        memory_context: MemoryContext,
+        session_id: Option<String>,
+        user_content: String,
+        namespace: String,
+        agent: Option<String>,
+    },
+}
+
 // ─── Signal Adapter Trait ─────────────────────────────────────────────────────
 
 /// Trait implemented by all protocol adapters (HTTP, WebSocket, MCP, gRPC, CLI).
@@ -224,7 +275,8 @@ fn resolve_llm_api_key(config: &brain_core::BrainConfig) -> String {
     std::env::var("BRAIN_LLM__API_KEY").unwrap_or_default()
 }
 
-fn response_to_text(content: &ResponseContent) -> String {
+/// Extract text content from a ResponseContent variant.
+pub fn response_to_text(content: &ResponseContent) -> String {
     match content {
         ResponseContent::Text(t) => t.clone(),
         ResponseContent::Json(v) => v.to_string(),
@@ -355,7 +407,7 @@ impl SignalProcessor {
         Ok(Self {
             config,
             classifier,
-            importance: amygdala::ImportanceScorer::new(),
+            importance: amygdala::ImportanceScorer::with_llm(llm.clone()),
             episodic,
             semantic,
             embedder,
@@ -372,10 +424,16 @@ impl SignalProcessor {
 
     /// Process a signal through the full Brain pipeline.
     ///
+    /// Delegates to `prepare()` for pipeline work, then handles LLM generation
+    /// for intents that require it (Chat, Recall).
+    ///
     /// Routes by intent:
     /// - `StoreFact`  → Amygdala importance → Hippocampus semantic store → confirmation
     /// - `Recall`     → Hippocampus hybrid search → Cortex context assembly → LLM response
     /// - `Chat`       → Hippocampus context → Cortex LLM → Hippocampus episode store
+    /// - `Forget`     → search + delete matching facts
+    /// - `SystemStatus` → memory counts
+    /// - Action intents → ActionDispatcher
     #[tracing::instrument(
         name = "signal.process",
         skip(self, signal),
@@ -386,6 +444,61 @@ impl SignalProcessor {
         )
     )]
     pub async fn process(&self, signal: Signal) -> Result<SignalResponse, SignalError> {
+        match self.prepare(&signal, None).await? {
+            PipelineResult::Complete(resp) => {
+                self.publish_event(&signal, &resp);
+                Ok(resp)
+            }
+            PipelineResult::LlmReady {
+                signal_id,
+                messages,
+                memory_context,
+                session_id,
+                namespace,
+                agent,
+                ..
+            } => {
+                let llm_resp = self.llm.generate(&messages).await?;
+
+                // Store assistant episode for Chat/Recall
+                if let Some(sid) = &session_id {
+                    self.episodic
+                        .store_episode(
+                            sid,
+                            "assistant",
+                            &llm_resp.content,
+                            0.5,
+                            Some(&namespace),
+                            agent.as_deref(),
+                        )
+                        .map_err(|e| SignalError::Storage(e.to_string()))?;
+                }
+
+                let resp = SignalResponse {
+                    signal_id,
+                    status: ResponseStatus::Ok,
+                    response: ResponseContent::Text(llm_resp.content),
+                    memory_context,
+                };
+                self.publish_event(&signal, &resp);
+                Ok(resp)
+            }
+        }
+    }
+
+    /// Prepare the pipeline up to (but not including) LLM generation.
+    ///
+    /// Returns either a complete response (for StoreFact, Forget, SystemStatus,
+    /// Actions) or assembled LLM messages (for Chat, Recall). The caller can
+    /// then choose streaming vs batch LLM generation.
+    ///
+    /// If `conversation_history` is provided, it is used instead of an empty
+    /// history when assembling context (useful for CLI which manages its own).
+    pub async fn prepare(
+        &self,
+        signal: &Signal,
+        conversation_history: Option<&[cortex::llm::Message]>,
+    ) -> Result<PipelineResult, SignalError> {
         let signal_id = signal.id;
 
         // 0. Drain any pending proactive notifications from the outbox
@@ -395,24 +508,53 @@ impl SignalProcessor {
             Vec::new()
         };
 
-        // 1. Score importance via Amygdala
+        // 1. Score importance via Amygdala (keyword heuristic — sync so the LLM
+        //    slot stays free for classification which extracts facts)
         let importance = self.importance.score(&signal.content);
 
         // 2. Classify intent via Thalamus
         let classification = self.classifier.classify(&signal.content).await;
 
-        tracing::debug!(
+        tracing::info!(
             signal_id = %signal_id,
             source = ?signal.source,
             intent = ?classification.intent,
             importance = importance,
+            method = ?classification.method,
+            extracted_facts = classification.extracted_facts.len(),
             "Signal classified"
         );
 
+        // ── Store any facts extracted during classification ───────────────────
+        if !classification.extracted_facts.is_empty() {
+            for fact in &classification.extracted_facts {
+                match self
+                    .store_fact_direct(
+                        &signal.namespace,
+                        "extracted",
+                        &fact.subject,
+                        &fact.predicate,
+                        &fact.object,
+                        signal.agent.as_deref(),
+                    )
+                    .await
+                {
+                    Ok(_) => {
+                        tracing::info!(
+                            "Extracted fact: {} {} {}",
+                            fact.subject,
+                            fact.predicate,
+                            fact.object
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to store extracted fact: {e}");
+                    }
+                }
+            }
+        }
+
         // ── Cerebellum: match stored procedures ───────────────────────────────
-        // Check whether any learned procedures match this signal.  Matching
-        // procedures contribute their steps as additional context injected into
-        // the LLM prompt, and their use counters are bumped.
         let procedure_context: Vec<String> = match self.procedures.match_trigger(&signal.content) {
             Ok(procs) if !procs.is_empty() => {
                 tracing::debug!(
@@ -433,8 +575,23 @@ impl SignalProcessor {
             }
         };
 
-        let response: Result<SignalResponse, SignalError> = match classification.intent {
-            // ── STORE_FACT: importance score → semantic memory → confirmation ────
+        // Helper: prepend notification nudges to a response
+        let prepend_nudges = |mut resp: SignalResponse| -> SignalResponse {
+            if !pending_notifications.is_empty() {
+                let nudge_text: String = pending_notifications
+                    .iter()
+                    .map(|n| format!("[nudge] {}", n.content))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if let ResponseContent::Text(ref text) = resp.response {
+                    resp.response = ResponseContent::Text(format!("{nudge_text}\n\n{text}"));
+                }
+            }
+            resp
+        };
+
+        match classification.intent {
+            // ── STORE_FACT ──
             thalamus::Intent::StoreFact {
                 subject,
                 predicate,
@@ -464,7 +621,7 @@ impl SignalProcessor {
                     }
                 }
 
-                Ok(SignalResponse {
+                let resp = prepend_nudges(SignalResponse {
                     signal_id,
                     status: ResponseStatus::Ok,
                     response: ResponseContent::Text(format!(
@@ -474,17 +631,18 @@ impl SignalProcessor {
                         facts_used: facts_stored,
                         episodes_used: 0,
                     },
-                })
+                });
+                Ok(PipelineResult::Complete(resp))
             }
 
-            // ── RECALL_MEMORY: hybrid search → structured or LLM response ─────
+            // ── RECALL ──
             thalamus::Intent::Recall { query } => {
                 let query_vector = self.embed_text(&query).await;
                 let (memories, facts_used, episodes_used) = self
                     .do_recall(&query, query_vector, 10, Some(&signal.namespace))
                     .await;
 
-                // Agent callers get structured data — they have their own LLM
+                // Agent callers get structured data
                 if signal.agent.is_some() {
                     let text = if memories.is_empty() {
                         "No relevant memories found.".to_string()
@@ -495,7 +653,7 @@ impl SignalProcessor {
                             .collect::<Vec<_>>()
                             .join("\n")
                     };
-                    return Ok(SignalResponse {
+                    let resp = prepend_nudges(SignalResponse {
                         signal_id,
                         status: ResponseStatus::Ok,
                         response: ResponseContent::Text(text),
@@ -504,9 +662,10 @@ impl SignalProcessor {
                             episodes_used,
                         },
                     });
+                    return Ok(PipelineResult::Complete(resp));
                 }
 
-                // Human callers get LLM-synthesized response
+                // Human callers: assemble LLM messages
                 let proc_history: Vec<cortex::llm::Message> = procedure_context
                     .iter()
                     .map(|step| cortex::llm::Message {
@@ -515,25 +674,27 @@ impl SignalProcessor {
                     })
                     .collect();
 
+                let history = conversation_history.unwrap_or(&proc_history);
                 let messages = self
                     .context_assembler
-                    .assemble(&query, &memories, &proc_history);
-                let llm_response = self.llm.generate(&messages).await?;
+                    .assemble(&query, &memories, history);
 
-                Ok(SignalResponse {
+                Ok(PipelineResult::LlmReady {
                     signal_id,
-                    status: ResponseStatus::Ok,
-                    response: ResponseContent::Text(llm_response.content),
+                    messages,
                     memory_context: MemoryContext {
                         facts_used,
                         episodes_used,
                     },
+                    session_id: None,
+                    user_content: query,
+                    namespace: signal.namespace.clone(),
+                    agent: signal.agent.clone(),
                 })
             }
 
-            // ── CHAT: context fetch → structured or LLM response → episode ──
+            // ── CHAT ──
             thalamus::Intent::Chat { content } => {
-                // Fetch relevant memory context
                 let query_vector = self.embed_text(&content).await;
                 let (memories, facts_used, episodes_used) = self
                     .do_recall(&content, query_vector, 10, Some(&signal.namespace))
@@ -556,8 +717,7 @@ impl SignalProcessor {
                     )
                     .map_err(|e| SignalError::Storage(e.to_string()))?;
 
-                // Agent callers get structured memory context — skip LLM round-trip.
-                // The calling application's LLM will synthesize its own response.
+                // Agent callers get structured memory context
                 if signal.agent.is_some() {
                     let response_text = if memories.is_empty() {
                         format!("Stored episode. No relevant memories found for: {}", content)
@@ -573,7 +733,7 @@ impl SignalProcessor {
                         )
                     };
 
-                    return Ok(SignalResponse {
+                    let resp = prepend_nudges(SignalResponse {
                         signal_id,
                         status: ResponseStatus::Ok,
                         response: ResponseContent::Text(response_text),
@@ -582,9 +742,10 @@ impl SignalProcessor {
                             episodes_used,
                         },
                     });
+                    return Ok(PipelineResult::Complete(resp));
                 }
 
-                // Human callers get full LLM response
+                // Human callers: assemble LLM messages
                 let proc_history: Vec<cortex::llm::Message> = procedure_context
                     .iter()
                     .map(|step| cortex::llm::Message {
@@ -593,35 +754,26 @@ impl SignalProcessor {
                     })
                     .collect();
 
+                let history = conversation_history.unwrap_or(&proc_history);
                 let messages = self
                     .context_assembler
-                    .assemble(&content, &memories, &proc_history);
-                let llm_response = self.llm.generate(&messages).await?;
+                    .assemble(&content, &memories, history);
 
-                // Store the assistant turn in episodic memory
-                self.episodic
-                    .store_episode(
-                        &session_id,
-                        "assistant",
-                        &llm_response.content,
-                        0.5,
-                        Some(&signal.namespace),
-                        signal.agent.as_deref(),
-                    )
-                    .map_err(|e| SignalError::Storage(e.to_string()))?;
-
-                Ok(SignalResponse {
+                Ok(PipelineResult::LlmReady {
                     signal_id,
-                    status: ResponseStatus::Ok,
-                    response: ResponseContent::Text(llm_response.content),
+                    messages,
                     memory_context: MemoryContext {
                         facts_used,
                         episodes_used,
                     },
+                    session_id: Some(session_id),
+                    user_content: content,
+                    namespace: signal.namespace.clone(),
+                    agent: signal.agent.clone(),
                 })
             }
 
-            // ── FORGET: search for matching facts and delete them ────────────
+            // ── FORGET ──
             thalamus::Intent::Forget { target } => {
                 let mut deleted_count = 0usize;
 
@@ -654,7 +806,7 @@ impl SignalProcessor {
                     format!("No engrams found matching \"{target}\" to erase")
                 };
 
-                Ok(SignalResponse {
+                let resp = prepend_nudges(SignalResponse {
                     signal_id,
                     status: ResponseStatus::Ok,
                     response: ResponseContent::Text(message),
@@ -662,10 +814,11 @@ impl SignalProcessor {
                         facts_used: 0,
                         episodes_used: 0,
                     },
-                })
+                });
+                Ok(PipelineResult::Complete(resp))
             }
 
-            // ── SystemStatus: basic status report ────────────────────────────
+            // ── SystemStatus ──
             thalamus::Intent::SystemStatus => {
                 let semantic_count = self
                     .semantic
@@ -674,23 +827,23 @@ impl SignalProcessor {
                     .unwrap_or(0);
                 let episode_count = self.episodic.count().unwrap_or(0);
 
-                Ok(SignalResponse::ok(
+                let resp = prepend_nudges(SignalResponse::ok(
                     signal_id,
                     format!("Brain status: {semantic_count} facts, {episode_count} episodes"),
-                ))
+                ));
+                Ok(PipelineResult::Complete(resp))
             }
 
-            // ── Action intents: dispatch via ActionDispatcher ────────────────
+            // ── Action intents ──
             ref intent @ (thalamus::Intent::WebSearch { .. }
             | thalamus::Intent::Schedule { .. }
             | thalamus::Intent::SendMessage { .. }
             | thalamus::Intent::ExecuteCommand { .. }) => {
                 let router = thalamus::SignalRouter::new();
-                match (router.intent_to_action(intent), &self.action_dispatcher) {
+                let resp = match (router.intent_to_action(intent), &self.action_dispatcher) {
                     (Some(action), Some(dispatcher)) => {
                         let result = dispatcher.dispatch(&action).await;
                         if result.success {
-                            // For WebSearch: synthesize results through LLM for a natural response
                             if matches!(&action, cortex::actions::Action::WebSearch { .. })
                                 && !result.output.is_empty()
                             {
@@ -709,51 +862,54 @@ impl SignalProcessor {
                                     },
                                 ];
                                 match self.llm.generate(&messages).await {
-                                    Ok(llm_response) => Ok(SignalResponse::ok(signal_id, llm_response.content)),
-                                    Err(_) => Ok(SignalResponse::ok(signal_id, result.output)),
+                                    Ok(llm_response) => SignalResponse::ok(signal_id, llm_response.content),
+                                    Err(_) => SignalResponse::ok(signal_id, result.output),
                                 }
                             } else {
-                                Ok(SignalResponse::ok(signal_id, result.output))
+                                SignalResponse::ok(signal_id, result.output)
                             }
                         } else {
-                            Ok(SignalResponse::error(
+                            SignalResponse::error(
                                 signal_id,
                                 result.error.unwrap_or_else(|| "Action failed".to_string()),
-                            ))
+                            )
                         }
                     }
-                    (Some(_action), None) => Ok(SignalResponse::error(
+                    (Some(_action), None) => SignalResponse::error(
                         signal_id,
                         format!(
                             "Action {:?} recognized but no dispatcher configured — \
                              enable the relevant backend in config",
                             intent
                         ),
-                    )),
-                    (None, _) => Ok(SignalResponse::ok(
+                    ),
+                    (None, _) => SignalResponse::ok(
                         signal_id,
                         format!("Intent classified: {:?}", intent),
-                    )),
-                }
-            }
-        };
-        let mut response = response?;
-
-        // Prepend any pending proactive notifications to the response
-        if !pending_notifications.is_empty() {
-            let nudge_text: String = pending_notifications
-                .iter()
-                .map(|n| format!("[nudge] {}", n.content))
-                .collect::<Vec<_>>()
-                .join("\n");
-
-            if let ResponseContent::Text(ref text) = response.response {
-                response.response = ResponseContent::Text(format!("{nudge_text}\n\n{text}"));
+                    ),
+                };
+                let resp = prepend_nudges(resp);
+                Ok(PipelineResult::Complete(resp))
             }
         }
+    }
 
-        self.publish_event(&signal, &response);
-        Ok(response)
+    /// Store the assistant response in episodic memory after streaming completes.
+    ///
+    /// Call this after streaming LLM generation finishes to persist the
+    /// assistant turn in episodic memory. The `session_id` comes from the
+    /// `PipelineResult::LlmReady` variant.
+    pub fn finalize_streaming(
+        &self,
+        session_id: &str,
+        assistant_content: &str,
+        namespace: &str,
+        agent: Option<&str>,
+    ) -> Result<(), SignalError> {
+        self.episodic
+            .store_episode(session_id, "assistant", assistant_content, 0.5, Some(namespace), agent)
+            .map_err(|e| SignalError::Storage(e.to_string()))?;
+        Ok(())
     }
 
     /// Generate a vector embedding for text.
@@ -901,13 +1057,38 @@ impl SignalProcessor {
     }
 
     /// Expose the LLM provider (for adapter use).
-    pub fn llm(&self) -> &dyn cortex::LlmProvider {
-        self.llm.as_ref()
+    pub fn llm(&self) -> &Arc<dyn cortex::LlmProvider> {
+        &self.llm
     }
 
     /// Expose the context assembler (for adapter use).
     pub fn context_assembler(&self) -> &cortex::context::ContextAssembler {
         &self.context_assembler
+    }
+
+    /// Expose the embedding dimension (for adapter use).
+    pub fn embedding_dim(&self) -> usize {
+        self.embedding_dim
+    }
+
+    /// Get a cloneable handle to the LLM provider (for adapter use).
+    pub fn llm_arc(&self) -> Arc<dyn cortex::LlmProvider> {
+        self.llm.clone()
+    }
+
+    /// Recall memories using hybrid search (BM25 + ANN), with embedding done internally.
+    ///
+    /// Returns merged and ranked memories. Falls back to BM25-only episodic search
+    /// when the semantic store is unavailable.
+    pub async fn recall_memories(
+        &self,
+        query: &str,
+        top_k: usize,
+        namespace: Option<&str>,
+    ) -> Vec<hippocampus::Memory> {
+        let query_vector = self.embed_text(query).await;
+        let (memories, _, _) = self.do_recall(query, query_vector, top_k, namespace).await;
+        memories
     }
 
     /// Search semantic facts by text query (embed → vector ANN search).
@@ -990,6 +1171,16 @@ impl SignalProcessor {
         self
     }
 
+    /// Set the namespace used by the action dispatcher (if attached).
+    ///
+    /// Call this before `prepare()` when the active namespace changes
+    /// (e.g. CLI session namespace switch).
+    pub fn set_action_namespace(&mut self, ns: &str) {
+        if let Some(d) = &mut self.action_dispatcher {
+            d.set_namespace(ns);
+        }
+    }
+
     /// Flush all in-flight writes and checkpoint the SQLite WAL.
     ///
     /// Call this on graceful shutdown to ensure no committed data is lost.
@@ -1010,8 +1201,9 @@ impl SignalProcessor {
 
     /// Store a semantic fact directly (bypasses intent classification).
     ///
-    /// Used by the MCP `memory_store` tool to write structured facts.
+    /// Used by the MCP `memory_store` tool and extracted-fact storage.
     /// The `namespace` scopes the fact (default: "personal").
+    /// Importance is scored via Amygdala rather than hardcoded.
     pub async fn store_fact_direct(
         &self,
         namespace: &str,
@@ -1019,13 +1211,16 @@ impl SignalProcessor {
         subject: &str,
         predicate: &str,
         object: &str,
+        agent: Option<&str>,
     ) -> Result<String, SignalError> {
         if let Some(semantic) = &self.semantic {
             let fact_text = format!("{subject} {predicate} {object}");
+            let importance = self.importance.score(&fact_text);
             let vector = self.embed_text(&fact_text).await;
             let id = semantic
                 .store_fact(
-                    namespace, category, subject, predicate, object, 1.0, None, vector, None,
+                    namespace, category, subject, predicate, object, importance as f64, None,
+                    vector, agent,
                 )
                 .await
                 .map_err(|e| SignalError::Storage(e.to_string()))?;
@@ -1227,11 +1422,11 @@ mod tests {
         let processor = SignalProcessor::new(config).await.unwrap();
 
         processor
-            .store_fact_direct("personal", "test", "project", "uses", "bun")
+            .store_fact_direct("personal", "test", "project", "uses", "bun", None)
             .await
             .unwrap();
         processor
-            .store_fact_direct("work", "test", "project", "uses", "bun")
+            .store_fact_direct("work", "test", "project", "uses", "bun", None)
             .await
             .unwrap();
 

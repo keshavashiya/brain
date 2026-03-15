@@ -230,6 +230,10 @@ impl McpServer {
                             "namespace": {
                                 "type": "string",
                                 "description": "Memory namespace (e.g. 'personal', 'work'). Defaults to 'personal'."
+                            },
+                            "agent": {
+                                "type": "string",
+                                "description": "Agent identity for attribution (e.g. 'claude-code', 'cursor'). Optional."
                             }
                         },
                         "required": ["subject", "predicate", "object"]
@@ -394,9 +398,11 @@ impl McpServer {
             .and_then(Value::as_str)
             .unwrap_or("personal");
 
+        let agent = args.get("agent").and_then(Value::as_str);
+
         match self
             .processor
-            .store_fact_direct(namespace, category, subject, predicate, object)
+            .store_fact_direct(namespace, category, subject, predicate, object, agent)
             .await
         {
             Ok(id) => Ok(tool_result_text(format!(

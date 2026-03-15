@@ -121,13 +121,33 @@ impl ProcedureStore {
 
     // ── Match ─────────────────────────────────────────────────────────────────
 
-    /// Find all procedures whose trigger pattern appears in `input` (case-insensitive substring match).
+    /// Find all procedures whose trigger pattern appears in `input` as whole words
+    /// (case-insensitive word-boundary matching).
+    ///
+    /// Uses word-boundary matching so "deploy" doesn't match "I deployed yesterday".
+    /// Multi-word triggers are matched as contiguous word sequences.
     pub fn match_trigger(&self, input: &str) -> Result<Vec<Procedure>, CerebellumError> {
-        let lower = input.to_lowercase();
+        let input_words: Vec<&str> = input
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+            .collect();
         let all = self.list_procedures()?;
         Ok(all
             .into_iter()
-            .filter(|p| lower.contains(&p.trigger_pattern.to_lowercase()))
+            .filter(|p| {
+                let trigger_words: Vec<&str> = p.trigger_pattern.split_whitespace().collect();
+                if trigger_words.is_empty() {
+                    return false;
+                }
+                input_words
+                    .windows(trigger_words.len())
+                    .any(|window| {
+                        window
+                            .iter()
+                            .zip(&trigger_words)
+                            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+                    })
+            })
             .collect())
     }
 

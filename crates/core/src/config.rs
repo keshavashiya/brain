@@ -156,18 +156,13 @@ impl Default for ResilienceConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WebSearchProvider {
     Searxng,
     Tavily,
+    #[default]
     Custom,
-}
-
-impl Default for WebSearchProvider {
-    fn default() -> Self {
-        Self::Custom
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

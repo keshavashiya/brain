@@ -673,21 +673,15 @@ async fn post_signal_handler(
     state.metrics.signals_total.fetch_add(1, Ordering::Relaxed);
 
     let source = parse_source(body.source.as_deref());
-    let mut signal = Signal::new(
+    let signal = Signal::new(
         source,
         body.channel.unwrap_or_else(|| "http".to_string()),
         body.sender.unwrap_or_else(|| "apiclient".to_string()),
         body.content,
-    );
-    if let Some(meta) = body.metadata {
-        signal.metadata = meta;
-    }
-    if let Some(ns) = body.namespace {
-        signal.namespace = ns;
-    }
-    if let Some(agent) = body.agent {
-        signal.agent = Some(agent);
-    }
+    )
+    .with_metadata(body.metadata.unwrap_or_default())
+    .with_namespace_opt(body.namespace)
+    .with_agent_opt(body.agent);
 
     let signal_id = signal.id;
     let result = state.processor.process(signal).await;
@@ -1397,7 +1391,7 @@ mod tests {
 
         // Pre-store a fact directly so search has something to find
         let _ = processor
-            .store_fact_direct("personal", "test", "Ferris", "is", "the Rust mascot")
+            .store_fact_direct("personal", "test", "Ferris", "is", "the Rust mascot", None)
             .await
             .unwrap();
 

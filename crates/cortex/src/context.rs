@@ -19,6 +19,23 @@ pub const TOKEN_BUDGETS: TokenBudget = TokenBudget {
     total_context: 8192, // Default for most models
 };
 
+/// Hardcoded greeting for first-ever chat session (0 facts).
+/// Printed directly — no LLM call needed.
+pub const ONBOARDING_GREETING: &str = "Hey! I'm Brain \u{2014} your personal memory engine. \
+I run locally on your machine and I'm here to remember what matters to you. \
+I don't know anything about you yet, so let's fix that. What's your name?";
+
+/// System-prompt addendum injected while the user has fewer than 5 facts.
+/// Makes the LLM naturally curious and question-asking during onboarding.
+pub const ONBOARDING_ADDENDUM: &str = r#"
+
+[ONBOARDING MODE — the user is new and you know very little about them]
+- After every user message, end your response with ONE short, focused follow-up question to learn about the user (name, role, projects, interests).
+- Keep responses to 1-3 sentences plus the question.
+- Sound warm, curious, and conversational — not like an intake form.
+- NEVER say "I don't have that in my memory yet" — instead, be proactive about learning.
+- Once you learn something, acknowledge it naturally and ask about the next thing."#;
+
 /// Token budget allocation.
 #[derive(Debug, Clone, Copy)]
 pub struct TokenBudget {
@@ -145,6 +162,7 @@ Operating Principles:
 2. SEAMLESS RECALL: Reference memories naturally ("You mentioned earlier...", "Based on what we discussed...").
 3. COGNITIVE CLARITY: Be concise, direct, and insightful. Avoid corporate fluff.
 4. CONTEXTUAL AWARENESS: Use the provided User Profile to tailor your tone and relevance.
+5. CURIOSITY: When you lack context about the user, ask one focused follow-up question. Learning about the user is part of your job — don't wait to be told.
 
 You are the user's partner in thought. Your goal is to make their digital life feel like a continuous, coherent stream of intelligence."#
             .to_string()
@@ -384,6 +402,34 @@ mod tests {
         assert!(system.contains("Semantic Memory"));
         assert!(system.contains("Proactivity"));
         assert!(system.contains("TRUTH OVER HALLUCINATION"));
+        assert!(
+            system.contains("CURIOSITY"),
+            "SOUL prompt must include CURIOSITY operating principle"
+        );
+    }
+
+    #[test]
+    fn test_onboarding_greeting_exists() {
+        assert!(
+            ONBOARDING_GREETING.contains("Brain"),
+            "greeting must mention Brain"
+        );
+        assert!(
+            ONBOARDING_GREETING.contains("name"),
+            "greeting must ask for the user's name"
+        );
+    }
+
+    #[test]
+    fn test_onboarding_addendum_exists() {
+        assert!(
+            ONBOARDING_ADDENDUM.contains("ONBOARDING MODE"),
+            "addendum must contain ONBOARDING MODE marker"
+        );
+        assert!(
+            ONBOARDING_ADDENDUM.contains("follow-up question"),
+            "addendum must instruct follow-up questions"
+        );
     }
 
     #[test]

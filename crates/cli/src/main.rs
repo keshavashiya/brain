@@ -876,13 +876,14 @@ async fn main() -> anyhow::Result<()> {
                 let p = processor.clone();
                 let ol_cfg = config.proactivity.open_loop.clone();
                 set.spawn(async move {
-                    let detector = ganglia::OpenLoopDetector::new(
+                    let detector = ganglia::OpenLoopDetector::with_llm(
                         p.episodic().pool().clone(),
                         ganglia::OpenLoopConfig {
                             scan_window_hours: ol_cfg.scan_window_hours,
                             resolution_window_hours: ol_cfg.resolution_window_hours,
                             max_reminders: 3,
                         },
+                        p.llm().clone(),
                     );
                     let check_interval =
                         tokio::time::Duration::from_secs(ol_cfg.check_interval_minutes as u64 * 60);
@@ -890,7 +891,7 @@ async fn main() -> anyhow::Result<()> {
                     ticker.tick().await; // skip first tick
                     loop {
                         ticker.tick().await;
-                        match detector.generate_reminders() {
+                        match detector.generate_reminders_async().await {
                             Ok(reminders) if !reminders.is_empty() => {
                                 if let Some(router) = p.notification_router() {
                                     for msg in reminders {
@@ -1173,7 +1174,7 @@ async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Result<()> {
     );
 
     // LLM health
-    let llm_api_key = resolve_llm_api_key(&config);
+    let llm_api_key = resolve_llm_api_key(config);
     let llm_cfg = cortex::llm::ProviderConfig {
         provider: config.llm.provider.clone(),
         base_url: config.llm.base_url.clone(),
@@ -1258,12 +1259,10 @@ fn find_compose_file() -> Option<std::path::PathBuf> {
                 .map(|d| d.join("../share/brain/docker/docker-compose.yml"))
         }),
     ];
-    for candidate in candidates.into_iter().flatten() {
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    candidates
+        .into_iter()
+        .flatten()
+        .find(|candidate| candidate.is_file())
 }
 
 fn cmd_deps(action: DepsAction) -> anyhow::Result<()> {
@@ -1450,6 +1449,7 @@ async fn cmd_bridge(
 ///             `systemctl --user daemon-reload` and `systemctl --user enable`.
 /// • Windows — registers a Task Scheduler task (`schtasks`) that runs
 ///             `brain serve` at every user login, no admin required.
+#[allow(clippy::needless_return)] // returns are needed for cross-platform #[cfg] blocks
 fn cmd_service_install() -> anyhow::Result<()> {
     let exe = std::env::current_exe()
         .map_err(|e| anyhow::anyhow!("Cannot determine Brain binary path: {e}"))?;
@@ -1623,6 +1623,7 @@ WantedBy=default.target
 }
 
 /// Remove the Brain login service.
+#[allow(clippy::needless_return)] // returns are needed for cross-platform #[cfg] blocks
 fn cmd_service_uninstall() -> anyhow::Result<()> {
     let home = std::env::var_os("HOME")
         .map(std::path::PathBuf::from)
@@ -1954,7 +1955,7 @@ async fn cmd_import(
                 ruv.ensure_tables().await.ok();
 
                 // Create embedder
-                let llm_api_key = resolve_llm_api_key(&config);
+                let llm_api_key = resolve_llm_api_key(config);
                 let embedder = match config.llm.provider.as_str() {
                     "openai" => hippocampus::Embedder::for_openai(
                         &config.llm.base_url,
@@ -2054,8 +2055,11 @@ async fn promote_candidates(
             continue;
         }
 
-        let (subject, predicate, object) =
-            thalamus::IntentClassifier::parse_store_fact_content(&candidate.content);
+        // Use the full episode content as the object; the consolidation
+        // path doesn't have SPO structure — that comes from LLM classification.
+        let subject = "user";
+        let predicate = "said";
+        let object = &candidate.content;
 
         if object.trim().is_empty() {
             continue;
@@ -2065,9 +2069,10 @@ async fn promote_candidates(
             .store_fact_direct(
                 &candidate.namespace,
                 "consolidated",
-                &subject,
-                &predicate,
-                &object,
+                subject,
+                predicate,
+                object,
+                None,
             )
             .await
         {
@@ -2202,17 +2207,35 @@ async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()
     println!();
     println!("  Cortex:  {}", config.llm.model);
     println!("  Memory:  {}", config.data_dir().display());
+
+    let mut brain = BrainSession::new(config).await?;
+
+    if brain.processor.semantic().is_some() {
+        println!("  Synapse: standalone (full memory)");
+    } else {
+        println!("  Synapse: standalone (episodic only)");
+    }
+
     println!();
     println!("Signals: /status  /clear  /quit");
     println!();
-
-    let mut brain = BrainSession::new(config).await?;
     let mut rl = DefaultEditor::new()?;
     let history_path = config.data_dir().join("history.txt");
     let _ = rl.load_history(&history_path);
 
     // Show proactive nudges at session start (open loops + pending outbox)
     show_proactive_nudges(&brain, config);
+
+    // Onboarding greeting for first-ever session (no facts AND no prior episodes)
+    if brain.semantic_fact_count() == 0 && brain.episode_count() == 0 {
+        let mut out = stdout();
+        out.execute(SetForegroundColor(Color::Green))?;
+        out.execute(Print("Brain: "))?;
+        out.execute(ResetColor)?;
+        println!("{}", cortex::context::ONBOARDING_GREETING);
+        println!();
+        brain.record_onboarding_greeting();
+    }
 
     loop {
         match rl.readline("You: ") {
@@ -2449,7 +2472,7 @@ impl cortex::actions::MemoryBackend for CliMemoryBackend {
     async fn store_fact(
         &self,
         namespace: &str,
-        category: &str,
+        _category: &str,
         subject: &str,
         predicate: &str,
         object: &str,
@@ -2486,7 +2509,7 @@ impl cortex::actions::MemoryBackend for CliMemoryBackend {
 
         semantic
             .store_fact(
-                namespace, category, subject, predicate, object, 1.0, None, vector, None,
+                namespace, _category, subject, predicate, object, 1.0, None, vector, None,
             )
             .await
             .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))
@@ -3255,19 +3278,12 @@ impl cortex::actions::MessageBackend for WebhookMessageBackend {
     }
 }
 
-#[allow(dead_code)]
 struct BrainSession {
-    _config: brain_core::BrainConfig,
-    db: storage::SqlitePool,
-    episodic: hippocampus::EpisodicStore,
-    semantic: Option<hippocampus::SemanticStore>,
-    embedder: Arc<tokio::sync::Mutex<Option<hippocampus::Embedder>>>,
-    embedding_dim: usize,
-    recall_engine: hippocampus::RecallEngine,
+    /// Central signal processor — owns all stores (episodic, semantic, embedder, recall)
+    /// plus the action dispatcher. All memory and intent operations go through it.
+    processor: signal::SignalProcessor,
+    /// LLM provider Arc — kept separately so streaming doesn't conflict with &mut self.
     llm: Arc<dyn cortex::llm::LlmProvider>,
-    router: thalamus::SignalRouter,
-    context_assembler: cortex::context::ContextAssembler,
-    action_dispatcher: cortex::actions::ActionDispatcher,
     namespace: String,
     conversation_history: Vec<cortex::llm::Message>,
     session_id: String,
@@ -3275,36 +3291,13 @@ struct BrainSession {
 
 impl BrainSession {
     async fn new(config: &brain_core::BrainConfig) -> anyhow::Result<Self> {
-        let db = storage::SqlitePool::open(&config.sqlite_path())?;
-        let episodic = hippocampus::EpisodicStore::new(db.clone());
+        let encryptor = resolve_encryptor(config)?;
+        let processor =
+            signal::SignalProcessor::new_with_encryptor(config.clone(), encryptor).await?;
 
-        let semantic = match storage::RuVectorStore::open(
-            &config.ruvector_path(),
-            config.embedding.dimensions as usize,
-        )
-        .await
-        {
-            Ok(ruv) => match ruv.ensure_tables().await {
-                Ok(()) => Some(hippocampus::SemanticStore::new(db.clone(), ruv)),
-                Err(e) => {
-                    tracing::warn!(
-                        "RuVector table initialization failed, semantic memory disabled: {e}"
-                    );
-                    None
-                }
-            },
-            Err(e) => {
-                tracing::warn!(
-                    "RuVector unavailable at {}, semantic memory disabled: {e}",
-                    config.ruvector_path().display()
-                );
-                None
-            }
-        };
-
-        // Create embedder (same logic as SignalProcessor)
-        let embedding_dim = config.embedding.dimensions as usize;
-        let llm_api_key = resolve_llm_api_key(&config);
+        // Create embedder for CliMemoryBackend (action dispatcher's memory ops)
+        let embedding_dim = processor.embedding_dim();
+        let llm_api_key = resolve_llm_api_key(config);
         let embedder = Arc::new(tokio::sync::Mutex::new(
             match config.llm.provider.as_str() {
                 "openai" => Some(hippocampus::Embedder::for_openai(
@@ -3320,8 +3313,8 @@ impl BrainSession {
         ));
 
         let action_backend = Arc::new(CliMemoryBackend {
-            semantic: semantic.clone(),
-            embedder: Arc::clone(&embedder),
+            semantic: processor.semantic().cloned(),
+            embedder,
             embedding_dim,
         });
         let action_config = cortex::actions::ActionConfig {
@@ -3388,14 +3381,14 @@ impl BrainSession {
                     );
                     action_dispatcher = action_dispatcher.with_web_search_backend(backend);
                 }
-                Ok(None) => {} // warning already logged above
+                Ok(None) => {}
                 Err(e) => tracing::warn!("Web search backend init failed: {e}"),
             }
         }
 
         if config.actions.scheduling.enabled {
             let backend = CliSchedulingBackend {
-                db: db.clone(),
+                db: processor.episodic().pool().clone(),
                 mode: config.actions.scheduling.mode.clone(),
             };
             action_dispatcher = action_dispatcher.with_scheduling_backend(Arc::new(backend));
@@ -3423,36 +3416,16 @@ impl BrainSession {
             }
         }
 
-        let recall_engine = hippocampus::RecallEngine::with_defaults();
+        let llm = processor.llm_arc();
 
-        let llm: Arc<dyn cortex::llm::LlmProvider> =
-            Arc::from(cortex::llm::create_provider(&cortex::llm::ProviderConfig {
-                provider: config.llm.provider.clone(),
-                base_url: config.llm.base_url.clone(),
-                api_key: None,
-                model: config.llm.model.clone(),
-                temperature: config.llm.temperature,
-                max_tokens: config.llm.max_tokens as i32,
-            }));
+        // Attach the action dispatcher to the processor so prepare() can use it
+        let processor = processor.with_action_dispatcher(action_dispatcher);
 
-        let router = thalamus::SignalRouter::new()
-            .with_llm_fallback(Arc::new(thalamus::LlmIntentFallback::new(llm.clone())));
-
-        let context_assembler = cortex::context::ContextAssembler::with_defaults();
-        let session_id = episodic.create_session("cli")?;
+        let session_id = processor.episodic().create_session("cli")?;
 
         Ok(Self {
-            _config: config.clone(),
-            db,
-            episodic,
-            semantic,
-            embedder,
-            embedding_dim,
-            recall_engine,
+            processor,
             llm,
-            router,
-            context_assembler,
-            action_dispatcher,
             namespace: "personal".to_string(),
             conversation_history: Vec::new(),
             session_id,
@@ -3460,242 +3433,105 @@ impl BrainSession {
     }
 
     fn db(&self) -> &storage::SqlitePool {
-        &self.db
+        self.processor.episodic().pool()
+    }
+
+    /// Total active semantic facts, querying SQLite directly so it works even
+    /// when the RuVector store is locked by another process.
+    fn semantic_fact_count(&self) -> i64 {
+        self.processor
+            .episodic()
+            .pool()
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM semantic_facts WHERE superseded_by IS NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap_or(0)
+    }
+
+    fn episode_count(&self) -> i64 {
+        self.processor
+            .episodic()
+            .pool()
+            .with_conn(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM episodes", [], |row| row.get(0))
+                    .map_err(Into::into)
+            })
+            .unwrap_or(0)
+    }
+
+    /// True while the user has fewer than 5 facts (onboarding phase).
+    fn is_onboarding(&self) -> bool {
+        self.semantic_fact_count() < 5
+    }
+
+    /// Record the onboarding greeting in episodic memory and conversation history.
+    fn record_onboarding_greeting(&mut self) {
+        let _ = self.processor.episodic().store_episode(
+            &self.session_id,
+            "assistant",
+            cortex::context::ONBOARDING_GREETING,
+            0.6,
+            Some(&self.namespace),
+            None,
+        );
+        self.conversation_history.push(cortex::llm::Message {
+            role: cortex::llm::Role::Assistant,
+            content: cortex::context::ONBOARDING_GREETING.to_string(),
+        });
     }
 
     fn clear_history(&mut self) {
         self.conversation_history.clear();
     }
 
-    /// Generate a vector embedding for text, falling back to a deterministic vector.
-    async fn embed_text(&mut self, text: &str) -> Vec<f32> {
-        let mut guard = self.embedder.lock().await;
-        if let Some(ref mut embedder) = *guard {
-            match embedder.embed(text).await {
-                Ok(vec) => {
-                    hippocampus::embedding::sanitize_embedding(vec, self.embedding_dim, text)
-                }
-                Err(e) => {
-                    tracing::warn!("Embedding failed in CLI chat, using fallback vector: {e}");
-                    hippocampus::embedding::deterministic_fallback_embedding(
-                        text,
-                        self.embedding_dim,
-                    )
-                }
-            }
-        } else {
-            hippocampus::embedding::deterministic_fallback_embedding(text, self.embedding_dim)
-        }
-    }
-
-    /// Phase 0: store user episode, route via thalamus, recall memories, assemble context.
+    /// Prepare context by delegating to the unified SignalProcessor pipeline.
+    ///
+    /// Translates `PipelineResult` into the CLI's `PrepareResult`, preserving
+    /// CLI-specific concerns: conversation history passthrough and onboarding
+    /// addendum injection.
     async fn prepare_context(&mut self, message: &str) -> anyhow::Result<PrepareResult> {
-        let importance = hippocampus::ImportanceScorer::score(message, true);
-        self.episodic.store_episode(
-            &self.session_id,
-            "user",
-            message,
-            importance,
-            Some(&self.namespace),
-            None,
-        )?;
+        // Sync the action dispatcher's namespace with the session namespace
+        self.processor.set_action_namespace(&self.namespace);
 
-        let classification = self
-            .router
-            .route(&thalamus::NormalizedMessage {
-                content: message.to_string(),
-                channel: "cli".to_string(),
-                sender: "user".to_string(),
-                timestamp: chrono::Utc::now(),
-                message_id: None,
-                metadata: std::collections::HashMap::new(),
-            })
-            .await;
+        let signal = signal::Signal::new(signal::SignalSource::Cli, "cli", "user", message)
+            .with_namespace(self.namespace.clone());
 
-        // ── Handle StoreFact directly (graceful when semantic is unavailable) ──
-        if let thalamus::Intent::StoreFact {
-            ref subject,
-            ref predicate,
-            ref object,
-        } = classification.intent
+        match self
+            .processor
+            .prepare(&signal, Some(&self.conversation_history))
+            .await?
         {
-            let fact_text = format!("{subject} {predicate} {object}");
-            let vector = self.embed_text(&fact_text).await;
-            let mut stored = false;
-
-            if let Some(semantic) = &self.semantic {
-                match semantic
-                    .store_fact(
-                        &self.namespace,
-                        "signal",
-                        subject,
-                        predicate,
-                        object,
-                        importance,
-                        None,
-                        vector,
-                        None,
-                    )
-                    .await
-                {
-                    Ok(_) => stored = true,
-                    Err(e) => tracing::warn!("Failed to store fact in semantic memory: {e}"),
-                }
+            signal::PipelineResult::Complete(resp) => {
+                Ok(PrepareResult::ActionResult(signal::response_to_text(&resp.response)))
             }
-
-            let status = if stored {
-                format!("Stored: {fact_text} (importance: {importance:.2})")
-            } else {
-                format!(
-                    "Noted in conversation history: {fact_text} (semantic memory unavailable for permanent storage)"
-                )
-            };
-            return Ok(PrepareResult::ActionResult(status));
-        }
-
-        // ── Handle Recall by falling through to the normal memory + LLM path ──
-        // This uses hybrid recall (BM25 + ANN) and feeds results to the LLM for
-        // a natural response, rather than returning raw fact dumps.
-        if let thalamus::Intent::Recall { ref query } = classification.intent {
-            let query_vector = self.embed_text(query).await;
-            let memories = if let Some(semantic) = &self.semantic {
-                self.recall_engine
-                    .recall(
-                        query,
-                        query_vector,
-                        &self.episodic,
-                        semantic,
-                        10,
-                        Some(&self.namespace),
-                        None,
-                    )
-                    .await
-                    .unwrap_or_default()
-            } else {
-                self.episodic
-                    .search_bm25(query, 10, Some(&self.namespace), None)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|r| hippocampus::search::Memory {
-                        id: r.episode_id,
-                        content: r.content,
-                        source: hippocampus::search::MemorySource::Episodic,
-                        score: r.rank,
-                        importance: 0.5,
-                        timestamp: r.timestamp,
-                        agent: r.agent,
-                    })
-                    .collect()
-            };
-            let messages =
-                self.context_assembler
-                    .assemble(query, &memories, &self.conversation_history);
-            return Ok(PrepareResult::LlmReady(messages));
-        }
-
-        // ── Handle remaining action intents via ActionDispatcher ──────────────
-        if let Some(action) = self.router.intent_to_action(&classification.intent) {
-            self.action_dispatcher.set_namespace(self.namespace.clone());
-
-            // For WebSearch: feed results back through the LLM for a natural response
-            if matches!(&action, cortex::actions::Action::WebSearch { .. }) {
-                let result = self.action_dispatcher.dispatch(&action).await;
-                if result.success && !result.output.is_empty() {
-                    let search_context = format!(
-                        "The user asked: \"{}\"\n\nHere are web search results:\n{}\n\nUsing these search results, provide a helpful and concise answer to the user's question. Cite sources when relevant.",
-                        message, result.output
-                    );
-                    let messages = vec![
-                        cortex::llm::Message {
-                            role: cortex::llm::Role::System,
-                            content: "You are Brain OS. Answer the user's question using the provided web search results. Be concise and cite your sources.".to_string(),
-                        },
-                        cortex::llm::Message {
-                            role: cortex::llm::Role::User,
-                            content: search_context,
-                        },
-                    ];
-                    return Ok(PrepareResult::LlmReady(messages));
-                } else {
-                    return Ok(PrepareResult::ActionResult(
-                        result.error.unwrap_or_else(|| "Web search returned no results.".to_string()),
-                    ));
+            signal::PipelineResult::LlmReady {
+                mut messages,
+                session_id,
+                ..
+            } => {
+                // Stash the session_id so finalize_response can store the assistant turn
+                if let Some(sid) = session_id {
+                    self.session_id = sid;
                 }
-            }
 
-            let result = self.action_dispatcher.dispatch(&action).await;
-            return if result.success {
-                Ok(PrepareResult::ActionResult(result.output))
-            } else {
-                Ok(PrepareResult::ActionResult(format!(
-                    "Error: {}",
-                    result.error.unwrap_or_default()
-                )))
-            };
-        }
-
-        // Hybrid recall (BM25 + ANN via RecallEngine)
-        let query_vector = self.embed_text(message).await;
-        let memories = if let Some(semantic) = &self.semantic {
-            match self
-                .recall_engine
-                .recall(
-                    message,
-                    query_vector,
-                    &self.episodic,
-                    semantic,
-                    10,
-                    Some(&self.namespace),
-                    None,
-                )
-                .await
-            {
-                Ok(mems) => mems,
-                Err(e) => {
-                    tracing::warn!(
-                        "Recall engine failed in CLI chat, falling back to BM25-only episodic search: {e}"
-                    );
-                    self.episodic
-                        .search_bm25(message, 10, Some(&self.namespace), None)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|r| hippocampus::search::Memory {
-                            id: r.episode_id,
-                            content: r.content,
-                            source: hippocampus::search::MemorySource::Episodic,
-                            score: r.rank,
-                            importance: 0.5,
-                            timestamp: r.timestamp,
-                            agent: r.agent,
-                        })
-                        .collect()
+                // Inject onboarding addendum into system prompt during early usage
+                if self.is_onboarding() {
+                    if let Some(sys) = messages.first_mut() {
+                        sys.content.push_str(cortex::context::ONBOARDING_ADDENDUM);
+                    }
                 }
+
+                Ok(PrepareResult::LlmReady(messages))
             }
-        } else {
-            self.episodic
-                .search_bm25(message, 10, Some(&self.namespace), None)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|r| hippocampus::search::Memory {
-                    id: r.episode_id,
-                    content: r.content,
-                    source: hippocampus::search::MemorySource::Episodic,
-                    score: r.rank,
-                    importance: 0.5,
-                    timestamp: r.timestamp,
-                    agent: r.agent,
-                })
-                .collect()
-        };
-
-        let messages =
-            self.context_assembler
-                .assemble(message, &memories, &self.conversation_history);
-
-        Ok(PrepareResult::LlmReady(messages))
+        }
     }
 
-    /// Store assistant response in episodic memory and conversation history.
+    /// Store assistant response in episodic memory and update conversation history.
     fn finalize_response(
         &mut self,
         user_message: &str,
@@ -3703,14 +3539,8 @@ impl BrainSession {
     ) -> anyhow::Result<()> {
         use cortex::llm::{Message, Role};
 
-        self.episodic.store_episode(
-            &self.session_id,
-            "assistant",
-            assistant_content,
-            0.5,
-            Some(&self.namespace),
-            None,
-        )?;
+        self.processor
+            .finalize_streaming(&self.session_id, assistant_content, &self.namespace, None)?;
 
         self.conversation_history.push(Message {
             role: Role::User,
