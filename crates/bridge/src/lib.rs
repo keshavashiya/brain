@@ -14,7 +14,7 @@
 //!
 //! ## Usage
 //! ```no_run
-//! # use bridge::{BridgeClient, BridgeConfig, BridgeMessage};
+//! # use brainos_bridge::{BridgeClient, BridgeConfig, BridgeMessage};
 //! # #[tokio::main] async fn main() -> anyhow::Result<()> {
 //! let client = BridgeClient::new("ws://gateway.example.com/brain", BridgeConfig::default());
 //! client.connect_and_relay(|msg| async move {

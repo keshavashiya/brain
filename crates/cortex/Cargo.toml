@@ -1,9 +1,14 @@
 [package]
-name = "cortex"
+name = "brainos-cortex"
+description = "LLM provider abstraction, context assembly, and action dispatch for Brain OS"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 storage = { workspace = true }

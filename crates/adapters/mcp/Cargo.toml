@@ -1,12 +1,17 @@
 [package]
-name = "mcp"
+name = "brainos-mcp"
+description = "Model Context Protocol (MCP) adapter for Brain OS"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-brain_core = { path = "../../core", package = "core" }
+brain_core = { workspace = true }
 signal = { workspace = true }
 hippocampus = { workspace = true }
 tokio = { workspace = true }

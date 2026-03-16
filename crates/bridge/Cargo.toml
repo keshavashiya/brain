@@ -1,9 +1,14 @@
 [package]
-name = "bridge"
+name = "brainos-bridge"
+description = "WebSocket relay client for connecting external platforms to Brain OS"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 serde = { workspace = true }

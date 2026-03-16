@@ -1,9 +1,14 @@
 [package]
-name = "cerebellum"
+name = "brainos-cerebellum"
+description = "Procedural memory store for Brain OS trigger-action patterns"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 storage = { workspace = true }

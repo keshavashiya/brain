@@ -1,12 +1,17 @@
 [package]
-name = "signal"
+name = "brainos-signal"
+description = "Central signal processor coordinating all Brain OS subsystems"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-brain_core = { path = "../core", package = "core" }
+brain_core = { workspace = true }
 storage = { workspace = true }
 hippocampus = { workspace = true }
 cortex = { workspace = true }

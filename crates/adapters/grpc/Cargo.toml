@@ -1,12 +1,17 @@
 [package]
-name = "grpcadapter"
+name = "brainos-grpcadapter"
+description = "gRPC adapter for Brain OS"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
-brain_core = { path = "../../core", package = "core" }
+brain_core = { workspace = true }
 signal       = { workspace = true }
 tonic        = { version = "0.14", features = ["transport"] }
 tonic-prost  = "0.14"

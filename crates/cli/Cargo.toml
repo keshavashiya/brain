@@ -1,16 +1,21 @@
 [package]
-name = "cli"
+name = "brainos"
+description = "Brain OS — local-first AI memory engine. Stop giving your AI amnesia."
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [[bin]]
 name = "brain"
 path = "src/main.rs"
 
 [dependencies]
-brain_core = { path = "../core", package = "core" }
+brain_core = { workspace = true }
 storage = { workspace = true }
 rusqlite = { workspace = true }
 hippocampus = { workspace = true }

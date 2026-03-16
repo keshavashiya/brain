@@ -24,6 +24,9 @@ edition = "2021"
 authors = ["Keshav Ashiya"]
 license = "MIT"
 repository = "https://github.com/keshavashiya/brain"
+homepage = "https://github.com/keshavashiya/brain"
+keywords = ["ai", "memory", "local-first", "mcp", "llm"]
+categories = ["command-line-utilities", "database"]
 
 [workspace.dependencies]
 # Async runtime
@@ -86,17 +89,17 @@ futures-core = "0.3"
 tokio-tungstenite = "0.26"
 
 # Internal crates
-core = { path = "crates/core" }
-storage = { path = "crates/storage" }
-hippocampus = { path = "crates/hippocampus" }
-cortex = { path = "crates/cortex" }
-thalamus = { path = "crates/thalamus" }
-amygdala = { path = "crates/amygdala" }
-signal = { path = "crates/signal" }
-httpadapter = { path = "crates/adapters/http" }
-wsadapter = { path = "crates/adapters/ws" }
-grpcadapter = { path = "crates/adapters/grpc" }
-mcp = { path = "crates/adapters/mcp" }
-cerebellum = { path = "crates/cerebellum" }
-ganglia = { path = "crates/ganglia" }
-bridge = { path = "crates/bridge" }
+brain_core = { package = "brainos-core", path = "crates/core", version = "0.1.0" }
+storage = { package = "brainos-storage", path = "crates/storage", version = "0.1.0" }
+hippocampus = { package = "brainos-hippocampus", path = "crates/hippocampus", version = "0.1.0" }
+cortex = { package = "brainos-cortex", path = "crates/cortex", version = "0.1.0" }
+thalamus = { package = "brainos-thalamus", path = "crates/thalamus", version = "0.1.0" }
+amygdala = { package = "brainos-amygdala", path = "crates/amygdala", version = "0.1.0" }
+signal = { package = "brainos-signal", path = "crates/signal", version = "0.1.0" }
+httpadapter = { package = "brainos-httpadapter", path = "crates/adapters/http", version = "0.1.0" }
+wsadapter = { package = "brainos-wsadapter", path = "crates/adapters/ws", version = "0.1.0" }
+grpcadapter = { package = "brainos-grpcadapter", path = "crates/adapters/grpc", version = "0.1.0" }
+mcp = { package = "brainos-mcp", path = "crates/adapters/mcp", version = "0.1.0" }
+cerebellum = { package = "brainos-cerebellum", path = "crates/cerebellum", version = "0.1.0" }
+ganglia = { package = "brainos-ganglia", path = "crates/ganglia", version = "0.1.0" }
+bridge = { package = "brainos-bridge", path = "crates/bridge", version = "0.1.0" }

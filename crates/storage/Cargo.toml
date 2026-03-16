@@ -1,9 +1,14 @@
 [package]
-name = "storage"
+name = "brainos-storage"
+description = "SQLite and HNSW vector storage layer for Brain OS"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 rusqlite = { workspace = true }
