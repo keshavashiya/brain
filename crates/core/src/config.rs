@@ -108,6 +108,31 @@ pub struct SemanticConfig {
 pub struct SearchConfig {
     pub hybrid_weight: f64,
     pub rrf_k: u32,
+    /// Candidates fetched from each source (BM25, ANN) before RRF fusion.
+    #[serde(default = "default_pre_fusion_limit")]
+    pub pre_fusion_limit: u32,
+    /// Weight for importance in final reranking (0.0–1.0).
+    #[serde(default = "default_importance_weight")]
+    pub importance_weight: f64,
+    /// Weight for recency in final reranking (0.0–1.0).
+    #[serde(default = "default_recency_weight")]
+    pub recency_weight: f64,
+    /// Decay rate for the forgetting curve (higher = faster forgetting).
+    #[serde(default = "default_decay_rate")]
+    pub decay_rate: f64,
+}
+
+fn default_pre_fusion_limit() -> u32 {
+    50
+}
+fn default_importance_weight() -> f64 {
+    0.3
+}
+fn default_recency_weight() -> f64 {
+    0.2
+}
+fn default_decay_rate() -> f64 {
+    0.01
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -669,6 +694,10 @@ impl Default for BrainConfig {
                 search: SearchConfig {
                     hybrid_weight: 0.7,
                     rrf_k: 60,
+                    pre_fusion_limit: 50,
+                    importance_weight: 0.3,
+                    recency_weight: 0.2,
+                    decay_rate: 0.01,
                 },
                 consolidation: ConsolidationConfig {
                     enabled: true,
@@ -817,6 +846,10 @@ mod tests {
         let config: BrainConfig = figment.extract().unwrap();
         assert_eq!(config.llm.model, "qwen2.5-coder:7b");
         assert_eq!(config.memory.search.rrf_k, 60);
+        assert_eq!(config.memory.search.pre_fusion_limit, 50);
+        assert!((config.memory.search.importance_weight - 0.3).abs() < f64::EPSILON);
+        assert!((config.memory.search.recency_weight - 0.2).abs() < f64::EPSILON);
+        assert!((config.memory.search.decay_rate - 0.01).abs() < f64::EPSILON);
     }
 
     // ── validate() ────────────────────────────────────────────────────────────

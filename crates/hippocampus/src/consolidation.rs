@@ -184,6 +184,9 @@ struct ConsolidationCandidate {
 }
 
 /// Parse hours since a timestamp string (RFC3339 or SQLite datetime format).
+///
+/// Falls back to 24.0 hours if parsing fails — this biases consolidation toward
+/// pruning stale records with unparseable timestamps rather than preserving them.
 fn parse_hours_since(timestamp_str: &str, now: &chrono::DateTime<chrono::Utc>) -> f64 {
     // Try RFC3339 first, then SQLite datetime format
     if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(timestamp_str) {
@@ -195,7 +198,10 @@ fn parse_hours_since(timestamp_str: &str, now: &chrono::DateTime<chrono::Utc>) -
         let duration = *now - utc_ts;
         return duration.num_seconds() as f64 / 3600.0;
     }
-    // Default to 24 hours if parsing fails
+    tracing::warn!(
+        timestamp = timestamp_str,
+        "Unparseable timestamp in consolidation — using 24h fallback"
+    );
     24.0
 }
 

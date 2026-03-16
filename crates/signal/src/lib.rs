@@ -397,8 +397,17 @@ impl SignalProcessor {
             }
         };
 
-        // Create recall engine with default RRF config
-        let recall_engine = hippocampus::RecallEngine::with_defaults();
+        // Create recall engine from user config
+        let search_cfg = &config.memory.search;
+        let recall_engine = hippocampus::RecallEngine::new(
+            hippocampus::RecallConfig::from_config(
+                search_cfg.rrf_k,
+                search_cfg.pre_fusion_limit,
+                search_cfg.importance_weight,
+                search_cfg.recency_weight,
+                search_cfg.decay_rate,
+            ),
+        );
         let (events_tx, _) = tokio::sync::broadcast::channel(512);
 
         let classifier = thalamus::IntentClassifier::new()

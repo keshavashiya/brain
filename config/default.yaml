@@ -36,6 +36,10 @@ memory:
   search:
     hybrid_weight: 0.7         # Weight for vector search (1-weight for BM25)
     rrf_k: 60                  # RRF fusion parameter
+    pre_fusion_limit: 50       # Candidates fetched from each source before RRF fusion
+    importance_weight: 0.3     # Weight for importance in reranking (0.0–1.0)
+    recency_weight: 0.2        # Weight for recency in reranking (0.0–1.0)
+    decay_rate: 0.01           # Forgetting curve decay rate (higher = faster forgetting)
   consolidation:
     enabled: true
     interval_hours: 24

@@ -44,6 +44,19 @@ pub struct RecallConfig {
     pub decay_rate: f64,
 }
 
+impl RecallConfig {
+    /// Build from individual config values (avoids cross-crate dependency on brain_core).
+    pub fn from_config(rrf_k: u32, pre_fusion_limit: u32, importance_weight: f64, recency_weight: f64, decay_rate: f64) -> Self {
+        Self {
+            rrf_k: rrf_k as f64,
+            pre_fusion_limit: pre_fusion_limit as usize,
+            importance_weight,
+            recency_weight,
+            decay_rate,
+        }
+    }
+}
+
 impl Default for RecallConfig {
     fn default() -> Self {
         Self {
@@ -211,8 +224,11 @@ impl RecallEngine {
 /// Parse an ISO 8601 or SQLite datetime string and return hours elapsed since `now`.
 ///
 /// Falls back to 1.0 hour if parsing fails (e.g., empty or malformed timestamp).
+/// A fallback of 1.0h applies mild decay without artificially boosting (0.0) or
+/// aggressively penalizing the memory. Logs a warning so serialization bugs are visible.
 fn parse_elapsed_hours(timestamp: &str, now: &chrono::DateTime<chrono::Utc>) -> f64 {
     if timestamp.is_empty() {
+        tracing::warn!("Empty timestamp in recall — using 1.0h fallback");
         return 1.0;
     }
     // Try RFC 3339 first (e.g. "2025-03-01T12:00:00+00:00")
@@ -226,6 +242,7 @@ fn parse_elapsed_hours(timestamp: &str, now: &chrono::DateTime<chrono::Utc>) -> 
         let elapsed = *now - dt;
         return (elapsed.num_seconds() as f64 / 3600.0).max(0.01);
     }
+    tracing::warn!(timestamp, "Unparseable timestamp in recall — using 1.0h fallback");
     1.0 // fallback
 }
 

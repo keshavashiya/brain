@@ -25,6 +25,10 @@ pub struct ImportanceSignals {
 /// - Urgency: +0.2
 /// - Emotional intensity: +0.15
 /// - Novelty: +0.1
+///
+/// Uses word-boundary matching for single-word keywords to avoid false
+/// positives (e.g., "insurgent" no longer triggers "urgent"). Multi-word
+/// phrases use substring matching since they are already specific enough.
 pub struct ImportanceScorer;
 
 impl ImportanceScorer {
@@ -34,10 +38,8 @@ impl ImportanceScorer {
     const EMOTIONAL_BOOST: f64 = 0.15;
     const NOVELTY_BOOST: f64 = 0.1;
 
-    /// Keywords that signal explicit memory intent.
-    const EXPLICIT_KEYWORDS: &[&str] = &[
-        "remember",
-        "important",
+    /// Multi-word phrases that signal explicit memory intent (use substring match).
+    const EXPLICIT_PHRASES: &[&str] = &[
         "don't forget",
         "dont forget",
         "note that",
@@ -47,22 +49,27 @@ impl ImportanceScorer {
         "always remember",
     ];
 
-    /// Keywords that signal urgency.
-    const URGENCY_KEYWORDS: &[&str] = &[
+    /// Single-word keywords that signal explicit memory intent (use word-boundary match).
+    const EXPLICIT_WORDS: &[&str] = &["remember", "important"];
+
+    /// Multi-word phrases that signal urgency (use substring match).
+    const URGENCY_PHRASES: &[&str] = &["right now", "due date"];
+
+    /// Single-word keywords that signal urgency (use word-boundary match).
+    const URGENCY_WORDS: &[&str] = &[
         "asap",
         "urgent",
         "deadline",
         "emergency",
         "immediately",
-        "right now",
         "timesensitive",
         "critical",
-        "due date",
         "overdue",
     ];
 
-    /// Keywords that signal emotional intensity.
-    const EMOTIONAL_KEYWORDS: &[&str] = &[
+    /// Single-word keywords that signal emotional intensity (use word-boundary match).
+    /// All emotional keywords are single words.
+    const EMOTIONAL_WORDS: &[&str] = &[
         "stressed",
         "excited",
         "frustrated",
@@ -91,9 +98,11 @@ impl ImportanceScorer {
         let lower = text.to_lowercase();
 
         ImportanceSignals {
-            explicit: Self::EXPLICIT_KEYWORDS.iter().any(|kw| lower.contains(kw)),
-            urgency: Self::URGENCY_KEYWORDS.iter().any(|kw| lower.contains(kw)),
-            emotional: Self::EMOTIONAL_KEYWORDS.iter().any(|kw| lower.contains(kw)),
+            explicit: has_phrase(&lower, Self::EXPLICIT_PHRASES)
+                || has_word(&lower, Self::EXPLICIT_WORDS),
+            urgency: has_phrase(&lower, Self::URGENCY_PHRASES)
+                || has_word(&lower, Self::URGENCY_WORDS),
+            emotional: has_word(&lower, Self::EMOTIONAL_WORDS),
             novelty,
         }
     }
@@ -118,6 +127,48 @@ impl ImportanceScorer {
         // Clamp to [0.0, 1.0]
         score.clamp(0.0, 1.0)
     }
+}
+
+/// Check if `text` contains any of `phrases` as a substring.
+///
+/// Used for multi-word phrases where substring matching is specific enough.
+fn has_phrase(text: &str, phrases: &[&str]) -> bool {
+    phrases.iter().any(|p| text.contains(p))
+}
+
+/// Check if `text` contains any of `words` as whole words.
+///
+/// A "word boundary" is the start/end of the string or any non-alphabetic
+/// character. This avoids false positives like "insurgent" matching "urgent".
+fn has_word(text: &str, words: &[&str]) -> bool {
+    words.iter().any(|word| contains_whole_word(text, word))
+}
+
+/// Returns true if `word` appears in `text` surrounded by word boundaries.
+fn contains_whole_word(text: &str, word: &str) -> bool {
+    let word_bytes = word.as_bytes();
+    let text_bytes = text.as_bytes();
+    let word_len = word_bytes.len();
+
+    if word_len > text_bytes.len() {
+        return false;
+    }
+
+    for start in 0..=(text_bytes.len() - word_len) {
+        if &text_bytes[start..start + word_len] != word_bytes {
+            continue;
+        }
+        // Check left boundary: start of string or non-alphabetic
+        let left_ok = start == 0 || !text_bytes[start - 1].is_ascii_alphabetic();
+        // Check right boundary: end of string or non-alphabetic
+        let right_ok = start + word_len == text_bytes.len()
+            || !text_bytes[start + word_len].is_ascii_alphabetic();
+
+        if left_ok && right_ok {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -184,5 +235,75 @@ mod tests {
         assert!(signals.urgency);
         assert!(!signals.emotional);
         assert!(signals.novelty);
+    }
+
+    // ── Word-boundary false-positive prevention ─────────────────────────────
+
+    #[test]
+    fn test_insurgent_does_not_trigger_urgency() {
+        let score = ImportanceScorer::score("The insurgent was captured", false);
+        assert!(
+            (score - 0.3).abs() < f64::EPSILON,
+            "'insurgent' should NOT trigger urgency, got {score}"
+        );
+    }
+
+    #[test]
+    fn test_misremember_does_not_trigger_explicit() {
+        let score = ImportanceScorer::score("I tend to misremember things", false);
+        assert!(
+            (score - 0.3).abs() < f64::EPSILON,
+            "'misremember' should NOT trigger explicit, got {score}"
+        );
+    }
+
+    #[test]
+    fn test_unhappy_does_not_trigger_emotional() {
+        let score = ImportanceScorer::score("I am unhappy about it", false);
+        assert!(
+            (score - 0.3).abs() < f64::EPSILON,
+            "'unhappy' should NOT trigger emotional (happy), got {score}"
+        );
+    }
+
+    #[test]
+    fn test_unimportant_does_not_trigger_explicit() {
+        let score = ImportanceScorer::score("This is unimportant", false);
+        assert!(
+            (score - 0.3).abs() < f64::EPSILON,
+            "'unimportant' should NOT trigger explicit, got {score}"
+        );
+    }
+
+    #[test]
+    fn test_word_at_boundaries() {
+        // keyword at start of string
+        assert!((ImportanceScorer::score("urgent: fix this", false) - 0.5).abs() < f64::EPSILON);
+        // keyword at end of string
+        assert!((ImportanceScorer::score("this is urgent", false) - 0.5).abs() < f64::EPSILON);
+        // keyword with punctuation
+        assert!((ImportanceScorer::score("it's urgent!", false) - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_multi_word_phrases_still_work() {
+        // "don't forget" is a multi-word phrase — still uses substring matching
+        let score = ImportanceScorer::score("don't forget about the meeting", false);
+        assert!(
+            (score - 0.6).abs() < f64::EPSILON,
+            "multi-word phrase 'don't forget' should trigger explicit, got {score}"
+        );
+    }
+
+    // ── Internal word-boundary function ─────────────────────────────────────
+
+    #[test]
+    fn test_contains_whole_word() {
+        assert!(contains_whole_word("this is urgent", "urgent"));
+        assert!(contains_whole_word("urgent fix needed", "urgent"));
+        assert!(contains_whole_word("it's urgent!", "urgent"));
+        assert!(contains_whole_word("urgent", "urgent"));
+        assert!(!contains_whole_word("insurgent attack", "urgent"));
+        assert!(!contains_whole_word("urgently needed", "urgent"));
     }
 }
