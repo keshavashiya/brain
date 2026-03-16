@@ -1,5 +1,8 @@
 # Brain OS 🧠
 
+[![Crates.io](https://img.shields.io/crates/v/brainos.svg)](https://crates.io/crates/brainos)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 **Stop giving your AI amnesia.**
 
 Brain OS is a biologically-inspired, central cognitive engine written in pure Rust. Instead of every script, coding assistant, and chat UI keeping its own isolated, fragmented context, Brain OS acts as your single source of truth.
@@ -24,21 +27,33 @@ The memory engine combines vector search (HNSW) with full-text search (BM25 FTS5
 
 ## Install
 
-**Requirements:** Rust 1.82+, [Ollama](https://ollama.com) (or any OpenAI-compatible API), Docker (optional, for web search)
+**Requirements:** [Ollama](https://ollama.com) (or any OpenAI-compatible API), Docker (optional, for web search)
+
+### From crates.io (recommended)
 
 ```bash
-# Install the CLI
-cargo install --path crates/cli
+# Install the brain binary (requires Rust 1.82+)
+cargo install brainos
 
 # Initialize data directory (~/.brain/)
 brain init
 
-# Pull the default LLM + embedding models (Ollama)
+# Pull the default LLM + embedding models
 ollama pull qwen2.5-coder:7b
 ollama pull nomic-embed-text
 
 # Start external services (SearXNG web search — optional)
 brain deps up
+```
+
+### From source
+
+```bash
+git clone https://github.com/keshavashiya/brain.git
+cd brain
+cargo install --path crates/cli
+
+brain init
 ```
 
 `brain init` creates `~/.brain/` with config, database, vector index, and log directories.
@@ -627,6 +642,58 @@ brain init --force --encrypt
 ```
 
 `--force` overwrites `~/.brain/config.yaml` with defaults and a fresh API key. Your database, vector index, and exports remain untouched.
+
+---
+
+## Development
+
+```bash
+git clone https://github.com/keshavashiya/brain.git
+cd brain
+
+# Build the workspace
+cargo build
+
+# Run tests
+cargo test
+
+# Run the CLI in development
+cargo run -p brainos -- chat "hello"
+
+# Run the server in foreground (all adapters)
+cargo run -p brainos -- serve
+
+# Run specific adapters only
+cargo run -p brainos -- serve --http --mcp
+```
+
+### Workspace Structure
+
+The project is a Cargo workspace with 15 crates. All internal dependencies use both `path` (for local development) and `version` (for crates.io), so no Cargo.toml changes are needed to switch between local and published builds.
+
+```
+crates/
+├── core/           # brainos-core        — Config and bootstrapping
+├── storage/        # brainos-storage     — SQLite + HNSW vector index
+├── hippocampus/    # brainos-hippocampus — Episodic + semantic memory
+├── cortex/         # brainos-cortex      — LLM providers + context assembly
+├── thalamus/       # brainos-thalamus    — Intent classification
+├── amygdala/       # brainos-amygdala    — Importance scoring
+├── signal/         # brainos-signal      — Central signal processor
+├── cerebellum/     # brainos-cerebellum  — Procedural memory
+├── ganglia/        # brainos-ganglia     — Proactivity engine
+├── bridge/         # brainos-bridge      — WebSocket relay client
+├── adapters/
+│   ├── http/       # brainos-httpadapter — Axum REST API
+│   ├── ws/         # brainos-wsadapter   — WebSocket adapter
+│   ├── grpc/       # brainos-grpcadapter — gRPC adapter
+│   └── mcp/        # brainos-mcp        — MCP adapter
+└── cli/            # brainos (binary: brain) — CLI entry point
+```
+
+### Publishing
+
+Crates must be published in dependency order (leaf crates first). All crates are on [crates.io](https://crates.io) under the `brainos-*` namespace.
 
 ---
 
