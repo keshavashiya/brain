@@ -767,7 +767,7 @@ Environment variables   BRAIN_LLM__MODEL=gpt-4o
         ↓ override
 ~/.brain/config.yaml    (user overrides — created by `brain init`)
         ↓ override
-config/default.yaml     (compiled-in defaults via include_str!)
+crates/core/default.yaml  (compiled-in defaults via include_str!)
 ```
 
 The `BrainConfig` struct in `crates/core/src/config.rs` maps 1-to-1 with the YAML keys. Double-underscore (`__`) is the env-var nesting separator (e.g. `BRAIN_ACTIONS__WEB_SEARCH__ENABLED=false`).

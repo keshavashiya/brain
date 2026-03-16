@@ -534,7 +534,7 @@ Config is loaded from three sources (highest priority wins):
 
 1. **Environment variables** — `BRAIN_LLM__MODEL=gpt-4o brain serve`
 2. **User config** — `~/.brain/config.yaml`
-3. **Defaults** — [`config/default.yaml`](config/default.yaml)
+3. **Defaults** — [`crates/core/default.yaml`](crates/core/default.yaml)
 
 Double-underscore (`__`) is the nesting separator in env var names.
 

@@ -7,7 +7,7 @@
 
 /// Default configuration embedded at compile time.
 /// This means `brain` works anywhere without needing config files on disk.
-const DEFAULT_CONFIG: &str = include_str!("../../../config/default.yaml");
+const DEFAULT_CONFIG: &str = include_str!("../default.yaml");
 
 use std::{
     collections::HashMap,
