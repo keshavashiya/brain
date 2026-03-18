@@ -173,14 +173,24 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "brain=info".into()),
-        )
-        .init();
-
     let cli = Cli::parse();
+
+    // For `brain mcp` (stdio transport), stdout IS the JSON-RPC channel.
+    // Tracing must go to stderr with ANSI disabled so it never corrupts the stream.
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "brain=info".into());
+
+    if matches!(cli.command, Commands::Mcp) {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(env_filter)
+            .init();
+    }
 
     let config = brain_core::BrainConfig::load().unwrap_or_else(|e| {
         tracing::warn!("Failed to load config, using defaults: {e}");

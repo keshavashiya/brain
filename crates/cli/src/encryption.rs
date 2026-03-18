@@ -56,8 +56,13 @@ pub(crate) fn resolve_encryptor(
     let passphrase = if let Ok(p) = std::env::var("BRAIN_PASSPHRASE") {
         p
     } else {
-        rpassword::prompt_password("Brain passphrase: ")
-            .map_err(|e| anyhow::anyhow!("Failed to read passphrase: {e}"))?
+        rpassword::prompt_password("Brain passphrase: ").map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to read passphrase: {e}\n\
+                 Hint: set the BRAIN_PASSPHRASE environment variable when running \
+                 without a terminal (e.g. as an MCP server)."
+            )
+        })?
     };
 
     let encryptor = storage::Encryptor::from_passphrase(&passphrase, &salt)

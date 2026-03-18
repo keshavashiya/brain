@@ -8,8 +8,9 @@
 //!
 //! ## Authentication
 //! - **HTTP**: `x-api-key: <key>` HTTP header on every request.
-//! - **stdio**: `{"x-api-key": "<key>"}` inside `params._meta` of each JSON-RPC
-//!   request.  If no API keys are configured, auth is skipped.
+//! - **stdio**: either `BRAIN_API_KEY` env var (session-level, recommended for
+//!   MCP clients) or `params._meta["x-api-key"]` per request.
+//!   If no API keys are configured, auth is skipped.
 //!
 //! ## Tools
 //! - `memory_search`     — semantic search over stored facts/episodes
@@ -25,7 +26,10 @@
 //!   "mcpServers": {
 //!     "brain": {
 //!       "command": "brain",
-//!       "args": ["mcp"]
+//!       "args": ["mcp"],
+//!       "env": {
+//!         "BRAIN_API_KEY": "<your-api-key>"
+//!       }
 //!     }
 //!   }
 //! }
@@ -577,12 +581,37 @@ fn extract_meta_key(req: &JsonRpcRequest) -> Option<&str> {
 
 /// Run the MCP server over stdio (line-delimited JSON-RPC).
 ///
-/// Auth: if API keys are configured, each request must include
-/// `params._meta["x-api-key"]` with a valid key.
+/// ## Authentication
+///
+/// Stdio clients authenticate in one of two ways:
+///
+/// 1. **Per-request** — include `params._meta["x-api-key"]` in each JSON-RPC
+///    request (same as HTTP header auth).
+/// 2. **Session-level** — set the `BRAIN_API_KEY` env var to a valid API key.
+///    The entire stdio session is then pre-authenticated; per-request `_meta`
+///    is not required.  This is the recommended approach for MCP clients
+///    (e.g. Claude Code) that cannot inject custom `_meta` fields.
 pub async fn serve_stdio(processor: signal::SignalProcessor) -> anyhow::Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let api_keys = processor.config().access.api_keys.clone();
+
+    // If BRAIN_API_KEY is set and matches a configured key, treat the entire
+    // stdio session as pre-authenticated (skip per-request _meta checks).
+    let session_authed = match std::env::var("BRAIN_API_KEY") {
+        Ok(env_key) if !env_key.is_empty() => {
+            let valid = api_keys.is_empty() || api_keys.iter().any(|k| k.key == env_key);
+            if !valid {
+                anyhow::bail!(
+                    "BRAIN_API_KEY does not match any configured API key. \
+                     Check your ~/.brain/config.yaml access.api_keys."
+                );
+            }
+            true
+        }
+        _ => false,
+    };
+
     let server = Arc::new(McpServer::new(Arc::new(processor), api_keys));
     let stdin = tokio::io::stdin();
     let mut stdout = tokio::io::stdout();
@@ -613,8 +642,9 @@ pub async fn serve_stdio(processor: signal::SignalProcessor) -> anyhow::Result<(
             }
         };
 
-        // Auth check for requests (not notifications)
-        if !server.api_keys.is_empty() && req.id.is_some() {
+        // Auth check for requests (not notifications).
+        // Skipped when the session is pre-authenticated via BRAIN_API_KEY.
+        if !session_authed && !server.api_keys.is_empty() && req.id.is_some() {
             let meta_key = extract_meta_key(&req);
             let key_ok = meta_key.is_some_and(|k| server.validate_key(k));
             if !key_ok {
@@ -622,7 +652,8 @@ pub async fn serve_stdio(processor: signal::SignalProcessor) -> anyhow::Result<(
                 let resp = JsonRpcResponse::err(
                     id,
                     -32600,
-                    "Unauthorized: provide valid x-api-key in params._meta",
+                    "Unauthorized: provide valid x-api-key in params._meta \
+                     or set BRAIN_API_KEY env var",
                 );
                 let json = serde_json::to_string(&resp)?;
                 stdout.write_all(json.as_bytes()).await?;
