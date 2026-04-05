@@ -29,6 +29,38 @@ pub enum SqliteError {
     Migration(String),
 }
 
+/// A semantic fact for export/import operations.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ExportedFact {
+    pub id: String,
+    pub namespace: String,
+    pub category: String,
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    pub confidence: f64,
+    pub source_episode_id: Option<String>,
+}
+
+/// An episodic memory entry for export/import operations.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ExportedEpisode {
+    pub id: String,
+    pub session_id: String,
+    pub session_channel: String,
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+    pub role: String,
+    pub content: String,
+    pub timestamp: String,
+    pub importance: f64,
+    pub reinforcement_count: i32,
+}
+
+fn default_namespace() -> String {
+    "personal".to_string()
+}
+
 /// A notification queued for delivery to the user.
 #[derive(Debug, Clone)]
 pub struct Notification {
@@ -640,10 +672,148 @@ impl SqlitePool {
         })
     }
 
+    // ── Export / Import ──────────────────────────────────────────────────────
+
+    /// Export all semantic facts ordered by ID.
+    pub fn export_all_facts(&self) -> Result<Vec<ExportedFact>, SqliteError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, namespace, category, subject, predicate, object,
+                        confidence, source_episode_id
+                 FROM semantic_facts
+                 ORDER BY id ASC",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(ExportedFact {
+                        id: row.get(0)?,
+                        namespace: row.get(1)?,
+                        category: row.get(2)?,
+                        subject: row.get(3)?,
+                        predicate: row.get(4)?,
+                        object: row.get(5)?,
+                        confidence: row.get(6)?,
+                        source_episode_id: row.get(7)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Export all episodes with session info, ordered by timestamp.
+    pub fn export_all_episodes(&self) -> Result<Vec<ExportedEpisode>, SqliteError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT e.id, e.session_id, COALESCE(s.channel, 'cli'),
+                        e.namespace, e.role, e.content, e.timestamp,
+                        e.importance, e.reinforcement_count
+                 FROM episodes e
+                 LEFT JOIN sessions s ON s.id = e.session_id
+                 ORDER BY e.timestamp ASC",
+            )?;
+            let rows = stmt
+                .query_map([], |row| {
+                    Ok(ExportedEpisode {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        session_channel: row.get(2)?,
+                        namespace: row.get(3)?,
+                        role: row.get(4)?,
+                        content: row.get(5)?,
+                        timestamp: row.get(6)?,
+                        importance: row.get(7)?,
+                        reinforcement_count: row.get(8)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })
+    }
+
+    /// Import facts (ON CONFLICT DO NOTHING). Returns (imported_count, new_indices).
+    pub fn import_facts(&self, facts: &[ExportedFact]) -> Result<(usize, Vec<usize>), SqliteError> {
+        self.with_conn(|conn| {
+            let mut imported = 0usize;
+            let mut new_indices = Vec::new();
+            for (idx, f) in facts.iter().enumerate() {
+                let n = conn.execute(
+                    "INSERT INTO semantic_facts
+                        (id, namespace, category, subject, predicate, object,
+                         confidence, source_episode_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     ON CONFLICT(id) DO NOTHING",
+                    rusqlite::params![
+                        f.id,
+                        f.namespace,
+                        f.category,
+                        f.subject,
+                        f.predicate,
+                        f.object,
+                        f.confidence,
+                        f.source_episode_id
+                    ],
+                )?;
+                if n > 0 {
+                    new_indices.push(idx);
+                }
+                imported += n;
+            }
+            Ok((imported, new_indices))
+        })
+    }
+
+    /// Import episodes (ON CONFLICT DO NOTHING). Returns count of newly imported episodes.
+    pub fn import_episodes(&self, episodes: &[ExportedEpisode]) -> Result<usize, SqliteError> {
+        self.with_conn(|conn| {
+            // Ensure sessions exist first
+            let mut sessions: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            for ep in episodes {
+                sessions
+                    .entry(ep.session_id.clone())
+                    .or_insert_with(|| ep.session_channel.clone());
+            }
+            for (sid, channel) in &sessions {
+                conn.execute(
+                    "INSERT INTO sessions (id, channel) VALUES (?1, ?2)
+                     ON CONFLICT(id) DO NOTHING",
+                    rusqlite::params![sid, channel],
+                )?;
+            }
+
+            let mut imported = 0usize;
+            for e in episodes {
+                let n = conn.execute(
+                    "INSERT INTO episodes
+                        (id, session_id, namespace, role, content, timestamp,
+                         importance, reinforcement_count)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                     ON CONFLICT(id) DO NOTHING",
+                    rusqlite::params![
+                        e.id,
+                        e.session_id,
+                        e.namespace,
+                        e.role,
+                        e.content,
+                        e.timestamp,
+                        e.importance,
+                        e.reinforcement_count
+                    ],
+                )?;
+                imported += n;
+            }
+            Ok(imported)
+        })
+    }
+
     /// Get table row counts for status display.
     pub fn table_stats(&self) -> Result<Vec<(String, i64)>, SqliteError> {
         self.with_conn(|conn| {
-            let tables = [
+            let mut stats = Vec::new();
+            // Whitelist approach: each match arm is both the table name and its SQL,
+            // preventing any possibility of SQL injection via table name interpolation.
+            for table in &[
                 "sessions",
                 "episodes",
                 "semantic_facts",
@@ -653,15 +823,20 @@ impl SqlitePool {
                 "user_profile",
                 "procedures",
                 "audit_log",
-            ];
-
-            let mut stats = Vec::new();
-            for table in &tables {
-                let count: i64 = conn
-                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                        row.get(0)
-                    })
-                    .unwrap_or(0);
+            ] {
+                let sql = match *table {
+                    "sessions" => "SELECT COUNT(*) FROM sessions",
+                    "episodes" => "SELECT COUNT(*) FROM episodes",
+                    "semantic_facts" => "SELECT COUNT(*) FROM semantic_facts",
+                    "episode_promotions" => "SELECT COUNT(*) FROM episode_promotions",
+                    "scheduled_intents" => "SELECT COUNT(*) FROM scheduled_intents",
+                    "notification_outbox" => "SELECT COUNT(*) FROM notification_outbox",
+                    "user_profile" => "SELECT COUNT(*) FROM user_profile",
+                    "procedures" => "SELECT COUNT(*) FROM procedures",
+                    "audit_log" => "SELECT COUNT(*) FROM audit_log",
+                    _ => continue,
+                };
+                let count: i64 = conn.query_row(sql, [], |row| row.get(0)).unwrap_or(0);
                 stats.push((table.to_string(), count));
             }
 

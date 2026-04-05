@@ -3,16 +3,16 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 /// Tracks consecutive failures and opens a circuit after a threshold is reached.
-pub(crate) struct CircuitBreaker {
+pub struct CircuitBreaker {
     consecutive_failures: AtomicU32,
     last_failure_epoch_ms: AtomicU64,
     threshold: u32,
     cooldown_ms: u64,
-    pub(crate) name: String,
+    pub name: String,
 }
 
 impl CircuitBreaker {
-    pub(crate) fn new(name: &str, threshold: u32, cooldown_secs: u64) -> Self {
+    pub fn new(name: &str, threshold: u32, cooldown_secs: u64) -> Self {
         Self {
             consecutive_failures: AtomicU32::new(0),
             last_failure_epoch_ms: AtomicU64::new(0),
@@ -22,7 +22,7 @@ impl CircuitBreaker {
         }
     }
 
-    pub(crate) fn is_open(&self) -> bool {
+    pub fn is_open(&self) -> bool {
         let failures = self.consecutive_failures.load(Ordering::Relaxed);
         if failures < self.threshold {
             return false;
@@ -38,14 +38,14 @@ impl CircuitBreaker {
         true
     }
 
-    pub(crate) fn record_success(&self) {
+    pub fn record_success(&self) {
         let prev = self.consecutive_failures.swap(0, Ordering::Relaxed);
         if prev >= self.threshold {
             tracing::info!(backend = %self.name, "Circuit breaker closed (backend recovered)");
         }
     }
 
-    pub(crate) fn record_failure(&self) {
+    pub fn record_failure(&self) {
         let prev = self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -80,7 +80,7 @@ fn is_transient_status(status: reqwest::StatusCode) -> bool {
 }
 
 /// Send an HTTP request with retry + circuit breaker.
-pub(crate) async fn resilient_send<F>(
+pub async fn resilient_send<F>(
     build_request: F,
     circuit_breaker: &CircuitBreaker,
     max_retries: u32,

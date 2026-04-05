@@ -15,6 +15,7 @@ members = [
     "crates/cerebellum",
     "crates/ganglia",
     "crates/bridge",
+    "crates/backends",
     "crates/cli",
 ]
 
@@ -103,3 +104,4 @@ mcp = { package = "brainos-mcp", path = "crates/adapters/mcp", version = "0.1.0"
 cerebellum = { package = "brainos-cerebellum", path = "crates/cerebellum", version = "0.1.0" }
 ganglia = { package = "brainos-ganglia", path = "crates/ganglia", version = "0.1.0" }
 bridge = { package = "brainos-bridge", path = "crates/bridge", version = "0.1.0" }
+backends = { package = "brainos-backends", path = "crates/backends", version = "0.1.0" }

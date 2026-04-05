@@ -93,7 +93,10 @@ pub(crate) fn stop_process(pid: u32) -> anyhow::Result<()> {
 }
 
 /// Spawn `brain serve` as a detached background process and return its PID.
-pub(crate) fn spawn_daemon(log_path: &std::path::Path, passphrase: Option<&str>) -> anyhow::Result<u32> {
+pub(crate) fn spawn_daemon(
+    log_path: &std::path::Path,
+    passphrase: Option<&str>,
+) -> anyhow::Result<u32> {
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
     }

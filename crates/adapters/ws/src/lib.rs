@@ -59,6 +59,8 @@ pub struct ClientMessage {
     pub namespace: Option<String>,
     /// Originating agent identity (e.g. "claude-code", "open-code").
     pub agent: Option<String>,
+    /// Session ID for conversation continuity.
+    pub session_id: Option<String>,
 }
 
 /// Server-to-client auth result frame.
@@ -307,9 +309,10 @@ where
     }
 }
 
-/// Returns true if `key` is present in `api_keys` (any permission).
+/// Returns true if `key` is valid and has write permission (WS connections can both read and write).
 fn validate_key(api_keys: &[ApiKeyConfig], key: &str) -> bool {
-    api_keys.iter().any(|k| k.key == key)
+    // WS connections need write permission since they can send signals.
+    brain_core::check_auth(api_keys, Some(key), "write").is_allowed()
 }
 
 /// Parse a text frame and run it through the signal pipeline.
@@ -326,16 +329,19 @@ async fn process_text_frame(
         }
     };
 
-    let source = parse_source(client_msg.source.as_deref());
-    let signal = Signal::new(
+    let source = SignalSource::parse(client_msg.source.as_deref(), SignalSource::WebSocket);
+    let signal = Signal::from_adapter_request(
         source,
-        format!("ws:{conn_id}"),
-        client_msg.sender.unwrap_or_else(|| "wsclient".to_string()),
         client_msg.content,
-    )
-    .with_metadata(client_msg.metadata.unwrap_or_default())
-    .with_namespace_opt(client_msg.namespace)
-    .with_agent_opt(client_msg.agent);
+        Some(format!("ws:{conn_id}")),
+        client_msg.sender,
+        client_msg.metadata,
+        client_msg.namespace,
+        client_msg.agent,
+        client_msg.session_id,
+        &format!("ws:{conn_id}"),
+        "wsclient",
+    );
 
     let signal_id = signal.id;
     match processor.process(signal).await {
@@ -348,17 +354,6 @@ async fn process_text_frame(
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-fn parse_source(s: Option<&str>) -> SignalSource {
-    match s {
-        Some("ws") | Some("websocket") | None => SignalSource::WebSocket,
-        Some("cli") => SignalSource::Cli,
-        Some("http") => SignalSource::Http,
-        Some("mcp") => SignalSource::Mcp,
-        Some("grpc") => SignalSource::Grpc,
-        _ => SignalSource::WebSocket,
-    }
-}
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
@@ -381,17 +376,38 @@ mod tests {
 
     #[test]
     fn test_parse_source_defaults_to_websocket() {
-        assert_eq!(parse_source(None), SignalSource::WebSocket);
-        assert_eq!(parse_source(Some("ws")), SignalSource::WebSocket);
-        assert_eq!(parse_source(Some("websocket")), SignalSource::WebSocket);
+        assert_eq!(
+            SignalSource::parse(None, SignalSource::WebSocket),
+            SignalSource::WebSocket
+        );
+        assert_eq!(
+            SignalSource::parse(Some("ws"), SignalSource::WebSocket),
+            SignalSource::WebSocket
+        );
+        assert_eq!(
+            SignalSource::parse(Some("websocket"), SignalSource::WebSocket),
+            SignalSource::WebSocket
+        );
     }
 
     #[test]
     fn test_parse_source_all_variants() {
-        assert_eq!(parse_source(Some("cli")), SignalSource::Cli);
-        assert_eq!(parse_source(Some("http")), SignalSource::Http);
-        assert_eq!(parse_source(Some("mcp")), SignalSource::Mcp);
-        assert_eq!(parse_source(Some("grpc")), SignalSource::Grpc);
+        assert_eq!(
+            SignalSource::parse(Some("cli"), SignalSource::WebSocket),
+            SignalSource::Cli
+        );
+        assert_eq!(
+            SignalSource::parse(Some("http"), SignalSource::WebSocket),
+            SignalSource::Http
+        );
+        assert_eq!(
+            SignalSource::parse(Some("mcp"), SignalSource::WebSocket),
+            SignalSource::Mcp
+        );
+        assert_eq!(
+            SignalSource::parse(Some("grpc"), SignalSource::WebSocket),
+            SignalSource::Grpc
+        );
     }
 
     #[test]
@@ -439,8 +455,8 @@ mod tests {
 
     #[test]
     fn test_validate_key_empty_list() {
-        // With empty key list, no key is valid
-        assert!(!validate_key(&[], "demokey123"));
+        // With empty key list, auth is disabled (open access) — all keys pass
+        assert!(validate_key(&[], "demokey123"));
     }
 
     #[test]

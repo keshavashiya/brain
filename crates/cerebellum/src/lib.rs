@@ -127,26 +127,25 @@ impl ProcedureStore {
     /// Uses word-boundary matching so "deploy" doesn't match "I deployed yesterday".
     /// Multi-word triggers are matched as contiguous word sequences.
     pub fn match_trigger(&self, input: &str) -> Result<Vec<Procedure>, CerebellumError> {
-        let input_words: Vec<&str> = input
+        let input_words: Vec<String> = input
             .split_whitespace()
-            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+            .map(brain_core::normalize_keyword)
             .collect();
         let all = self.list_procedures()?;
         Ok(all
             .into_iter()
             .filter(|p| {
-                let trigger_words: Vec<&str> = p.trigger_pattern.split_whitespace().collect();
+                let trigger_words: Vec<String> = p
+                    .trigger_pattern
+                    .split_whitespace()
+                    .map(brain_core::normalize_keyword)
+                    .collect();
                 if trigger_words.is_empty() {
                     return false;
                 }
                 input_words
                     .windows(trigger_words.len())
-                    .any(|window| {
-                        window
-                            .iter()
-                            .zip(&trigger_words)
-                            .all(|(a, b)| a.eq_ignore_ascii_case(b))
-                    })
+                    .any(|window| window.iter().zip(&trigger_words).all(|(a, b)| a == b))
             })
             .collect())
     }

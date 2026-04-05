@@ -357,13 +357,6 @@ pub struct AccessConfig {
 }
 
 impl AccessConfig {
-    /// Returns true if `key` is valid and has the given `permission`.
-    pub fn validate(&self, key: &str, permission: &str) -> bool {
-        self.api_keys
-            .iter()
-            .any(|k| k.key == key && k.has_permission(permission))
-    }
-
     /// Find a key entry by its raw key string.
     pub fn find_key(&self, key: &str) -> Option<&ApiKeyConfig> {
         self.api_keys.iter().find(|k| k.key == key)
@@ -621,6 +614,24 @@ impl BrainConfig {
                     }
                 }
             }
+        }
+
+        // ── Deprecated / unused config field warnings ────────────────────────
+        #[allow(clippy::float_cmp)]
+        if self.memory.search.hybrid_weight != 0.7 {
+            warnings.push(
+                "memory.search.hybrid_weight is set but unused — recall uses Reciprocal Rank Fusion (rrf_k) instead. This field will be removed in a future release.".to_string()
+            );
+        }
+        if self.memory.episodic.max_entries != 100_000 {
+            warnings.push(
+                "memory.episodic.max_entries is set but not enforced — no pruning logic exists yet. This field is reserved for future use.".to_string()
+            );
+        }
+        if self.memory.episodic.retention_days != 365 {
+            warnings.push(
+                "memory.episodic.retention_days is set but not enforced — recall uses a forgetting curve (decay_rate) instead of TTL-based retention.".to_string()
+            );
         }
 
         // ── Timeout bounds ───────────────────────────────────────────────────

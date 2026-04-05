@@ -158,7 +158,7 @@ impl OllamaProvider {
     pub fn new(base_url: &str, model: &str) -> Self {
         // Ollama may need to load the model on first call — allow up to 120s
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(brain_core::timeouts::EMBEDDING_OLLAMA)
             .build()
             .expect("Failed to create HTTP client");
         Self {
@@ -251,7 +251,7 @@ struct OpenAIEmbedData {
 impl OpenAIProvider {
     pub fn new(base_url: &str, model: &str, api_key: &str) -> Self {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(brain_core::timeouts::EMBEDDING_OPENAI)
             .build()
             .expect("Failed to create HTTP client");
         Self {
@@ -335,6 +335,17 @@ impl Embedder {
     pub fn for_openai(base_url: &str, model: &str, api_key: &str) -> Self {
         info!(model, base_url, "Embedding provider: OpenAI-compatible");
         Self::OpenAI(OpenAIProvider::new(base_url, model, api_key))
+    }
+
+    /// Create an embedder from Brain config settings.
+    ///
+    /// Selects the appropriate backend (Ollama or OpenAI-compatible)
+    /// based on `provider`. Returns `None` if no provider is configured.
+    pub fn from_config(provider: &str, base_url: &str, model: &str, api_key: &str) -> Option<Self> {
+        match provider {
+            "openai" => Some(Self::for_openai(base_url, model, api_key)),
+            _ => Some(Self::for_ollama(base_url, model)),
+        }
     }
 
     /// Embed a single text string.

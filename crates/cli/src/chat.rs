@@ -62,36 +62,34 @@ pub(crate) async fn chat_non_interactive(
         PrepareResult::ActionResult(text) => {
             println!("{text}");
         }
-        PrepareResult::LlmReady(messages) => {
-            match brain.llm.generate_stream(&messages).await {
-                Ok(mut stream) => {
-                    let mut full_response = String::new();
-                    while let Some(chunk) = stream.next().await {
-                        match chunk {
-                            Ok(c) => {
-                                print!("{}", c.content);
-                                let _ = stdout().flush();
-                                full_response.push_str(&c.content);
-                                if c.is_done {
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("\nStream error: {e}");
+        PrepareResult::LlmReady(messages) => match brain.llm.generate_stream(&messages).await {
+            Ok(mut stream) => {
+                let mut full_response = String::new();
+                while let Some(chunk) = stream.next().await {
+                    match chunk {
+                        Ok(c) => {
+                            print!("{}", c.content);
+                            let _ = stdout().flush();
+                            full_response.push_str(&c.content);
+                            if c.is_done {
                                 break;
                             }
                         }
+                        Err(e) => {
+                            eprintln!("\nStream error: {e}");
+                            break;
+                        }
                     }
-                    println!();
-                    brain.finalize_response(message, &full_response)?;
                 }
-                Err(_) => {
-                    let response = brain.llm.generate(&messages).await?;
-                    println!("{}", response.content);
-                    brain.finalize_response(message, &response.content)?;
-                }
+                println!();
+                brain.finalize_response(message, &full_response)?;
             }
-        }
+            Err(_) => {
+                let response = brain.llm.generate(&messages).await?;
+                println!("{}", response.content);
+                brain.finalize_response(message, &response.content)?;
+            }
+        },
     }
     Ok(())
 }
@@ -268,43 +266,41 @@ pub(crate) async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow
                                     tracing::warn!("Failed to store response: {e}");
                                 }
                             }
-                            Err(_) => {
-                                match brain.llm.generate(&messages).await {
-                                    Ok(response) => {
-                                        if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle)
-                                        {
-                                            let _ = h.await;
-                                        }
-                                        let mut out = stdout();
-                                        out.execute(SetForegroundColor(Color::Green))?;
-                                        out.execute(Print("Brain: "))?;
-                                        out.execute(ResetColor)?;
-                                        println!("{}", response.content);
-                                        if let Err(e) =
-                                            brain.finalize_response(input, &response.content)
-                                        {
-                                            tracing::warn!("Failed to store response: {e}");
-                                        }
+                            Err(_) => match brain.llm.generate(&messages).await {
+                                Ok(response) => {
+                                    if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle) {
+                                        let _ = h.await;
                                     }
-                                    Err(e) => {
-                                        if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle)
-                                        {
-                                            let _ = h.await;
-                                        }
-                                        let msg = e.to_string();
-                                        if msg.contains("timed out") || msg.contains("Timeout") {
-                                            eprintln!("LLM timed out — model may still be loading. Try again.");
-                                        } else if msg.contains("error sending request")
-                                            || msg.contains("connection refused")
-                                            || msg.contains("Connection refused")
-                                        {
-                                            eprintln!("LLM unreachable — is Ollama running? (`ollama serve`)");
-                                        } else {
-                                            eprintln!("Error: {msg}");
-                                        }
+                                    let mut out = stdout();
+                                    out.execute(SetForegroundColor(Color::Green))?;
+                                    out.execute(Print("Brain: "))?;
+                                    out.execute(ResetColor)?;
+                                    println!("{}", response.content);
+                                    if let Err(e) =
+                                        brain.finalize_response(input, &response.content)
+                                    {
+                                        tracing::warn!("Failed to store response: {e}");
                                     }
                                 }
-                            }
+                                Err(e) => {
+                                    if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle) {
+                                        let _ = h.await;
+                                    }
+                                    let msg = e.to_string();
+                                    if msg.contains("timed out") || msg.contains("Timeout") {
+                                        eprintln!("LLM timed out — model may still be loading. Try again.");
+                                    } else if msg.contains("error sending request")
+                                        || msg.contains("connection refused")
+                                        || msg.contains("Connection refused")
+                                    {
+                                        eprintln!(
+                                            "LLM unreachable — is Ollama running? (`ollama serve`)"
+                                        );
+                                    } else {
+                                        eprintln!("Error: {msg}");
+                                    }
+                                }
+                            },
                         }
                     }
                     Err(e) => {

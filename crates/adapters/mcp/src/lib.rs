@@ -132,12 +132,10 @@ impl McpServer {
         }
     }
 
-    /// Returns true if the given key is valid (or if auth is disabled).
+    /// Returns true if the given key is valid with write permission (or if auth is disabled).
+    /// MCP clients can both read and write, so we require write permission.
     pub fn validate_key(&self, key: &str) -> bool {
-        if self.api_keys.is_empty() {
-            return true; // auth disabled
-        }
-        self.api_keys.iter().any(|k| k.key == key)
+        brain_core::check_auth(&self.api_keys, Some(key), "write").is_allowed()
     }
 
     /// Handle a single JSON-RPC request and return a response.

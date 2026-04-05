@@ -49,6 +49,21 @@ pub enum SignalSource {
     Grpc,
 }
 
+impl SignalSource {
+    /// Parse a source string into a SignalSource variant.
+    /// Returns the given `default` for unrecognized or None values.
+    pub fn parse(s: Option<&str>, default: SignalSource) -> SignalSource {
+        match s {
+            Some("cli") => SignalSource::Cli,
+            Some("http") => SignalSource::Http,
+            Some("ws") | Some("websocket") => SignalSource::WebSocket,
+            Some("mcp") => SignalSource::Mcp,
+            Some("grpc") => SignalSource::Grpc,
+            _ => default,
+        }
+    }
+}
+
 /// A unified signal — the single input type for all protocol adapters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Signal {
@@ -65,6 +80,10 @@ pub struct Signal {
     /// Originating AI agent (e.g. "claude-code", "opencode"). Optional.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// Optional session ID for conversation continuity.
+    /// When provided, the processor reuses this session instead of creating a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 fn default_namespace() -> String {
@@ -89,6 +108,7 @@ impl Signal {
             timestamp: Utc::now(),
             namespace: "personal".to_string(),
             agent: None,
+            session_id: None,
         }
     }
 
@@ -125,6 +145,44 @@ impl Signal {
         }
         self
     }
+
+    /// Builder: set session ID for conversation continuity.
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// Builder: set session ID from an Option (no-op if None).
+    pub fn with_session_id_opt(mut self, session_id: Option<String>) -> Self {
+        self.session_id = session_id;
+        self
+    }
+
+    /// Build a Signal from adapter request fields, applying defaults for missing optional fields.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_adapter_request(
+        source: SignalSource,
+        content: String,
+        channel: Option<String>,
+        sender: Option<String>,
+        metadata: Option<HashMap<String, String>>,
+        namespace: Option<String>,
+        agent: Option<String>,
+        session_id: Option<String>,
+        default_channel: &str,
+        default_sender: &str,
+    ) -> Self {
+        Signal::new(
+            source,
+            channel.unwrap_or_else(|| default_channel.to_string()),
+            sender.unwrap_or_else(|| default_sender.to_string()),
+            content,
+        )
+        .with_metadata(metadata.unwrap_or_default())
+        .with_namespace_opt(namespace)
+        .with_agent_opt(agent)
+        .with_session_id_opt(session_id)
+    }
 }
 
 // ─── Response Types ───────────────────────────────────────────────────────────
@@ -146,6 +204,10 @@ pub enum ResponseContent {
     Error(String),
 }
 
+// ─── Export / Import types ───────────────────────────────────────────────────
+
+pub use storage::{ExportedEpisode, ExportedFact};
+
 /// Memory context included in every response — tracks what memory was used.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MemoryContext {
@@ -162,6 +224,10 @@ pub struct SignalResponse {
     pub status: ResponseStatus,
     pub response: ResponseContent,
     pub memory_context: MemoryContext,
+    /// Session ID for conversation continuity. Clients should send this back
+    /// in subsequent signals to maintain the same conversation context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
 }
 
 impl SignalResponse {
@@ -172,6 +238,7 @@ impl SignalResponse {
             status: ResponseStatus::Ok,
             response: ResponseContent::Text(text.into()),
             memory_context: MemoryContext::default(),
+            session_id: None,
         }
     }
 
@@ -182,6 +249,7 @@ impl SignalResponse {
             status: ResponseStatus::Error,
             response: ResponseContent::Error(error.into()),
             memory_context: MemoryContext::default(),
+            session_id: None,
         }
     }
 }
@@ -343,32 +411,18 @@ impl SignalProcessor {
         // The model and dimension come from the embedding config section.
         // embedding.dimensions MUST match the model's actual output size.
         let embedding_dim = config.embedding.dimensions as usize;
-        let embedder_inner = match config.llm.provider.as_str() {
-            "openai" => {
-                tracing::info!(
-                    model = config.embedding.model,
-                    dim = embedding_dim,
-                    "Embedding provider: OpenAI-compatible"
-                );
-                Some(hippocampus::Embedder::for_openai(
-                    &config.llm.base_url,
-                    &config.embedding.model,
-                    &llm_api_key,
-                ))
-            }
-            _ => {
-                // Default: Ollama (covers "ollama" and any custom provider name)
-                tracing::info!(
-                    model = config.embedding.model,
-                    dim = embedding_dim,
-                    "Embedding provider: Ollama"
-                );
-                Some(hippocampus::Embedder::for_ollama(
-                    &config.llm.base_url,
-                    &config.embedding.model,
-                ))
-            }
-        };
+        tracing::info!(
+            provider = config.llm.provider,
+            model = config.embedding.model,
+            dim = embedding_dim,
+            "Embedding provider selected"
+        );
+        let embedder_inner = hippocampus::Embedder::from_config(
+            &config.llm.provider,
+            &config.llm.base_url,
+            &config.embedding.model,
+            &llm_api_key,
+        );
         let embedder = tokio::sync::Mutex::new(embedder_inner);
 
         // Create semantic store (optional — fails gracefully if RuVector unavailable).
@@ -399,15 +453,14 @@ impl SignalProcessor {
 
         // Create recall engine from user config
         let search_cfg = &config.memory.search;
-        let recall_engine = hippocampus::RecallEngine::new(
-            hippocampus::RecallConfig::from_config(
-                search_cfg.rrf_k,
-                search_cfg.pre_fusion_limit,
-                search_cfg.importance_weight,
-                search_cfg.recency_weight,
-                search_cfg.decay_rate,
-            ),
-        );
+        let recall_engine = hippocampus::RecallEngine::new(hippocampus::RecallConfig::from_config(
+            search_cfg.rrf_k,
+            search_cfg.pre_fusion_limit,
+            search_cfg.importance_weight,
+            search_cfg.recency_weight,
+            search_cfg.decay_rate,
+            config.memory.semantic.similarity_threshold,
+        ));
         let (events_tx, _) = tokio::sync::broadcast::channel(512);
 
         let classifier = thalamus::IntentClassifier::new()
@@ -488,6 +541,7 @@ impl SignalProcessor {
                     status: ResponseStatus::Ok,
                     response: ResponseContent::Text(llm_resp.content),
                     memory_context,
+                    session_id,
                 };
                 self.publish_event(&signal, &resp);
                 Ok(resp)
@@ -600,307 +654,387 @@ impl SignalProcessor {
         };
 
         match classification.intent {
-            // ── STORE_FACT ──
             thalamus::Intent::StoreFact {
                 subject,
                 predicate,
                 object,
             } => {
-                let fact_text = format!("{subject} {predicate} {object}");
-                let vector = self.embed_text(&fact_text).await;
-
-                let mut facts_stored = 0;
-                if let Some(semantic) = &self.semantic {
-                    match semantic
-                        .store_fact(
-                            &signal.namespace,
-                            "signal",
-                            &subject,
-                            &predicate,
-                            &object,
-                            importance as f64,
-                            None,
-                            vector,
-                            signal.agent.as_deref(),
-                        )
-                        .await
-                    {
-                        Ok(_) => facts_stored = 1,
-                        Err(e) => tracing::warn!("Failed to store fact in semantic memory: {e}"),
-                    }
-                }
-
-                let resp = prepend_nudges(SignalResponse {
+                self.handle_store_fact(
                     signal_id,
-                    status: ResponseStatus::Ok,
-                    response: ResponseContent::Text(format!(
-                        "Stored: {subject} {predicate} {object} (importance: {importance:.2})"
-                    )),
-                    memory_context: MemoryContext {
-                        facts_used: facts_stored,
-                        episodes_used: 0,
-                    },
-                });
-                Ok(PipelineResult::Complete(resp))
+                    &signal.namespace,
+                    signal.agent.as_deref(),
+                    subject,
+                    predicate,
+                    object,
+                    importance,
+                    &prepend_nudges,
+                )
+                .await
             }
-
-            // ── RECALL ──
             thalamus::Intent::Recall { query } => {
-                let query_vector = self.embed_text(&query).await;
-                let (memories, facts_used, episodes_used) = self
-                    .do_recall(&query, query_vector, 10, Some(&signal.namespace))
-                    .await;
-
-                // Agent callers get structured data
-                if signal.agent.is_some() {
-                    let text = if memories.is_empty() {
-                        "No relevant memories found.".to_string()
-                    } else {
-                        memories
-                            .iter()
-                            .map(|m| format!("[{:?}] {}", m.source, m.content))
-                            .collect::<Vec<_>>()
-                            .join("\n")
-                    };
-                    let resp = prepend_nudges(SignalResponse {
-                        signal_id,
-                        status: ResponseStatus::Ok,
-                        response: ResponseContent::Text(text),
-                        memory_context: MemoryContext {
-                            facts_used,
-                            episodes_used,
-                        },
-                    });
-                    return Ok(PipelineResult::Complete(resp));
-                }
-
-                // Human callers: assemble LLM messages
-                let proc_history: Vec<cortex::llm::Message> = procedure_context
-                    .iter()
-                    .map(|step| cortex::llm::Message {
-                        role: cortex::llm::Role::User,
-                        content: format!("[procedure step] {step}"),
-                    })
-                    .collect();
-
-                let history = conversation_history.unwrap_or(&proc_history);
-                let messages = self
-                    .context_assembler
-                    .assemble(&query, &memories, history);
-
-                Ok(PipelineResult::LlmReady {
+                self.handle_recall(
                     signal_id,
-                    messages,
-                    memory_context: MemoryContext {
-                        facts_used,
-                        episodes_used,
-                    },
-                    session_id: None,
-                    user_content: query,
-                    namespace: signal.namespace.clone(),
-                    agent: signal.agent.clone(),
-                })
+                    signal,
+                    query,
+                    conversation_history,
+                    &procedure_context,
+                    &prepend_nudges,
+                )
+                .await
             }
-
-            // ── CHAT ──
             thalamus::Intent::Chat { content } => {
-                let query_vector = self.embed_text(&content).await;
-                let (memories, facts_used, episodes_used) = self
-                    .do_recall(&content, query_vector, 10, Some(&signal.namespace))
-                    .await;
-
-                // Create session and store the user turn
-                let session_id = self
-                    .episodic
-                    .create_session(&signal.channel)
-                    .map_err(|e| SignalError::Storage(e.to_string()))?;
-
-                self.episodic
-                    .store_episode(
-                        &session_id,
-                        "user",
-                        &signal.content,
-                        importance as f64,
-                        Some(&signal.namespace),
-                        signal.agent.as_deref(),
-                    )
-                    .map_err(|e| SignalError::Storage(e.to_string()))?;
-
-                // Agent callers get structured memory context
-                if signal.agent.is_some() {
-                    let response_text = if memories.is_empty() {
-                        format!("Stored episode. No relevant memories found for: {}", content)
-                    } else {
-                        let mem_lines: String = memories
-                            .iter()
-                            .map(|m| format!("[{:?}] {}", m.source, m.content))
-                            .collect::<Vec<_>>()
-                            .join("\n");
-                        format!(
-                            "Stored episode. Relevant memories:\n{}",
-                            mem_lines
-                        )
-                    };
-
-                    let resp = prepend_nudges(SignalResponse {
-                        signal_id,
-                        status: ResponseStatus::Ok,
-                        response: ResponseContent::Text(response_text),
-                        memory_context: MemoryContext {
-                            facts_used,
-                            episodes_used,
-                        },
-                    });
-                    return Ok(PipelineResult::Complete(resp));
-                }
-
-                // Human callers: assemble LLM messages
-                let proc_history: Vec<cortex::llm::Message> = procedure_context
-                    .iter()
-                    .map(|step| cortex::llm::Message {
-                        role: cortex::llm::Role::User,
-                        content: format!("[procedure step] {step}"),
-                    })
-                    .collect();
-
-                let history = conversation_history.unwrap_or(&proc_history);
-                let messages = self
-                    .context_assembler
-                    .assemble(&content, &memories, history);
-
-                Ok(PipelineResult::LlmReady {
+                self.handle_chat(
                     signal_id,
-                    messages,
-                    memory_context: MemoryContext {
-                        facts_used,
-                        episodes_used,
-                    },
-                    session_id: Some(session_id),
-                    user_content: content,
-                    namespace: signal.namespace.clone(),
-                    agent: signal.agent.clone(),
-                })
+                    signal,
+                    content,
+                    importance,
+                    conversation_history,
+                    &procedure_context,
+                    &prepend_nudges,
+                )
+                .await
             }
-
-            // ── FORGET ──
             thalamus::Intent::Forget { target } => {
-                let mut deleted_count = 0usize;
-
-                if let Some(semantic) = &self.semantic {
-                    match semantic.find_facts_matching(&target, Some(&signal.namespace)) {
-                        Ok(facts) if !facts.is_empty() => {
-                            for fact in &facts {
-                                if let Err(e) = semantic.delete_fact(&fact.id).await {
-                                    tracing::warn!(
-                                        fact_id = %fact.id,
-                                        "Failed to delete fact: {e}"
-                                    );
-                                } else {
-                                    deleted_count += 1;
-                                }
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::warn!("Forget search failed: {e}");
-                        }
-                    }
-                }
-
-                let message = if deleted_count > 0 {
-                    format!(
-                        "Memory erased: removed {deleted_count} engram(s) matching \"{target}\""
-                    )
-                } else {
-                    format!("No engrams found matching \"{target}\" to erase")
-                };
-
-                let resp = prepend_nudges(SignalResponse {
-                    signal_id,
-                    status: ResponseStatus::Ok,
-                    response: ResponseContent::Text(message),
-                    memory_context: MemoryContext {
-                        facts_used: 0,
-                        episodes_used: 0,
-                    },
-                });
-                Ok(PipelineResult::Complete(resp))
+                self.handle_forget(signal_id, signal, target, &prepend_nudges)
+                    .await
             }
-
-            // ── SystemStatus ──
-            thalamus::Intent::SystemStatus => {
-                let semantic_count = self
-                    .semantic
-                    .as_ref()
-                    .and_then(|s| s.count().ok())
-                    .unwrap_or(0);
-                let episode_count = self.episodic.count().unwrap_or(0);
-
-                let resp = prepend_nudges(SignalResponse::ok(
-                    signal_id,
-                    format!("Brain status: {semantic_count} facts, {episode_count} episodes"),
-                ));
-                Ok(PipelineResult::Complete(resp))
-            }
-
-            // ── Action intents ──
+            thalamus::Intent::SystemStatus => self.handle_system_status(signal_id, &prepend_nudges),
             ref intent @ (thalamus::Intent::WebSearch { .. }
             | thalamus::Intent::Schedule { .. }
             | thalamus::Intent::SendMessage { .. }
             | thalamus::Intent::ExecuteCommand { .. }) => {
-                let router = thalamus::SignalRouter::new();
-                let resp = match (router.intent_to_action(intent), &self.action_dispatcher) {
-                    (Some(action), Some(dispatcher)) => {
-                        let result = dispatcher.dispatch(&action).await;
-                        if result.success {
-                            if matches!(&action, cortex::actions::Action::WebSearch { .. })
-                                && !result.output.is_empty()
-                            {
-                                let search_context = format!(
-                                    "The user asked: \"{}\"\n\nHere are web search results:\n{}\n\nUsing these search results, provide a helpful and concise answer to the user's question. Cite sources when relevant.",
-                                    signal.content, result.output
-                                );
-                                let messages = vec![
-                                    cortex::llm::Message {
-                                        role: cortex::llm::Role::System,
-                                        content: "You are Brain OS. Answer the user's question using the provided web search results. Be concise and cite your sources.".to_string(),
-                                    },
-                                    cortex::llm::Message {
-                                        role: cortex::llm::Role::User,
-                                        content: search_context,
-                                    },
-                                ];
-                                match self.llm.generate(&messages).await {
-                                    Ok(llm_response) => SignalResponse::ok(signal_id, llm_response.content),
-                                    Err(_) => SignalResponse::ok(signal_id, result.output),
-                                }
-                            } else {
-                                SignalResponse::ok(signal_id, result.output)
-                            }
-                        } else {
-                            SignalResponse::error(
-                                signal_id,
-                                result.error.unwrap_or_else(|| "Action failed".to_string()),
-                            )
-                        }
-                    }
-                    (Some(_action), None) => SignalResponse::error(
-                        signal_id,
-                        format!(
-                            "Action {:?} recognized but no dispatcher configured — \
-                             enable the relevant backend in config",
-                            intent
-                        ),
-                    ),
-                    (None, _) => SignalResponse::ok(
-                        signal_id,
-                        format!("Intent classified: {:?}", intent),
-                    ),
-                };
-                let resp = prepend_nudges(resp);
-                Ok(PipelineResult::Complete(resp))
+                self.handle_action(signal_id, signal, intent, &prepend_nudges)
+                    .await
             }
         }
+    }
+
+    // ── Per-intent handlers ─────────────────────────────────────────────────
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_store_fact(
+        &self,
+        signal_id: Uuid,
+        namespace: &str,
+        agent: Option<&str>,
+        subject: String,
+        predicate: String,
+        object: String,
+        importance: f32,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let fact_text = format!("{subject} {predicate} {object}");
+        let vector = self.embed_text(&fact_text).await;
+
+        let mut facts_stored = 0;
+        if let Some(semantic) = &self.semantic {
+            match semantic
+                .store_fact(
+                    namespace,
+                    "signal",
+                    &subject,
+                    &predicate,
+                    &object,
+                    importance as f64,
+                    None,
+                    vector,
+                    agent,
+                )
+                .await
+            {
+                Ok(_) => facts_stored = 1,
+                Err(e) => tracing::warn!("Failed to store fact in semantic memory: {e}"),
+            }
+        }
+
+        let resp = prepend_nudges(SignalResponse {
+            signal_id,
+            status: ResponseStatus::Ok,
+            response: ResponseContent::Text(format!(
+                "Stored: {subject} {predicate} {object} (importance: {importance:.2})"
+            )),
+            memory_context: MemoryContext {
+                facts_used: facts_stored,
+                episodes_used: 0,
+            },
+            session_id: None,
+        });
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    async fn handle_recall(
+        &self,
+        signal_id: Uuid,
+        signal: &Signal,
+        query: String,
+        conversation_history: Option<&[cortex::llm::Message]>,
+        procedure_context: &[String],
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let top_k = self.config.memory.semantic.max_results as usize;
+        let query_vector = self.embed_text(&query).await;
+        let (memories, facts_used, episodes_used) = self
+            .do_recall(&query, query_vector, top_k, Some(&signal.namespace))
+            .await;
+
+        // Agent callers get structured data
+        if signal.agent.is_some() {
+            let text = if memories.is_empty() {
+                "No relevant memories found.".to_string()
+            } else {
+                memories
+                    .iter()
+                    .map(|m| format!("[{:?}] {}", m.source, m.content))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            };
+            let resp = prepend_nudges(SignalResponse {
+                signal_id,
+                status: ResponseStatus::Ok,
+                response: ResponseContent::Text(text),
+                memory_context: MemoryContext {
+                    facts_used,
+                    episodes_used,
+                },
+                session_id: None,
+            });
+            return Ok(PipelineResult::Complete(resp));
+        }
+
+        let proc_history: Vec<cortex::llm::Message> = procedure_context
+            .iter()
+            .map(|step| cortex::llm::Message {
+                role: cortex::llm::Role::User,
+                content: format!("[procedure step] {step}"),
+            })
+            .collect();
+        let history = conversation_history.unwrap_or(&proc_history);
+        let messages = self.context_assembler.assemble(&query, &memories, history);
+
+        Ok(PipelineResult::LlmReady {
+            signal_id,
+            messages,
+            memory_context: MemoryContext {
+                facts_used,
+                episodes_used,
+            },
+            session_id: None,
+            user_content: query,
+            namespace: signal.namespace.clone(),
+            agent: signal.agent.clone(),
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn handle_chat(
+        &self,
+        signal_id: Uuid,
+        signal: &Signal,
+        content: String,
+        importance: f32,
+        conversation_history: Option<&[cortex::llm::Message]>,
+        procedure_context: &[String],
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let top_k = self.config.memory.semantic.max_results as usize;
+        let query_vector = self.embed_text(&content).await;
+        let (memories, facts_used, episodes_used) = self
+            .do_recall(&content, query_vector, top_k, Some(&signal.namespace))
+            .await;
+
+        // Reuse caller-supplied session or create a new one
+        let session_id = if let Some(ref sid) = signal.session_id {
+            sid.clone()
+        } else {
+            self.episodic
+                .create_session(&signal.channel)
+                .map_err(|e| SignalError::Storage(e.to_string()))?
+        };
+
+        self.episodic
+            .store_episode(
+                &session_id,
+                "user",
+                &signal.content,
+                importance as f64,
+                Some(&signal.namespace),
+                signal.agent.as_deref(),
+            )
+            .map_err(|e| SignalError::Storage(e.to_string()))?;
+
+        // Agent callers get structured memory context
+        if signal.agent.is_some() {
+            let response_text = if memories.is_empty() {
+                format!(
+                    "Stored episode. No relevant memories found for: {}",
+                    content
+                )
+            } else {
+                let mem_lines: String = memories
+                    .iter()
+                    .map(|m| format!("[{:?}] {}", m.source, m.content))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("Stored episode. Relevant memories:\n{}", mem_lines)
+            };
+
+            let resp = prepend_nudges(SignalResponse {
+                signal_id,
+                status: ResponseStatus::Ok,
+                response: ResponseContent::Text(response_text),
+                memory_context: MemoryContext {
+                    facts_used,
+                    episodes_used,
+                },
+                session_id: Some(session_id.clone()),
+            });
+            return Ok(PipelineResult::Complete(resp));
+        }
+
+        let proc_history: Vec<cortex::llm::Message> = procedure_context
+            .iter()
+            .map(|step| cortex::llm::Message {
+                role: cortex::llm::Role::User,
+                content: format!("[procedure step] {step}"),
+            })
+            .collect();
+        let history = conversation_history.unwrap_or(&proc_history);
+        let messages = self
+            .context_assembler
+            .assemble(&content, &memories, history);
+
+        Ok(PipelineResult::LlmReady {
+            signal_id,
+            messages,
+            memory_context: MemoryContext {
+                facts_used,
+                episodes_used,
+            },
+            session_id: Some(session_id),
+            user_content: content,
+            namespace: signal.namespace.clone(),
+            agent: signal.agent.clone(),
+        })
+    }
+
+    async fn handle_forget(
+        &self,
+        signal_id: Uuid,
+        signal: &Signal,
+        target: String,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let mut deleted_count = 0usize;
+
+        if let Some(semantic) = &self.semantic {
+            match semantic.find_facts_matching(&target, Some(&signal.namespace)) {
+                Ok(facts) if !facts.is_empty() => {
+                    for fact in &facts {
+                        if let Err(e) = semantic.delete_fact(&fact.id).await {
+                            tracing::warn!(fact_id = %fact.id, "Failed to delete fact: {e}");
+                        } else {
+                            deleted_count += 1;
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!("Forget search failed: {e}"),
+            }
+        }
+
+        let message = if deleted_count > 0 {
+            format!("Memory erased: removed {deleted_count} engram(s) matching \"{target}\"")
+        } else {
+            format!("No engrams found matching \"{target}\" to erase")
+        };
+
+        let resp = prepend_nudges(SignalResponse {
+            signal_id,
+            status: ResponseStatus::Ok,
+            response: ResponseContent::Text(message),
+            memory_context: MemoryContext {
+                facts_used: 0,
+                episodes_used: 0,
+            },
+            session_id: None,
+        });
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    fn handle_system_status(
+        &self,
+        signal_id: Uuid,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let semantic_count = self
+            .semantic
+            .as_ref()
+            .and_then(|s| s.count().ok())
+            .unwrap_or(0);
+        let episode_count = self.episodic.count().unwrap_or(0);
+
+        let resp = prepend_nudges(SignalResponse::ok(
+            signal_id,
+            format!("Brain status: {semantic_count} facts, {episode_count} episodes"),
+        ));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    async fn handle_action(
+        &self,
+        signal_id: Uuid,
+        signal: &Signal,
+        intent: &thalamus::Intent,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let router = thalamus::SignalRouter::new();
+        let resp = match (router.intent_to_action(intent), &self.action_dispatcher) {
+            (Some(action), Some(dispatcher)) => {
+                let result = dispatcher.dispatch(&action).await;
+                if result.success {
+                    if matches!(&action, cortex::actions::Action::WebSearch { .. })
+                        && !result.output.is_empty()
+                    {
+                        let search_context = format!(
+                            "The user asked: \"{}\"\n\nHere are web search results:\n{}\n\nUsing these search results, provide a helpful and concise answer to the user's question. Cite sources when relevant.",
+                            signal.content, result.output
+                        );
+                        let messages = vec![
+                            cortex::llm::Message {
+                                role: cortex::llm::Role::System,
+                                content: "You are Brain OS. Answer the user's question using the provided web search results. Be concise and cite your sources.".to_string(),
+                            },
+                            cortex::llm::Message {
+                                role: cortex::llm::Role::User,
+                                content: search_context,
+                            },
+                        ];
+                        match self.llm.generate(&messages).await {
+                            Ok(llm_response) => SignalResponse::ok(signal_id, llm_response.content),
+                            Err(_) => SignalResponse::ok(signal_id, result.output),
+                        }
+                    } else {
+                        SignalResponse::ok(signal_id, result.output)
+                    }
+                } else {
+                    SignalResponse::error(
+                        signal_id,
+                        result.error.unwrap_or_else(|| "Action failed".to_string()),
+                    )
+                }
+            }
+            (Some(_action), None) => SignalResponse::error(
+                signal_id,
+                format!(
+                    "Action {:?} recognized but no dispatcher configured — \
+                     enable the relevant backend in config",
+                    intent
+                ),
+            ),
+            (None, _) => SignalResponse::ok(signal_id, format!("Intent classified: {:?}", intent)),
+        };
+        let resp = prepend_nudges(resp);
+        Ok(PipelineResult::Complete(resp))
     }
 
     /// Store the assistant response in episodic memory after streaming completes.
@@ -916,7 +1050,14 @@ impl SignalProcessor {
         agent: Option<&str>,
     ) -> Result<(), SignalError> {
         self.episodic
-            .store_episode(session_id, "assistant", assistant_content, 0.5, Some(namespace), agent)
+            .store_episode(
+                session_id,
+                "assistant",
+                assistant_content,
+                0.5,
+                Some(namespace),
+                agent,
+            )
             .map_err(|e| SignalError::Storage(e.to_string()))?;
         Ok(())
     }
@@ -945,6 +1086,24 @@ impl SignalProcessor {
                 hippocampus::embedding::deterministic_fallback_embedding(text, self.embedding_dim)
             }
         }
+    }
+
+    /// Convert BM25 search results to Memory objects.
+    fn bm25_to_memories(
+        results: Vec<hippocampus::episodic::FtsResult>,
+    ) -> Vec<hippocampus::Memory> {
+        results
+            .into_iter()
+            .map(|r| hippocampus::Memory {
+                id: r.episode_id,
+                content: r.content,
+                source: hippocampus::MemorySource::Episodic,
+                score: r.rank,
+                importance: 0.5,
+                timestamp: r.timestamp,
+                agent: r.agent,
+            })
+            .collect()
     }
 
     /// Run hybrid recall (BM25 + ANN via RecallEngine) and return memories with counts.
@@ -991,18 +1150,7 @@ impl SignalProcessor {
                         .search_bm25(query, top_k, namespace, None)
                         .unwrap_or_default();
                     let episodes_used = bm25.len();
-                    let memories = bm25
-                        .into_iter()
-                        .map(|r| hippocampus::Memory {
-                            id: r.episode_id,
-                            content: r.content,
-                            source: hippocampus::MemorySource::Episodic,
-                            score: r.rank,
-                            importance: 0.5,
-                            timestamp: r.timestamp,
-                            agent: r.agent,
-                        })
-                        .collect();
+                    let memories = Self::bm25_to_memories(bm25);
                     (memories, 0, episodes_used)
                 }
             }
@@ -1013,18 +1161,7 @@ impl SignalProcessor {
                 .search_bm25(query, top_k, namespace, None)
                 .unwrap_or_default();
             let episodes_used = bm25.len();
-            let memories = bm25
-                .into_iter()
-                .map(|r| hippocampus::Memory {
-                    id: r.episode_id,
-                    content: r.content,
-                    source: hippocampus::MemorySource::Episodic,
-                    score: r.rank,
-                    importance: 0.5,
-                    timestamp: r.timestamp,
-                    agent: r.agent,
-                })
-                .collect();
+            let memories = Self::bm25_to_memories(bm25);
             (memories, 0, episodes_used)
         }
     }
@@ -1208,6 +1345,87 @@ impl SignalProcessor {
         &self.procedures
     }
 
+    // ── Scheduled intent management ───────────────────────────────────────────
+
+    /// List scheduled intents, optionally filtered by namespace.
+    pub fn list_scheduled_intents(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<Vec<storage::ScheduledIntent>, SignalError> {
+        self.episodic
+            .pool()
+            .list_scheduled_intents(namespace)
+            .map_err(|e| SignalError::Storage(e.to_string()))
+    }
+
+    /// Cancel a scheduled intent by ID. Returns true if the intent was found and cancelled.
+    pub fn cancel_scheduled_intent(&self, id: &str) -> Result<bool, SignalError> {
+        self.episodic
+            .pool()
+            .cancel_scheduled_intent(id)
+            .map_err(|e| SignalError::Storage(e.to_string()))
+    }
+
+    // ── Export / Import ──────────────────────────────────────────────────────
+
+    /// Export all semantic facts.
+    pub fn export_facts(&self) -> Result<Vec<ExportedFact>, SignalError> {
+        self.episodic
+            .pool()
+            .export_all_facts()
+            .map_err(|e| SignalError::Storage(e.to_string()))
+    }
+
+    /// Export all episodes with their session info.
+    pub fn export_episodes(&self) -> Result<Vec<ExportedEpisode>, SignalError> {
+        self.episodic
+            .pool()
+            .export_all_episodes()
+            .map_err(|e| SignalError::Storage(e.to_string()))
+    }
+
+    /// Import facts into SQLite (ON CONFLICT DO NOTHING). Returns (imported_count, new_fact_indices).
+    pub fn import_facts(&self, facts: &[ExportedFact]) -> Result<(usize, Vec<usize>), SignalError> {
+        self.episodic
+            .pool()
+            .import_facts(facts)
+            .map_err(|e| SignalError::Storage(e.to_string()))
+    }
+
+    /// Import episodes into SQLite (ON CONFLICT DO NOTHING). Returns count of newly imported episodes.
+    pub fn import_episodes(&self, episodes: &[ExportedEpisode]) -> Result<usize, SignalError> {
+        self.episodic
+            .pool()
+            .import_episodes(episodes)
+            .map_err(|e| SignalError::Storage(e.to_string()))
+    }
+
+    /// Re-embed facts into the vector index. Returns (embedded_count, failed_count).
+    pub async fn reembed_facts(&self, facts: &[ExportedFact]) -> (usize, usize) {
+        let semantic = match &self.semantic {
+            Some(s) => s,
+            None => return (0, 0),
+        };
+
+        let mut embedded = 0usize;
+        let mut failed = 0usize;
+
+        for f in facts {
+            let text = format!("{} {} {}", f.subject, f.predicate, f.object);
+            let vector = self.embed_text(&text).await;
+
+            match semantic.add_vector(&f.id, &text, vector, "semantic").await {
+                Ok(()) => embedded += 1,
+                Err(e) => {
+                    tracing::warn!("RuVector insert failed for fact {}: {e}", f.id);
+                    failed += 1;
+                }
+            }
+        }
+
+        (embedded, failed)
+    }
+
     /// Store a semantic fact directly (bypasses intent classification).
     ///
     /// Used by the MCP `memory_store` tool and extracted-fact storage.
@@ -1228,8 +1446,15 @@ impl SignalProcessor {
             let vector = self.embed_text(&fact_text).await;
             let id = semantic
                 .store_fact(
-                    namespace, category, subject, predicate, object, importance as f64, None,
-                    vector, agent,
+                    namespace,
+                    category,
+                    subject,
+                    predicate,
+                    object,
+                    importance as f64,
+                    None,
+                    vector,
+                    agent,
                 )
                 .await
                 .map_err(|e| SignalError::Storage(e.to_string()))?;

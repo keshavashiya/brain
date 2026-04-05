@@ -1,11 +1,10 @@
-mod backends;
+mod bootstrap;
 mod bridge;
 mod chat;
 mod daemon;
 mod deps;
 mod encryption;
 mod export;
-mod resilience;
 mod schedules;
 mod serve;
 mod service;
@@ -187,9 +186,7 @@ async fn main() -> anyhow::Result<()> {
             .with_ansi(false)
             .init();
     } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .init();
+        tracing_subscriber::fmt().with_env_filter(env_filter).init();
     }
 
     let config = brain_core::BrainConfig::load().unwrap_or_else(|e| {
@@ -371,15 +368,22 @@ async fn main() -> anyhow::Result<()> {
 
         // ── mcp stdio ─────────────────────────────────────────────────────────
         Commands::Mcp => {
-            let encryptor = encryption::resolve_encryptor(&config)?;
-            let processor =
-                signal::SignalProcessor::new_with_encryptor(config.clone(), encryptor).await?;
-            mcp::serve_stdio(processor).await?;
+            // If a daemon is running, proxy JSON-RPC through its MCP HTTP
+            // transport. This avoids ruvector lock contention and ensures
+            // one shared SignalProcessor (design principle #1).
+            if bootstrap::detect_running_daemon(&config).await.is_some() {
+                let mcp_url = format!("http://127.0.0.1:{}", config.adapters.mcp.port);
+                tracing::info!(url = %mcp_url, "Daemon detected — proxying MCP stdio through HTTP");
+                bootstrap::proxy_mcp_stdio(&mcp_url, &config).await?;
+            } else {
+                let processor = bootstrap::build_processor(&config).await?;
+                mcp::serve_stdio(processor).await?;
+            }
         }
 
         // ── export ────────────────────────────────────────────────────────────
         Commands::Export { output } => {
-            export::cmd_export(&config, output.as_deref())?;
+            export::cmd_export(&config, output.as_deref()).await?;
         }
 
         // ── import ────────────────────────────────────────────────────────────

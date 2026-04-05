@@ -63,11 +63,14 @@ pub(crate) fn cmd_service_install() -> anyhow::Result<()> {
 
         std::fs::write(&plist_path, &plist)?;
 
+        let plist_str = plist_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Path contains non-UTF-8 characters"))?;
         let _ = std::process::Command::new("launchctl")
-            .args(["unload", plist_path.to_str().unwrap()])
+            .args(["unload", plist_str])
             .output();
         let out = std::process::Command::new("launchctl")
-            .args(["load", "-w", plist_path.to_str().unwrap()])
+            .args(["load", "-w", plist_str])
             .output()
             .map_err(|e| anyhow::anyhow!("launchctl load failed: {e}"))?;
         if !out.status.success() {
@@ -146,8 +149,7 @@ WantedBy=default.target
 
         let out = std::process::Command::new("schtasks")
             .args([
-                "/Create", "/TN", task_name, "/TR", &cmd, "/SC", "ONLOGON", "/RL",
-                "HIGHEST", "/F",
+                "/Create", "/TN", task_name, "/TR", &cmd, "/SC", "ONLOGON", "/RL", "HIGHEST", "/F",
             ])
             .output()
             .map_err(|e| anyhow::anyhow!("schtasks not found: {e}"))?;
@@ -195,8 +197,11 @@ pub(crate) fn cmd_service_uninstall() -> anyhow::Result<()> {
             return Ok(());
         }
 
+        let plist_str = plist_path
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("Path contains non-UTF-8 characters"))?;
         let _ = std::process::Command::new("launchctl")
-            .args(["unload", "-w", plist_path.to_str().unwrap()])
+            .args(["unload", "-w", plist_str])
             .output();
 
         std::fs::remove_file(&plist_path)?;

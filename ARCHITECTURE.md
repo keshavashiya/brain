@@ -17,7 +17,7 @@ brain/
 │   │
 │   ├── thalamus/       # Intent classification
 │   │                     Regex fast-path (compiled at startup) + async LLM fallback with timeout
-│   │                     8 intent types: StoreFact, Recall, Forget, Chat,
+│   │                     9 intent types: StoreFact, Recall, Forget, Chat, SystemStatus,
 │   │                     WebSearch, Schedule, SendMessage, ExecuteCommand
 │   │
 │   ├── amygdala/       # Importance scoring with per-process novelty detection → [0.0, 1.0]
@@ -294,11 +294,11 @@ Migration-based schema versioned in a `MIGRATIONS` slice. The runner compares `M
 | `scheduled_intents` | Persisted scheduling intents (background poller fires & delivers via NotificationRouter) |
 | `episode_promotions` | Idempotency log for episode → semantic-fact promotions |
 | `notification_outbox` | Proactive notification queue with priority and delivery status |
-| `habit_state` | Rate-limit state for proactivity engine (daily count, last sent) |
+| `habit_state` | Rate-limit state for proactivity engine (daily count, last sent) — created on-demand by HabitEngine, not in core migrations |
 | `_migrations` | Applied migration version log |
 
-**WAL mode** is enabled for concurrent reads alongside writes.  
-**Thread safety** is via `Mutex<Connection>` — one connection, one writer at a time.  
+**WAL mode** is enabled for concurrent reads alongside writes.
+**Thread safety** is via `Mutex<Connection>` — one connection, one writer at a time.
 **Encryption** is opt-in: `SqlitePool::with_encryptor(enc)` wraps the pool so `encrypt_content` / `decrypt_content` are called transparently on write/read of content columns.
 
 ### Vector Index (`crates/storage/src/ruvector.rs`)

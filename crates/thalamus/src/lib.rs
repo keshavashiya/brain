@@ -136,14 +136,7 @@ impl LlmIntentFallback {
     }
 
     fn parse_json_payload(raw: &str) -> Option<LlmIntentPayload> {
-        let trimmed = raw.trim();
-        if let Ok(payload) = serde_json::from_str::<LlmIntentPayload>(trimmed) {
-            return Some(payload);
-        }
-
-        let start = trimmed.find('{')?;
-        let end = trimmed.rfind('}')?;
-        serde_json::from_str::<LlmIntentPayload>(&trimmed[start..=end]).ok()
+        cortex::extract_json_from_response(raw)
     }
 
     fn split_command(raw: &str) -> (String, Vec<String>) {
@@ -198,7 +191,10 @@ impl IntentFallback for LlmIntentFallback {
             }
         };
 
-        tracing::debug!(raw_len = response.content.len(), "LLM classifier raw response");
+        tracing::debug!(
+            raw_len = response.content.len(),
+            "LLM classifier raw response"
+        );
 
         let payload = match Self::parse_json_payload(&response.content) {
             Some(p) => p,
@@ -329,9 +325,6 @@ pub struct NormalizedMessage {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     /// Original message ID (if any).
     pub message_id: Option<String>,
-    /// Metadata (channel-specific).
-    #[allow(dead_code)]
-    pub metadata: HashMap<String, String>,
 }
 
 // ─── Intent Classifier ─────────────────────────────────────────────────────
@@ -556,7 +549,7 @@ impl IntentClassifier {
         }
     }
 
-/// Classify slash commands (deterministic, not NLU).
+    /// Classify slash commands (deterministic, not NLU).
     fn classify_slash_command(&self, input: &str) -> Option<Classification> {
         if !input.starts_with('/') {
             return None;
@@ -939,8 +932,7 @@ mod tests {
     #[tokio::test]
     async fn test_llm_classifies_ambiguous_input() {
         // For input that doesn't match regex patterns, LLM should classify
-        let classifier = IntentClassifier::new()
-            .with_llm_fallback(Arc::new(MockFallback::chat()));
+        let classifier = IntentClassifier::new().with_llm_fallback(Arc::new(MockFallback::chat()));
 
         // "What's the weather?" doesn't match any regex pattern → LLM classifies as Chat
         let result = classifier.classify("What's the weather?").await;
@@ -955,8 +947,8 @@ mod tests {
     #[tokio::test]
     async fn test_regex_fallback_when_llm_unavailable() {
         // LLM returns None → regex should kick in
-        let classifier = IntentClassifier::new()
-            .with_llm_fallback(Arc::new(MockFallback::unavailable()));
+        let classifier =
+            IntentClassifier::new().with_llm_fallback(Arc::new(MockFallback::unavailable()));
 
         let result = classifier.classify("Remember that I like coffee").await;
         assert_eq!(result.method, ClassificationMethod::Regex);

@@ -1,6 +1,6 @@
 [package]
-name = "brainos-ganglia"
-description = "Proactivity engine with habit and open-loop detection for Brain OS"
+name = "brainos-backends"
+description = "Action backends (search, scheduling, messaging, memory) and resilience primitives for Brain OS"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -12,18 +12,15 @@ categories.workspace = true
 
 [dependencies]
 brain_core = { workspace = true }
-storage = { workspace = true }
 cortex = { workspace = true }
+hippocampus = { workspace = true }
+storage = { workspace = true }
+signal = { workspace = true }
+reqwest = { workspace = true }
 tokio = { workspace = true }
-rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
-chrono-tz = { workspace = true }
-
-[dev-dependencies]
-tempfile = "3"
+anyhow = { workspace = true }
 async-trait = "0.1"
-futures = { workspace = true }

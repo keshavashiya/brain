@@ -119,7 +119,7 @@ pub(crate) async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Res
     if !searxng_ep.is_empty() {
         println!("\n  External Services:");
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(2))
+            .timeout(brain_core::timeouts::STATUS_CHECK)
             .build()
             .unwrap_or_default();
         let health_url = format!("{}/healthz", searxng_ep);

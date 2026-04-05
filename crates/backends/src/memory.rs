@@ -1,0 +1,108 @@
+//! Memory backend for the action dispatcher.
+
+use std::sync::Arc;
+
+#[derive(Clone)]
+pub struct DefaultMemoryBackend {
+    pub semantic: Option<hippocampus::SemanticStore>,
+    pub embedder: Arc<tokio::sync::Mutex<Option<hippocampus::Embedder>>>,
+    pub embedding_dim: usize,
+}
+
+#[async_trait::async_trait]
+impl cortex::actions::MemoryBackend for DefaultMemoryBackend {
+    async fn store_fact(
+        &self,
+        namespace: &str,
+        _category: &str,
+        subject: &str,
+        predicate: &str,
+        object: &str,
+    ) -> Result<String, cortex::actions::ActionError> {
+        let Some(semantic) = &self.semantic else {
+            return Err(cortex::actions::ActionError::ExecutionFailed(
+                "Semantic store unavailable".to_string(),
+            ));
+        };
+
+        let content = format!("{subject} {predicate} {object}");
+        let vector = {
+            let mut guard = self.embedder.lock().await;
+            if let Some(embedder) = guard.as_mut() {
+                match embedder.embed(&content).await {
+                    Ok(v) => {
+                        hippocampus::embedding::sanitize_embedding(v, self.embedding_dim, &content)
+                    }
+                    Err(e) => {
+                        tracing::warn!("ActionDispatcher embedding failed: {e}");
+                        hippocampus::embedding::deterministic_fallback_embedding(
+                            &content,
+                            self.embedding_dim,
+                        )
+                    }
+                }
+            } else {
+                hippocampus::embedding::deterministic_fallback_embedding(
+                    &content,
+                    self.embedding_dim,
+                )
+            }
+        };
+
+        semantic
+            .store_fact(
+                namespace, _category, subject, predicate, object, 1.0, None, vector, None,
+            )
+            .await
+            .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))
+    }
+
+    async fn recall(
+        &self,
+        query: &str,
+        top_k: usize,
+        namespace: Option<&str>,
+    ) -> Result<Vec<cortex::actions::MemoryFact>, cortex::actions::ActionError> {
+        let Some(semantic) = &self.semantic else {
+            return Err(cortex::actions::ActionError::ExecutionFailed(
+                "Semantic store unavailable".to_string(),
+            ));
+        };
+
+        let vector = {
+            let mut guard = self.embedder.lock().await;
+            if let Some(embedder) = guard.as_mut() {
+                match embedder.embed(query).await {
+                    Ok(v) => {
+                        hippocampus::embedding::sanitize_embedding(v, self.embedding_dim, query)
+                    }
+                    Err(e) => {
+                        tracing::warn!("ActionDispatcher embedding failed: {e}");
+                        hippocampus::embedding::deterministic_fallback_embedding(
+                            query,
+                            self.embedding_dim,
+                        )
+                    }
+                }
+            } else {
+                hippocampus::embedding::deterministic_fallback_embedding(query, self.embedding_dim)
+            }
+        };
+
+        let results = semantic
+            .search_similar(vector, top_k.max(1), namespace, None)
+            .await
+            .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))?;
+
+        Ok(results
+            .into_iter()
+            .map(|r| cortex::actions::MemoryFact {
+                namespace: r.fact.namespace,
+                subject: r.fact.subject,
+                predicate: r.fact.predicate,
+                object: r.fact.object,
+                confidence: r.fact.confidence,
+            })
+            .collect())
+    }
+}

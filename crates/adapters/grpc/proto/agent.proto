@@ -40,6 +40,8 @@ message SignalRequest {
   string namespace = 6;
   // Originating agent identity (e.g. "claude-code", "open-code").
   string agent = 7;
+  // Optional session ID for conversation continuity.
+  string session_id = 8;
 }
 
 message SignalResponse {
@@ -48,6 +50,8 @@ message SignalResponse {
   string response      = 3;
   uint32 facts_used    = 4;
   uint32 episodes_used = 5;
+  // Session ID for conversation continuity.
+  string session_id    = 6;
 }
 
 // ── ReceiveSignals ────────────────────────────────────────────────────────────

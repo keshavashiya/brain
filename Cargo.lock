@@ -387,6 +387,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "brainos-backends",
  "brainos-bridge",
  "brainos-core",
  "brainos-cortex",
@@ -435,11 +436,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "brainos-backends"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "brainos-core",
+ "brainos-cortex",
+ "brainos-hippocampus",
+ "brainos-signal",
+ "brainos-storage",
+ "chrono",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "brainos-bridge"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chrono",
  "futures-util",
  "serde",
  "serde_json",
@@ -454,6 +473,7 @@ dependencies = [
 name = "brainos-cerebellum"
 version = "0.1.0"
 dependencies = [
+ "brainos-core",
  "brainos-storage",
  "chrono",
  "rusqlite",
@@ -482,6 +502,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "brainos-core",
  "brainos-hippocampus",
  "brainos-storage",
  "chrono",
@@ -499,6 +520,7 @@ name = "brainos-ganglia"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "brainos-core",
  "brainos-cortex",
  "brainos-storage",
  "chrono",
@@ -540,6 +562,7 @@ name = "brainos-hippocampus"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "brainos-core",
  "brainos-storage",
  "chrono",
  "reqwest",
@@ -611,6 +634,7 @@ dependencies = [
  "brainos-storage",
  "brainos-thalamus",
  "chrono",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

@@ -13,6 +13,6 @@ pub mod context;
 pub mod llm;
 
 pub use llm::{
-    create_provider, LlmError, LlmProvider, Message, OllamaProvider, OpenAiProvider,
-    ProviderConfig, Response, ResponseChunk, Role, Usage,
+    create_provider, extract_json_from_response, LlmError, LlmProvider, Message, OllamaProvider,
+    OpenAiProvider, ProviderConfig, Response, ResponseChunk, Role, Usage,
 };

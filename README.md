@@ -264,6 +264,7 @@ For development, `brain serve` runs everything in the foreground with optional f
 brain serve               # all adapters (foreground)
 brain serve --http        # HTTP only
 brain serve --http --ws   # HTTP + WebSocket
+brain serve --grpc        # gRPC only
 brain serve --mcp         # MCP HTTP only
 ```
 
@@ -516,6 +517,16 @@ The export format is a self-contained JSON file containing all facts and episode
 
 ---
 
+## Scheduled Intents
+
+```bash
+brain schedules list                    # list all scheduled intents
+brain schedules list --namespace work   # list for specific namespace
+brain schedules cancel <id>             # cancel a scheduled intent
+```
+
+---
+
 ## Authentication
 
 | Adapter | Method |
@@ -540,6 +551,8 @@ access:
 ```
 
 `brain init` generates a unique API key (prefixed `brk_`) and prints it to the terminal. Find your key in `~/.brain/config.yaml` under `access.api_keys`.
+
+MCP stdio can also authenticate via the `BRAIN_API_KEY` environment variable, which is validated against configured keys at startup.
 
 ---
 

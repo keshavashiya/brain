@@ -82,16 +82,35 @@ impl SemanticStore {
         let now = chrono::Utc::now().to_rfc3339();
 
         // Deduplication: check for highly similar facts in the same namespace and category.
-        let similar = self.search_similar(vector.clone(), 1, Some(namespace), agent).await?;
+        let similar = self
+            .search_similar(vector.clone(), 1, Some(namespace), agent)
+            .await?;
         if let Some(hit) = similar.first() {
             // Distance < 0.1 means similarity > 0.9 (cosine distance = 1 - similarity)
             if hit.distance < 0.1 && hit.fact.category == category {
                 // If the content is identical, just return the existing ID.
-                if hit.fact.subject == subject && hit.fact.predicate == predicate && hit.fact.object == object {
+                if hit.fact.subject == subject
+                    && hit.fact.predicate == predicate
+                    && hit.fact.object == object
+                {
                     return Ok(hit.fact.id.clone());
                 }
                 // Otherwise, mark the existing fact as superseded and insert the new one.
-                let id = self.do_store_fact(namespace, category, subject, predicate, object, confidence, source_episode_id, vector, agent, &content, &now).await?;
+                let id = self
+                    .do_store_fact(
+                        namespace,
+                        category,
+                        subject,
+                        predicate,
+                        object,
+                        confidence,
+                        source_episode_id,
+                        vector,
+                        agent,
+                        &content,
+                        &now,
+                    )
+                    .await?;
                 self.db.with_conn(|conn| {
                     conn.execute(
                         "UPDATE semantic_facts SET superseded_by = ?1 WHERE id = ?2",
@@ -103,7 +122,20 @@ impl SemanticStore {
             }
         }
 
-        self.do_store_fact(namespace, category, subject, predicate, object, confidence, source_episode_id, vector, agent, &content, &now).await
+        self.do_store_fact(
+            namespace,
+            category,
+            subject,
+            predicate,
+            object,
+            confidence,
+            source_episode_id,
+            vector,
+            agent,
+            &content,
+            &now,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -180,14 +212,19 @@ impl SemanticStore {
             let fact_opt = self.get_fact_with_timestamp(&vr.id)?;
             if let Some((fact, created_at)) = fact_opt {
                 // Skip superseded facts
-                let is_superseded = self.db.with_conn(|conn| {
-                    let superseded: Option<String> = conn.query_row(
-                        "SELECT superseded_by FROM semantic_facts WHERE id = ?1",
-                        [&vr.id],
-                        |row| row.get(0)
-                    ).unwrap_or(None);
-                    Ok(superseded.is_some())
-                }).unwrap_or(false);
+                let is_superseded = self
+                    .db
+                    .with_conn(|conn| {
+                        let superseded: Option<String> = conn
+                            .query_row(
+                                "SELECT superseded_by FROM semantic_facts WHERE id = ?1",
+                                [&vr.id],
+                                |row| row.get(0),
+                            )
+                            .unwrap_or(None);
+                        Ok(superseded.is_some())
+                    })
+                    .unwrap_or(false);
 
                 if is_superseded {
                     continue;
@@ -578,6 +615,31 @@ impl SemanticStore {
 
             Ok(facts)
         })?)
+    }
+
+    /// Insert a pre-existing fact's vector into the index (for import/re-embed).
+    ///
+    /// Does NOT write to SQLite — only adds the vector to RuVector.
+    /// Used by import to re-embed facts that already exist in SQLite.
+    pub async fn add_vector(
+        &self,
+        fact_id: &str,
+        content: &str,
+        vector: Vec<f32>,
+        source: &str,
+    ) -> Result<(), SemanticError> {
+        let now = chrono::Utc::now().to_rfc3339();
+        self.ruv
+            .add_vectors(
+                "facts_vec",
+                vec![fact_id.to_string()],
+                vec![content.to_string()],
+                vec![vector],
+                vec![now],
+                source,
+            )
+            .await?;
+        Ok(())
     }
 
     /// Count total active facts.

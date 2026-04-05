@@ -130,27 +130,14 @@ fn parse_importance_response(raw: &str) -> Result<f32, cortex::LlmError> {
         score: f32,
     }
 
-    let trimmed = raw.trim();
-
-    // Try direct parse
-    if let Ok(payload) = serde_json::from_str::<ImportancePayload>(trimmed) {
-        return Ok(payload.score.clamp(0.0, 1.0));
-    }
-
-    // Try extracting JSON object
-    if let Some(start) = trimmed.find('{') {
-        if let Some(end) = trimmed.rfind('}') {
-            if let Ok(payload) =
-                serde_json::from_str::<ImportancePayload>(&trimmed[start..=end])
-            {
-                return Ok(payload.score.clamp(0.0, 1.0));
-            }
-        }
-    }
-
-    Err(cortex::LlmError::InvalidFormat(format!(
-        "Could not parse importance score from: {trimmed}"
-    )))
+    cortex::extract_json_from_response::<ImportancePayload>(raw)
+        .map(|p| p.score.clamp(0.0, 1.0))
+        .ok_or_else(|| {
+            cortex::LlmError::InvalidFormat(format!(
+                "Could not parse importance score from: {}",
+                raw.trim()
+            ))
+        })
 }
 
 #[cfg(test)]
@@ -247,7 +234,8 @@ mod tests {
 
     #[test]
     fn test_parse_importance_clean_json() {
-        let score = parse_importance_response(r#"{"score":0.7,"reason":"memory request"}"#).unwrap();
+        let score =
+            parse_importance_response(r#"{"score":0.7,"reason":"memory request"}"#).unwrap();
         assert!((score - 0.7).abs() < 1e-6);
     }
 
@@ -316,9 +304,7 @@ mod tests {
             >,
             cortex::LlmError,
         > {
-            Err(cortex::LlmError::ProviderUnavailable(
-                "mock".to_string(),
-            ))
+            Err(cortex::LlmError::ProviderUnavailable("mock".to_string()))
         }
 
         async fn health_check(&self) -> bool {
@@ -384,9 +370,7 @@ mod tests {
             >,
             cortex::LlmError,
         > {
-            Err(cortex::LlmError::ProviderUnavailable(
-                "mock".to_string(),
-            ))
+            Err(cortex::LlmError::ProviderUnavailable("mock".to_string()))
         }
 
         async fn health_check(&self) -> bool {

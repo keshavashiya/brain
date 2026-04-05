@@ -17,6 +17,15 @@ use uuid::Uuid;
 
 use signal::{Signal, SignalSource};
 
+/// Convert protobuf empty string to Option (proto3 defaults strings to "").
+fn non_empty(s: String) -> Option<String> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
+}
+
 // ── Generated protobuf types ──────────────────────────────────────────────────
 
 /// Types and server/client stubs generated from `proto/memory.proto`.
@@ -78,15 +87,11 @@ impl MemoryService for MemoryServiceImpl {
             req.top_k as usize
         };
 
-        let namespace = if req.namespace.is_empty() {
-            None
-        } else {
-            Some(req.namespace.as_str())
-        };
+        let namespace = non_empty(req.namespace);
 
         let results = self
             .processor
-            .search_facts(&req.query, top_k, namespace)
+            .search_facts(&req.query, top_k, namespace.as_deref())
             .await;
 
         let facts = results
@@ -111,22 +116,14 @@ impl MemoryService for MemoryServiceImpl {
         request: Request<StoreRequest>,
     ) -> Result<Response<StoreResponse>, Status> {
         let req = request.into_inner();
-        let category = if req.category.is_empty() {
-            "general"
-        } else {
-            &req.category
-        };
-        let namespace = if req.namespace.is_empty() {
-            "personal"
-        } else {
-            &req.namespace
-        };
+        let category = non_empty(req.category).unwrap_or_else(|| "general".to_string());
+        let namespace = non_empty(req.namespace).unwrap_or_else(|| "personal".to_string());
 
         match self
             .processor
             .store_fact_direct(
-                namespace,
-                category,
+                &namespace,
+                &category,
                 &req.subject,
                 &req.predicate,
                 &req.object,
@@ -150,16 +147,13 @@ impl MemoryService for MemoryServiceImpl {
     ) -> Result<Response<GetFactsResponse>, Status> {
         let req = request.into_inner();
 
-        let namespace = if req.namespace.is_empty() {
-            None
-        } else {
-            Some(req.namespace.as_str())
-        };
+        let namespace = non_empty(req.namespace);
 
         let raw_facts = if req.subject.is_empty() {
-            self.processor.list_facts(namespace)
+            self.processor.list_facts(namespace.as_deref())
         } else {
-            self.processor.facts_about(&req.subject, namespace)
+            self.processor
+                .facts_about(&req.subject, namespace.as_deref())
         };
 
         let facts = raw_facts
@@ -186,25 +180,20 @@ impl MemoryService for MemoryServiceImpl {
         request: Request<MemorySignalRequest>,
     ) -> Result<Response<Self::StreamSignalsStream>, Status> {
         let req = request.into_inner();
-        let source = parse_source(&req.source);
+        let source = SignalSource::parse(Some(&req.source), SignalSource::Grpc);
 
-        let sig = Signal::new(
+        let sig = Signal::from_adapter_request(
             source,
-            if req.channel.is_empty() {
-                "grpc"
-            } else {
-                &req.channel
-            },
-            if req.sender.is_empty() {
-                "grpcclient"
-            } else {
-                &req.sender
-            },
-            req.content.clone(),
-        )
-        .with_metadata(req.metadata)
-        .with_namespace_opt(if req.namespace.is_empty() { None } else { Some(req.namespace) })
-        .with_agent_opt(if req.agent.is_empty() { None } else { Some(req.agent) });
+            req.content,
+            non_empty(req.channel),
+            non_empty(req.sender),
+            Some(req.metadata),
+            non_empty(req.namespace),
+            non_empty(req.agent),
+            non_empty(req.session_id),
+            "grpc",
+            "grpcclient",
+        );
 
         let processor = self.processor.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(4);
@@ -218,6 +207,7 @@ impl MemoryService for MemoryServiceImpl {
                         response: response_to_string(resp.response),
                         facts_used: resp.memory_context.facts_used as u32,
                         episodes_used: resp.memory_context.episodes_used as u32,
+                        session_id: resp.session_id.unwrap_or_default(),
                     };
                     let _ = tx.send(Ok(event)).await;
                 }
@@ -282,25 +272,20 @@ impl AgentService for AgentServiceImpl {
         request: Request<AgentSignalRequest>,
     ) -> Result<Response<AgentSignalResponse>, Status> {
         let req = request.into_inner();
-        let source = parse_source(&req.source);
+        let source = SignalSource::parse(Some(&req.source), SignalSource::Grpc);
 
-        let sig = Signal::new(
+        let sig = Signal::from_adapter_request(
             source,
-            if req.channel.is_empty() {
-                "grpc"
-            } else {
-                &req.channel
-            },
-            if req.sender.is_empty() {
-                "agent"
-            } else {
-                &req.sender
-            },
-            req.content.clone(),
-        )
-        .with_metadata(req.metadata)
-        .with_namespace_opt(if req.namespace.is_empty() { None } else { Some(req.namespace) })
-        .with_agent_opt(if req.agent.is_empty() { None } else { Some(req.agent) });
+            req.content,
+            non_empty(req.channel),
+            non_empty(req.sender),
+            Some(req.metadata),
+            non_empty(req.namespace),
+            non_empty(req.agent),
+            non_empty(req.session_id),
+            "grpc",
+            "agent",
+        );
 
         match self.processor.process(sig).await {
             Ok(resp) => Ok(Response::new(AgentSignalResponse {
@@ -309,6 +294,7 @@ impl AgentService for AgentServiceImpl {
                 response: response_to_string(resp.response),
                 facts_used: resp.memory_context.facts_used as u32,
                 episodes_used: resp.memory_context.episodes_used as u32,
+                session_id: resp.session_id.unwrap_or_default(),
             })),
             Err(e) => Err(Status::internal(e.to_string())),
         }
@@ -400,15 +386,7 @@ pub async fn serve(
 ) -> anyhow::Result<()> {
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
 
-    let api_keys: Vec<String> = processor
-        .config()
-        .access
-        .api_keys
-        .iter()
-        .map(|k| k.key.clone())
-        .collect();
-
-    let auth_keys = Arc::new(api_keys);
+    let auth_keys = Arc::new(processor.config().access.api_keys.clone());
 
     let memory_svc =
         MemoryServiceServer::with_interceptor(MemoryServiceImpl::new(processor.clone()), {
@@ -431,53 +409,43 @@ pub async fn serve(
     Ok(())
 }
 
-/// Tonic interceptor that validates API key authentication.
+/// Tonic interceptor that validates API key authentication with permission checking.
 ///
 /// Accepts the key from either `x-api-key` or `authorization` (Bearer) metadata.
-/// Returns `UNAUTHENTICATED` if no valid key is found. If no keys are configured,
-/// all requests are allowed (open mode).
-fn auth_interceptor(req: Request<()>, api_keys: &[String]) -> Result<Request<()>, Status> {
-    // If no keys configured, allow all (open mode)
-    if api_keys.is_empty() {
-        return Ok(req);
-    }
-
+/// Returns `UNAUTHENTICATED` / `PERMISSION_DENIED` if no valid key is found.
+/// If no keys are configured, all requests are allowed (open mode).
+fn auth_interceptor(
+    req: Request<()>,
+    api_keys: &[brain_core::ApiKeyConfig],
+) -> Result<Request<()>, Status> {
     let metadata = req.metadata();
 
-    // Check x-api-key header
-    if let Some(key) = metadata.get("x-api-key") {
-        if let Ok(key_str) = key.to_str() {
-            if api_keys.iter().any(|k| k == key_str) {
-                return Ok(req);
-            }
-        }
-    }
+    // Extract key from x-api-key or authorization header
+    let provided_key = metadata
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| {
+            metadata.get("authorization").and_then(|v| {
+                v.to_str()
+                    .ok()
+                    .and_then(|s| brain_core::auth::extract_bearer_from_value(s).or(Some(s)))
+            })
+        });
 
-    // Check authorization header (Bearer token)
-    if let Some(auth) = metadata.get("authorization") {
-        if let Ok(auth_str) = auth.to_str() {
-            let token = auth_str.strip_prefix("Bearer ").unwrap_or(auth_str);
-            if api_keys.iter().any(|k| k == token) {
-                return Ok(req);
-            }
-        }
+    // gRPC requests can both read and write, so require write permission.
+    let result = brain_core::check_auth(api_keys, provided_key, "write");
+    match result {
+        brain_core::AuthResult::Open | brain_core::AuthResult::Allowed => Ok(req),
+        brain_core::AuthResult::InsufficientPermission => Err(Status::permission_denied(
+            result.error_message("write").unwrap_or_default(),
+        )),
+        _ => Err(Status::unauthenticated(
+            result.error_message("write").unwrap_or_default(),
+        )),
     }
-
-    Err(Status::unauthenticated("Missing or invalid API key"))
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-fn parse_source(s: &str) -> SignalSource {
-    match s {
-        "grpc" | "" => SignalSource::Grpc,
-        "http" => SignalSource::Http,
-        "cli" => SignalSource::Cli,
-        "ws" | "websocket" => SignalSource::WebSocket,
-        "mcp" => SignalSource::Mcp,
-        _ => SignalSource::Grpc,
-    }
-}
 
 fn response_to_string(content: signal::ResponseContent) -> String {
     match content {
@@ -591,6 +559,7 @@ mod tests {
             metadata: std::collections::HashMap::new(),
             namespace: String::new(),
             agent: String::new(),
+            session_id: String::new(),
         });
         let resp = svc.send_signal(req).await.unwrap();
         let inner = resp.into_inner();
@@ -613,6 +582,7 @@ mod tests {
             metadata: std::collections::HashMap::new(),
             namespace: String::new(),
             agent: String::new(),
+            session_id: String::new(),
         });
         let resp = svc.stream_signals(req).await.unwrap();
         let mut stream = resp.into_inner();
@@ -672,6 +642,7 @@ mod tests {
             metadata: std::collections::HashMap::new(),
             namespace: "personal".to_string(),
             agent: String::new(),
+            session_id: String::new(),
         });
         let send_resp = agent_svc.send_signal(send_req).await.unwrap().into_inner();
         assert_eq!(send_resp.status, "Ok");
@@ -686,13 +657,40 @@ mod tests {
 
     #[test]
     fn test_parse_source() {
-        assert_eq!(parse_source("grpc"), SignalSource::Grpc);
-        assert_eq!(parse_source(""), SignalSource::Grpc);
-        assert_eq!(parse_source("http"), SignalSource::Http);
-        assert_eq!(parse_source("cli"), SignalSource::Cli);
-        assert_eq!(parse_source("ws"), SignalSource::WebSocket);
-        assert_eq!(parse_source("mcp"), SignalSource::Mcp);
-        assert_eq!(parse_source("unknown"), SignalSource::Grpc);
+        assert_eq!(
+            SignalSource::parse(Some("grpc"), SignalSource::Grpc),
+            SignalSource::Grpc
+        );
+        assert_eq!(
+            SignalSource::parse(Some(""), SignalSource::Grpc),
+            SignalSource::Grpc
+        );
+        assert_eq!(
+            SignalSource::parse(Some("http"), SignalSource::Grpc),
+            SignalSource::Http
+        );
+        assert_eq!(
+            SignalSource::parse(Some("cli"), SignalSource::Grpc),
+            SignalSource::Cli
+        );
+        assert_eq!(
+            SignalSource::parse(Some("ws"), SignalSource::Grpc),
+            SignalSource::WebSocket
+        );
+        assert_eq!(
+            SignalSource::parse(Some("mcp"), SignalSource::Grpc),
+            SignalSource::Mcp
+        );
+        assert_eq!(
+            SignalSource::parse(Some("unknown"), SignalSource::Grpc),
+            SignalSource::Grpc
+        );
+    }
+
+    #[test]
+    fn test_non_empty() {
+        assert_eq!(non_empty(String::new()), None);
+        assert_eq!(non_empty("hello".to_string()), Some("hello".to_string()));
     }
 
     #[test]

@@ -42,17 +42,28 @@ pub struct RecallConfig {
     pub recency_weight: f64,
     /// Decay rate for the forgetting curve (higher = faster decay).
     pub decay_rate: f64,
+    /// Minimum similarity score for semantic results (0.0–1.0).
+    /// ANN results with similarity below this threshold are discarded before fusion.
+    pub similarity_threshold: f64,
 }
 
 impl RecallConfig {
     /// Build from individual config values (avoids cross-crate dependency on brain_core).
-    pub fn from_config(rrf_k: u32, pre_fusion_limit: u32, importance_weight: f64, recency_weight: f64, decay_rate: f64) -> Self {
+    pub fn from_config(
+        rrf_k: u32,
+        pre_fusion_limit: u32,
+        importance_weight: f64,
+        recency_weight: f64,
+        decay_rate: f64,
+        similarity_threshold: f64,
+    ) -> Self {
         Self {
             rrf_k: rrf_k as f64,
             pre_fusion_limit: pre_fusion_limit as usize,
             importance_weight,
             recency_weight,
             decay_rate,
+            similarity_threshold,
         }
     }
 }
@@ -65,6 +76,7 @@ impl Default for RecallConfig {
             importance_weight: 0.3,
             recency_weight: 0.2,
             decay_rate: 0.01,
+            similarity_threshold: 0.65,
         }
     }
 }
@@ -149,9 +161,13 @@ impl RecallEngine {
             .await
             .map_err(RecallError::Semantic)?;
 
+        // Convert distance to similarity and filter by threshold.
+        // distance is L2; similarity = 1/(1+d). Higher = more similar.
+        let threshold = self.config.similarity_threshold;
         let ann_ranked: Vec<(String, f64)> = ann_results
             .iter()
             .map(|r| (r.fact.id.clone(), 1.0 / (1.0 + r.distance as f64)))
+            .filter(|(_, sim)| *sim >= threshold)
             .collect();
 
         // 3. RRF fusion
@@ -242,7 +258,10 @@ fn parse_elapsed_hours(timestamp: &str, now: &chrono::DateTime<chrono::Utc>) -> 
         let elapsed = *now - dt;
         return (elapsed.num_seconds() as f64 / 3600.0).max(0.01);
     }
-    tracing::warn!(timestamp, "Unparseable timestamp in recall — using 1.0h fallback");
+    tracing::warn!(
+        timestamp,
+        "Unparseable timestamp in recall — using 1.0h fallback"
+    );
     1.0 // fallback
 }
 

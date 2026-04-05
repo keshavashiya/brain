@@ -20,7 +20,7 @@ llm:
   api_key: ""                 # Required for openai provider; also settable via BRAIN_LLM__API_KEY env var
   temperature: 0.7
   max_tokens: 4096
-  intent_llm_fallback: false  # Deprecated: intent routing is LLM-first when LLM is available
+  # intent_llm_fallback: false  # DEPRECATED — no longer used; kept for config compat
 
 embedding:
   model: "nomic-embed-text"    # must be pulled: `ollama pull nomic-embed-text`
@@ -95,6 +95,7 @@ proactivity:
   quiet_hours:
     start: "22:00"
     end: "08:00"
+    timezone: "UTC"              # IANA timezone name (e.g. "America/New_York")
   delivery:
     outbox: true               # Always write to outbox; drain on next interaction
     broadcast: true            # Push to live WS/SSE sessions

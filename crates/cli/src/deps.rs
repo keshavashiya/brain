@@ -52,11 +52,17 @@ pub(crate) fn cmd_deps(action: DepsAction) -> anyhow::Result<()> {
     }
 
     let compose_dir = compose_file.parent().unwrap();
+    let compose_str = compose_file
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Path contains non-UTF-8 characters"))?;
+    let dir_str = compose_dir
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("Path contains non-UTF-8 characters"))?;
     let run = |args: &[&str]| -> anyhow::Result<()> {
         let status = std::process::Command::new("docker")
             .arg("compose")
-            .args(["-f", compose_file.to_str().unwrap()])
-            .args(["--project-directory", compose_dir.to_str().unwrap()])
+            .args(["-f", compose_str])
+            .args(["--project-directory", dir_str])
             .args(args)
             .status()?;
         if !status.success() {

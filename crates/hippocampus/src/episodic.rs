@@ -275,7 +275,11 @@ impl EpisodicStore {
             let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(sanitized)];
 
             if let Some(ns) = namespace {
-                sql.push_str(&format!(" AND (e.namespace = ?{} OR e.namespace LIKE ?{})", params.len() + 1, params.len() + 2));
+                sql.push_str(&format!(
+                    " AND (e.namespace = ?{} OR e.namespace LIKE ?{})",
+                    params.len() + 1,
+                    params.len() + 2
+                ));
                 params.push(Box::new(ns.to_string()));
                 params.push(Box::new(format!("{}/%", ns)));
             }

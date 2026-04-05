@@ -152,7 +152,7 @@ impl OllamaProvider {
     ) -> Result<Self, LlmError> {
         // Ollama may need to load a large model on first call — allow up to 5 min
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
+            .timeout(brain_core::timeouts::LLM_GENERATE)
             .build()
             .map_err(|e| {
                 LlmError::ProviderUnavailable(format!("Failed to create HTTP client: {e}"))
@@ -417,7 +417,7 @@ impl OpenAiProvider {
         max_tokens: Option<i32>,
     ) -> Result<Self, LlmError> {
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
+            .timeout(brain_core::timeouts::LLM_GENERATE)
             .build()
             .map_err(|e| {
                 LlmError::ProviderUnavailable(format!("Failed to create HTTP client: {e}"))
@@ -683,8 +683,25 @@ pub fn create_provider(config: &ProviderConfig) -> Box<dyn LlmProvider> {
             // TLS initialisation failure is unrecoverable — surface clearly.
             .expect("Failed to initialise OpenAI HTTP client"),
         ),
-        _ => Box::new(OllamaProvider::default_config()),
+        other => {
+            tracing::warn!(provider = %other, "Unknown LLM provider, falling back to default Ollama");
+            Box::new(OllamaProvider::default_config())
+        }
     }
+}
+
+/// Extract a JSON object from an LLM response string.
+///
+/// LLMs sometimes wrap JSON in markdown fences or explanatory text.
+/// This tries direct parse first, then finds the outermost `{...}`.
+pub fn extract_json_from_response<T: serde::de::DeserializeOwned>(raw: &str) -> Option<T> {
+    let trimmed = raw.trim();
+    if let Ok(parsed) = serde_json::from_str::<T>(trimmed) {
+        return Some(parsed);
+    }
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+    serde_json::from_str::<T>(&trimmed[start..=end]).ok()
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -717,5 +734,30 @@ mod tests {
     fn test_openrouter_provider_creation() {
         let provider = OpenAiProvider::openrouter("test-key", "anthropic/claude-3-opus");
         assert_eq!(provider.name(), "openai");
+    }
+
+    #[test]
+    fn test_extract_json_from_response() {
+        #[derive(serde::Deserialize, PartialEq, Debug)]
+        struct Payload {
+            value: i32,
+        }
+
+        // Direct JSON
+        assert_eq!(
+            extract_json_from_response::<Payload>(r#"{"value": 42}"#)
+                .unwrap()
+                .value,
+            42
+        );
+        // Wrapped in text
+        assert_eq!(
+            extract_json_from_response::<Payload>("Here is the result: {\"value\": 7} done")
+                .unwrap()
+                .value,
+            7
+        );
+        // Invalid
+        assert!(extract_json_from_response::<Payload>("no json here").is_none());
     }
 }
