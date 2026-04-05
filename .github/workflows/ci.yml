@@ -83,7 +83,7 @@ jobs:
       - name: Run coverage
         run: cargo tarpaulin --workspace --out xml --skip-clean
       - name: Upload coverage
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v6
         with:
           files: cobertura.xml
           fail_ci_if_under: 50
