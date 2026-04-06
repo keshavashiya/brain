@@ -2,6 +2,7 @@
 
 use std::io::{stdout, Write};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crossterm::cursor;
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
@@ -11,6 +12,53 @@ use rustyline::DefaultEditor;
 
 use crate::session::{BrainSession, PrepareResult};
 use crate::status::show_status;
+
+/// Try to send a chat message via a running `brain serve` HTTP API.
+///
+/// Returns `Ok(Some(response_text))` if the server is reachable and responds,
+/// `Ok(None)` if the server is not running (caller should fall back to local),
+/// or `Err` on unexpected failures.
+async fn try_server_chat(
+    config: &brain_core::BrainConfig,
+    message: &str,
+) -> anyhow::Result<Option<String>> {
+    let host = &config.adapters.http.host;
+    let port = config.adapters.http.port;
+    let health_url = format!("http://{host}:{port}/health");
+
+    let client = reqwest::Client::new();
+    // Quick health check — if the server isn't running, bail fast.
+    let health = client
+        .get(&health_url)
+        .timeout(Duration::from_millis(200))
+        .send()
+        .await;
+    match health {
+        Ok(r) if r.status().is_success() => {}
+        _ => return Ok(None), // server not running
+    }
+
+    let signal_url = format!("http://{host}:{port}/v1/signals");
+    let api_key = config
+        .access
+        .api_keys
+        .first()
+        .map(|k| k.key.clone())
+        .unwrap_or_default();
+
+    let resp = client
+        .post(&signal_url)
+        .header("Authorization", format!("Bearer {api_key}"))
+        .json(&serde_json::json!({"content": message}))
+        .timeout(Duration::from_secs(120))
+        .send()
+        .await?
+        .json::<serde_json::Value>()
+        .await?;
+
+    let text = resp["response"]["value"].as_str().unwrap_or("").to_string();
+    Ok(Some(text))
+}
 
 /// Display proactive nudges at session start: pending outbox items and open loops.
 fn show_proactive_nudges(brain: &BrainSession, config: &brain_core::BrainConfig) {
@@ -53,6 +101,12 @@ pub(crate) async fn chat_non_interactive(
     message: &str,
 ) -> anyhow::Result<()> {
     use futures::StreamExt;
+
+    // If the server is already running, delegate via HTTP to avoid ruvector lock conflicts.
+    if let Some(response) = try_server_chat(config, message).await? {
+        println!("{response}");
+        return Ok(());
+    }
 
     let mut brain = BrainSession::new(config).await?;
 
@@ -107,13 +161,32 @@ pub(crate) async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow
     println!("  Cortex:  {}", config.llm.model);
     println!("  Memory:  {}", config.data_dir().display());
 
-    let mut brain = BrainSession::new(config).await?;
+    // Check if a server is already running — if so, delegate via HTTP.
+    let server_available = {
+        let host = &config.adapters.http.host;
+        let port = config.adapters.http.port;
+        let url = format!("http://{host}:{port}/health");
+        reqwest::Client::new()
+            .get(&url)
+            .timeout(Duration::from_millis(200))
+            .send()
+            .await
+            .is_ok_and(|r| r.status().is_success())
+    };
 
-    if brain.processor.semantic().is_some() {
-        println!("  Synapse: standalone (full memory)");
+    // Only open a local BrainSession if the server is not running.
+    let mut brain = if server_available {
+        println!("  Synapse: connected to server (HTTP)");
+        None
     } else {
-        println!("  Synapse: standalone (episodic only)");
-    }
+        let b = BrainSession::new(config).await?;
+        if b.processor.semantic().is_some() {
+            println!("  Synapse: standalone (full memory)");
+        } else {
+            println!("  Synapse: standalone (episodic only)");
+        }
+        Some(b)
+    };
 
     println!();
     println!("Signals: /status  /clear  /quit");
@@ -122,16 +195,20 @@ pub(crate) async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow
     let history_path = config.data_dir().join("history.txt");
     let _ = rl.load_history(&history_path);
 
-    show_proactive_nudges(&brain, config);
+    if let Some(ref b) = brain {
+        show_proactive_nudges(b, config);
+    }
 
-    if brain.semantic_fact_count() == 0 && brain.episode_count() == 0 {
-        let mut out = stdout();
-        out.execute(SetForegroundColor(Color::Green))?;
-        out.execute(Print("Brain: "))?;
-        out.execute(ResetColor)?;
-        println!("{}", cortex::context::ONBOARDING_GREETING);
-        println!();
-        brain.record_onboarding_greeting();
+    if let Some(ref mut b) = brain {
+        if b.semantic_fact_count() == 0 && b.episode_count() == 0 {
+            let mut out = stdout();
+            out.execute(SetForegroundColor(Color::Green))?;
+            out.execute(Print("Brain: "))?;
+            out.execute(ResetColor)?;
+            println!("{}", cortex::context::ONBOARDING_GREETING);
+            println!();
+            b.record_onboarding_greeting();
+        }
     }
 
     loop {
@@ -153,7 +230,9 @@ pub(crate) async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow
                         continue;
                     }
                     "/clear" => {
-                        brain.clear_history();
+                        if let Some(ref mut b) = brain {
+                            b.clear_history();
+                        }
                         println!("Short-term memory cleared.");
                         continue;
                     }
@@ -164,6 +243,29 @@ pub(crate) async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow
                     }
                     _ => {}
                 }
+
+                // Server mode: delegate via HTTP API
+                if server_available {
+                    match try_server_chat(config, input).await {
+                        Ok(Some(response)) => {
+                            let mut out = stdout();
+                            out.execute(SetForegroundColor(Color::Green))?;
+                            out.execute(Print("Brain: "))?;
+                            out.execute(ResetColor)?;
+                            println!("{response}");
+                        }
+                        Ok(None) => {
+                            eprintln!("Server disconnected unexpectedly.");
+                        }
+                        Err(e) => {
+                            eprintln!("Error: {e}");
+                        }
+                    }
+                    continue;
+                }
+
+                // Local mode: full BrainSession pipeline
+                let brain = brain.as_mut().expect("local session");
 
                 let phase = Arc::new(std::sync::atomic::AtomicU8::new(0));
                 let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
