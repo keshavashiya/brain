@@ -12,7 +12,7 @@
 //! - `GET  /v1/signals/:id`     — retrieve cached signal response (requires read)
 //! - `POST /v1/memory/search`   — semantic search over stored facts (requires read)
 //! - `GET  /v1/memory/facts`    — list all semantic facts (requires read)
-//! - `GET  /v1/events`          — SSE stream of proactive notifications (requires read)
+//! - `GET  /v1/events`          — SSE stream of signal events + proactive notifications (requires read)
 //!
 //! ## Authentication
 //! All `/v1/*` routes require `Authorization: Bearer <api-key>` header.
@@ -697,9 +697,11 @@ async fn get_namespaces_handler(
 
 /// `GET /v1/events` — Server-Sent Events stream of proactive notifications.
 ///
-/// Subscribes to the NotificationRouter broadcast channel and streams
-/// each notification as a JSON SSE event. The connection stays open
-/// until the client disconnects.
+/// Streams signal-processed events and (optionally) proactive notifications
+/// as JSON SSE events. The connection stays open until the client disconnects.
+///
+/// Always available — proactive notifications are included when the
+/// NotificationRouter is configured, but the endpoint works without it.
 async fn sse_events_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -709,38 +711,70 @@ async fn sse_events_handler(
 > {
     check_auth(&state, &headers, "read")?;
 
-    let router = state.processor.notification_router().ok_or_else(|| {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Proactive notifications not configured".to_string(),
-        )
-    })?;
-
-    let mut rx = router.subscribe();
+    let mut signal_rx = state.processor.subscribe_events();
+    let mut notif_rx = state.processor.notification_router().map(|r| r.subscribe());
 
     let stream = async_stream::stream! {
         loop {
-            match rx.recv().await {
-                Ok(notification) => {
-                    let payload = serde_json::json!({
-                        "type": "proactive",
-                        "content": notification.content,
-                        "triggered_by": notification.triggered_by,
-                        "priority": notification.priority,
-                        "agent": notification.agent,
-                    });
-                    yield Ok(Event::default()
-                        .event("notification")
-                        .json_data(payload)
-                        .unwrap_or_else(|_| Event::default().data("{}")));
+            tokio::select! {
+                result = signal_rx.recv() => {
+                    match result {
+                        Ok(event) => {
+                            let payload = serde_json::json!({
+                                "type": "signal",
+                                "signal_id": event.signal_id.to_string(),
+                                "source": format!("{:?}", event.source),
+                                "status": format!("{:?}", event.status),
+                                "response": event.response,
+                                "facts_used": event.facts_used,
+                                "episodes_used": event.episodes_used,
+                            });
+                            yield Ok(Event::default()
+                                .event("signal")
+                                .json_data(payload)
+                                .unwrap_or_else(|_| Event::default().data("{}")));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(skipped = n, "SSE signal stream lagged");
+                            yield Ok(Event::default()
+                                .event("error")
+                                .data(format!("{{\"lagged\":{n}}}")));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!(skipped = n, "SSE client lagged behind");
-                    yield Ok(Event::default()
-                        .event("error")
-                        .data(format!("{{\"lagged\":{n}}}")));
+                result = async {
+                    match notif_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match result {
+                        Ok(notification) => {
+                            let payload = serde_json::json!({
+                                "type": "proactive",
+                                "content": notification.content,
+                                "triggered_by": notification.triggered_by,
+                                "priority": notification.priority,
+                                "agent": notification.agent,
+                            });
+                            yield Ok(Event::default()
+                                .event("notification")
+                                .json_data(payload)
+                                .unwrap_or_else(|_| Event::default().data("{}")));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(skipped = n, "SSE notification stream lagged");
+                            yield Ok(Event::default()
+                                .event("error")
+                                .data(format!("{{\"lagged\":{n}}}")));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            // Notification channel closed, but signal stream may still be live.
+                            notif_rx = None;
+                        }
+                    }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     };
