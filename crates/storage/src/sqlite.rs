@@ -204,6 +204,19 @@ impl SqlitePool {
         }
     }
 
+    /// Try to decrypt a string, returning `None` if decryption fails.
+    ///
+    /// Unlike `decrypt_content`, this does NOT fall back to returning raw
+    /// ciphertext. Use this at read boundaries to filter out rows that
+    /// were encrypted with a different key or are corrupted.
+    pub fn try_decrypt_content(&self, maybe_ciphertext: &str) -> Option<String> {
+        if let Some(enc) = &self.encryptor {
+            enc.decrypt_string(maybe_ciphertext).ok()
+        } else {
+            Some(maybe_ciphertext.to_string())
+        }
+    }
+
     /// Flush the WAL file into the main database file.
     ///
     /// Should be called on graceful shutdown to ensure all committed writes are

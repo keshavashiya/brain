@@ -466,7 +466,7 @@ impl SignalProcessor {
         let classifier = thalamus::IntentClassifier::new()
             .with_llm_fallback(Arc::new(thalamus::LlmIntentFallback::new(llm.clone())));
 
-        Ok(Self {
+        let processor = Self {
             config,
             classifier,
             importance: amygdala::ImportanceScorer::with_llm(llm.clone()),
@@ -481,7 +481,24 @@ impl SignalProcessor {
             events_tx,
             notification_router: None,
             action_dispatcher: None,
-        })
+        };
+
+        // Warm up the LLM model in the background to avoid first-call timeout
+        // (cold Ollama starts can exceed the 15s classification timeout while
+        // loading weights into VRAM).
+        let warmup_llm = processor.llm.clone();
+        tokio::spawn(async move {
+            let warmup = vec![cortex::llm::Message {
+                role: cortex::llm::Role::User,
+                content: "hi".to_string(),
+            }];
+            match warmup_llm.generate(&warmup).await {
+                Ok(_) => tracing::info!("LLM warm-up complete"),
+                Err(e) => tracing::debug!("LLM warm-up skipped (provider unavailable): {e}"),
+            }
+        });
+
+        Ok(processor)
     }
 
     /// Process a signal through the full Brain pipeline.

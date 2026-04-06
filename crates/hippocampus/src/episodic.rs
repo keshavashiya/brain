@@ -211,21 +211,29 @@ impl EpisodicStore {
             let episodes = stmt
                 .query_map(rusqlite::params![session_id, limit as i64], |row| {
                     let raw: String = row.get(3)?;
-                    Ok(Episode {
-                        id: row.get(0)?,
-                        session_id: row.get(1)?,
-                        role: row.get(2)?,
-                        content: pool.decrypt_content(&raw),
-                        timestamp: row.get(4)?,
-                        namespace: row.get(5)?,
-                        importance: row.get(6)?,
-                        decay_rate: row.get(7)?,
-                        reinforcement_count: row.get(8)?,
-                        last_accessed: row.get(9)?,
-                        agent: row.get(10)?,
-                    })
+                    Ok((
+                        Episode {
+                            id: row.get(0)?,
+                            session_id: row.get(1)?,
+                            role: row.get(2)?,
+                            content: String::new(),
+                            timestamp: row.get(4)?,
+                            namespace: row.get(5)?,
+                            importance: row.get(6)?,
+                            decay_rate: row.get(7)?,
+                            reinforcement_count: row.get(8)?,
+                            last_accessed: row.get(9)?,
+                            agent: row.get(10)?,
+                        },
+                        raw,
+                    ))
                 })?
-                .collect::<Result<Vec<_>, _>>()?;
+                .filter_map(|r| {
+                    let (mut ep, raw) = r.ok()?;
+                    ep.content = pool.try_decrypt_content(&raw)?;
+                    Some(ep)
+                })
+                .collect::<Vec<_>>();
 
             Ok(episodes)
         })?)
@@ -336,24 +344,31 @@ impl EpisodicStore {
                      LIMIT ?3",
                 )?;
                 let prefix = format!("{}/%", ns);
-                let episodes = stmt
-                    .query_map(rusqlite::params![ns, &prefix, limit as i64], |row| {
-                        let raw: String = row.get(3)?;
-                        Ok(Episode {
-                            id: row.get(0)?,
-                            session_id: row.get(1)?,
-                            role: row.get(2)?,
-                            content: pool.decrypt_content(&raw),
-                            timestamp: row.get(4)?,
-                            namespace: row.get(5)?,
-                            importance: row.get(6)?,
-                            decay_rate: row.get(7)?,
-                            reinforcement_count: row.get(8)?,
-                            last_accessed: row.get(9)?,
-                            agent: row.get(10)?,
-                        })
-                    })?
-                    .collect::<Result<Vec<_>, _>>()?;
+                let row_to_raw = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(Episode, String)> {
+                    let raw: String = row.get(3)?;
+                    Ok((Episode {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        role: row.get(2)?,
+                        content: String::new(),
+                        timestamp: row.get(4)?,
+                        namespace: row.get(5)?,
+                        importance: row.get(6)?,
+                        decay_rate: row.get(7)?,
+                        reinforcement_count: row.get(8)?,
+                        last_accessed: row.get(9)?,
+                        agent: row.get(10)?,
+                    }, raw))
+                };
+                let decrypt_filter = |r: rusqlite::Result<(Episode, String)>| -> Option<Episode> {
+                    let (mut ep, raw) = r.ok()?;
+                    ep.content = pool.try_decrypt_content(&raw)?;
+                    Some(ep)
+                };
+                let episodes: Vec<Episode> = stmt
+                    .query_map(rusqlite::params![ns, &prefix, limit as i64], row_to_raw)?
+                    .filter_map(decrypt_filter)
+                    .collect();
                 Ok(episodes)
             } else {
                 let mut stmt = conn.prepare(
@@ -364,24 +379,31 @@ impl EpisodicStore {
                      LIMIT ?1",
                 )?;
 
-                let episodes = stmt
-                    .query_map([limit as i64], |row| {
-                        let raw: String = row.get(3)?;
-                        Ok(Episode {
-                            id: row.get(0)?,
-                            session_id: row.get(1)?,
-                            role: row.get(2)?,
-                            content: pool.decrypt_content(&raw),
-                            timestamp: row.get(4)?,
-                            namespace: row.get(5)?,
-                            importance: row.get(6)?,
-                            decay_rate: row.get(7)?,
-                            reinforcement_count: row.get(8)?,
-                            last_accessed: row.get(9)?,
-                            agent: row.get(10)?,
-                        })
-                    })?
-                    .collect::<Result<Vec<_>, _>>()?;
+                let row_to_raw = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(Episode, String)> {
+                    let raw: String = row.get(3)?;
+                    Ok((Episode {
+                        id: row.get(0)?,
+                        session_id: row.get(1)?,
+                        role: row.get(2)?,
+                        content: String::new(),
+                        timestamp: row.get(4)?,
+                        namespace: row.get(5)?,
+                        importance: row.get(6)?,
+                        decay_rate: row.get(7)?,
+                        reinforcement_count: row.get(8)?,
+                        last_accessed: row.get(9)?,
+                        agent: row.get(10)?,
+                    }, raw))
+                };
+                let decrypt_filter = |r: rusqlite::Result<(Episode, String)>| -> Option<Episode> {
+                    let (mut ep, raw) = r.ok()?;
+                    ep.content = pool.try_decrypt_content(&raw)?;
+                    Some(ep)
+                };
+                let episodes: Vec<Episode> = stmt
+                    .query_map([limit as i64], row_to_raw)?
+                    .filter_map(decrypt_filter)
+                    .collect();
                 Ok(episodes)
             }
         })?)

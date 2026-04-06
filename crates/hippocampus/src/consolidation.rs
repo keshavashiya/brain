@@ -105,18 +105,26 @@ impl Consolidator {
             let rows = stmt
                 .query_map([self.config.max_prune_per_run as i64 * 2], |row| {
                     let raw_content: String = row.get(3)?;
-                    Ok(ConsolidationCandidate {
-                        row_id: row.get(0)?,
-                        id: row.get(1)?,
-                        namespace: row.get(2)?,
-                        content: pool.decrypt_content(&raw_content),
-                        importance: row.get(4)?,
-                        decay_rate: row.get(5)?,
-                        reinforcement_count: row.get(6)?,
-                        last_accessed: row.get::<_, String>(7)?,
-                    })
+                    Ok((
+                        ConsolidationCandidate {
+                            row_id: row.get(0)?,
+                            id: row.get(1)?,
+                            namespace: row.get(2)?,
+                            content: String::new(),
+                            importance: row.get(4)?,
+                            decay_rate: row.get(5)?,
+                            reinforcement_count: row.get(6)?,
+                            last_accessed: row.get::<_, String>(7)?,
+                        },
+                        raw_content,
+                    ))
                 })?
-                .collect::<Result<Vec<_>, _>>()?;
+                .filter_map(|r| {
+                    let (mut c, raw) = r.ok()?;
+                    c.content = pool.try_decrypt_content(&raw)?;
+                    Some(c)
+                })
+                .collect::<Vec<_>>();
 
             Ok(rows)
         })?;

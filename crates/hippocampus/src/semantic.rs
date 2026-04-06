@@ -250,6 +250,8 @@ impl SemanticStore {
     }
 
     /// Get a fact by ID from SQLite.
+    ///
+    /// Returns `None` if the fact does not exist or its content cannot be decrypted.
     pub fn get_fact(&self, fact_id: &str) -> Result<Option<Fact>, SemanticError> {
         let pool = &self.db;
         Ok(self.db.with_conn(|conn| {
@@ -259,21 +261,29 @@ impl SemanticStore {
                 [fact_id],
                 |row| {
                     let raw_object: String = row.get(5)?;
-                    Ok(Fact {
+                    Ok((Fact {
                         id: row.get(0)?,
                         namespace: row.get(1)?,
                         category: row.get(2)?,
                         subject: row.get(3)?,
                         predicate: row.get(4)?,
-                        object: pool.decrypt_content(&raw_object),
+                        object: String::new(), // filled below
                         confidence: row.get(6)?,
                         source_episode_id: row.get(7)?,
                         agent: row.get(8)?,
-                    })
+                    }, raw_object))
                 },
             );
             match result {
-                Ok(fact) => Ok(Some(fact)),
+                Ok((mut fact, raw_object)) => {
+                    match pool.try_decrypt_content(&raw_object) {
+                        Some(obj) => {
+                            fact.object = obj;
+                            Ok(Some(fact))
+                        }
+                        None => Ok(None), // undecryptable — treat as absent
+                    }
+                }
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
                 Err(e) => Err(e.into()),
             }
@@ -281,6 +291,8 @@ impl SemanticStore {
     }
 
     /// Get a fact and its updated_at timestamp by ID.
+    ///
+    /// Returns `None` if the fact does not exist or its content cannot be decrypted.
     fn get_fact_with_timestamp(
         &self,
         fact_id: &str,
@@ -300,15 +312,23 @@ impl SemanticStore {
                         category: row.get(2)?,
                         subject: row.get(3)?,
                         predicate: row.get(4)?,
-                        object: pool.decrypt_content(&raw_object),
+                        object: String::new(), // filled below
                         confidence: row.get(6)?,
                         source_episode_id: row.get(7)?,
                         agent: row.get(9)?,
-                    }, updated_at))
+                    }, raw_object, updated_at))
                 },
             );
             match result {
-                Ok(pair) => Ok(Some(pair)),
+                Ok((mut fact, raw_object, updated_at)) => {
+                    match pool.try_decrypt_content(&raw_object) {
+                        Some(obj) => {
+                            fact.object = obj;
+                            Ok(Some((fact, updated_at)))
+                        }
+                        None => Ok(None),
+                    }
+                }
                 Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
                 Err(e) => Err(e.into()),
             }
@@ -345,19 +365,27 @@ impl SemanticStore {
             let facts = stmt
                 .query_map(params_ref.as_slice(), |row| {
                     let raw_object: String = row.get(5)?;
-                    Ok(Fact {
+                    Ok((Fact {
                         id: row.get(0)?,
                         namespace: row.get(1)?,
                         category: row.get(2)?,
                         subject: row.get(3)?,
                         predicate: row.get(4)?,
-                        object: pool.decrypt_content(&raw_object),
+                        object: String::new(),
                         confidence: row.get(6)?,
                         source_episode_id: row.get(7)?,
                         agent: row.get(8)?,
-                    })
+                    }, raw_object))
                 })?
-                .collect::<Result<Vec<_>, _>>()?;
+                .filter_map(|r| match r {
+                    Ok((mut fact, raw)) => {
+                        let obj = pool.try_decrypt_content(&raw)?;
+                        fact.object = obj;
+                        Some(fact)
+                    }
+                    Err(_) => None,
+                })
+                .collect::<Vec<_>>();
 
             Ok(facts)
         })?)
@@ -376,19 +404,25 @@ impl SemanticStore {
     ) -> Result<Vec<Fact>, SemanticError> {
         let pool = &self.db;
         Ok(self.db.with_conn(|conn| {
-            let row_to_fact = |row: &rusqlite::Row<'_>| -> rusqlite::Result<Fact> {
+            let row_to_raw_fact = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(Fact, String)> {
                 let raw_object: String = row.get(5)?;
-                Ok(Fact {
+                Ok((Fact {
                     id: row.get(0)?,
                     namespace: row.get(1)?,
                     category: row.get(2)?,
                     subject: row.get(3)?,
                     predicate: row.get(4)?,
-                    object: pool.decrypt_content(&raw_object),
+                    object: String::new(),
                     confidence: row.get(6)?,
                     source_episode_id: row.get(7)?,
                     agent: row.get(8)?,
-                })
+                }, raw_object))
+            };
+
+            let decrypt_filter = |r: rusqlite::Result<(Fact, String)>| -> Option<Fact> {
+                let (mut fact, raw) = r.ok()?;
+                fact.object = pool.try_decrypt_content(&raw)?;
+                Some(fact)
             };
 
             let facts: Vec<Fact> = if let Some(ns) = namespace {
@@ -399,8 +433,8 @@ impl SemanticStore {
                      ORDER BY confidence DESC",
                 )?;
                 let prefix = format!("{}/%", ns);
-                let rows = stmt.query_map(rusqlite::params![subject, ns, &prefix], row_to_fact)?;
-                rows.collect::<Result<Vec<_>, _>>()?
+                let rows = stmt.query_map(rusqlite::params![subject, ns, &prefix], row_to_raw_fact)?;
+                rows.filter_map(decrypt_filter).collect()
             } else {
                 let mut stmt = conn.prepare(
                     "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
@@ -408,8 +442,8 @@ impl SemanticStore {
                      WHERE subject = ?1
                      ORDER BY confidence DESC",
                 )?;
-                let rows = stmt.query_map([subject], row_to_fact)?;
-                rows.collect::<Result<Vec<_>, _>>()?
+                let rows = stmt.query_map([subject], row_to_raw_fact)?;
+                rows.filter_map(decrypt_filter).collect()
             };
 
             Ok(facts)
@@ -464,39 +498,45 @@ impl SemanticStore {
     pub fn list_by_namespace(&self, namespace: Option<&str>) -> Result<Vec<Fact>, SemanticError> {
         let pool = &self.db;
         Ok(self.db.with_conn(|conn| {
-            let row_to_fact = |row: &rusqlite::Row<'_>| -> rusqlite::Result<Fact> {
+            let row_to_raw_fact = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(Fact, String)> {
                 let raw_object: String = row.get(5)?;
-                Ok(Fact {
+                Ok((Fact {
                     id: row.get(0)?,
                     namespace: row.get(1)?,
                     category: row.get(2)?,
                     subject: row.get(3)?,
                     predicate: row.get(4)?,
-                    object: pool.decrypt_content(&raw_object),
+                    object: String::new(),
                     confidence: row.get(6)?,
                     source_episode_id: row.get(7)?,
                     agent: row.get(8)?,
-                })
+                }, raw_object))
+            };
+
+            let decrypt_filter = |r: rusqlite::Result<(Fact, String)>| -> Option<Fact> {
+                let (mut fact, raw) = r.ok()?;
+                fact.object = pool.try_decrypt_content(&raw)?;
+                Some(fact)
             };
 
             let facts: Vec<Fact> = if let Some(ns) = namespace {
                 let mut stmt = conn.prepare(
                     "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
-                     FROM semantic_facts 
+                     FROM semantic_facts
                      WHERE superseded_by IS NULL AND (namespace = ?1 OR namespace LIKE ?2)
                      ORDER BY rowid DESC",
                 )?;
                 let prefix = format!("{}/%", ns);
-                let rows = stmt.query_map(rusqlite::params![ns, &prefix], row_to_fact)?.collect::<Result<Vec<_>, _>>()?;
-                rows
+                let result = stmt.query_map(rusqlite::params![ns, &prefix], row_to_raw_fact)?.filter_map(decrypt_filter).collect();
+                result
             } else {
                 let mut stmt = conn.prepare(
                     "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
                      FROM semantic_facts WHERE superseded_by IS NULL
                      ORDER BY rowid DESC",
                 )?;
-                let rows = stmt.query_map([], row_to_fact)?.collect::<Result<Vec<_>, _>>()?;
-                rows
+                let result = stmt.query_map([], row_to_raw_fact)?.filter_map(decrypt_filter).collect();
+                result
             };
             Ok(facts)
         })?)
@@ -572,19 +612,25 @@ impl SemanticStore {
         let pool = &self.db;
         let pattern = format!("%{query}%");
         Ok(self.db.with_conn(|conn| {
-            let row_to_fact = |row: &rusqlite::Row<'_>| -> rusqlite::Result<Fact> {
+            let row_to_raw_fact = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(Fact, String)> {
                 let raw_object: String = row.get(5)?;
-                Ok(Fact {
+                Ok((Fact {
                     id: row.get(0)?,
                     namespace: row.get(1)?,
                     category: row.get(2)?,
                     subject: row.get(3)?,
                     predicate: row.get(4)?,
-                    object: pool.decrypt_content(&raw_object),
+                    object: String::new(),
                     confidence: row.get(6)?,
                     source_episode_id: row.get(7)?,
                     agent: row.get(8)?,
-                })
+                }, raw_object))
+            };
+
+            let decrypt_filter = |r: rusqlite::Result<(Fact, String)>| -> Option<Fact> {
+                let (mut fact, raw) = r.ok()?;
+                fact.object = pool.try_decrypt_content(&raw)?;
+                Some(fact)
             };
 
             let facts: Vec<Fact> = if let Some(ns) = namespace {
@@ -598,8 +644,8 @@ impl SemanticStore {
                      LIMIT 50",
                 )?;
                 let prefix = format!("{}/%", ns);
-                let rows = stmt.query_map(rusqlite::params![&pattern, ns, &prefix], row_to_fact)?;
-                rows.collect::<Result<Vec<_>, _>>()?
+                let rows = stmt.query_map(rusqlite::params![&pattern, ns, &prefix], row_to_raw_fact)?;
+                rows.filter_map(decrypt_filter).collect()
             } else {
                 let mut stmt = conn.prepare(
                     "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
@@ -609,8 +655,8 @@ impl SemanticStore {
                      ORDER BY rowid DESC
                      LIMIT 50",
                 )?;
-                let rows = stmt.query_map([&pattern], row_to_fact)?;
-                rows.collect::<Result<Vec<_>, _>>()?
+                let rows = stmt.query_map([&pattern], row_to_raw_fact)?;
+                rows.filter_map(decrypt_filter).collect()
             };
 
             Ok(facts)

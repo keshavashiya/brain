@@ -159,11 +159,18 @@ impl IntentFallback for LlmIntentFallback {
             "Classify the user input into exactly one intent for Brain OS.\n\
              Valid intents: store_fact, recall, forget, execute_command, web_search, schedule, send_message, system_status, chat.\n\
              Rules:\n\
-             - Questions (how/what/why/who/when/where/can/could/is/are) are ALWAYS chat. Never classify a question as execute_command.\n\
-             - execute_command is ONLY for explicit requests like \"run ls\", \"execute cargo build\". The command field must be a real shell command (ls, git, cargo, etc.).\n\
-             - Conversational statements (\"I've done X\", \"I completed X\", \"I like X\") are chat — but ALSO extract any personal facts (see below).\n\
-             - store_fact is ONLY for explicit memory requests like \"remember that ...\", \"note that ...\", \"keep in mind ...\".\n\
-             - recall is ONLY for explicit memory queries like \"what did we discuss\", \"recall ...\", \"what do you remember about ...\".\n\
+             - recall is for memory queries: \"what do you know about...\", \"what did we discuss\", \
+             \"what do you remember about...\", \"tell me about...\", \"what is my...\", \
+             \"do you remember...\", \"tell me everything about...\". These ask about the user's stored memories.\n\
+             - Questions that are NOT about stored memories (general knowledge, opinions, \
+             how-to questions) are chat.\n\
+             - Questions should NEVER be execute_command.\n\
+             - store_fact is ONLY for explicit memory requests: \"remember that ...\", \
+             \"note that ...\", \"keep in mind ...\".\n\
+             - execute_command is ONLY for explicit requests like \"run ls\", \"execute cargo build\". \
+             The command field must be a real shell command (ls, git, cargo, etc.).\n\
+             - Conversational statements (\"I've done X\", \"I completed X\", \"I like X\") are chat — \
+             but ALSO extract any personal facts (see below).\n\
              - Prefer web_search for explicit search requests about internet/google/latest/current external info.\n\
              - For web_search, set 'query' to the exact optimal search terms, stripping conversational fluff.\n\
              - Use system_status only for explicit status checks like \"/status\".\n\
