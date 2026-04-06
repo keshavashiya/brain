@@ -21,7 +21,7 @@ pub mod timeouts {
     pub const EMBEDDING_OLLAMA: Duration = Duration::from_secs(120);
     pub const EMBEDDING_OPENAI: Duration = Duration::from_secs(60);
     pub const LLM_GENERATE: Duration = Duration::from_secs(300);
-    pub const HEALTH_CHECK: Duration = Duration::from_millis(500);
+    pub const HEALTH_CHECK: Duration = Duration::from_secs(2);
     pub const DAEMON_SETUP: Duration = Duration::from_secs(30);
     pub const STATUS_CHECK: Duration = Duration::from_secs(2);
 }

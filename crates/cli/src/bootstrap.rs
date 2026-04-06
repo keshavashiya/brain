@@ -168,7 +168,9 @@ fn build_action_dispatcher(
 ///
 /// Returns the base URL (e.g. `http://127.0.0.1:19789`) if the daemon is alive.
 pub async fn detect_running_daemon(config: &brain_core::BrainConfig) -> Option<String> {
-    let base_url = format!("http://127.0.0.1:{}", config.adapters.http.port);
+    let host = &config.adapters.http.host;
+    let port = config.adapters.http.port;
+    let base_url = format!("http://{host}:{port}");
     let health_url = format!("{base_url}/health");
 
     let client = reqwest::Client::builder()
@@ -181,7 +183,14 @@ pub async fn detect_running_daemon(config: &brain_core::BrainConfig) -> Option<S
             tracing::info!(url = %base_url, "Detected running Brain daemon");
             Some(base_url)
         }
-        _ => None,
+        Ok(resp) => {
+            tracing::debug!(status = %resp.status(), "Daemon health check returned non-success");
+            None
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "Daemon health check failed");
+            None
+        }
     }
 }
 
