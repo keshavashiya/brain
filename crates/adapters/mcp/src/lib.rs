@@ -74,6 +74,24 @@ pub struct JsonRpcRequest {
     pub params: Option<Value>,
 }
 
+impl JsonRpcRequest {
+    /// A JSON-RPC message is a notification (no response expected).
+    ///
+    /// True when:
+    /// - Method starts with `notifications/` (MCP convention, always a notification)
+    /// - Method is `initialized` (MCP lifecycle notification)
+    /// - `id` is absent or explicitly `null` (JSON-RPC spec: no id → notification)
+    ///
+    /// Note: serde_json deserializes `"id": null` as `Some(Value::Null)`, not `None`,
+    /// so we must check both.
+    pub fn is_notification(&self) -> bool {
+        if self.method.starts_with("notifications/") || self.method == "initialized" {
+            return true;
+        }
+        matches!(&self.id, None | Some(Value::Null))
+    }
+}
+
 /// Outgoing JSON-RPC response.
 #[derive(Debug, Serialize)]
 pub struct JsonRpcResponse {
@@ -144,19 +162,19 @@ impl McpServer {
     pub async fn handle(&self, req: JsonRpcRequest) -> Option<JsonRpcResponse> {
         let id = req.id.clone().unwrap_or(Value::Null);
 
-        // Notifications have no `id` — no response required
-        if req.id.is_none()
-            && (req.method == "notifications/initialized"
-                || req.method.starts_with("notifications/"))
-        {
+        // Notifications have no response.
+        // Check both `id: None` (field absent) and `id: Some(Null)` (explicit null)
+        // because serde deserializes `"id": null` as Some(Value::Null), not None.
+        if req.is_notification() {
             return None;
         }
 
         let result = match req.method.as_str() {
             "initialize" => self.handle_initialize(&req),
-            "initialized" => return None, // notification
             "tools/list" => self.handle_tools_list(),
             "tools/call" => self.handle_tools_call(&req).await,
+            "resources/list" => Ok(json!({ "resources": [] })),
+            "prompts/list" => Ok(json!({ "prompts": [] })),
             "ping" => Ok(json!({})),
             _ => Err((-32601, format!("Method not found: {}", req.method))),
         };
@@ -173,7 +191,9 @@ impl McpServer {
         Ok(json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {
-                "tools": {}
+                "tools": {},
+                "resources": {},
+                "prompts": {}
             },
             "serverInfo": {
                 "name": "brain",
@@ -628,6 +648,8 @@ pub async fn serve_stdio(processor: signal::SignalProcessor) -> anyhow::Result<(
             continue;
         }
 
+        tracing::debug!(line = %trimmed.get(..120).unwrap_or(trimmed), "MCP stdio ← request");
+
         let req: JsonRpcRequest = match serde_json::from_str(trimmed) {
             Ok(r) => r,
             Err(e) => {
@@ -642,7 +664,7 @@ pub async fn serve_stdio(processor: signal::SignalProcessor) -> anyhow::Result<(
 
         // Auth check for requests (not notifications).
         // Skipped when the session is pre-authenticated via BRAIN_API_KEY.
-        if !session_authed && !server.api_keys.is_empty() && req.id.is_some() {
+        if !session_authed && !server.api_keys.is_empty() && !req.is_notification() {
             let meta_key = extract_meta_key(&req);
             let key_ok = meta_key.is_some_and(|k| server.validate_key(k));
             if !key_ok {
@@ -663,9 +685,12 @@ pub async fn serve_stdio(processor: signal::SignalProcessor) -> anyhow::Result<(
 
         if let Some(resp) = server.handle(req).await {
             let json = serde_json::to_string(&resp)?;
+            tracing::debug!(len = json.len(), "MCP stdio → response");
             stdout.write_all(json.as_bytes()).await?;
             stdout.write_all(b"\n").await?;
             stdout.flush().await?;
+        } else {
+            tracing::debug!(method = %trimmed.get(..80).unwrap_or(trimmed), "MCP stdio → notification (no response)");
         }
     }
 
@@ -943,6 +968,65 @@ mod tests {
         };
         let resp = server.handle(req).await;
         assert!(resp.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_notification_with_explicit_null_id_returns_none() {
+        let (server, _tmp) = make_server().await;
+        // Some MCP clients send "id": null explicitly for notifications.
+        // serde deserializes this as Some(Value::Null), not None.
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(Value::Null),
+            method: "notifications/initialized".to_string(),
+            params: None,
+        };
+        let resp = server.handle(req).await;
+        assert!(
+            resp.is_none(),
+            "notification with id:null must not produce a response"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_initialized_without_prefix_returns_none() {
+        let (server, _tmp) = make_server().await;
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: None,
+            method: "initialized".to_string(),
+            params: None,
+        };
+        let resp = server.handle(req).await;
+        assert!(resp.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_resources_list_returns_empty() {
+        let (server, _tmp) = make_server().await;
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "resources/list".to_string(),
+            params: None,
+        };
+        let resp = server.handle(req).await.unwrap();
+        assert!(resp.error.is_none());
+        assert_eq!(resp.result.unwrap()["resources"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn test_prompts_list_returns_empty() {
+        let (server, _tmp) = make_server().await;
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "prompts/list".to_string(),
+            params: None,
+        };
+        let resp = server.handle(req).await.unwrap();
+        assert!(resp.error.is_none());
+        assert_eq!(resp.result.unwrap()["prompts"], json!([]));
     }
 
     #[tokio::test]
