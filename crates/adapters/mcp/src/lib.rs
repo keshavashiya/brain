@@ -40,7 +40,7 @@ use std::sync::Arc;
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
-    response::Json as AxumJson,
+    response::{IntoResponse, Json as AxumJson},
     routing::post,
     Router,
 };
@@ -728,7 +728,7 @@ async fn http_handler(
     State(state): State<Arc<HttpState>>,
     headers: HeaderMap,
     AxumJson(req): AxumJson<JsonRpcRequest>,
-) -> Result<AxumJson<Value>, (StatusCode, String)> {
+) -> Result<axum::response::Response, (StatusCode, String)> {
     // Auth via x-api-key HTTP header
     if !state.server.api_keys.is_empty() {
         let key = headers
@@ -749,11 +749,12 @@ async fn http_handler(
         Some(resp) => {
             let val = serde_json::to_value(&resp)
                 .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            Ok(AxumJson(val))
+            Ok(AxumJson(val).into_response())
         }
         None => {
-            // Notification — no response body
-            Ok(AxumJson(json!({})))
+            // Notification — JSON-RPC spec says no response. Return 204 so
+            // the proxy_mcp_stdio relay knows to skip forwarding.
+            Ok(StatusCode::NO_CONTENT.into_response())
         }
     }
 }

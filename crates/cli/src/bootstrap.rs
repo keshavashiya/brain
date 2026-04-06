@@ -242,6 +242,11 @@ pub async fn proxy_mcp_stdio(
 
         match resp {
             Ok(r) => {
+                // 204 No Content = notification ack — nothing to forward to the
+                // stdio client (JSON-RPC spec: no response for notifications).
+                if r.status() == reqwest::StatusCode::NO_CONTENT {
+                    continue;
+                }
                 let body = r.text().await.unwrap_or_default();
                 if !body.is_empty() {
                     stdout.write_all(body.as_bytes()).await?;
