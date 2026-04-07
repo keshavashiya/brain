@@ -10,6 +10,7 @@
 
 pub mod auth;
 pub mod config;
+pub mod cors;
 
 pub use auth::{check_auth, AuthResult};
 pub use config::{AccessConfig, ApiKeyConfig, BrainConfig, DeliveryConfig};

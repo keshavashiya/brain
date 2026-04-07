@@ -1,0 +1,127 @@
+{
+  "tools": [
+    {
+      "name": "memory_search",
+      "description": "Search Brain memory for relevant facts and episodes by semantic similarity.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Search query text"
+          },
+          "top_k": {
+            "type": "number",
+            "description": "Number of results to return (default: 10)"
+          },
+          "namespace": {
+            "type": "string",
+            "description": "Filter results to this namespace (e.g. 'personal', 'work'). Omit to search all."
+          }
+        },
+        "required": ["query"]
+      }
+    },
+    {
+      "name": "memory_store",
+      "description": "Store a structured semantic fact in Brain memory.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "subject": {
+            "type": "string",
+            "description": "The entity this fact is about (e.g. 'user', 'project-x')"
+          },
+          "predicate": {
+            "type": "string",
+            "description": "The relationship or property (e.g. 'prefers', 'is_working_on')"
+          },
+          "object": {
+            "type": "string",
+            "description": "The value of the relationship (e.g. 'Rust', 'Brain OS')"
+          },
+          "category": {
+            "type": "string",
+            "description": "Category for the fact (e.g. 'personal', 'work'). Defaults to 'general'."
+          },
+          "namespace": {
+            "type": "string",
+            "description": "Memory namespace (e.g. 'personal', 'work'). Defaults to 'personal'."
+          },
+          "agent": {
+            "type": "string",
+            "description": "Agent identity for attribution (e.g. 'claude-code', 'cursor'). Optional."
+          }
+        },
+        "required": ["subject", "predicate", "object"]
+      }
+    },
+    {
+      "name": "memory_facts",
+      "description": "Retrieve all stored facts about a specific subject.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "subject": {
+            "type": "string",
+            "description": "The subject to retrieve facts about"
+          },
+          "namespace": {
+            "type": "string",
+            "description": "Filter to this namespace only (optional)."
+          }
+        },
+        "required": ["subject"]
+      }
+    },
+    {
+      "name": "memory_episodes",
+      "description": "Retrieve recent conversation episodes from episodic memory.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "number",
+            "description": "Number of episodes to return (default: 20)"
+          }
+        }
+      }
+    },
+    {
+      "name": "user_profile",
+      "description": "Retrieve the user profile and Brain OS configuration.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
+    },
+    {
+      "name": "memory_procedures",
+      "description": "Manage stored procedures (learned workflows). Use action='list' to see all, 'store' to save a new one, 'delete' to remove by id.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "'list' | 'store' | 'delete'",
+            "enum": ["list", "store", "delete"]
+          },
+          "trigger": {
+            "type": "string",
+            "description": "Keyword/phrase that activates the procedure (required for 'store')"
+          },
+          "steps": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Ordered list of action steps (required for 'store')"
+          },
+          "id": {
+            "type": "string",
+            "description": "Procedure ID (required for 'delete')"
+          }
+        },
+        "required": ["action"]
+      }
+    }
+  ]
+}

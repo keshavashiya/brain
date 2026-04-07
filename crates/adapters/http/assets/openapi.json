@@ -1,0 +1,343 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Brain OS — Synapse HTTP API",
+    "description": "Your AI's long-term memory — signal processing, semantic search, and episodic recall.",
+    "version": "{{VERSION}}",
+    "contact": { "name": "Brain OS", "url": "https://github.com/keshavashiya/brain" }
+  },
+  "servers": [{ "url": "/", "description": "Local Brain instance" }],
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": { "type": "http", "scheme": "bearer", "bearerFormat": "APIKey" }
+    },
+    "schemas": {
+      "HealthResponse": {
+        "type": "object",
+        "required": ["status", "version"],
+        "properties": {
+          "status": { "type": "string", "example": "ok" },
+          "version": { "type": "string", "example": "0.1.0" }
+        }
+      },
+      "SignalRequest": {
+        "type": "object",
+        "required": ["content"],
+        "properties": {
+          "content": { "type": "string", "example": "Remember that Rust is memory-safe" },
+          "source": { "type": "string", "enum": ["http", "cli", "ws", "mcp", "grpc"] },
+          "channel": { "type": "string" },
+          "sender": { "type": "string" },
+          "namespace": { "type": "string", "default": "personal" },
+          "metadata": { "type": "object", "additionalProperties": { "type": "string" } }
+        }
+      },
+      "SignalResponse": {
+        "type": "object",
+        "required": ["signal_id", "status", "response", "memory_context"],
+        "properties": {
+          "signal_id": { "type": "string", "format": "uuid" },
+          "status": { "type": "string", "enum": ["Ok", "Error"] },
+          "response": {
+            "type": "object",
+            "properties": {
+              "type": { "type": "string", "enum": ["Text", "Json", "Error"] },
+              "value": {}
+            }
+          },
+          "memory_context": {
+            "type": "object",
+            "properties": {
+              "facts_used": { "type": "integer" },
+              "episodes_used": { "type": "integer" }
+            }
+          },
+          "session_id": {
+            "type": "string",
+            "description": "Session ID for conversation continuity. Send back in subsequent signals to maintain context."
+          }
+        }
+      },
+      "SearchRequest": {
+        "type": "object",
+        "required": ["query"],
+        "properties": {
+          "query": { "type": "string", "example": "Rust programming" },
+          "top_k": { "type": "integer", "default": 10 },
+          "namespace": { "type": "string" }
+        }
+      },
+      "FactJson": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "namespace": { "type": "string" },
+          "category": { "type": "string" },
+          "subject": { "type": "string" },
+          "predicate": { "type": "string" },
+          "object": { "type": "string" },
+          "confidence": { "type": "number", "format": "double" },
+          "distance": { "type": "number", "format": "float", "nullable": true }
+        }
+      },
+      "NamespaceJson": {
+        "type": "object",
+        "properties": {
+          "namespace": { "type": "string" },
+          "fact_count": { "type": "integer" },
+          "episode_count": { "type": "integer" }
+        }
+      },
+      "ExportResponse": {
+        "type": "object",
+        "required": ["version", "exported_at", "facts", "episodes"],
+        "properties": {
+          "version": { "type": "string" },
+          "exported_at": { "type": "string", "format": "date-time" },
+          "facts": { "type": "array", "items": { "type": "object" } },
+          "episodes": { "type": "array", "items": { "type": "object" } }
+        }
+      },
+      "ImportRequest": {
+        "type": "object",
+        "required": ["facts", "episodes"],
+        "properties": {
+          "facts": { "type": "array", "items": { "type": "object" } },
+          "episodes": { "type": "array", "items": { "type": "object" } },
+          "dry_run": { "type": "boolean", "default": false, "description": "Preview import without writing data" }
+        }
+      },
+      "ImportResponse": {
+        "type": "object",
+        "properties": {
+          "facts_imported": { "type": "integer" },
+          "episodes_imported": { "type": "integer" },
+          "facts_already_existed": { "type": "integer" },
+          "episodes_already_existed": { "type": "integer" },
+          "embedded": { "type": "integer" },
+          "embed_failed": { "type": "integer" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Health check",
+        "operationId": "getHealth",
+        "responses": {
+          "200": {
+            "description": "Service is healthy",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HealthResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "summary": "Prometheus metrics",
+        "operationId": "getMetrics",
+        "responses": {
+          "200": {
+            "description": "Prometheus text format metrics",
+            "content": { "text/plain": { "schema": { "type": "string" } } }
+          }
+        }
+      }
+    },
+    "/v1/signals": {
+      "post": {
+        "summary": "Submit a signal for processing",
+        "operationId": "postSignal",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SignalRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Signal processed",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SignalResponse" }
+              }
+            }
+          },
+          "401": { "description": "Unauthorized — missing or invalid API key" },
+          "500": { "description": "Internal server error" }
+        }
+      }
+    },
+    "/v1/signals/{id}": {
+      "get": {
+        "summary": "Retrieve a cached signal response by ID",
+        "operationId": "getSignalById",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string", "format": "uuid" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Signal response found",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SignalResponse" }
+              }
+            }
+          },
+          "401": { "description": "Unauthorized" },
+          "404": { "description": "Signal not found in cache" }
+        }
+      }
+    },
+    "/v1/memory/search": {
+      "post": {
+        "summary": "Semantic search over stored facts",
+        "operationId": "searchMemory",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/SearchRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Matching facts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/FactJson" }
+                }
+              }
+            }
+          },
+          "401": { "description": "Unauthorized" }
+        }
+      }
+    },
+    "/v1/memory/facts": {
+      "get": {
+        "summary": "List all stored semantic facts",
+        "operationId": "listFacts",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          { "name": "namespace", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of facts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/FactJson" }
+                }
+              }
+            }
+          },
+          "401": { "description": "Unauthorized" }
+        }
+      }
+    },
+    "/v1/memory/namespaces": {
+      "get": {
+        "summary": "List memory namespaces with statistics",
+        "operationId": "listNamespaces",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "List of namespaces",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/NamespaceJson" }
+                }
+              }
+            }
+          },
+          "401": { "description": "Unauthorized" }
+        }
+      }
+    },
+    "/v1/memory/export": {
+      "get": {
+        "summary": "Export all memory data (facts and episodes)",
+        "operationId": "exportMemory",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "Exported memory data",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ExportResponse" }
+              }
+            }
+          },
+          "401": { "description": "Unauthorized" }
+        }
+      }
+    },
+    "/v1/memory/import": {
+      "post": {
+        "summary": "Import memory data (facts and episodes)",
+        "operationId": "importMemory",
+        "security": [{ "BearerAuth": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ImportRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Import results",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ImportResponse" }
+              }
+            }
+          },
+          "401": { "description": "Unauthorized" }
+        }
+      }
+    },
+    "/v1/events": {
+      "get": {
+        "summary": "Server-Sent Events stream of proactive notifications",
+        "operationId": "getEvents",
+        "security": [{ "BearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "SSE event stream",
+            "content": {
+              "text/event-stream": {
+                "schema": { "type": "string" }
+              }
+            }
+          },
+          "401": { "description": "Unauthorized" }
+        }
+      }
+    }
+  }
+}

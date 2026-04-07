@@ -1,5 +1,7 @@
 //! Encryption helpers — salt management, encryptor resolution, API key lookup.
 
+use std::io::IsTerminal;
+
 use brain_core::BrainConfig;
 
 pub(crate) fn salt_path(config: &BrainConfig) -> std::path::PathBuf {
@@ -55,6 +57,13 @@ pub(crate) fn resolve_encryptor(
 
     let passphrase = if let Ok(p) = std::env::var("BRAIN_PASSPHRASE") {
         p
+    } else if !std::io::stdin().is_terminal() {
+        // Running non-interactively (e.g. spawned by an MCP client).
+        // Cannot prompt — bail with a clear, single-line message.
+        anyhow::bail!(
+            "Encryption is enabled but BRAIN_PASSPHRASE is not set. \
+             Set it in your MCP client's env config or in your shell profile."
+        );
     } else {
         rpassword::prompt_password("Brain passphrase: ").map_err(|e| {
             anyhow::anyhow!(

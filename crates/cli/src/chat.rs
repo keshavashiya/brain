@@ -1,44 +1,24 @@
 //! Chat commands — interactive and non-interactive conversation modes.
 
-use std::io::{stdout, Write};
-use std::sync::Arc;
+use std::io::stdout;
 use std::time::Duration;
 
-use crossterm::cursor;
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
-use crossterm::terminal;
 use crossterm::ExecutableCommand;
 use rustyline::DefaultEditor;
 
-use crate::session::{BrainSession, PrepareResult};
 use crate::status::show_status;
 
-/// Try to send a chat message via a running `brain serve` HTTP API.
+/// Send a chat message via a running daemon's HTTP API.
 ///
-/// Returns `Ok(Some(response_text))` if the server is reachable and responds,
-/// `Ok(None)` if the server is not running (caller should fall back to local),
-/// or `Err` on unexpected failures.
-async fn try_server_chat(
+/// Returns `Ok(Some(response_text))` if the server responds,
+/// or `Err` on failures.
+async fn try_server_chat_via_url(
+    daemon_url: &str,
     config: &brain_core::BrainConfig,
     message: &str,
 ) -> anyhow::Result<Option<String>> {
-    let host = &config.adapters.http.host;
-    let port = config.adapters.http.port;
-    let health_url = format!("http://{host}:{port}/health");
-
-    let client = reqwest::Client::new();
-    // Quick health check — if the server isn't running, bail fast.
-    let health = client
-        .get(&health_url)
-        .timeout(Duration::from_millis(200))
-        .send()
-        .await;
-    match health {
-        Ok(r) if r.status().is_success() => {}
-        _ => return Ok(None), // server not running
-    }
-
-    let signal_url = format!("http://{host}:{port}/v1/signals");
+    let signal_url = format!("{daemon_url}/v1/signals");
     let api_key = config
         .access
         .api_keys
@@ -46,6 +26,7 @@ async fn try_server_chat(
         .map(|k| k.key.clone())
         .unwrap_or_default();
 
+    let client = reqwest::Client::new();
     let resp = client
         .post(&signal_url)
         .header("Authorization", format!("Bearer {api_key}"))
@@ -57,42 +38,10 @@ async fn try_server_chat(
         .await?;
 
     let text = resp["response"]["value"].as_str().unwrap_or("").to_string();
-    Ok(Some(text))
-}
-
-/// Display proactive nudges at session start: pending outbox items and open loops.
-fn show_proactive_nudges(brain: &BrainSession, config: &brain_core::BrainConfig) {
-    let mut nudges: Vec<String> = Vec::new();
-
-    if let Ok(pending) = brain.db().pending_notifications(5) {
-        for n in &pending {
-            nudges.push(n.content.clone());
-            let _ = brain.db().mark_notification_delivered(&n.id);
-        }
-    }
-
-    if config.proactivity.enabled && config.proactivity.open_loop.enabled {
-        let detector = ganglia::OpenLoopDetector::new(
-            brain.db().clone(),
-            ganglia::OpenLoopConfig {
-                scan_window_hours: config.proactivity.open_loop.scan_window_hours,
-                resolution_window_hours: config.proactivity.open_loop.resolution_window_hours,
-                max_reminders: 3,
-            },
-        );
-        if let Ok(reminders) = detector.generate_reminders() {
-            for r in reminders {
-                nudges.push(r.content);
-            }
-        }
-    }
-
-    if !nudges.is_empty() {
-        println!("\x1b[33m📌 Nudges:\x1b[0m");
-        for nudge in &nudges {
-            println!("  \x1b[33m• {nudge}\x1b[0m");
-        }
-        println!();
+    if text.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(text))
     }
 }
 
@@ -100,55 +49,19 @@ pub(crate) async fn chat_non_interactive(
     config: &brain_core::BrainConfig,
     message: &str,
 ) -> anyhow::Result<()> {
-    use futures::StreamExt;
+    let daemon_url = crate::bootstrap::require_daemon(config).await?;
 
-    // If the server is already running, delegate via HTTP to avoid ruvector lock conflicts.
-    if let Some(response) = try_server_chat(config, message).await? {
-        println!("{response}");
-        return Ok(());
-    }
+    let response = try_server_chat_via_url(&daemon_url, config, message)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Daemon returned empty response"))?;
 
-    let mut brain = BrainSession::new(config).await?;
-
-    show_proactive_nudges(&brain, config);
-
-    match brain.prepare_context(message).await? {
-        PrepareResult::ActionResult(text) => {
-            println!("{text}");
-        }
-        PrepareResult::LlmReady(messages) => match brain.llm.generate_stream(&messages).await {
-            Ok(mut stream) => {
-                let mut full_response = String::new();
-                while let Some(chunk) = stream.next().await {
-                    match chunk {
-                        Ok(c) => {
-                            print!("{}", c.content);
-                            let _ = stdout().flush();
-                            full_response.push_str(&c.content);
-                            if c.is_done {
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("\nStream error: {e}");
-                            break;
-                        }
-                    }
-                }
-                println!();
-                brain.finalize_response(message, &full_response)?;
-            }
-            Err(_) => {
-                let response = brain.llm.generate(&messages).await?;
-                println!("{}", response.content);
-                brain.finalize_response(message, &response.content)?;
-            }
-        },
-    }
+    println!("{response}");
     Ok(())
 }
 
 pub(crate) async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()> {
+    let daemon_url = crate::bootstrap::require_daemon(config).await?;
+
     let ver = env!("CARGO_PKG_VERSION");
     let title = format!("Brain v{ver}");
     let tagline = "Your AI's long-term memory";
@@ -160,56 +73,13 @@ pub(crate) async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow
     println!();
     println!("  Cortex:  {}", config.llm.model);
     println!("  Memory:  {}", config.data_dir().display());
-
-    // Check if a server is already running — if so, delegate via HTTP.
-    let server_available = {
-        let host = &config.adapters.http.host;
-        let port = config.adapters.http.port;
-        let url = format!("http://{host}:{port}/health");
-        reqwest::Client::new()
-            .get(&url)
-            .timeout(Duration::from_millis(200))
-            .send()
-            .await
-            .is_ok_and(|r| r.status().is_success())
-    };
-
-    // Only open a local BrainSession if the server is not running.
-    let mut brain = if server_available {
-        println!("  Synapse: connected to server (HTTP)");
-        None
-    } else {
-        let b = BrainSession::new(config).await?;
-        if b.processor.semantic().is_some() {
-            println!("  Synapse: standalone (full memory)");
-        } else {
-            println!("  Synapse: standalone (episodic only)");
-        }
-        Some(b)
-    };
-
+    println!("  Synapse: connected to daemon (HTTP)");
     println!();
-    println!("Signals: /status  /clear  /quit");
+    println!("Signals: /status  /quit");
     println!();
     let mut rl = DefaultEditor::new()?;
     let history_path = config.data_dir().join("history.txt");
     let _ = rl.load_history(&history_path);
-
-    if let Some(ref b) = brain {
-        show_proactive_nudges(b, config);
-    }
-
-    if let Some(ref mut b) = brain {
-        if b.semantic_fact_count() == 0 && b.episode_count() == 0 {
-            let mut out = stdout();
-            out.execute(SetForegroundColor(Color::Green))?;
-            out.execute(Print("Brain: "))?;
-            out.execute(ResetColor)?;
-            println!("{}", cortex::context::ONBOARDING_GREETING);
-            println!();
-            b.record_onboarding_greeting();
-        }
-    }
 
     loop {
         match rl.readline("You: ") {
@@ -229,197 +99,27 @@ pub(crate) async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow
                         show_status(config).await?;
                         continue;
                     }
-                    "/clear" => {
-                        if let Some(ref mut b) = brain {
-                            b.clear_history();
-                        }
-                        println!("Short-term memory cleared.");
-                        continue;
-                    }
                     s if s.starts_with('/') => {
                         println!("Unknown signal: {s}");
-                        println!("Available: /status  /clear  /quit");
+                        println!("Available: /status  /quit");
                         continue;
                     }
                     _ => {}
                 }
 
-                // Server mode: delegate via HTTP API
-                if server_available {
-                    match try_server_chat(config, input).await {
-                        Ok(Some(response)) => {
-                            let mut out = stdout();
-                            out.execute(SetForegroundColor(Color::Green))?;
-                            out.execute(Print("Brain: "))?;
-                            out.execute(ResetColor)?;
-                            println!("{response}");
-                        }
-                        Ok(None) => {
-                            eprintln!("Server disconnected unexpectedly.");
-                        }
-                        Err(e) => {
-                            eprintln!("Error: {e}");
-                        }
-                    }
-                    continue;
-                }
-
-                // Local mode: full BrainSession pipeline
-                let brain = brain.as_mut().expect("local session");
-
-                let phase = Arc::new(std::sync::atomic::AtomicU8::new(0));
-                let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let phase_c = Arc::clone(&phase);
-                let stop_c = Arc::clone(&stop);
-                let spinner_handle = tokio::spawn(async move {
-                    let frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-                    let mut i = 0;
-                    while !stop_c.load(std::sync::atomic::Ordering::Relaxed) {
-                        let label = match phase_c.load(std::sync::atomic::Ordering::Relaxed) {
-                            0 => "Recalling memories",
-                            _ => "Thinking",
-                        };
-                        {
-                            let mut out = stdout();
-                            let _ = out.execute(cursor::MoveToColumn(0));
-                            let _ = out.execute(terminal::Clear(terminal::ClearType::CurrentLine));
-                            let _ = write!(
-                                out,
-                                "\x1b[90m  {} {}\x1b[0m",
-                                frames[i % frames.len()],
-                                label
-                            );
-                            let _ = out.flush();
-                        }
-                        i += 1;
-                        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-                    }
-                    let mut out = stdout();
-                    let _ = out.execute(cursor::MoveToColumn(0));
-                    let _ = out.execute(terminal::Clear(terminal::ClearType::CurrentLine));
-                    let _ = out.flush();
-                });
-
-                let prepare_result = brain.prepare_context(input).await;
-
-                let mut spinner_handle = Some(spinner_handle);
-                let dismiss_spinner =
-                    |stop: &Arc<std::sync::atomic::AtomicBool>,
-                     handle: &mut Option<tokio::task::JoinHandle<()>>| {
-                        stop.store(true, std::sync::atomic::Ordering::Relaxed);
-                        handle.take()
-                    };
-
-                match prepare_result {
-                    Ok(PrepareResult::ActionResult(text)) => {
-                        if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle) {
-                            let _ = h.await;
-                        }
+                match try_server_chat_via_url(&daemon_url, config, input).await {
+                    Ok(Some(response)) => {
                         let mut out = stdout();
                         out.execute(SetForegroundColor(Color::Green))?;
                         out.execute(Print("Brain: "))?;
                         out.execute(ResetColor)?;
-                        println!("{text}");
+                        println!("{response}");
                     }
-                    Ok(PrepareResult::LlmReady(messages)) => {
-                        phase.store(1, std::sync::atomic::Ordering::Relaxed);
-
-                        let stream_result = brain.llm.generate_stream(&messages).await;
-                        match stream_result {
-                            Ok(mut stream) => {
-                                use futures::StreamExt;
-                                let mut full_response = String::new();
-                                while let Some(chunk) = stream.next().await {
-                                    match chunk {
-                                        Ok(c) => {
-                                            if let Some(h) =
-                                                dismiss_spinner(&stop, &mut spinner_handle)
-                                            {
-                                                let _ = h.await;
-                                                let mut out = stdout();
-                                                out.execute(SetForegroundColor(Color::Green))?;
-                                                out.execute(Print("Brain: "))?;
-                                                out.execute(ResetColor)?;
-                                                let _ = out.flush();
-                                            }
-                                            print!("{}", c.content);
-                                            let _ = stdout().flush();
-                                            full_response.push_str(&c.content);
-                                            if c.is_done {
-                                                break;
-                                            }
-                                        }
-                                        Err(e) => {
-                                            if let Some(h) =
-                                                dismiss_spinner(&stop, &mut spinner_handle)
-                                            {
-                                                let _ = h.await;
-                                            }
-                                            eprintln!("\nStream error: {e}");
-                                            break;
-                                        }
-                                    }
-                                }
-                                if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle) {
-                                    let _ = h.await;
-                                }
-                                println!();
-                                if let Err(e) = brain.finalize_response(input, &full_response) {
-                                    tracing::warn!("Failed to store response: {e}");
-                                }
-                            }
-                            Err(_) => match brain.llm.generate(&messages).await {
-                                Ok(response) => {
-                                    if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle) {
-                                        let _ = h.await;
-                                    }
-                                    let mut out = stdout();
-                                    out.execute(SetForegroundColor(Color::Green))?;
-                                    out.execute(Print("Brain: "))?;
-                                    out.execute(ResetColor)?;
-                                    println!("{}", response.content);
-                                    if let Err(e) =
-                                        brain.finalize_response(input, &response.content)
-                                    {
-                                        tracing::warn!("Failed to store response: {e}");
-                                    }
-                                }
-                                Err(e) => {
-                                    if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle) {
-                                        let _ = h.await;
-                                    }
-                                    let msg = e.to_string();
-                                    if msg.contains("timed out") || msg.contains("Timeout") {
-                                        eprintln!("LLM timed out — model may still be loading. Try again.");
-                                    } else if msg.contains("error sending request")
-                                        || msg.contains("connection refused")
-                                        || msg.contains("Connection refused")
-                                    {
-                                        eprintln!(
-                                            "LLM unreachable — is Ollama running? (`ollama serve`)"
-                                        );
-                                    } else {
-                                        eprintln!("Error: {msg}");
-                                    }
-                                }
-                            },
-                        }
+                    Ok(None) => {
+                        eprintln!("Daemon returned empty response.");
                     }
                     Err(e) => {
-                        if let Some(h) = dismiss_spinner(&stop, &mut spinner_handle) {
-                            let _ = h.await;
-                        }
-                        let msg = e.to_string();
-                        if msg.contains("timed out") || msg.contains("Timeout") {
-                            eprintln!("LLM timed out — model may still be loading. Try again.");
-                        } else if msg.contains("error sending request")
-                            || msg.contains("connection refused")
-                            || msg.contains("Connection refused")
-                        {
-                            eprintln!("LLM unreachable — is Ollama running? (`ollama serve`)");
-                        } else {
-                            eprintln!("Error: {msg}");
-                        }
+                        eprintln!("Error: {e}");
                     }
                 }
             }

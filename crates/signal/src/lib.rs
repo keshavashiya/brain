@@ -158,31 +158,35 @@ impl Signal {
         self
     }
 
-    /// Build a Signal from adapter request fields, applying defaults for missing optional fields.
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_adapter_request(
-        source: SignalSource,
-        content: String,
-        channel: Option<String>,
-        sender: Option<String>,
-        metadata: Option<HashMap<String, String>>,
-        namespace: Option<String>,
-        agent: Option<String>,
-        session_id: Option<String>,
-        default_channel: &str,
-        default_sender: &str,
-    ) -> Self {
+    /// Build a Signal from an [`AdapterRequest`], applying defaults for missing optional fields.
+    pub fn from_adapter_request(req: AdapterRequest) -> Self {
         Signal::new(
-            source,
-            channel.unwrap_or_else(|| default_channel.to_string()),
-            sender.unwrap_or_else(|| default_sender.to_string()),
-            content,
+            req.source,
+            req.channel.unwrap_or(req.default_channel),
+            req.sender.unwrap_or(req.default_sender),
+            req.content,
         )
-        .with_metadata(metadata.unwrap_or_default())
-        .with_namespace_opt(namespace)
-        .with_agent_opt(agent)
-        .with_session_id_opt(session_id)
+        .with_metadata(req.metadata.unwrap_or_default())
+        .with_namespace_opt(req.namespace)
+        .with_agent_opt(req.agent)
+        .with_session_id_opt(req.session_id)
     }
+}
+
+/// Fields from an adapter request used to construct a [`Signal`].
+///
+/// Replaces the previous 10-parameter positional API to prevent argument mis-ordering.
+pub struct AdapterRequest {
+    pub source: SignalSource,
+    pub content: String,
+    pub channel: Option<String>,
+    pub sender: Option<String>,
+    pub metadata: Option<HashMap<String, String>>,
+    pub namespace: Option<String>,
+    pub agent: Option<String>,
+    pub session_id: Option<String>,
+    pub default_channel: String,
+    pub default_sender: String,
 }
 
 // ─── Response Types ───────────────────────────────────────────────────────────
@@ -439,7 +443,9 @@ impl SignalProcessor {
                     Ok(()) => Some(hippocampus::SemanticStore::new(db.clone(), ruv)),
                     Err(e) => {
                         tracing::warn!(
-                            "RuVector table initialization failed, semantic memory disabled: {e}"
+                            "RuVector table initialization failed, semantic memory disabled: {e}. \
+                             Another brain process may be holding the file lock — \
+                             check `ps aux | grep brain` and stop standalone brain mcp processes."
                         );
                         None
                     }

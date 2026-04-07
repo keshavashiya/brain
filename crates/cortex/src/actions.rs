@@ -314,6 +314,11 @@ impl ActionDispatcher {
             return ActionResult::failure(format!("Command '{}' is not in the allowlist", command));
         }
 
+        // Validate arguments against deny-lists
+        if let Err(reason) = validate_args(command, args) {
+            return ActionResult::failure(format!("Blocked: {}", reason));
+        }
+
         // Build command
         let mut cmd = tokio::process::Command::new(command);
         cmd.args(args)
@@ -467,6 +472,68 @@ impl ActionDispatcher {
             Err(e) => ActionResult::failure(format!("Send message failed: {e}")),
         }
     }
+}
+
+// ─── Argument Validation ────────────────────────────────────────────────────
+
+/// Validate command arguments against deny-lists to prevent injection attacks.
+///
+/// Layered defense: universal blocked patterns + per-command restrictions + path
+/// restrictions. This runs *after* the command allowlist check.
+fn validate_args(command: &str, args: &[String]) -> Result<(), String> {
+    // Universal deny-list: shell metacharacters and dangerous flags
+    let universal_blocked = ["--exec", "-exec", ";", "&&", "||", "|", ">", ">>", "<"];
+    for arg in args {
+        for pattern in &universal_blocked {
+            if arg.contains(pattern) {
+                return Err(format!(
+                    "Argument '{}' contains blocked pattern '{}'",
+                    arg, pattern
+                ));
+            }
+        }
+    }
+
+    // Per-command restrictions
+    match command {
+        "git" => {
+            let git_blocked = ["push", "reset", "clean", "rm", "checkout"];
+            if let Some(subcmd) = args.first() {
+                if git_blocked.contains(&subcmd.as_str()) {
+                    return Err(format!("git subcommand '{}' is blocked", subcmd));
+                }
+            }
+        }
+        "find" => {
+            if args.iter().any(|a| a == "-delete") {
+                return Err("find -delete is blocked".to_string());
+            }
+        }
+        "cargo" => {
+            let cargo_allowed = [
+                "build", "test", "check", "clippy", "fmt", "doc", "metadata", "tree",
+            ];
+            if let Some(subcmd) = args.first() {
+                if !cargo_allowed.contains(&subcmd.as_str()) {
+                    return Err(format!("cargo subcommand '{}' is not allowed", subcmd));
+                }
+            }
+        }
+        _ => {}
+    }
+
+    // Path restriction: reject absolute paths outside $HOME and /tmp
+    for arg in args {
+        if arg.starts_with('/') && !arg.starts_with("/tmp") {
+            if let Ok(home) = std::env::var("HOME") {
+                if !arg.starts_with(&home) {
+                    return Err(format!("Path '{}' is outside allowed directories", arg));
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ─── Tool Definition for LLM ────────────────────────────────────────────────
@@ -940,5 +1007,77 @@ mod tests {
         let calls = backend.calls.lock().expect("calls lock");
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].3, "project-x");
+    }
+
+    // ── Argument validation tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_validate_args_blocks_shell_metacharacters() {
+        assert!(validate_args("ls", &["&&".to_string(), "rm".to_string()]).is_err());
+        assert!(validate_args("echo", &["hello".to_string(), "|".to_string()]).is_err());
+        assert!(validate_args("cat", &[">".to_string(), "/etc/passwd".to_string()]).is_err());
+    }
+
+    #[test]
+    fn test_validate_args_blocks_exec_pattern() {
+        assert!(validate_args("find", &["/".to_string(), "-exec".to_string()]).is_err());
+        assert!(validate_args("find", &["/tmp".to_string(), "-delete".to_string()]).is_err());
+    }
+
+    #[test]
+    fn test_validate_args_blocks_dangerous_git_subcommands() {
+        assert!(validate_args("git", &["push".to_string()]).is_err());
+        assert!(validate_args("git", &["reset".to_string()]).is_err());
+        assert!(validate_args("git", &["clean".to_string()]).is_err());
+    }
+
+    #[test]
+    fn test_validate_args_allows_safe_git_subcommands() {
+        assert!(validate_args("git", &["status".to_string()]).is_ok());
+        assert!(validate_args("git", &["log".to_string()]).is_ok());
+        assert!(validate_args("git", &["diff".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn test_validate_args_cargo_subcommand_allowlist() {
+        assert!(validate_args("cargo", &["build".to_string()]).is_ok());
+        assert!(validate_args("cargo", &["test".to_string()]).is_ok());
+        assert!(validate_args("cargo", &["install".to_string()]).is_err());
+        assert!(validate_args("cargo", &["publish".to_string()]).is_err());
+    }
+
+    #[test]
+    fn test_validate_args_blocks_absolute_paths_outside_home() {
+        assert!(validate_args("ls", &["/etc/shadow".to_string()]).is_err());
+        assert!(validate_args("cat", &["/var/log/syslog".to_string()]).is_err());
+    }
+
+    #[test]
+    fn test_validate_args_allows_tmp_paths() {
+        assert!(validate_args("ls", &["/tmp/foo".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn test_validate_args_allows_relative_paths() {
+        assert!(validate_args("ls", &["./src".to_string()]).is_ok());
+        assert!(validate_args("cat", &["Cargo.toml".to_string()]).is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_execute_command_blocked_args() {
+        let dispatcher = ActionDispatcher::with_defaults();
+        let action = Action::ExecuteCommand {
+            command: "find".to_string(),
+            args: vec![
+                "/".to_string(),
+                "-exec".to_string(),
+                "rm".to_string(),
+                "-rf".to_string(),
+                "{}".to_string(),
+            ],
+        };
+        let result = dispatcher.dispatch(&action).await;
+        assert!(!result.success);
+        assert!(result.error.as_ref().unwrap().contains("Blocked"));
     }
 }

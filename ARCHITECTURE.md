@@ -86,7 +86,8 @@ brain/
 ├── crates/cli/         # `brain` binary — all CLI commands:
 │                         init, chat, status, start, stop, serve, mcp,
 │                         export, import, service install/uninstall, deps up/down/status
-│                         Contains: BrainSession, all action backend impls
+│                         CLI commands delegate to the running daemon via HTTP.
+│                         Contains: all action backend impls
 │                         (SearxngSearchBackend, TavilySearchBackend, CustomSearchBackend,
 │                          CliSchedulingBackend, WebhookMessageBackend),
 │                         CircuitBreaker, resilient_send, promote_candidates

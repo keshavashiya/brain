@@ -132,10 +132,47 @@ impl RuVectorStore {
     }
 
     /// Ensure the standard vector tables exist (idempotent).
+    ///
+    /// Retries up to 5 times with exponential backoff (200ms → 3.2s) to handle
+    /// transient file-lock contention from other `brain` processes (e.g. a
+    /// standalone `brain mcp` holding the redb lock when the daemon starts).
     pub async fn ensure_tables(&self) -> Result<(), RuVectorError> {
+        const MAX_RETRIES: u32 = 5;
+        const BASE_DELAY_MS: u64 = 200;
+
         for name in &["facts_vec", "episodes_vec"] {
-            self.get_or_create_db(name)?;
-            info!("Ensured RuVector table: {name}");
+            let mut last_err = None;
+            for attempt in 0..=MAX_RETRIES {
+                match self.get_or_create_db(name) {
+                    Ok(()) => {
+                        if attempt > 0 {
+                            info!("RuVector table '{name}' opened after {attempt} retries");
+                        } else {
+                            info!("Ensured RuVector table: {name}");
+                        }
+                        last_err = None;
+                        break;
+                    }
+                    Err(e) if attempt < MAX_RETRIES => {
+                        let delay_ms = BASE_DELAY_MS * 2u64.pow(attempt);
+                        warn!(
+                            table = name,
+                            attempt = attempt + 1,
+                            delay_ms,
+                            error = %e,
+                            "RuVector table lock contention, retrying"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        last_err = Some(e);
+                    }
+                    Err(e) => {
+                        last_err = Some(e);
+                    }
+                }
+            }
+            if let Some(e) = last_err {
+                return Err(e);
+            }
         }
         Ok(())
     }

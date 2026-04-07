@@ -8,7 +8,6 @@ mod export;
 mod schedules;
 mod serve;
 mod service;
-mod session;
 mod status;
 
 use clap::{Parser, Subcommand};
@@ -368,17 +367,16 @@ async fn main() -> anyhow::Result<()> {
 
         // ── mcp stdio ─────────────────────────────────────────────────────────
         Commands::Mcp => {
-            // If a daemon is running, proxy JSON-RPC through its MCP HTTP
-            // transport. This avoids ruvector lock contention and ensures
-            // one shared SignalProcessor (design principle #1).
-            if bootstrap::detect_running_daemon(&config).await.is_some() {
-                let mcp_url = format!("http://127.0.0.1:{}", config.adapters.mcp.port);
-                tracing::info!(url = %mcp_url, "Daemon detected — proxying MCP stdio through HTTP");
-                bootstrap::proxy_mcp_stdio(&mcp_url, &config).await?;
-            } else {
-                let processor = bootstrap::build_processor(&config).await?;
-                mcp::serve_stdio(processor).await?;
-            }
+            // Always proxy through the daemon's MCP HTTP transport.
+            // This ensures a single shared SignalProcessor — no ruvector lock
+            // contention, no memory isolation, no passphrase prompts.
+            //
+            // Retry daemon detection a few times — the daemon might still be
+            // booting when an MCP client spawns `brain mcp`.
+            let daemon_url = bootstrap::require_daemon(&config).await?;
+            let mcp_url = format!("{}/mcp", daemon_url);
+            tracing::info!(url = %mcp_url, "Daemon detected — proxying MCP stdio through HTTP");
+            bootstrap::proxy_mcp_stdio(&mcp_url, &config).await?;
         }
 
         // ── export ────────────────────────────────────────────────────────────

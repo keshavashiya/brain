@@ -182,18 +182,18 @@ impl MemoryService for MemoryServiceImpl {
         let req = request.into_inner();
         let source = SignalSource::parse(Some(&req.source), SignalSource::Grpc);
 
-        let sig = Signal::from_adapter_request(
+        let sig = Signal::from_adapter_request(signal::AdapterRequest {
             source,
-            req.content,
-            non_empty(req.channel),
-            non_empty(req.sender),
-            Some(req.metadata),
-            non_empty(req.namespace),
-            non_empty(req.agent),
-            non_empty(req.session_id),
-            "grpc",
-            "grpcclient",
-        );
+            content: req.content,
+            channel: non_empty(req.channel),
+            sender: non_empty(req.sender),
+            metadata: Some(req.metadata),
+            namespace: non_empty(req.namespace),
+            agent: non_empty(req.agent),
+            session_id: non_empty(req.session_id),
+            default_channel: "grpc".to_string(),
+            default_sender: "grpcclient".to_string(),
+        });
 
         let processor = self.processor.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(4);
@@ -274,18 +274,18 @@ impl AgentService for AgentServiceImpl {
         let req = request.into_inner();
         let source = SignalSource::parse(Some(&req.source), SignalSource::Grpc);
 
-        let sig = Signal::from_adapter_request(
+        let sig = Signal::from_adapter_request(signal::AdapterRequest {
             source,
-            req.content,
-            non_empty(req.channel),
-            non_empty(req.sender),
-            Some(req.metadata),
-            non_empty(req.namespace),
-            non_empty(req.agent),
-            non_empty(req.session_id),
-            "grpc",
-            "agent",
-        );
+            content: req.content,
+            channel: non_empty(req.channel),
+            sender: non_empty(req.sender),
+            metadata: Some(req.metadata),
+            namespace: non_empty(req.namespace),
+            agent: non_empty(req.agent),
+            session_id: non_empty(req.session_id),
+            default_channel: "grpc".to_string(),
+            default_sender: "agent".to_string(),
+        });
 
         match self.processor.process(sig).await {
             Ok(resp) => Ok(Response::new(AgentSignalResponse {

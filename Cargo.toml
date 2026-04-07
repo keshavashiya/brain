@@ -72,6 +72,9 @@ argon2 = "0.5"
 # Hashing (audit log)
 sha2 = "0.10"
 
+# Constant-time comparison
+subtle = "2"
+
 # CLI
 clap = { version = "4", features = ["derive"] }
 rustyline = "14"
@@ -79,6 +82,9 @@ rpassword = "7"
 
 # Terminal UI
 crossterm = "0.28"
+
+# LRU cache
+lru = "0.12"
 
 # HTTP server
 axum = { version = "0.7", features = ["json"] }

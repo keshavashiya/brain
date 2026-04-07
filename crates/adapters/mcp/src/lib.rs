@@ -47,7 +47,6 @@ use axum::{
 use brain_core::ApiKeyConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -203,133 +202,9 @@ impl McpServer {
     }
 
     fn handle_tools_list(&self) -> Result<Value, (i32, String)> {
-        Ok(json!({
-            "tools": [
-                {
-                    "name": "memory_search",
-                    "description": "Search Brain memory for relevant facts and episodes by semantic similarity.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "description": "Search query text"
-                            },
-                            "top_k": {
-                                "type": "number",
-                                "description": "Number of results to return (default: 10)"
-                            },
-                            "namespace": {
-                                "type": "string",
-                                "description": "Filter results to this namespace (e.g. 'personal', 'work'). Omit to search all."
-                            }
-                        },
-                        "required": ["query"]
-                    }
-                },
-                {
-                    "name": "memory_store",
-                    "description": "Store a structured semantic fact in Brain memory.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "subject": {
-                                "type": "string",
-                                "description": "The entity this fact is about (e.g. 'user', 'project-x')"
-                            },
-                            "predicate": {
-                                "type": "string",
-                                "description": "The relationship or property (e.g. 'prefers', 'is_working_on')"
-                            },
-                            "object": {
-                                "type": "string",
-                                "description": "The value of the relationship (e.g. 'Rust', 'Brain OS')"
-                            },
-                            "category": {
-                                "type": "string",
-                                "description": "Category for the fact (e.g. 'personal', 'work'). Defaults to 'general'."
-                            },
-                            "namespace": {
-                                "type": "string",
-                                "description": "Memory namespace (e.g. 'personal', 'work'). Defaults to 'personal'."
-                            },
-                            "agent": {
-                                "type": "string",
-                                "description": "Agent identity for attribution (e.g. 'claude-code', 'cursor'). Optional."
-                            }
-                        },
-                        "required": ["subject", "predicate", "object"]
-                    }
-                },
-                {
-                    "name": "memory_facts",
-                    "description": "Retrieve all stored facts about a specific subject.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "subject": {
-                                "type": "string",
-                                "description": "The subject to retrieve facts about"
-                            },
-                            "namespace": {
-                                "type": "string",
-                                "description": "Filter to this namespace only (optional)."
-                            }
-                        },
-                        "required": ["subject"]
-                    }
-                },
-                {
-                    "name": "memory_episodes",
-                    "description": "Retrieve recent conversation episodes from episodic memory.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "limit": {
-                                "type": "number",
-                                "description": "Number of episodes to return (default: 20)"
-                            }
-                        }
-                    }
-                },
-                {
-                    "name": "user_profile",
-                    "description": "Retrieve the user profile and Brain OS configuration.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {}
-                    }
-                },
-                {
-                    "name": "memory_procedures",
-                    "description": "Manage stored procedures (learned workflows). Use action='list' to see all, 'store' to save a new one, 'delete' to remove by id.",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {
-                            "action": {
-                                "type": "string",
-                                "description": "'list' | 'store' | 'delete'",
-                                "enum": ["list", "store", "delete"]
-                            },
-                            "trigger": {
-                                "type": "string",
-                                "description": "Keyword/phrase that activates the procedure (required for 'store')"
-                            },
-                            "steps": {
-                                "type": "array",
-                                "items": { "type": "string" },
-                                "description": "Ordered list of action steps (required for 'store')"
-                            },
-                            "id": {
-                                "type": "string",
-                                "description": "Procedure ID (required for 'delete')"
-                            }
-                        },
-                        "required": ["action"]
-                    }
-                }
-            ]
-        }))
+        static TOOLS_JSON: &str = include_str!("../assets/tools.json");
+        serde_json::from_str(TOOLS_JSON)
+            .map_err(|e| (-32603, format!("Failed to parse tools.json: {e}")))
     }
 
     async fn handle_tools_call(&self, req: &JsonRpcRequest) -> Result<Value, (i32, String)> {
@@ -664,6 +539,11 @@ pub async fn serve_stdio(processor: signal::SignalProcessor) -> anyhow::Result<(
 
         // Auth check for requests (not notifications).
         // Skipped when the session is pre-authenticated via BRAIN_API_KEY.
+        //
+        // SAFETY: Notifications (is_notification() == true) bypass auth intentionally.
+        // handle() returns None for all notification methods — no state changes occur.
+        // If handle() ever processes notification methods with side effects, auth
+        // must be checked here regardless of is_notification().
         if !session_authed && !server.api_keys.is_empty() && !req.is_notification() {
             let meta_key = extract_meta_key(&req);
             let key_ok = meta_key.is_some_and(|k| server.validate_key(k));
@@ -697,21 +577,6 @@ pub async fn serve_stdio(processor: signal::SignalProcessor) -> anyhow::Result<(
     Ok(())
 }
 
-// ─── CORS (localhost-only) ────────────────────────────────────────────────────
-
-fn localhost_cors() -> CorsLayer {
-    CorsLayer::new()
-        .allow_origin(AllowOrigin::predicate(|origin, _req| {
-            let bytes = origin.as_bytes();
-            bytes.starts_with(b"http://127.0.0.1")
-                || bytes.starts_with(b"http://localhost")
-                || bytes.starts_with(b"https://127.0.0.1")
-                || bytes.starts_with(b"https://localhost")
-        }))
-        .allow_methods(AllowMethods::any())
-        .allow_headers(AllowHeaders::any())
-}
-
 // ─── HTTP Transport ───────────────────────────────────────────────────────────
 
 /// Shared state for the HTTP MCP server.
@@ -737,7 +602,7 @@ pub async fn serve_http(
         .route("/", post(http_handler))
         .route("/mcp", post(http_handler))
         .with_state(state)
-        .layer(localhost_cors());
+        .layer(brain_core::cors::localhost_cors());
 
     let addr: std::net::SocketAddr = format!("{host}:{port}").parse()?;
     tracing::info!("Synapse MCP online at http://{addr}");
@@ -1091,7 +956,7 @@ mod tests {
         let router = Router::new()
             .route("/mcp", post(http_handler))
             .with_state(state)
-            .layer(localhost_cors());
+            .layer(brain_core::cors::localhost_cors());
 
         let body = serde_json::json!({
             "jsonrpc": "2.0",
@@ -1130,7 +995,7 @@ mod tests {
         let router = Router::new()
             .route("/mcp", post(http_handler))
             .with_state(state)
-            .layer(localhost_cors());
+            .layer(brain_core::cors::localhost_cors());
 
         let body = serde_json::json!({
             "jsonrpc": "2.0",
@@ -1169,7 +1034,7 @@ mod tests {
         let router = Router::new()
             .route("/mcp", post(http_handler))
             .with_state(state)
-            .layer(localhost_cors());
+            .layer(brain_core::cors::localhost_cors());
 
         let body = serde_json::json!({
             "jsonrpc": "2.0",

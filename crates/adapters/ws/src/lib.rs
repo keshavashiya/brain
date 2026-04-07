@@ -230,7 +230,7 @@ async fn handle_connection(
         // or pends forever if no router is configured.
         let proactive_fut = async {
             match proactive_rx.as_mut() {
-                Some(rx) => rx.recv().await.ok(),
+                Some(rx) => rx.recv().await,
                 None => std::future::pending().await,
             }
         };
@@ -271,21 +271,31 @@ async fn handle_connection(
                 }
             }
             // Proactive notification push
-            notification = proactive_fut => {
-                if let Some(notification) = notification {
-                    let mut frame = serde_json::json!({
-                        "type": "proactive",
-                        "content": notification.content,
-                        "triggered_by": notification.triggered_by,
-                        "priority": notification.priority,
-                    });
-                    if let Some(agent) = &notification.agent {
-                        frame["agent"] = serde_json::json!(agent);
-                    }
-                    if let Ok(json) = serde_json::to_string(&frame) {
-                        if ws_tx.send(Message::Text(json.into())).await.is_err() {
-                            break;
+            result = proactive_fut => {
+                match result {
+                    Ok(notification) => {
+                        let mut frame = serde_json::json!({
+                            "type": "proactive",
+                            "content": notification.content,
+                            "triggered_by": notification.triggered_by,
+                            "priority": notification.priority,
+                        });
+                        if let Some(agent) = &notification.agent {
+                            frame["agent"] = serde_json::json!(agent);
                         }
+                        if let Ok(json) = serde_json::to_string(&frame) {
+                            if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(conn_id = %conn_id, skipped = n, "WS client lagged, dropped notifications");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        tracing::debug!(conn_id = %conn_id, "Notification channel closed");
+                        // Channel closed but client connection may still be live — disable proactive push.
+                        proactive_rx = None;
                     }
                 }
             }
@@ -330,18 +340,18 @@ async fn process_text_frame(
     };
 
     let source = SignalSource::parse(client_msg.source.as_deref(), SignalSource::WebSocket);
-    let signal = Signal::from_adapter_request(
+    let signal = Signal::from_adapter_request(signal::AdapterRequest {
         source,
-        client_msg.content,
-        Some(format!("ws:{conn_id}")),
-        client_msg.sender,
-        client_msg.metadata,
-        client_msg.namespace,
-        client_msg.agent,
-        client_msg.session_id,
-        &format!("ws:{conn_id}"),
-        "wsclient",
-    );
+        content: client_msg.content,
+        channel: Some(format!("ws:{conn_id}")),
+        sender: client_msg.sender,
+        metadata: client_msg.metadata,
+        namespace: client_msg.namespace,
+        agent: client_msg.agent,
+        session_id: client_msg.session_id,
+        default_channel: format!("ws:{conn_id}"),
+        default_sender: "wsclient".to_string(),
+    });
 
     let signal_id = signal.id;
     match processor.process(signal).await {

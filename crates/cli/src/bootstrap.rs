@@ -194,6 +194,31 @@ pub async fn detect_running_daemon(config: &brain_core::BrainConfig) -> Option<S
     }
 }
 
+/// Require a running Brain daemon, returning its base URL or a clear error.
+///
+/// Retries a few times to handle the case where the daemon is still booting.
+/// This is the canonical way for CLI commands to ensure they don't create
+/// their own SignalProcessor (which would cause RuVector lock contention
+/// and memory isolation).
+pub async fn require_daemon(config: &brain_core::BrainConfig) -> anyhow::Result<String> {
+    let max_attempts = 4;
+    for attempt in 0..max_attempts {
+        if let Some(url) = detect_running_daemon(config).await {
+            return Ok(url);
+        }
+        if attempt < max_attempts - 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+
+    let port = config.adapters.http.port;
+    anyhow::bail!(
+        "No running Brain daemon detected (expected at http://127.0.0.1:{port}).\n\
+         Run `brain start` to wake the daemon first.\n\
+         All CLI commands require a running daemon to ensure a single shared SignalProcessor."
+    )
+}
+
 /// Proxy MCP stdio through a running daemon's MCP HTTP transport.
 ///
 /// Reads JSON-RPC lines from stdin, forwards each as an HTTP POST to the

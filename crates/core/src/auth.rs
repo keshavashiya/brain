@@ -4,6 +4,8 @@
 //! permission checking. Every adapter (HTTP, WebSocket, gRPC, MCP) must
 //! use these functions instead of rolling their own validation.
 
+use subtle::ConstantTimeEq;
+
 use crate::config::ApiKeyConfig;
 
 /// Result of an authentication check.
@@ -68,7 +70,11 @@ pub fn check_auth(
         _ => return AuthResult::MissingKey,
     };
 
-    match api_keys.iter().find(|k| k.key == key) {
+    match api_keys.iter().find(|k| {
+        let a = k.key.as_bytes();
+        let b = key.as_bytes();
+        a.len() == b.len() && a.ct_eq(b).into()
+    }) {
         None => AuthResult::InvalidKey,
         Some(k) if !k.has_permission(permission) => AuthResult::InsufficientPermission,
         Some(_) => AuthResult::Allowed,

@@ -21,6 +21,7 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
+    num::NonZeroUsize,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -41,7 +42,6 @@ use axum::{
 use brain_core::ApiKeyConfig;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use uuid::Uuid;
 
 use signal::{Signal, SignalResponse, SignalSource};
@@ -87,6 +87,36 @@ pub struct NamespaceJson {
     pub namespace: String,
     pub fact_count: i64,
     pub episode_count: i64,
+}
+
+/// Export envelope (GET /v1/memory/export).
+#[derive(Debug, Serialize)]
+pub struct ExportJson {
+    pub version: String,
+    pub exported_at: String,
+    pub facts: Vec<signal::ExportedFact>,
+    pub episodes: Vec<signal::ExportedEpisode>,
+}
+
+/// Import request body (POST /v1/memory/import).
+#[derive(Debug, Deserialize)]
+pub struct ImportRequest {
+    pub facts: Vec<signal::ExportedFact>,
+    pub episodes: Vec<signal::ExportedEpisode>,
+    /// If true, preview what would be imported without writing.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+/// Import response (POST /v1/memory/import).
+#[derive(Debug, Serialize)]
+pub struct ImportResponse {
+    pub facts_imported: usize,
+    pub episodes_imported: usize,
+    pub facts_already_existed: usize,
+    pub episodes_already_existed: usize,
+    pub embedded: usize,
+    pub embed_failed: usize,
 }
 
 /// A single fact in JSON form (GET /v1/memory/facts, search results).
@@ -163,11 +193,14 @@ impl Metrics {
 
 // ─── App State ───────────────────────────────────────────────────────────────
 
+/// Maximum number of cached signal responses before eviction.
+const CACHE_CAPACITY: usize = 1000;
+
 /// Shared state for all HTTP handlers.
 pub struct AppState {
     processor: Arc<signal::SignalProcessor>,
-    /// In-memory cache: signal_id → SignalResponse.
-    cache: Mutex<HashMap<Uuid, SignalResponse>>,
+    /// LRU cache: signal_id → SignalResponse. Bounded to `CACHE_CAPACITY` entries.
+    cache: Mutex<lru::LruCache<Uuid, SignalResponse>>,
     /// Configured API keys (loaded from BrainConfig).
     api_keys: Vec<ApiKeyConfig>,
     /// Request counters and latency.
@@ -207,21 +240,6 @@ fn check_auth(
 
 // ─── Router builder ──────────────────────────────────────────────────────────
 
-/// CORS restricted to localhost origins — Brain is a local daemon, not a public service.
-/// Remote origins are blocked to prevent cross-site requests from untrusted web pages.
-fn localhost_cors() -> CorsLayer {
-    CorsLayer::new()
-        .allow_origin(AllowOrigin::predicate(|origin, _req| {
-            let bytes = origin.as_bytes();
-            bytes.starts_with(b"http://127.0.0.1")
-                || bytes.starts_with(b"http://localhost")
-                || bytes.starts_with(b"https://127.0.0.1")
-                || bytes.starts_with(b"https://localhost")
-        }))
-        .allow_methods(AllowMethods::any())
-        .allow_headers(AllowHeaders::any())
-}
-
 /// Build the axum router with all routes.
 ///
 /// `api_keys` is taken from `BrainConfig.access.api_keys` by the caller.
@@ -234,7 +252,9 @@ pub fn create_router(
 ) -> Router {
     let state = Arc::new(AppState {
         processor,
-        cache: Mutex::new(HashMap::new()),
+        cache: Mutex::new(lru::LruCache::new(
+            NonZeroUsize::new(CACHE_CAPACITY).unwrap(),
+        )),
         api_keys,
         metrics: Arc::new(Metrics::default()),
     });
@@ -246,6 +266,8 @@ pub fn create_router(
         .route("/v1/memory/search", post(search_memory_handler))
         .route("/v1/memory/facts", get(get_facts_handler))
         .route("/v1/memory/namespaces", get(get_namespaces_handler))
+        .route("/v1/memory/export", get(export_memory_handler))
+        .route("/v1/memory/import", post(import_memory_handler))
         .route("/v1/events", get(sse_events_handler))
         .layer(tower::limit::ConcurrencyLimitLayer::new(100));
 
@@ -259,7 +281,7 @@ pub fn create_router(
         .with_state(state);
 
     if cors_enabled {
-        router.layer(localhost_cors())
+        router.layer(brain_core::cors::localhost_cors())
     } else {
         router
     }
@@ -311,201 +333,14 @@ async fn ui_handler() -> impl IntoResponse {
 
 // ─── OpenAPI spec ─────────────────────────────────────────────────────────────
 
-/// Build the OpenAPI 3.0 document for the Brain HTTP API.
-fn build_openapi() -> serde_json::Value {
-    serde_json::json!({
-        "openapi": "3.0.3",
-        "info": {
-            "title": "Brain OS — Synapse HTTP API",
-            "description": "Your AI's long-term memory — signal processing, semantic search, and episodic recall.",
-            "version": env!("CARGO_PKG_VERSION"),
-            "contact": { "name": "Brain OS", "url": "https://github.com/keshavashiya/brain" }
-        },
-        "servers": [{ "url": "/", "description": "Local Brain instance" }],
-        "components": {
-            "securitySchemes": {
-                "BearerAuth": { "type": "http", "scheme": "bearer", "bearerFormat": "APIKey" }
-            },
-            "schemas": {
-                "HealthResponse": {
-                    "type": "object", "required": ["status","version"],
-                    "properties": {
-                        "status": { "type": "string", "example": "ok" },
-                        "version": { "type": "string", "example": "0.1.0" }
-                    }
-                },
-                "SignalRequest": {
-                    "type": "object", "required": ["content"],
-                    "properties": {
-                        "content": { "type": "string", "example": "Remember that Rust is memory-safe" },
-                        "source": { "type": "string", "enum": ["http","cli","ws","mcp","grpc"] },
-                        "channel": { "type": "string" },
-                        "sender": { "type": "string" },
-                        "namespace": { "type": "string", "default": "personal" },
-                        "metadata": { "type": "object", "additionalProperties": { "type": "string" } }
-                    }
-                },
-                "SignalResponse": {
-                    "type": "object", "required": ["signal_id","status","response","memory_context"],
-                    "properties": {
-                        "signal_id": { "type": "string", "format": "uuid" },
-                        "status": { "type": "string", "enum": ["Ok","Error"] },
-                        "response": {
-                            "type": "object",
-                            "properties": {
-                                "type": { "type": "string", "enum": ["Text","Json","Error"] },
-                                "value": {}
-                            }
-                        },
-                        "memory_context": {
-                            "type": "object",
-                            "properties": {
-                                "facts_used": { "type": "integer" },
-                                "episodes_used": { "type": "integer" }
-                            }
-                        },
-                        "session_id": { "type": "string", "description": "Session ID for conversation continuity. Send back in subsequent signals to maintain context." }
-                    }
-                },
-                "SearchRequest": {
-                    "type": "object", "required": ["query"],
-                    "properties": {
-                        "query": { "type": "string", "example": "Rust programming" },
-                        "top_k": { "type": "integer", "default": 10 },
-                        "namespace": { "type": "string" }
-                    }
-                },
-                "FactJson": {
-                    "type": "object",
-                    "properties": {
-                        "id": { "type": "string" },
-                        "namespace": { "type": "string" },
-                        "category": { "type": "string" },
-                        "subject": { "type": "string" },
-                        "predicate": { "type": "string" },
-                        "object": { "type": "string" },
-                        "confidence": { "type": "number", "format": "double" },
-                        "distance": { "type": "number", "format": "float", "nullable": true }
-                    }
-                },
-                "NamespaceJson": {
-                    "type": "object",
-                    "properties": {
-                        "namespace": { "type": "string" },
-                        "fact_count": { "type": "integer" },
-                        "episode_count": { "type": "integer" }
-                    }
-                }
-            }
-        },
-        "paths": {
-            "/health": {
-                "get": {
-                    "summary": "Health check",
-                    "operationId": "getHealth",
-                    "responses": {
-                        "200": { "description": "Service is healthy", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/HealthResponse" } } } }
-                    }
-                }
-            },
-            "/metrics": {
-                "get": {
-                    "summary": "Prometheus metrics",
-                    "operationId": "getMetrics",
-                    "responses": {
-                        "200": { "description": "Prometheus text format metrics", "content": { "text/plain": { "schema": { "type": "string" } } } }
-                    }
-                }
-            },
-            "/v1/signals": {
-                "post": {
-                    "summary": "Submit a signal for processing",
-                    "operationId": "postSignal",
-                    "security": [{ "BearerAuth": [] }],
-                    "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SignalRequest" } } } },
-                    "responses": {
-                        "200": { "description": "Signal processed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SignalResponse" } } } },
-                        "401": { "description": "Unauthorized — missing or invalid API key" },
-                        "500": { "description": "Internal server error" }
-                    }
-                }
-            },
-            "/v1/signals/{id}": {
-                "get": {
-                    "summary": "Retrieve a cached signal response by ID",
-                    "operationId": "getSignalById",
-                    "security": [{ "BearerAuth": [] }],
-                    "parameters": [{ "name": "id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
-                    "responses": {
-                        "200": { "description": "Signal response found", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SignalResponse" } } } },
-                        "401": { "description": "Unauthorized" },
-                        "404": { "description": "Signal not found in cache" }
-                    }
-                }
-            },
-            "/v1/memory/search": {
-                "post": {
-                    "summary": "Semantic search over stored facts",
-                    "operationId": "searchMemory",
-                    "security": [{ "BearerAuth": [] }],
-                    "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SearchRequest" } } } },
-                    "responses": {
-                        "200": { "description": "Matching facts", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/FactJson" } } } } },
-                        "401": { "description": "Unauthorized" }
-                    }
-                }
-            },
-            "/v1/memory/facts": {
-                "get": {
-                    "summary": "List all stored semantic facts",
-                    "operationId": "listFacts",
-                    "security": [{ "BearerAuth": [] }],
-                    "parameters": [{ "name": "namespace", "in": "query", "schema": { "type": "string" } }],
-                    "responses": {
-                        "200": { "description": "List of facts", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/FactJson" } } } } },
-                        "401": { "description": "Unauthorized" }
-                    }
-                }
-            },
-            "/v1/memory/namespaces": {
-                "get": {
-                    "summary": "List memory namespaces with statistics",
-                    "operationId": "listNamespaces",
-                    "security": [{ "BearerAuth": [] }],
-                    "responses": {
-                        "200": { "description": "List of namespaces", "content": { "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/NamespaceJson" } } } } },
-                        "401": { "description": "Unauthorized" }
-                    }
-                }
-            },
-            "/v1/events": {
-                "get": {
-                    "summary": "Server-Sent Events stream of proactive notifications",
-                    "operationId": "getEvents",
-                    "security": [{ "BearerAuth": [] }],
-                    "responses": {
-                        "200": {
-                            "description": "SSE event stream",
-                            "content": {
-                                "text/event-stream": {
-                                    "schema": { "type": "string" }
-                                }
-                            }
-                        },
-                        "401": { "description": "Unauthorized" }
-                    }
-                }
-            }
-        }
-    })
-}
+/// OpenAPI 3.0 document loaded at compile time from assets/openapi.json.
+/// The placeholder `{{VERSION}}` is replaced with the actual crate version at runtime.
+static OPENAPI_JSON: &str = include_str!("../assets/openapi.json");
 
 /// GET /openapi.json — OpenAPI 3.0 specification (no auth required)
 async fn openapi_handler() -> impl IntoResponse {
-    (
-        [("content-type", "application/json")],
-        build_openapi().to_string(),
-    )
+    let spec = OPENAPI_JSON.replace("{{VERSION}}", env!("CARGO_PKG_VERSION"));
+    ([("content-type", "application/json")], spec)
 }
 
 /// Swagger UI HTML that loads the spec from /openapi.json (CDN assets).
@@ -531,18 +366,18 @@ async fn post_signal_handler(
     state.metrics.signals_total.fetch_add(1, Ordering::Relaxed);
 
     let source = SignalSource::parse(body.source.as_deref(), SignalSource::Http);
-    let signal = Signal::from_adapter_request(
+    let signal = Signal::from_adapter_request(signal::AdapterRequest {
         source,
-        body.content,
-        body.channel,
-        body.sender,
-        body.metadata,
-        body.namespace,
-        body.agent,
-        body.session_id,
-        "http",
-        "apiclient",
-    );
+        content: body.content,
+        channel: body.channel,
+        sender: body.sender,
+        metadata: body.metadata,
+        namespace: body.namespace,
+        agent: body.agent,
+        session_id: body.session_id,
+        default_channel: "http".to_string(),
+        default_sender: "apiclient".to_string(),
+    });
 
     let signal_id = signal.id;
     let result = state.processor.process(signal).await;
@@ -579,8 +414,8 @@ async fn post_signal_handler(
         }
     };
 
-    // Cache the response so GET /v1/signals/:id can retrieve it
-    state.cache.lock().await.insert(signal_id, response.clone());
+    // Cache the response so GET /v1/signals/:id can retrieve it (LRU evicts oldest)
+    state.cache.lock().await.put(signal_id, response.clone());
 
     Ok(Json(response))
 }
@@ -596,7 +431,7 @@ async fn get_signal_handler(
     let uuid = Uuid::parse_str(&id)
         .map_err(|_| (StatusCode::BAD_REQUEST, format!("Invalid UUID: {id}")))?;
 
-    let cache = state.cache.lock().await;
+    let mut cache = state.cache.lock().await;
     match cache.get(&uuid) {
         Some(resp) => Ok(Json(resp.clone())),
         None => Err((
@@ -691,6 +526,93 @@ async fn get_namespaces_handler(
         .collect();
 
     Ok(Json(namespaces))
+}
+
+/// GET /v1/memory/export — requires read permission
+async fn export_memory_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<ExportJson>, (StatusCode, String)> {
+    check_auth(&state, &headers, "read")?;
+
+    let facts = state.processor.export_facts().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Export failed: {e}"),
+        )
+    })?;
+    let episodes = state.processor.export_episodes().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Export failed: {e}"),
+        )
+    })?;
+
+    Ok(Json(ExportJson {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        exported_at: chrono::Utc::now().to_rfc3339(),
+        facts,
+        episodes,
+    }))
+}
+
+/// POST /v1/memory/import — requires write permission
+async fn import_memory_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<ImportRequest>,
+) -> Result<Json<ImportResponse>, (StatusCode, String)> {
+    check_auth(&state, &headers, "write")?;
+
+    if body.dry_run {
+        // Preview only — report item counts without touching the database.
+        return Ok(Json(ImportResponse {
+            facts_imported: body.facts.len(),
+            episodes_imported: body.episodes.len(),
+            facts_already_existed: 0,
+            episodes_already_existed: 0,
+            embedded: 0,
+            embed_failed: 0,
+        }));
+    }
+
+    let (facts_imported, new_fact_indices) =
+        state.processor.import_facts(&body.facts).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Import failed: {e}"),
+            )
+        })?;
+    let episodes_imported = state
+        .processor
+        .import_episodes(&body.episodes)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Import failed: {e}"),
+            )
+        })?;
+
+    let mut embedded = 0;
+    let mut embed_failed = 0;
+    if !new_fact_indices.is_empty() {
+        let new_facts: Vec<signal::ExportedFact> = new_fact_indices
+            .iter()
+            .map(|&idx| body.facts[idx].clone())
+            .collect();
+        let (e, f) = state.processor.reembed_facts(&new_facts).await;
+        embedded = e;
+        embed_failed = f;
+    }
+
+    Ok(Json(ImportResponse {
+        facts_imported,
+        episodes_imported,
+        facts_already_existed: body.facts.len() - facts_imported,
+        episodes_already_existed: body.episodes.len() - episodes_imported,
+        embedded,
+        embed_failed,
+    }))
 }
 
 // ─── SSE event stream ───────────────────────────────────────────────────────
@@ -1222,7 +1144,9 @@ mod tests {
         let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
         let state = Arc::new(AppState {
             processor,
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(lru::LruCache::new(
+                NonZeroUsize::new(CACHE_CAPACITY).unwrap(),
+            )),
             api_keys,
             metrics: Arc::new(Metrics::default()),
         });
@@ -1299,7 +1223,9 @@ mod tests {
 
         let state = Arc::new(AppState {
             processor,
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(lru::LruCache::new(
+                NonZeroUsize::new(CACHE_CAPACITY).unwrap(),
+            )),
             api_keys,
             metrics: Arc::new(Metrics::default()),
         });
@@ -1344,7 +1270,9 @@ mod tests {
         let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
         let state = Arc::new(AppState {
             processor,
-            cache: Mutex::new(HashMap::new()),
+            cache: Mutex::new(lru::LruCache::new(
+                NonZeroUsize::new(CACHE_CAPACITY).unwrap(),
+            )),
             api_keys,
             metrics: Arc::new(Metrics::default()),
         });
@@ -1352,7 +1280,7 @@ mod tests {
         // Manually insert a response into the cache
         let id = Uuid::new_v4();
         let fake_resp = SignalResponse::ok(id, "test response");
-        state.cache.lock().await.insert(id, fake_resp);
+        state.cache.lock().await.put(id, fake_resp);
 
         let router = Router::new()
             .route("/v1/signals/:id", get(get_signal_handler))
