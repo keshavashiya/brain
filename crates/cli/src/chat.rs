@@ -1,6 +1,6 @@
 //! Chat commands — interactive and non-interactive conversation modes.
 
-use std::io::{stdout, Write};
+use std::io::stdout;
 use std::time::Duration;
 
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
