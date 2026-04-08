@@ -111,7 +111,10 @@ Return ONLY JSON: {"score":0.X,"reason":"brief"}"#;
             .map(|w| w.to_string())
             .collect();
 
-        let mut seen = self.seen_topics.lock().unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
+        let mut seen = self
+            .seen_topics
+            .lock()
+            .unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
         let mut found_new = false;
         for token in tokens {
             if seen.get(&token).is_none() {

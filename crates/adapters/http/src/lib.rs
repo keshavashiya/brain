@@ -414,7 +414,8 @@ async fn post_signal_handler(
                 serde_json::json!({
                     "error": "Signal processing failed",
                     "details": e.to_string()
-                }).to_string(),
+                })
+                .to_string(),
             ));
         }
     };

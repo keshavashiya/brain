@@ -125,25 +125,26 @@ pub(crate) async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow
                         println!("Available: /status  /clear  /quit");
                         continue;
                     }
-_ => {}
+                    _ => {}
                 }
 
-                let response = try_server_chat_via_url(&daemon_url, config, input, &session_id).await;
+                let response =
+                    try_server_chat_via_url(&daemon_url, config, input, &session_id).await;
 
                 match response {
-                Ok(Some(response)) => {
-                    let mut out = stdout();
-                    out.execute(SetForegroundColor(Color::Green))?;
-                    out.execute(Print("Brain: "))?;
-                    out.execute(ResetColor)?;
-                    println!("{response}");
-                }
-                Ok(None) => {
-                    eprintln!("Daemon returned empty response.");
-                }
-                Err(e) => {
-                    eprintln!("Error: {e}");
-                }
+                    Ok(Some(response)) => {
+                        let mut out = stdout();
+                        out.execute(SetForegroundColor(Color::Green))?;
+                        out.execute(Print("Brain: "))?;
+                        out.execute(ResetColor)?;
+                        println!("{response}");
+                    }
+                    Ok(None) => {
+                        eprintln!("Daemon returned empty response.");
+                    }
+                    Err(e) => {
+                        eprintln!("Error: {e}");
+                    }
                 }
             }
             Err(rustyline::error::ReadlineError::Interrupted)

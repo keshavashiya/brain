@@ -610,7 +610,10 @@ impl SemanticStore {
 
         // Compensating transaction: rollback if RuVector failed
         if let Err(e) = ruv_result {
-            tracing::warn!("RuVector delete failed for {}, re-syncing on next startup", fact_id);
+            tracing::warn!(
+                "RuVector delete failed for {}, re-syncing on next startup",
+                fact_id
+            );
             return Err(SemanticError::RuVector(e));
         }
 
