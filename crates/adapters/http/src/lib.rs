@@ -30,13 +30,13 @@ use std::{
 };
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Json,
     },
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use brain_core::ApiKeyConfig;
@@ -268,6 +268,8 @@ pub fn create_router(
         .route("/v1/memory/namespaces", get(get_namespaces_handler))
         .route("/v1/memory/export", get(export_memory_handler))
         .route("/v1/memory/import", post(import_memory_handler))
+        .route("/v1/schedules", get(list_schedules_handler))
+        .route("/v1/schedules/:id", delete(cancel_schedule_handler))
         .route("/v1/events", get(sse_events_handler))
         .layer(tower::limit::ConcurrencyLimitLayer::new(100));
 
@@ -482,7 +484,7 @@ async fn search_memory_handler(
 async fn get_facts_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<Vec<FactJson>>, (StatusCode, String)> {
     check_auth(&state, &headers, "read")?;
 
@@ -613,6 +615,69 @@ async fn import_memory_handler(
         embedded,
         embed_failed,
     }))
+}
+
+// ─── Schedules ───────────────────────────────────────────────────────────────
+
+/// GET /v1/schedules — list scheduled intents (requires read permission)
+async fn list_schedules_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<serde_json::Value>>, (StatusCode, String)> {
+    check_auth(&state, &headers, "read")?;
+
+    let namespace = params.get("namespace").map(|s| s.as_str());
+    let intents = state
+        .processor
+        .list_scheduled_intents(namespace)
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to list schedules: {e}"),
+            )
+        })?;
+
+    let json: Vec<serde_json::Value> = intents
+        .iter()
+        .map(|i| {
+            serde_json::json!({
+                "id": i.id,
+                "description": i.description,
+                "cron": i.cron,
+                "namespace": i.namespace,
+                "created_at": i.created_at,
+                "status": i.status,
+            })
+        })
+        .collect();
+
+    Ok(Json(json))
+}
+
+/// DELETE /v1/schedules/:id — cancel a scheduled intent (requires write permission)
+async fn cancel_schedule_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    check_auth(&state, &headers, "write")?;
+
+    let cancelled = state.processor.cancel_scheduled_intent(&id).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to cancel schedule: {e}"),
+        )
+    })?;
+
+    if cancelled {
+        Ok(Json(serde_json::json!({"cancelled": true, "id": id})))
+    } else {
+        Err((
+            StatusCode::NOT_FOUND,
+            format!("No scheduled intent found with ID: {id}"),
+        ))
+    }
 }
 
 // ─── SSE event stream ───────────────────────────────────────────────────────

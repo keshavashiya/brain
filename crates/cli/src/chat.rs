@@ -11,12 +11,17 @@ use crate::status::show_status;
 
 /// Send a chat message via a running daemon's HTTP API.
 ///
+/// `session_id` is included so the daemon groups episodes into the same
+/// conversation. When the user types `/clear`, the caller rotates the
+/// session_id to start a fresh conversation.
+///
 /// Returns `Ok(Some(response_text))` if the server responds,
 /// or `Err` on failures.
 async fn try_server_chat_via_url(
     daemon_url: &str,
     config: &brain_core::BrainConfig,
     message: &str,
+    session_id: &str,
 ) -> anyhow::Result<Option<String>> {
     let signal_url = format!("{daemon_url}/v1/signals");
     let api_key = config
@@ -30,7 +35,10 @@ async fn try_server_chat_via_url(
     let resp = client
         .post(&signal_url)
         .header("Authorization", format!("Bearer {api_key}"))
-        .json(&serde_json::json!({"content": message}))
+        .json(&serde_json::json!({
+            "content": message,
+            "session_id": session_id,
+        }))
         .timeout(Duration::from_secs(120))
         .send()
         .await?
@@ -50,8 +58,9 @@ pub(crate) async fn chat_non_interactive(
     message: &str,
 ) -> anyhow::Result<()> {
     let daemon_url = crate::bootstrap::require_daemon(config).await?;
+    let session_id = uuid::Uuid::new_v4().to_string();
 
-    let response = try_server_chat_via_url(&daemon_url, config, message)
+    let response = try_server_chat_via_url(&daemon_url, config, message, &session_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("Daemon returned empty response"))?;
 
@@ -61,6 +70,7 @@ pub(crate) async fn chat_non_interactive(
 
 pub(crate) async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()> {
     let daemon_url = crate::bootstrap::require_daemon(config).await?;
+    let mut session_id = uuid::Uuid::new_v4().to_string();
 
     let ver = env!("CARGO_PKG_VERSION");
     let title = format!("Brain v{ver}");
@@ -75,7 +85,7 @@ pub(crate) async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow
     println!("  Memory:  {}", config.data_dir().display());
     println!("  Synapse: connected to daemon (HTTP)");
     println!();
-    println!("Signals: /status  /quit");
+    println!("Signals: /status  /clear  /quit");
     println!();
     let mut rl = DefaultEditor::new()?;
     let history_path = config.data_dir().join("history.txt");
@@ -99,15 +109,20 @@ pub(crate) async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow
                         show_status(config).await?;
                         continue;
                     }
+                    "/clear" => {
+                        session_id = uuid::Uuid::new_v4().to_string();
+                        println!("Session cleared — starting fresh conversation.");
+                        continue;
+                    }
                     s if s.starts_with('/') => {
                         println!("Unknown signal: {s}");
-                        println!("Available: /status  /quit");
+                        println!("Available: /status  /clear  /quit");
                         continue;
                     }
                     _ => {}
                 }
 
-                match try_server_chat_via_url(&daemon_url, config, input).await {
+                match try_server_chat_via_url(&daemon_url, config, input, &session_id).await {
                     Ok(Some(response)) => {
                         let mut out = stdout();
                         out.execute(SetForegroundColor(Color::Green))?;
