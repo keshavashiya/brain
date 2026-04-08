@@ -373,8 +373,12 @@ async fn main() -> anyhow::Result<()> {
             //
             // Retry daemon detection a few times — the daemon might still be
             // booting when an MCP client spawns `brain mcp`.
-            let daemon_url = bootstrap::require_daemon(&config).await?;
-            let mcp_url = format!("{}/mcp", daemon_url);
+            // Detect the daemon via the HTTP adapter's health endpoint…
+            let _daemon_url = bootstrap::require_daemon(&config).await?;
+            // …but proxy to the MCP adapter's own HTTP port (separate from the REST API).
+            let mcp_host = &config.adapters.http.host;
+            let mcp_port = config.adapters.mcp.port;
+            let mcp_url = format!("http://{mcp_host}:{mcp_port}/mcp");
             tracing::info!(url = %mcp_url, "Daemon detected — proxying MCP stdio through HTTP");
             bootstrap::proxy_mcp_stdio(&mcp_url, &config).await?;
         }
