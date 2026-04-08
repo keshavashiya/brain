@@ -1,6 +1,6 @@
 //! Chat commands — interactive and non-interactive conversation modes.
 
-use std::io::stdout;
+use std::io::{stdout, Write};
 use std::time::Duration;
 
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
@@ -45,7 +45,13 @@ async fn try_server_chat_via_url(
         .json::<serde_json::Value>()
         .await?;
 
-    let text = resp["response"]["value"].as_str().unwrap_or("").to_string();
+    let text = if let Some(t) = resp["response"]["value"].as_str() {
+        t.to_string()
+    } else if let Some(e) = resp["response"]["Error"].as_str() {
+        e.to_string()
+    } else {
+        String::new()
+    };
     if text.is_empty() {
         Ok(None)
     } else {
@@ -119,23 +125,25 @@ pub(crate) async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow
                         println!("Available: /status  /clear  /quit");
                         continue;
                     }
-                    _ => {}
+_ => {}
                 }
 
-                match try_server_chat_via_url(&daemon_url, config, input, &session_id).await {
-                    Ok(Some(response)) => {
-                        let mut out = stdout();
-                        out.execute(SetForegroundColor(Color::Green))?;
-                        out.execute(Print("Brain: "))?;
-                        out.execute(ResetColor)?;
-                        println!("{response}");
-                    }
-                    Ok(None) => {
-                        eprintln!("Daemon returned empty response.");
-                    }
-                    Err(e) => {
-                        eprintln!("Error: {e}");
-                    }
+                let response = try_server_chat_via_url(&daemon_url, config, input, &session_id).await;
+
+                match response {
+                Ok(Some(response)) => {
+                    let mut out = stdout();
+                    out.execute(SetForegroundColor(Color::Green))?;
+                    out.execute(Print("Brain: "))?;
+                    out.execute(ResetColor)?;
+                    println!("{response}");
+                }
+                Ok(None) => {
+                    eprintln!("Daemon returned empty response.");
+                }
+                Err(e) => {
+                    eprintln!("Error: {e}");
+                }
                 }
             }
             Err(rustyline::error::ReadlineError::Interrupted)

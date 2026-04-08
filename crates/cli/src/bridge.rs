@@ -31,9 +31,13 @@ pub(crate) async fn cmd_bridge(
             let brain_ws_url = brain_ws_url.clone();
             let api_key = api_key.clone();
             async move {
-                let (ws, _) = tokio_tungstenite::connect_async(&brain_ws_url)
-                    .await
-                    .expect("Failed to connect to Brain WebSocket");
+                let ws = match tokio_tungstenite::connect_async(&brain_ws_url).await {
+                    Ok((ws, _)) => ws,
+                    Err(e) => {
+                        tracing::error!("Bridge connect failed: {}", e);
+                        return BridgeMessage::reply(&msg, "Bridge connection failed");
+                    }
+                };
 
                 let (mut sink, mut stream) = ws.split();
 
@@ -44,15 +48,19 @@ pub(crate) async fn cmd_bridge(
                     "metadata": msg.metadata.clone(),
                 });
 
-                sink.send(Message::Text(signal.to_string().into()))
-                    .await
-                    .expect("Failed to send to Brain");
+                if let Err(e) = sink.send(Message::Text(signal.to_string().into())).await {
+                    tracing::error!("Bridge send failed: {}", e);
+                    return BridgeMessage::reply(&msg, "Bridge send failed");
+                };
 
-                let response = stream
-                    .next()
-                    .await
-                    .expect("No response from Brain")
-                    .expect("Stream error");
+                let response = match stream.next().await {
+                    Some(Ok(response)) => response,
+                    Some(Err(e)) => {
+                        tracing::error!("Bridge stream error: {}", e);
+                        return BridgeMessage::reply(&msg, "Bridge stream error");
+                    }
+                    None => return BridgeMessage::reply(&msg, "No response from Brain"),
+                };
 
                 let response_text = match response {
                     Message::Text(t) => t.to_string(),
@@ -65,7 +73,7 @@ pub(crate) async fn cmd_bridge(
                 let content = response_json
                     .get("response")
                     .and_then(|r| r.as_str())
-                    .unwrap_or("");
+                    .unwrap_or("Bridge: parse error");
 
                 BridgeMessage::reply(&msg, content)
             }

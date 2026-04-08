@@ -150,45 +150,42 @@ impl LlmIntentFallback {
     }
 }
 
+const CLASSIFIER_SYSTEM_PROMPT: &str = r#"You classify user input into exactly one intent for Brain OS.
+Valid intents: store_fact, recall, forget, execute_command, web_search, schedule, send_message, system_status, chat.
+Rules:
+- recall is for memory queries: "what do you know about...", "what did we discuss", "what do you remember about...", "tell me about...", "what is my...", "do you remember...", "tell me everything about...". These ask about the user's stored memories.
+- Questions that are NOT about stored memories (general knowledge, opinions, how-to questions) are chat.
+- Questions should NEVER be execute_command.
+- store_fact is ONLY for explicit memory requests: "remember that ...", "note that ...", "keep in mind ...".
+- execute_command is ONLY for explicit requests like "run ls", "execute cargo build". The command field must be a real shell command (ls, git, cargo, etc.).
+- Conversational statements ("I've done X", "I completed X", "I like X") are chat but ALSO extract any personal facts (see below).
+- Prefer web_search for explicit search requests about internet/google/latest/current external info.
+- For web_search, set 'query' to the exact optimal search terms, stripping conversational fluff.
+- Use system_status only for explicit status checks like "/status".
+- Use chat when uncertain or for general conversation.
+
+FACT EXTRACTION: Regardless of intent, if the input contains personal facts about the user (name, role, company, projects, skills, interests, goals, location, preferences, habits), extract them into the "facts" array. Each fact is {"subject": "user", "predicate": "<snake_case_verb>", "object": "<value>"}.
+Predicates: name_is, role_is, works_at, works_on, title_is, interested_in, lives_in, skill_is, goal_is, preference_is, likes, etc.
+Only extract clear factual statements. If no facts, set facts to [].
+
+Return only JSON with keys: intent, subject, predicate, object, query, target, command, args, description, cron, channel, recipient, content, facts.
+Missing keys must be null. facts must be [] if none."#;
+
 #[async_trait::async_trait]
 impl IntentFallback for LlmIntentFallback {
     async fn classify_with_llm(&self, input: &str) -> Option<Classification> {
         use cortex::llm::{Message, Role};
 
-        let prompt = format!(
-            "Classify the user input into exactly one intent for Brain OS.\n\
-             Valid intents: store_fact, recall, forget, execute_command, web_search, schedule, send_message, system_status, chat.\n\
-             Rules:\n\
-             - recall is for memory queries: \"what do you know about...\", \"what did we discuss\", \
-             \"what do you remember about...\", \"tell me about...\", \"what is my...\", \
-             \"do you remember...\", \"tell me everything about...\". These ask about the user's stored memories.\n\
-             - Questions that are NOT about stored memories (general knowledge, opinions, \
-             how-to questions) are chat.\n\
-             - Questions should NEVER be execute_command.\n\
-             - store_fact is ONLY for explicit memory requests: \"remember that ...\", \
-             \"note that ...\", \"keep in mind ...\".\n\
-             - execute_command is ONLY for explicit requests like \"run ls\", \"execute cargo build\". \
-             The command field must be a real shell command (ls, git, cargo, etc.).\n\
-             - Conversational statements (\"I've done X\", \"I completed X\", \"I like X\") are chat — \
-             but ALSO extract any personal facts (see below).\n\
-             - Prefer web_search for explicit search requests about internet/google/latest/current external info.\n\
-             - For web_search, set 'query' to the exact optimal search terms, stripping conversational fluff.\n\
-             - Use system_status only for explicit status checks like \"/status\".\n\
-             - Use chat when uncertain or for general conversation.\n\n\
-             FACT EXTRACTION: Regardless of intent, if the input contains personal facts about the user \
-             (name, role, company, projects, skills, interests, goals, location, preferences, habits), \
-             extract them into the \"facts\" array. Each fact is {{\"subject\": \"user\", \"predicate\": \"<snake_case_verb>\", \"object\": \"<value>\"}}.\n\
-             Predicates: name_is, role_is, works_at, works_on, title_is, interested_in, lives_in, skill_is, goal_is, preference_is, likes, etc.\n\
-             Only extract clear factual statements. If no facts, set facts to [].\n\n\
-             Return only JSON with keys: intent, subject, predicate, object, query, target, command, args, description, cron, channel, recipient, content, facts.\n\
-             Missing keys must be null. facts must be [] if none.\n\
-             Input: {input}"
-        );
-
-        let messages = vec![Message {
-            role: Role::User,
-            content: prompt,
-        }];
+        let messages = vec![
+            Message {
+                role: Role::System,
+                content: CLASSIFIER_SYSTEM_PROMPT.to_string(),
+            },
+            Message {
+                role: Role::User,
+                content: input.to_string(),
+            },
+        ];
 
         let response = match self.llm.generate(&messages).await {
             Ok(r) => r,
@@ -389,11 +386,11 @@ impl IntentClassifier {
             },
         ));
 
-        // Execute command patterns
+        // Execute command patterns - must be explicit shell commands only
         patterns.push((
             Self::build_pattern(
-                r"(?i)^(?:run|execute|do)\s+(?:command\s+)?(.+?)$",
-                &[("command", 1)],
+                r"(?i)^(?:run|exec|execute)\s+(?:command\s+)?(\S+)(?:\s+(.*))?$",
+                &[("command", 1), ("args", 2)],
             ),
             Intent::ExecuteCommand {
                 command: String::new(),

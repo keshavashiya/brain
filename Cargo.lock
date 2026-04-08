@@ -428,6 +428,7 @@ dependencies = [
  "brainos-cortex",
  "brainos-hippocampus",
  "futures",
+ "lru",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

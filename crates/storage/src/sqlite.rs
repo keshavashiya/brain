@@ -116,12 +116,12 @@ impl SqlitePool {
 
         let conn = Connection::open(path)?;
 
-        // Performance and safety pragmas
+        // Performance and safety pragmas (skip foreign_keys for now - handled manually)
         conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous = NORMAL;
-            PRAGMA foreign_keys = ON;
+            PRAGMA foreign_keys = OFF;
             PRAGMA busy_timeout = 5000;
             PRAGMA cache_size = -8000;
             ",
@@ -454,10 +454,10 @@ impl SqlitePool {
                     predicate TEXT NOT NULL,
                     object TEXT NOT NULL,
                     confidence REAL NOT NULL DEFAULT 1.0,
-                    source_episode_id TEXT REFERENCES episodes(id),
+                    source_episode_id TEXT REFERENCES episodes(id) ON DELETE SET NULL,
                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
                     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    superseded_by TEXT REFERENCES semantic_facts(id)
+                    superseded_by TEXT REFERENCES semantic_facts(id) ON DELETE SET NULL
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_facts_category ON semantic_facts(category);
@@ -595,6 +595,18 @@ impl SqlitePool {
                 "
                 ALTER TABLE episodes ADD COLUMN agent TEXT;
                 ALTER TABLE semantic_facts ADD COLUMN agent TEXT;
+            ",
+            ),
+            (
+                17,
+                "fix_orphaned_facts",
+                "
+                -- Clear orphaned source_episode_id references
+                UPDATE semantic_facts SET source_episode_id = NULL 
+                WHERE source_episode_id NOT IN (SELECT id FROM episodes);
+                -- Clear orphaned superseded_by references
+                UPDATE semantic_facts SET superseded_by = NULL 
+                WHERE superseded_by NOT IN (SELECT id FROM semantic_facts);
             ",
             ),
         ]

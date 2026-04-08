@@ -10,20 +10,16 @@
 //! approach for richer importance scoring. The keyword heuristic stays as a
 //! 0ms fallback when LLM is unavailable or times out.
 
-use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::Mutex;
 
-/// Importance scorer with per-process novelty tracking.
-///
-/// Delegates keyword-based scoring to the canonical weights and keyword lists
-/// defined in `hippocampus::importance::ImportanceScorer` and adds a novelty
-/// bonus for previously unseen topic tokens.
-///
-/// When constructed with `with_llm()`, `score_async()` uses LLM-driven scoring
-/// with automatic fallback to keywords on failure/timeout.
+/// Bounded novelty cache to prevent unbounded memory growth.
+/// Caches recent tokens to detect duplicates.
+const NOVELTY_CACHE_CAPACITY: usize = 10_000;
+
 pub struct ImportanceScorer {
-    /// Previously seen topic tokens (for novelty detection).
-    seen_topics: std::sync::Mutex<HashSet<String>>,
+    /// Bounded LRU cache for novelty detection.
+    seen_topics: Mutex<lru::LruCache<String, ()>>,
     /// Optional LLM provider for prompt-based scoring.
     llm: Option<Arc<dyn cortex::LlmProvider>>,
 }
@@ -32,7 +28,9 @@ impl ImportanceScorer {
     /// Create a new `ImportanceScorer` with an empty novelty history (keyword-only).
     pub fn new() -> Self {
         Self {
-            seen_topics: std::sync::Mutex::new(HashSet::new()),
+            seen_topics: Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(NOVELTY_CACHE_CAPACITY).unwrap(),
+            )),
             llm: None,
         }
     }
@@ -40,7 +38,9 @@ impl ImportanceScorer {
     /// Create an `ImportanceScorer` backed by the given LLM provider.
     pub fn with_llm(llm: Arc<dyn cortex::LlmProvider>) -> Self {
         Self {
-            seen_topics: std::sync::Mutex::new(HashSet::new()),
+            seen_topics: Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(NOVELTY_CACHE_CAPACITY).unwrap(),
+            )),
             llm: Some(llm),
         }
     }
@@ -70,6 +70,10 @@ impl ImportanceScorer {
         hippocampus::ImportanceScorer::score(text, is_novel) as f32
     }
 
+    const IMPORTANCE_SYSTEM_PROMPT: &'static str = r#"Score the importance of text from 0.0 to 1.0.
+Criteria: memory_request (user asks to remember/note something), urgency (deadlines, ASAP), emotional_intensity (strong feelings), actionable (contains tasks/commitments), specificity (concrete vs vague).
+Return ONLY JSON: {"score":0.X,"reason":"brief"}"#;
+
     /// Ask the LLM to score text importance.
     async fn score_with_llm(
         &self,
@@ -77,20 +81,21 @@ impl ImportanceScorer {
         text: &str,
         is_novel: bool,
     ) -> Result<f32, cortex::LlmError> {
-        let prompt = format!(
-            "Score this text's importance from 0.0 to 1.0.\n\
-             Criteria: memory_request (user asks to remember/note something),\n\
-             urgency (deadlines, ASAP), emotional_intensity (strong feelings),\n\
-             actionable (contains tasks/commitments), specificity (concrete vs vague).\n\
-             Novel content: {is_novel}\n\
-             Return ONLY JSON: {{\"score\":0.X,\"reason\":\"brief\"}}\n\
+        let user_text = format!(
+            "Novel content: {is_novel}\n\
              Text: {text}"
         );
 
-        let messages = vec![cortex::Message {
-            role: cortex::Role::User,
-            content: prompt,
-        }];
+        let messages = vec![
+            cortex::Message {
+                role: cortex::Role::System,
+                content: Self::IMPORTANCE_SYSTEM_PROMPT.to_string(),
+            },
+            cortex::Message {
+                role: cortex::Role::User,
+                content: user_text,
+            },
+        ];
 
         let response = llm.generate(&messages).await?;
         parse_importance_response(&response.content)
@@ -106,11 +111,12 @@ impl ImportanceScorer {
             .map(|w| w.to_string())
             .collect();
 
-        let mut seen = self.seen_topics.lock().unwrap();
+        let mut seen = self.seen_topics.lock().unwrap_or_else(|e: std::sync::PoisonError<_>| e.into_inner());
         let mut found_new = false;
         for token in tokens {
-            if seen.insert(token) {
+            if seen.get(&token).is_none() {
                 found_new = true;
+                seen.put(token, ());
             }
         }
         found_new

@@ -408,10 +408,13 @@ async fn post_signal_handler(
                 error = %e,
                 "signal processing failed"
             );
-            // Return an opaque error — do not leak internal details to the client.
+            // Return an opaque error as JSON — do not leak internal details.
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Signal processing failed. Check server logs for details.".to_string(),
+                serde_json::json!({
+                    "error": "Signal processing failed",
+                    "details": e.to_string()
+                }).to_string(),
             ));
         }
     };

@@ -168,8 +168,9 @@ impl SemanticStore {
             Ok(())
         })?;
 
-        // Write vector to RuVector
-        self.ruv
+        // Write vector to RuVector with compensating transaction
+        let ruv_result = self
+            .ruv
             .add_vectors(
                 "facts_vec",
                 vec![id.clone()],
@@ -178,7 +179,16 @@ impl SemanticStore {
                 vec![now.to_string()],
                 "semantic",
             )
-            .await?;
+            .await;
+
+        // Compensating transaction: rollback SQLite if RuVector failed
+        if let Err(e) = ruv_result {
+            self.db.with_conn(|conn| {
+                conn.execute("DELETE FROM semantic_facts WHERE id = ?1", [&id])?;
+                Ok(())
+            })?;
+            return Err(SemanticError::RuVector(e));
+        }
 
         Ok(id)
     }
@@ -589,14 +599,20 @@ impl SemanticStore {
 
     /// Delete a fact from both SQLite and RuVector.
     pub async fn delete_fact(&self, fact_id: &str) -> Result<(), SemanticError> {
-        // Delete from SQLite
+        // Delete from SQLite first (reference for rollback)
         self.db.with_conn(|conn| {
             conn.execute("DELETE FROM semantic_facts WHERE id = ?1", [fact_id])?;
             Ok(())
         })?;
 
-        // Delete from RuVector
-        self.ruv.delete("facts_vec", fact_id).await?;
+        // Delete from RuVector with compensating transaction
+        let ruv_result = self.ruv.delete("facts_vec", fact_id).await;
+
+        // Compensating transaction: rollback if RuVector failed
+        if let Err(e) = ruv_result {
+            tracing::warn!("RuVector delete failed for {}, re-syncing on next startup", fact_id);
+            return Err(SemanticError::RuVector(e));
+        }
 
         Ok(())
     }
@@ -610,7 +626,9 @@ impl SemanticStore {
         namespace: Option<&str>,
     ) -> Result<Vec<Fact>, SemanticError> {
         let pool = &self.db;
-        let pattern = format!("%{query}%");
+        // Escape LIKE wildcards to prevent injection
+        let escaped = query.replace('%', r"\%").replace('_', r"\_");
+        let pattern = format!("%{escaped}%");
         Ok(self.db.with_conn(|conn| {
             let row_to_raw_fact = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(Fact, String)> {
                 let raw_object: String = row.get(5)?;

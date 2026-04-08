@@ -161,6 +161,7 @@ impl EpisodicStore {
         let encrypted_content = self.db.encrypt_content(content);
         let is_encrypted = self.db.is_encrypted();
         let namespace = namespace.unwrap_or("personal");
+
         self.db.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO episodes (id, session_id, namespace, role, content, importance, agent)
@@ -175,18 +176,16 @@ impl EpisodicStore {
                     agent
                 ],
             )?;
+            let row_id = conn.last_insert_rowid();
 
-            // FTS5 indexes plaintext for BM25 search.
-            // When encryption is enabled, skip FTS indexing — BM25 falls back
-            // to empty results while vector search continues to work.
             if !is_encrypted {
                 conn.execute(
-                    "INSERT INTO episodes_fts (rowid, content) VALUES (last_insert_rowid(), ?1)",
-                    [content],
+                    "INSERT INTO episodes_fts (rowid, content) VALUES (?1, ?2)",
+                    rusqlite::params![row_id, content],
                 )?;
             }
 
-            Ok(id.clone())
+            Ok(())
         })?;
         Ok(id)
     }

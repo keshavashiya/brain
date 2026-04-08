@@ -15,7 +15,12 @@ pub(crate) fn read_pid(config: &BrainConfig) -> Option<u32> {
 }
 
 pub(crate) fn write_pid(config: &BrainConfig, pid: u32) -> anyhow::Result<()> {
-    std::fs::write(pid_path(config), pid.to_string())?;
+    use std::os::unix::fs::PermissionsExt;
+    let path = pid_path(config);
+    std::fs::write(&path, pid.to_string())?;
+    let mut perms = std::fs::metadata(&path)?.permissions();
+    perms.set_mode(0o600);
+    std::fs::set_permissions(&path, perms)?;
     Ok(())
 }
 

@@ -143,16 +143,22 @@ impl Consolidator {
             let retention = forgetting_curve(candidate.importance, hours, candidate.decay_rate);
 
             if retention < self.config.prune_threshold {
-                // Prune this episode
-                db.with_conn(|conn| {
-                    conn.execute("DELETE FROM episodes WHERE id = ?1", [&candidate.id])?;
-                    conn.execute(
-                        "DELETE FROM episodes_fts WHERE rowid = ?1",
-                        [candidate.row_id],
-                    )?;
-                    Ok(())
-                })?;
-                pruned += 1;
+                let delete_ok = db
+                    .with_conn(|conn| {
+                        let tx = conn.unchecked_transaction()?;
+                        // Clear source_episode_id reference (preserve facts, just orphan them)
+                        tx.execute("UPDATE semantic_facts SET source_episode_id = NULL WHERE source_episode_id = ?1", [&candidate.id])?;
+                        tx.execute("DELETE FROM episode_promotions WHERE episode_id = ?1", [&candidate.id])?;
+                        tx.execute("DELETE FROM episodes_fts WHERE rowid = ?1", [candidate.row_id])?;
+                        tx.execute("DELETE FROM episodes WHERE id = ?1", [&candidate.id])?;
+                        tx.commit()?;
+                        Ok(true)
+                    })
+                    .unwrap_or(false);
+                if delete_ok {
+                    pruned += 1;
+                }
+                continue;
             }
 
             // Check for promotion candidates

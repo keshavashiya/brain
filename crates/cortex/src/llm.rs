@@ -116,9 +116,9 @@ struct OllamaMessage {
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 struct OllamaOptions {
     temperature: f64,
+    #[serde(rename = "num_predict")]
     num_predict: i32,
 }
 
