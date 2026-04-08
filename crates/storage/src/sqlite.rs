@@ -878,7 +878,7 @@ mod tests {
     fn test_open_memory() {
         let pool = SqlitePool::open_memory().unwrap();
         let version = pool.schema_version().unwrap();
-        assert_eq!(version, 16); // All migrations applied
+        assert_eq!(version, 17); // All migrations applied
     }
 
     #[test]
@@ -886,7 +886,7 @@ mod tests {
         let pool = SqlitePool::open_memory().unwrap();
         // Running migrate again should be a no-op
         pool.migrate().unwrap();
-        assert_eq!(pool.schema_version().unwrap(), 16);
+        assert_eq!(pool.schema_version().unwrap(), 17);
     }
 
     #[test]
