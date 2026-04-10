@@ -38,6 +38,9 @@ logs/
 *.gguf
 .chief/
 
+# Worktrees
+.worktrees/
+
 # Development references (not for version control)
 progress.md
 docs/*
