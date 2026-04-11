@@ -2,7 +2,26 @@
 
 use std::sync::Arc;
 
+use brain_core::metrics::SubsystemMetrics;
+
 use crate::resilience::{resilient_send, CircuitBreaker};
+
+fn make_cb(
+    name: &str,
+    resilience: &brain_core::config::ResilienceConfig,
+    metrics: Option<Arc<SubsystemMetrics>>,
+) -> CircuitBreaker {
+    let cb = CircuitBreaker::new(
+        name,
+        resilience.circuit_breaker_threshold,
+        resilience.circuit_breaker_cooldown_secs,
+    );
+    if let Some(m) = metrics {
+        cb.with_metrics(m)
+    } else {
+        cb
+    }
+}
 
 /// Parse a JSON array of search results into `SearchHit`s with flexible field names.
 fn parse_search_results(
@@ -66,14 +85,19 @@ impl SearxngSearchBackend {
         timeout_ms: u64,
         resilience: &brain_core::config::ResilienceConfig,
     ) -> anyhow::Result<Self> {
+        Self::new_with_metrics(endpoint, timeout_ms, resilience, None)
+    }
+
+    pub fn new_with_metrics(
+        endpoint: &str,
+        timeout_ms: u64,
+        resilience: &brain_core::config::ResilienceConfig,
+        metrics: Option<Arc<SubsystemMetrics>>,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             endpoint: endpoint.trim_end_matches('/').to_string(),
             client: build_search_client(timeout_ms)?,
-            circuit_breaker: Arc::new(CircuitBreaker::new(
-                "searxng",
-                resilience.circuit_breaker_threshold,
-                resilience.circuit_breaker_cooldown_secs,
-            )),
+            circuit_breaker: Arc::new(make_cb("searxng", resilience, metrics)),
             max_retries: resilience.max_retries,
             retry_base_ms: resilience.retry_base_ms,
         })
@@ -147,15 +171,21 @@ impl TavilySearchBackend {
         timeout_ms: u64,
         resilience: &brain_core::config::ResilienceConfig,
     ) -> anyhow::Result<Self> {
+        Self::new_with_metrics(endpoint, api_key, timeout_ms, resilience, None)
+    }
+
+    pub fn new_with_metrics(
+        endpoint: &str,
+        api_key: &str,
+        timeout_ms: u64,
+        resilience: &brain_core::config::ResilienceConfig,
+        metrics: Option<Arc<SubsystemMetrics>>,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             endpoint: endpoint.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
             client: build_search_client(timeout_ms)?,
-            circuit_breaker: Arc::new(CircuitBreaker::new(
-                "tavily",
-                resilience.circuit_breaker_threshold,
-                resilience.circuit_breaker_cooldown_secs,
-            )),
+            circuit_breaker: Arc::new(make_cb("tavily", resilience, metrics)),
             max_retries: resilience.max_retries,
             retry_base_ms: resilience.retry_base_ms,
         })
@@ -241,14 +271,19 @@ impl CustomSearchBackend {
         timeout_ms: u64,
         resilience: &brain_core::config::ResilienceConfig,
     ) -> anyhow::Result<Self> {
+        Self::new_with_metrics(endpoint, timeout_ms, resilience, None)
+    }
+
+    pub fn new_with_metrics(
+        endpoint: &str,
+        timeout_ms: u64,
+        resilience: &brain_core::config::ResilienceConfig,
+        metrics: Option<Arc<SubsystemMetrics>>,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             endpoint: endpoint.to_string(),
             client: build_search_client(timeout_ms)?,
-            circuit_breaker: Arc::new(CircuitBreaker::new(
-                "custom-search",
-                resilience.circuit_breaker_threshold,
-                resilience.circuit_breaker_cooldown_secs,
-            )),
+            circuit_breaker: Arc::new(make_cb("custom-search", resilience, metrics)),
             max_retries: resilience.max_retries,
             retry_base_ms: resilience.retry_base_ms,
         })
@@ -299,5 +334,150 @@ impl cortex::actions::WebSearchBackend for CustomSearchBackend {
             .unwrap_or_default();
 
         Ok(parse_search_results(candidates, top_k))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cortex::actions::WebSearchBackend;
+
+    fn fast_resilience() -> brain_core::config::ResilienceConfig {
+        brain_core::config::ResilienceConfig {
+            max_retries: 0,
+            retry_base_ms: 10,
+            circuit_breaker_threshold: 5,
+            circuit_breaker_cooldown_secs: 60,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_searxng_successful_search() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/search")
+            .match_query(mockito::Matcher::UrlEncoded("q".into(), "rust".into()))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "results": [
+                        {"title": "Rust docs", "url": "https://doc.rust-lang.org", "content": "language docs"},
+                        {"title": "Rust book", "url": "https://rust-book.rs", "content": "book"}
+                    ]
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let backend = SearxngSearchBackend::new(&server.url(), 5000, &fast_resilience()).unwrap();
+        let hits = backend.search("rust", 10).await.unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].title, "Rust docs");
+        assert_eq!(hits[0].url, "https://doc.rust-lang.org");
+        assert_eq!(hits[0].snippet, "language docs");
+    }
+
+    #[tokio::test]
+    async fn test_searxng_empty_results() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/search")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"results": []}"#)
+            .create_async()
+            .await;
+
+        let backend = SearxngSearchBackend::new(&server.url(), 5000, &fast_resilience()).unwrap();
+        let hits = backend.search("nothing", 10).await.unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_searxng_5xx_surfaces_as_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/search")
+            .match_query(mockito::Matcher::Any)
+            .with_status(500)
+            .with_body("internal error")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let backend = SearxngSearchBackend::new(&server.url(), 5000, &fast_resilience()).unwrap();
+        let result = backend.search("boom", 10).await;
+        assert!(result.is_err(), "expected 5xx to surface as error");
+    }
+
+    #[tokio::test]
+    async fn test_searxng_top_k_limit() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/search")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "results": [
+                        {"title": "a", "url": "https://a.com", "content": ""},
+                        {"title": "b", "url": "https://b.com", "content": ""},
+                        {"title": "c", "url": "https://c.com", "content": ""},
+                        {"title": "d", "url": "https://d.com", "content": ""}
+                    ]
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let backend = SearxngSearchBackend::new(&server.url(), 5000, &fast_resilience()).unwrap();
+        let hits = backend.search("q", 2).await.unwrap();
+        assert_eq!(hits.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_searxng_missing_results_field_returns_empty() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("GET", "/search")
+            .match_query(mockito::Matcher::Any)
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"something": "else"}"#)
+            .create_async()
+            .await;
+
+        let backend = SearxngSearchBackend::new(&server.url(), 5000, &fast_resilience()).unwrap();
+        let hits = backend.search("q", 10).await.unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_tavily_successful_search_sends_bearer() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/search")
+            .match_header("authorization", "Bearer tvly-test-key")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "results": [
+                        {"title": "Tavily hit", "url": "https://example.com", "content": "snippet"}
+                    ]
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let backend =
+            TavilySearchBackend::new(&server.url(), "tvly-test-key", 5000, &fast_resilience())
+                .unwrap();
+        let hits = backend.search("question", 5).await.unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].title, "Tavily hit");
     }
 }

@@ -1,13 +1,16 @@
 //! Encryption helpers — salt management, encryptor resolution, API key lookup.
 
+#[cfg(feature = "encryption")]
 use std::io::IsTerminal;
 
 use brain_core::BrainConfig;
 
+#[cfg(feature = "encryption")]
 pub(crate) fn salt_path(config: &BrainConfig) -> std::path::PathBuf {
     config.data_dir().join("db/salt")
 }
 
+#[cfg(feature = "encryption")]
 pub(crate) fn load_salt(config: &BrainConfig) -> Option<[u8; 16]> {
     let bytes = std::fs::read(salt_path(config)).ok()?;
     if bytes.len() == 16 {
@@ -19,6 +22,7 @@ pub(crate) fn load_salt(config: &BrainConfig) -> Option<[u8; 16]> {
     }
 }
 
+#[cfg(feature = "encryption")]
 pub(crate) fn write_salt(config: &BrainConfig, salt: &[u8; 16]) -> anyhow::Result<()> {
     let path = salt_path(config);
     std::fs::write(&path, salt.as_slice())?;
@@ -40,6 +44,7 @@ pub(crate) fn resolve_llm_api_key(config: &BrainConfig) -> String {
 }
 
 /// Build an `Encryptor` from config + passphrase, or `None` when encryption is disabled.
+#[cfg(feature = "encryption")]
 pub(crate) fn resolve_encryptor(
     config: &BrainConfig,
 ) -> anyhow::Result<Option<storage::Encryptor>> {

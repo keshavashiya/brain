@@ -1,10 +1,13 @@
 mod bootstrap;
+#[cfg(feature = "bridge")]
 mod bridge;
 mod chat;
 mod daemon;
 mod deps;
 mod encryption;
+mod errors;
 mod export;
+mod proactivity;
 mod schedules;
 mod serve;
 mod service;
@@ -16,6 +19,10 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "brain", version, about, long_about = None)]
 struct Cli {
+    /// Show full error details (technical error chain)
+    #[arg(long, short, global = true)]
+    verbose: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -29,6 +36,7 @@ enum Commands {
         force: bool,
         /// Seal the blood-brain barrier — enable encryption at rest
         /// (AES-256-GCM). Generates a salt and prompts for a passphrase.
+        #[cfg(feature = "encryption")]
         #[arg(long)]
         encrypt: bool,
     },
@@ -153,6 +161,7 @@ enum Commands {
     ///   brain bridge ws://localhost:8080/bot          # connect to gateway
     ///   brain bridge wss://slack.bot.com/ws           # connect to Slack (with TLS)
     ///   brain bridge ws://localhost:8080 --api-key YOUR_KEY  # with auth
+    #[cfg(feature = "bridge")]
     Bridge {
         /// WebSocket URL of the external gateway to connect to
         url: String,
@@ -167,11 +176,34 @@ enum Commands {
         #[command(subcommand)]
         action: schedules::SchedulesAction,
     },
+
+    /// Manage proactive notifications (habit detection, open-loop reminders).
+    ///
+    /// Quick toggle for proactivity without editing config files.
+    ///
+    /// Examples:
+    ///   brain proactivity status   # show current settings
+    ///   brain proactivity on       # enable
+    ///   brain proactivity off      # disable
+    Proactivity {
+        #[command(subcommand)]
+        action: proactivity::ProactivityAction,
+    },
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() {
     let cli = Cli::parse();
+    if let Err(err) = run(cli).await {
+        // Already parsed, so verbose is available
+        let verbose = std::env::args().any(|a| a == "--verbose" || a == "-v");
+        eprintln!("{}", errors::format_error(&err, verbose));
+        std::process::exit(1);
+    }
+}
+
+async fn run(cli: Cli) -> anyhow::Result<()> {
+    let _verbose = cli.verbose;
 
     // For `brain mcp` (stdio transport), stdout IS the JSON-RPC channel.
     // Tracing must go to stderr with ANSI disabled so it never corrupts the stream.
@@ -197,7 +229,11 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         // ── init ──────────────────────────────────────────────────────────────
-        Commands::Init { force, encrypt } => {
+        Commands::Init {
+            force,
+            #[cfg(feature = "encryption")]
+            encrypt,
+        } => {
             let data_dir = config.data_dir();
             println!("Forming neural pathways...");
             println!("  Cortex:    {}", data_dir.display());
@@ -226,6 +262,7 @@ async fn main() -> anyhow::Result<()> {
                 config.embedding.model, config.embedding.model
             );
 
+            #[cfg(feature = "encryption")]
             if encrypt {
                 let salt = storage::Encryptor::generate_salt();
                 encryption::write_salt(&config, &salt)?;
@@ -296,6 +333,7 @@ async fn main() -> anyhow::Result<()> {
                 daemon::remove_pid(&config);
             }
 
+            #[cfg(feature = "encryption")]
             let passphrase = if config.encryption.enabled {
                 if let Ok(p) = std::env::var("BRAIN_PASSPHRASE") {
                     Some(p)
@@ -315,6 +353,8 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 None
             };
+            #[cfg(not(feature = "encryption"))]
+            let passphrase: Option<String> = None;
 
             let log_path = config.data_dir().join("logs/brain.log");
             let pid = daemon::spawn_daemon(&log_path, passphrase.as_deref())?;
@@ -405,6 +445,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // ── bridge ─────────────────────────────────────────────────────────
+        #[cfg(feature = "bridge")]
         Commands::Bridge { url, api_key } => {
             bridge::cmd_bridge(&config, &url, api_key.as_deref()).await?;
         }
@@ -412,6 +453,11 @@ async fn main() -> anyhow::Result<()> {
         // ── schedules ───────────────────────────────────────────────────────
         Commands::Schedules { action } => {
             schedules::cmd_schedules(&config, action).await?;
+        }
+
+        // ── proactivity ─────────────────────────────────────────────────────
+        Commands::Proactivity { action } => {
+            proactivity::cmd_proactivity(&config, action)?;
         }
     }
 

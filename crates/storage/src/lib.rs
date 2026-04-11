@@ -6,10 +6,12 @@
 //! - Encryption at rest (AES-256-GCM + Argon2id)
 //! - Schema migrations
 
+#[cfg(feature = "encryption")]
 pub mod encryption;
 pub mod ruvector;
 pub mod sqlite;
 
+#[cfg(feature = "encryption")]
 pub use encryption::Encryptor;
 pub use ruvector::{RuVectorStore, VectorResult};
 pub use sqlite::{ExportedEpisode, ExportedFact, ScheduledIntent, SqlitePool};

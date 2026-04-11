@@ -25,3 +25,19 @@ reqwest = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+criterion = { workspace = true }
+tokio = { workspace = true }
+storage = { workspace = true }
+mockito = { workspace = true }
+
+[[bench]]
+name = "recall"
+harness = false
+
+[[bench]]
+name = "embedding"
+harness = false
+
+[[bench]]
+name = "consolidation"
+harness = false

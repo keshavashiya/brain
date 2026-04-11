@@ -14,6 +14,7 @@ use thiserror::Error;
 use tracing::info;
 use uuid::Uuid;
 
+#[cfg(feature = "encryption")]
 use crate::encryption::Encryptor;
 
 /// Errors from the SQLite storage layer.
@@ -84,6 +85,7 @@ pub struct Notification {
 #[derive(Clone)]
 pub struct SqlitePool {
     conn: Arc<Mutex<Connection>>,
+    #[cfg(feature = "encryption")]
     encryptor: Option<Arc<Encryptor>>,
 }
 
@@ -129,6 +131,7 @@ impl SqlitePool {
 
         let pool = Self {
             conn: Arc::new(Mutex::new(conn)),
+            #[cfg(feature = "encryption")]
             encryptor: None,
         };
 
@@ -151,6 +154,7 @@ impl SqlitePool {
 
         let pool = Self {
             conn: Arc::new(Mutex::new(conn)),
+            #[cfg(feature = "encryption")]
             encryptor: None,
         };
 
@@ -171,6 +175,7 @@ impl SqlitePool {
     ///
     /// Once set, `encrypt_content` / `decrypt_content` are active on all
     /// store layers that use this pool.
+    #[cfg(feature = "encryption")]
     pub fn with_encryptor(mut self, enc: Encryptor) -> Self {
         self.encryptor = Some(Arc::new(enc));
         self
@@ -178,17 +183,27 @@ impl SqlitePool {
 
     /// Returns true if an encryptor is active.
     pub fn is_encrypted(&self) -> bool {
-        self.encryptor.is_some()
+        #[cfg(feature = "encryption")]
+        {
+            self.encryptor.is_some()
+        }
+        #[cfg(not(feature = "encryption"))]
+        {
+            false
+        }
     }
 
     /// Encrypt a string if encryption is enabled, otherwise return as-is.
     pub fn encrypt_content(&self, plaintext: &str) -> String {
-        if let Some(enc) = &self.encryptor {
-            enc.encrypt_string(plaintext)
-                .unwrap_or_else(|_| plaintext.to_string())
-        } else {
-            plaintext.to_string()
+        #[cfg(feature = "encryption")]
+        {
+            if let Some(enc) = &self.encryptor {
+                return enc
+                    .encrypt_string(plaintext)
+                    .unwrap_or_else(|_| plaintext.to_string());
+            }
         }
+        plaintext.to_string()
     }
 
     /// Decrypt a string if encryption is enabled.
@@ -196,12 +211,15 @@ impl SqlitePool {
     /// Falls back to returning the input unchanged if decryption fails
     /// (e.g. legacy plaintext rows written before encryption was enabled).
     pub fn decrypt_content(&self, maybe_ciphertext: &str) -> String {
-        if let Some(enc) = &self.encryptor {
-            enc.decrypt_string(maybe_ciphertext)
-                .unwrap_or_else(|_| maybe_ciphertext.to_string())
-        } else {
-            maybe_ciphertext.to_string()
+        #[cfg(feature = "encryption")]
+        {
+            if let Some(enc) = &self.encryptor {
+                return enc
+                    .decrypt_string(maybe_ciphertext)
+                    .unwrap_or_else(|_| maybe_ciphertext.to_string());
+            }
         }
+        maybe_ciphertext.to_string()
     }
 
     /// Try to decrypt a string, returning `None` if decryption fails.
@@ -210,11 +228,13 @@ impl SqlitePool {
     /// ciphertext. Use this at read boundaries to filter out rows that
     /// were encrypted with a different key or are corrupted.
     pub fn try_decrypt_content(&self, maybe_ciphertext: &str) -> Option<String> {
-        if let Some(enc) = &self.encryptor {
-            enc.decrypt_string(maybe_ciphertext).ok()
-        } else {
-            Some(maybe_ciphertext.to_string())
+        #[cfg(feature = "encryption")]
+        {
+            if let Some(enc) = &self.encryptor {
+                return enc.decrypt_string(maybe_ciphertext).ok();
+            }
         }
+        Some(maybe_ciphertext.to_string())
     }
 
     /// Flush the WAL file into the main database file.

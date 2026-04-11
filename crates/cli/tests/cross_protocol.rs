@@ -1,3 +1,5 @@
+#![cfg(feature = "grpc")]
+
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};

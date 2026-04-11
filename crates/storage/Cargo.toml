@@ -10,10 +10,14 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = ["encryption"]
+encryption = ["dep:aes-gcm", "dep:argon2"]
+
 [dependencies]
 rusqlite = { workspace = true }
-aes-gcm = { workspace = true }
-argon2 = { workspace = true }
+aes-gcm = { workspace = true, optional = true }
+argon2 = { workspace = true, optional = true }
 sha2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

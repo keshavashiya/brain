@@ -754,4 +754,183 @@ mod tests {
         // Invalid
         assert!(extract_json_from_response::<Payload>("no json here").is_none());
     }
+
+    // ─── Mock HTTP tests for generate() ────────────────────────────────────
+
+    fn user_message(text: &str) -> Vec<Message> {
+        vec![Message {
+            role: Role::User,
+            content: text.to_string(),
+        }]
+    }
+
+    #[tokio::test]
+    async fn test_ollama_generate_success() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/api/chat")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "message": {"role": "assistant", "content": "Hello from mock!"},
+                    "done": true,
+                    "prompt_eval_count": 5,
+                    "eval_count": 4
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let provider = OllamaProvider::new(&server.url(), "test-model", 0.7, 1024).unwrap();
+        let resp = provider.generate(&user_message("hi")).await.unwrap();
+
+        assert_eq!(resp.content, "Hello from mock!");
+        assert_eq!(resp.usage.as_ref().unwrap().prompt_tokens, 5);
+        assert_eq!(resp.usage.as_ref().unwrap().completion_tokens, 4);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_ollama_generate_500_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/api/chat")
+            .with_status(500)
+            .with_body("internal server error")
+            .create_async()
+            .await;
+
+        let provider = OllamaProvider::new(&server.url(), "test-model", 0.7, 1024).unwrap();
+        let err = provider.generate(&user_message("hi")).await.unwrap_err();
+
+        assert!(
+            matches!(err, LlmError::Api { status: 500, .. }),
+            "expected Api(500), got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ollama_generate_rate_limited_as_api_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/api/chat")
+            .with_status(429)
+            .with_body("rate limited")
+            .create_async()
+            .await;
+
+        let provider = OllamaProvider::new(&server.url(), "test-model", 0.7, 1024).unwrap();
+        let err = provider.generate(&user_message("hi")).await.unwrap_err();
+
+        // Providers surface 429 as Api{status: 429} — callers translate to RateLimited.
+        assert!(
+            matches!(err, LlmError::Api { status: 429, .. }),
+            "expected Api(429), got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ollama_generate_malformed_json() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/api/chat")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body("this is not json")
+            .create_async()
+            .await;
+
+        let provider = OllamaProvider::new(&server.url(), "test-model", 0.7, 1024).unwrap();
+        let err = provider.generate(&user_message("hi")).await.unwrap_err();
+
+        // serde_json parse error surfaces as Http (via #[from] reqwest::Error from resp.json())
+        assert!(
+            matches!(err, LlmError::Http(_)),
+            "expected Http(..), got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openai_generate_success() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{
+                    "choices": [{
+                        "message": {"role": "assistant", "content": "OpenAI mock response"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": {
+                        "prompt_tokens": 10,
+                        "completion_tokens": 5,
+                        "total_tokens": 15
+                    }
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let provider =
+            OpenAiProvider::new(&server.url(), Some("test-key"), "gpt-4", 0.7, Some(1024)).unwrap();
+        let resp = provider.generate(&user_message("hi")).await.unwrap();
+
+        assert_eq!(resp.content, "OpenAI mock response");
+        assert_eq!(resp.usage.as_ref().unwrap().total_tokens, 15);
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_openai_generate_500_error() {
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/chat/completions")
+            .with_status(500)
+            .with_body("service unavailable")
+            .create_async()
+            .await;
+
+        let provider =
+            OpenAiProvider::new(&server.url(), Some("test-key"), "gpt-4", 0.7, Some(1024)).unwrap();
+        let err = provider.generate(&user_message("hi")).await.unwrap_err();
+
+        assert!(
+            matches!(err, LlmError::Api { status: 500, .. }),
+            "expected Api(500), got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_openai_sends_bearer_token() {
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/chat/completions")
+            .match_header("authorization", "Bearer my-secret-key")
+            .with_status(200)
+            .with_body(
+                r#"{
+                    "choices": [{
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": null
+                }"#,
+            )
+            .create_async()
+            .await;
+
+        let provider = OpenAiProvider::new(
+            &server.url(),
+            Some("my-secret-key"),
+            "gpt-4",
+            0.7,
+            Some(1024),
+        )
+        .unwrap();
+        provider.generate(&user_message("hi")).await.unwrap();
+        mock.assert_async().await;
+    }
 }

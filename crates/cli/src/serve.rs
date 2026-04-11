@@ -36,10 +36,11 @@ pub(crate) async fn cmd_serve(
 
         if config.actions.messaging.enabled && !config.actions.messaging.channels.is_empty() {
             let res = &config.actions.resilience;
-            match WebhookMessageBackend::new(
+            match WebhookMessageBackend::new_with_metrics(
                 &config.actions.messaging.channels,
                 config.actions.messaging.timeout_ms,
                 res,
+                Some(processor.metrics().clone()),
             ) {
                 Ok(sender) => {
                     router = router.with_webhook_sender(Box::new(sender));
@@ -76,12 +77,17 @@ pub(crate) async fn cmd_serve(
         set.spawn(async move { wsadapter::serve(p, &h, port).await });
     }
 
+    #[cfg(feature = "grpc")]
     if run_all || grpc {
         let p = processor.clone();
         let h = host.clone();
         let port = config.adapters.grpc.port;
         println!("  Synapse gRPC  → {}:{}", h, port);
         set.spawn(async move { grpcadapter::serve(p, &h, port).await });
+    }
+    #[cfg(not(feature = "grpc"))]
+    if grpc {
+        eprintln!("WARNING: brain was built without the `grpc` feature — gRPC synapse disabled");
     }
 
     if run_all || mcp {
@@ -92,7 +98,23 @@ pub(crate) async fn cmd_serve(
         set.spawn(async move { mcp::serve_http(p, &h, port).await });
     }
 
+    // ── Proactivity first-run notice ────────────────────────────────
+    if config.proactivity.enabled {
+        // Show a notice if user hasn't explicitly configured proactivity
+        let user_config_path = brain_core::BrainConfig::user_config_path();
+        let user_explicitly_set = std::fs::read_to_string(&user_config_path)
+            .map(|s| s.contains("proactivity") && s.contains("enabled"))
+            .unwrap_or(false);
+        if !user_explicitly_set {
+            tracing::info!(
+                "Proactive notifications are enabled by default (max 2/day, quiet hours 20:00-10:00). \
+                 Disable with: brain proactivity off"
+            );
+        }
+    }
+
     // ── Proactivity / habit engine background task ────────────────────
+    #[cfg(feature = "ganglia")]
     if config.proactivity.enabled {
         let p = processor.clone();
         let habit_cfg = ganglia::HabitConfig {
@@ -137,6 +159,7 @@ pub(crate) async fn cmd_serve(
     }
 
     // ── Open-loop detection background task ───────────────────────────
+    #[cfg(feature = "ganglia")]
     if config.proactivity.enabled && config.proactivity.open_loop.enabled {
         let p = processor.clone();
         let ol_cfg = config.proactivity.open_loop.clone();
@@ -242,6 +265,11 @@ pub(crate) async fn cmd_serve(
                         if let Some(router) = p.notification_router() {
                             router.prune();
                         }
+
+                        let metrics = p.metrics();
+                        metrics.inc_consolidation_run();
+                        metrics.add_consolidation_pruned(r.episodes_pruned as u64);
+                        metrics.add_consolidation_promoted(promoted_now as u64);
 
                         tracing::info!(
                             pruned = r.episodes_pruned,

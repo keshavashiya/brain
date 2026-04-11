@@ -24,3 +24,12 @@ tracing = { workspace = true }
 chrono = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+mockito = { workspace = true }
+tokio = { workspace = true }
+
+[[bench]]
+name = "circuit_breaker"
+harness = false

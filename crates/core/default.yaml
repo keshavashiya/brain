@@ -89,12 +89,12 @@ actions:
     circuit_breaker_cooldown_secs: 60  # seconds to wait before retrying after circuit opens
 
 proactivity:
-  enabled: false               # Opt-in
-  max_per_day: 5
+  enabled: true                # Enabled by default (max 2/day, wide quiet hours)
+  max_per_day: 2
   min_interval_minutes: 60
   quiet_hours:
-    start: "22:00"
-    end: "08:00"
+    start: "20:00"
+    end: "10:00"
     timezone: "UTC"              # IANA timezone name (e.g. "America/New_York")
   delivery:
     outbox: true               # Always write to outbox; drain on next interaction
