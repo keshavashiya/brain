@@ -477,7 +477,7 @@ mod tests {
             .create_async()
             .await;
 
-        let embedder = Embedder::for_ollama(&server.url(), "test-model");
+        let embedder = Embedder::for_ollama(&server.url(), "test-model").unwrap();
         let v = embedder.embed("hello world").await.unwrap();
         assert_eq!(v, vec![0.1, 0.2, 0.3, 0.4]);
         mock.assert_async().await;
@@ -493,7 +493,7 @@ mod tests {
             .create_async()
             .await;
 
-        let embedder = Embedder::for_ollama(&server.url(), "test-model");
+        let embedder = Embedder::for_ollama(&server.url(), "test-model").unwrap();
         let err = embedder.embed("hello").await.unwrap_err();
         assert!(
             matches!(err, EmbeddingError::Http(_)),
@@ -512,7 +512,7 @@ mod tests {
             .create_async()
             .await;
 
-        let embedder = Embedder::for_ollama(&server.url(), "test-model");
+        let embedder = Embedder::for_ollama(&server.url(), "test-model").unwrap();
         let err = embedder.embed("hello").await.unwrap_err();
         assert!(
             matches!(err, EmbeddingError::Parse(_)),
@@ -532,7 +532,7 @@ mod tests {
             .create_async()
             .await;
 
-        let embedder = Embedder::for_ollama(&server.url(), "test-model");
+        let embedder = Embedder::for_ollama(&server.url(), "test-model").unwrap();
         let err = embedder
             .embed_batch(&["first text", "second text"])
             .await
@@ -561,7 +561,8 @@ mod tests {
             .create_async()
             .await;
 
-        let embedder = Embedder::for_openai(&server.url(), "text-embedding-3-small", "test-key");
+        let embedder =
+            Embedder::for_openai(&server.url(), "text-embedding-3-small", "test-key").unwrap();
         let v = embedder.embed("hello").await.unwrap();
         assert_eq!(v, vec![0.9, 0.8, 0.7]);
         mock.assert_async().await;
@@ -586,7 +587,7 @@ mod tests {
             .create_async()
             .await;
 
-        let embedder = Embedder::for_openai(&server.url(), "model", "key");
+        let embedder = Embedder::for_openai(&server.url(), "model", "key").unwrap();
         let batch = embedder.embed_batch(&["a", "b"]).await.unwrap();
         assert_eq!(batch[0], vec![0.1]);
         assert_eq!(batch[1], vec![0.2]);
