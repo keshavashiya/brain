@@ -16,7 +16,7 @@
 //!
 //! ## Authentication
 //! All `/v1/*` routes require `Authorization: Bearer <api-key>` header.
-//! The demo key `demokey123` (read+write) is pre-configured in `default.yaml`.
+//! A random key is generated on `brain init` and printed to stdout.
 
 use std::{
     collections::HashMap,
@@ -177,7 +177,7 @@ impl Metrics {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        let mut guard = self.gauge_cache.lock().unwrap();
+        let mut guard = self.gauge_cache.lock().unwrap_or_else(|e| e.into_inner());
         if now_ms.saturating_sub(guard.last_updated_ms) < GAUGE_TTL_MS {
             return;
         }
@@ -211,7 +211,7 @@ impl Metrics {
         let latency_ms = self.signals_latency_ms_total.load(Ordering::Relaxed);
         let sub = subsystems.snapshot();
         let (fact_count, episode_count) = {
-            let g = self.gauge_cache.lock().unwrap();
+            let g = self.gauge_cache.lock().unwrap_or_else(|e| e.into_inner());
             (g.fact_count, g.episode_count)
         };
 
@@ -874,15 +874,16 @@ async fn sse_events_handler(
 mod tests {
     use super::*;
 
-    /// Build a test router with the demo key pre-loaded.
-    async fn make_router() -> (Router, tempfile::TempDir) {
+    /// Build a test router with the API key pre-loaded.
+    async fn make_router() -> (Router, tempfile::TempDir, String) {
         let temp = tempfile::tempdir().unwrap();
         let mut config = brain_core::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let api_key = config.access.api_keys.first().unwrap().key.clone();
         let api_keys = config.access.api_keys.clone();
         let processor = signal::SignalProcessor::new(config).await.unwrap();
         let router = create_router(Arc::new(processor), api_keys, true);
-        (router, temp)
+        (router, temp, api_key)
     }
 
     #[test]
@@ -953,7 +954,7 @@ mod tests {
         use axum::http::{self, Request};
         use tower::util::ServiceExt;
 
-        let (router, _tmp) = make_router().await;
+        let (router, _tmp, _api_key) = make_router().await;
 
         let request = Request::builder()
             .method(http::Method::GET)
@@ -986,7 +987,7 @@ mod tests {
         use axum::http::{self, Request};
         use tower::util::ServiceExt;
 
-        let (router, _tmp) = make_router().await;
+        let (router, _tmp, _api_key) = make_router().await;
 
         let request = Request::builder()
             .method(http::Method::GET)
@@ -1012,7 +1013,7 @@ mod tests {
         use axum::http::{self, Request};
         use tower::util::ServiceExt;
 
-        let (router, _tmp) = make_router().await;
+        let (router, _tmp, _api_key) = make_router().await;
 
         let request = Request::builder()
             .method(http::Method::GET)
@@ -1049,7 +1050,7 @@ mod tests {
         use axum::http::{self, Request};
         use tower::util::ServiceExt;
 
-        let (router, _tmp) = make_router().await;
+        let (router, _tmp, _api_key) = make_router().await;
 
         let request = Request::builder()
             .method(http::Method::GET)
@@ -1089,7 +1090,7 @@ mod tests {
         use axum::http::{self, Request};
         use tower::util::ServiceExt;
 
-        let (router, _tmp) = make_router().await;
+        let (router, _tmp, _api_key) = make_router().await;
 
         let request = Request::builder()
             .method(http::Method::GET)
@@ -1114,7 +1115,7 @@ mod tests {
         use axum::http::{self, Request};
         use tower::util::ServiceExt;
 
-        let (router, _tmp) = make_router().await;
+        let (router, _tmp, _api_key) = make_router().await;
 
         let payload = serde_json::json!({"content": "Remember Rust is fast"});
         let request = Request::builder()
@@ -1135,7 +1136,7 @@ mod tests {
         use axum::http::{self, Request};
         use tower::util::ServiceExt;
 
-        let (router, _tmp) = make_router().await;
+        let (router, _tmp, _api_key) = make_router().await;
 
         let payload = serde_json::json!({"content": "Remember Rust is fast"});
         let request = Request::builder()
@@ -1150,21 +1151,21 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// POST /v1/signals with valid demo key → 200.
+    /// POST /v1/signals with valid API key → 200.
     #[tokio::test]
     async fn test_post_signal_store_fact_with_auth() {
         use axum::body::Body;
         use axum::http::{self, Request};
         use tower::util::ServiceExt;
 
-        let (router, _tmp) = make_router().await;
+        let (router, _tmp, api_key) = make_router().await;
 
         let payload = serde_json::json!({"content": "Remember that Rust is fast"});
         let request = Request::builder()
             .method(http::Method::POST)
             .uri("/v1/signals")
             .header("content-type", "application/json")
-            .header("authorization", "Bearer demokey123")
+            .header("authorization", format!("Bearer {api_key}"))
             .body(Body::from(serde_json::to_string(&payload).unwrap()))
             .unwrap();
 
@@ -1185,7 +1186,7 @@ mod tests {
         use axum::http::{self, Request};
         use tower::util::ServiceExt;
 
-        let (router, _tmp) = make_router().await;
+        let (router, _tmp, _api_key) = make_router().await;
 
         let request = Request::builder()
             .method(http::Method::GET)
@@ -1197,19 +1198,19 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
-    /// GET /v1/memory/facts with valid demo key → 200.
+    /// GET /v1/memory/facts with valid API key → 200.
     #[tokio::test]
     async fn test_get_facts_endpoint_with_auth() {
         use axum::body::Body;
         use axum::http::{self, Request};
         use tower::util::ServiceExt;
 
-        let (router, _tmp) = make_router().await;
+        let (router, _tmp, api_key) = make_router().await;
 
         let request = Request::builder()
             .method(http::Method::GET)
             .uri("/v1/memory/facts")
-            .header("authorization", "Bearer demokey123")
+            .header("authorization", format!("Bearer {api_key}"))
             .body(Body::empty())
             .unwrap();
 
@@ -1302,6 +1303,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut config = brain_core::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let api_key = config.access.api_keys.first().unwrap().key.clone();
         let api_keys = config.access.api_keys.clone();
         let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
         let state = Arc::new(AppState {
@@ -1319,7 +1321,7 @@ mod tests {
             .method(http::Method::POST)
             .uri("/v1/signals")
             .header("content-type", "application/json")
-            .header("authorization", "Bearer demokey123")
+            .header("authorization", format!("Bearer {api_key}"))
             .body(Body::from(serde_json::to_string(&payload).unwrap()))
             .unwrap();
 
@@ -1343,7 +1345,7 @@ mod tests {
         let get_req = Request::builder()
             .method(http::Method::GET)
             .uri("/v1/memory/facts")
-            .header("authorization", "Bearer demokey123")
+            .header("authorization", format!("Bearer {api_key}"))
             .body(Body::empty())
             .unwrap();
 
@@ -1374,6 +1376,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut config = brain_core::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let api_key = config.access.api_keys.first().unwrap().key.clone();
         let api_keys = config.access.api_keys.clone();
         let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
 
@@ -1402,7 +1405,7 @@ mod tests {
             .method(http::Method::POST)
             .uri("/v1/memory/search")
             .header("content-type", "application/json")
-            .header("authorization", "Bearer demokey123")
+            .header("authorization", format!("Bearer {api_key}"))
             .body(Body::from(serde_json::to_string(&payload).unwrap()))
             .unwrap();
 
@@ -1428,6 +1431,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut config = brain_core::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let api_key = config.access.api_keys.first().unwrap().key.clone();
         let api_keys = config.access.api_keys.clone();
         let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
         let state = Arc::new(AppState {
@@ -1451,7 +1455,7 @@ mod tests {
         let request = Request::builder()
             .method(http::Method::GET)
             .uri(format!("/v1/signals/{id}"))
-            .header("authorization", "Bearer demokey123")
+            .header("authorization", format!("Bearer {api_key}"))
             .body(Body::empty())
             .unwrap();
 

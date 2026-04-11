@@ -15,7 +15,7 @@ pub(crate) async fn cmd_bridge(
         .ok_or_else(|| anyhow::anyhow!("No API key configured. Add one in ~/.brain/config.yaml"))?;
 
     let brain_ws_url = format!(
-        "ws://{}:{}/ws",
+        "ws://{}:{}",
         config.adapters.http.host, config.adapters.ws.port
     );
 
@@ -41,15 +41,53 @@ pub(crate) async fn cmd_bridge(
 
                 let (mut sink, mut stream) = ws.split();
 
-                let signal = serde_json::json!({
+                // Phase 1: Send auth frame first, await acknowledgment
+                let auth_frame = serde_json::json!({
                     "api_key": api_key,
+                });
+                if let Err(e) = sink
+                    .send(Message::Text(auth_frame.to_string().into()))
+                    .await
+                {
+                    tracing::error!("Bridge auth send failed: {}", e);
+                    return BridgeMessage::reply(&msg, "Bridge auth failed");
+                }
+
+                // Wait for auth acknowledgment
+                let auth_response = match stream.next().await {
+                    Some(Ok(response)) => response,
+                    Some(Err(e)) => {
+                        tracing::error!("Bridge auth stream error: {}", e);
+                        return BridgeMessage::reply(&msg, "Bridge auth failed");
+                    }
+                    None => return BridgeMessage::reply(&msg, "No auth response from Brain"),
+                };
+
+                let auth_text = match auth_response {
+                    Message::Text(t) => t.to_string(),
+                    _ => "{}".to_string(),
+                };
+
+                let auth_json: serde_json::Value =
+                    serde_json::from_str(&auth_text).unwrap_or_default();
+
+                if auth_json.get("status").and_then(|s| s.as_str()) != Some("authenticated") {
+                    let error = auth_json
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("Authentication failed");
+                    return BridgeMessage::reply(&msg, format!("Bridge auth error: {error}"));
+                }
+
+                // Phase 2: Send signal frame after successful auth
+                let signal = serde_json::json!({
                     "content": msg.content,
                     "source": msg.source.clone().unwrap_or_else(|| "bridge".to_string()),
                     "metadata": msg.metadata.clone(),
                 });
 
                 if let Err(e) = sink.send(Message::Text(signal.to_string().into())).await {
-                    tracing::error!("Bridge send failed: {}", e);
+                    tracing::error!("Bridge signal send failed: {}", e);
                     return BridgeMessage::reply(&msg, "Bridge send failed");
                 };
 

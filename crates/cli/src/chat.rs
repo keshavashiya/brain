@@ -1,72 +1,229 @@
 //! Chat commands — interactive and non-interactive conversation modes.
+//!
+//! Uses WebSocket for communication with the daemon, enabling lower latency
+//! and a consistent protocol across all adapters.
 
 use std::io::stdout;
-use std::time::Duration;
 
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use crossterm::ExecutableCommand;
+use futures_util::{SinkExt, StreamExt};
 use rustyline::DefaultEditor;
+use tokio_tungstenite::tungstenite::Message;
 
 use crate::status::show_status;
 
-/// Send a chat message via a running daemon's HTTP API.
+type WsSink = futures_util::stream::SplitSink<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    Message,
+>;
+type WsStream = futures_util::stream::SplitStream<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+>;
+
+/// Send a chat message via a running daemon's WebSocket API.
 ///
+/// Connects, authenticates, sends the signal, and returns the response text.
 /// `session_id` is included so the daemon groups episodes into the same
-/// conversation. When the user types `/clear`, the caller rotates the
-/// session_id to start a fresh conversation.
+/// conversation.
 ///
 /// Returns `Ok(Some(response_text))` if the server responds,
 /// or `Err` on failures.
-async fn try_server_chat_via_url(
-    daemon_url: &str,
-    config: &brain_core::BrainConfig,
+async fn send_ws_message(
+    ws_url: &str,
+    api_key: &str,
     message: &str,
     session_id: &str,
 ) -> anyhow::Result<Option<String>> {
-    let signal_url = format!("{daemon_url}/v1/signals");
-    let api_key = config
+    let (ws, _) = tokio_tungstenite::connect_async(ws_url).await?;
+    let (mut sink, mut stream) = ws.split();
+
+    // Phase 1: Auth handshake
+    let auth_frame = serde_json::json!({ "api_key": api_key });
+    sink.send(Message::Text(auth_frame.to_string().into()))
+        .await?;
+
+    let auth_response = match stream.next().await {
+        Some(Ok(Message::Text(t))) => t.to_string(),
+        Some(Ok(_)) => return Err(anyhow::anyhow!("Unexpected non-text auth response")),
+        Some(Err(e)) => return Err(anyhow::anyhow!("WebSocket error during auth: {e}")),
+        None => return Err(anyhow::anyhow!("No auth response from Brain")),
+    };
+
+    let auth_json: serde_json::Value = serde_json::from_str(&auth_response).unwrap_or_default();
+    if auth_json.get("status").and_then(|s| s.as_str()) != Some("authenticated") {
+        let error = auth_json
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("Authentication failed");
+        return Err(anyhow::anyhow!("Auth error: {error}"));
+    }
+
+    // Phase 2: Send signal
+    let signal = serde_json::json!({
+        "content": message,
+        "session_id": session_id,
+    });
+    sink.send(Message::Text(signal.to_string().into())).await?;
+
+    // Phase 3: Read response — skip proactive notifications, which the server
+    // may push unsolicited on the same stream before the real reply.
+    loop {
+        let frame = match stream.next().await {
+            Some(Ok(frame)) => frame,
+            Some(Err(e)) => return Err(anyhow::anyhow!("WebSocket error: {e}")),
+            None => return Err(anyhow::anyhow!("No response from Brain")),
+        };
+
+        let text = match frame {
+            Message::Text(t) => t.to_string(),
+            Message::Ping(data) => {
+                let _ = sink.send(Message::Pong(data)).await;
+                continue;
+            }
+            Message::Close(_) => {
+                return Err(anyhow::anyhow!("Server closed the connection"));
+            }
+            _ => continue,
+        };
+
+        let response_json: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+
+        if response_json.get("type").and_then(|v| v.as_str()) == Some("proactive") {
+            continue; // ignore unsolicited pushes, keep waiting for the reply
+        }
+
+        let reply = response_json
+            .get("response")
+            .and_then(|r| r.get("value").or_else(|| r.get("Error")))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        return Ok(reply.filter(|t| !t.is_empty()));
+    }
+}
+
+/// Persistent WS connection for interactive mode.
+struct WsSession {
+    sink: WsSink,
+    stream: WsStream,
+}
+
+impl WsSession {
+    async fn send_message(
+        &mut self,
+        message: &str,
+        session_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let signal = serde_json::json!({
+            "content": message,
+            "session_id": session_id,
+        });
+        self.sink
+            .send(Message::Text(signal.to_string().into()))
+            .await?;
+
+        loop {
+            let frame = match self.stream.next().await {
+                Some(Ok(frame)) => frame,
+                Some(Err(e)) => return Err(anyhow::anyhow!("WebSocket error: {e}")),
+                None => return Err(anyhow::anyhow!("Connection closed by server")),
+            };
+
+            match frame {
+                Message::Text(t) => {
+                    let response_json: serde_json::Value =
+                        serde_json::from_str(&t).unwrap_or_default();
+
+                    // Skip proactive notifications — they're pushed unsolicited
+                    if response_json.get("type").and_then(|v| v.as_str()) == Some("proactive") {
+                        // Print proactive notifications inline so the user sees them
+                        if let Some(content) = response_json["content"].as_str() {
+                            let mut out = stdout();
+                            out.execute(SetForegroundColor(Color::Yellow))?;
+                            out.execute(Print("[proactive] "))?;
+                            out.execute(ResetColor)?;
+                            println!("{content}");
+                        }
+                        continue; // keep waiting for the actual response
+                    }
+
+                    let text = response_json
+                        .get("response")
+                        .and_then(|r| r.get("value").or_else(|| r.get("Error")))
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+
+                    return Ok(text.filter(|t| !t.is_empty()));
+                }
+                Message::Ping(data) => {
+                    let _ = self.sink.send(Message::Pong(data)).await;
+                    continue; // wait for next frame
+                }
+                Message::Close(_) => {
+                    return Err(anyhow::anyhow!("Server closed the connection"));
+                }
+                _ => continue, // ignore Pong, Binary, etc.
+            }
+        }
+    }
+}
+
+async fn connect_ws_session(ws_url: &str, api_key: &str) -> anyhow::Result<WsSession> {
+    let (ws, _) = tokio_tungstenite::connect_async(ws_url).await?;
+    let (mut sink, mut stream) = ws.split();
+
+    // Auth handshake
+    let auth_frame = serde_json::json!({ "api_key": api_key });
+    sink.send(Message::Text(auth_frame.to_string().into()))
+        .await?;
+
+    let auth_response = match stream.next().await {
+        Some(Ok(Message::Text(t))) => t.to_string(),
+        Some(Ok(_)) => return Err(anyhow::anyhow!("Unexpected non-text auth response")),
+        Some(Err(e)) => return Err(anyhow::anyhow!("WebSocket error during auth: {e}")),
+        None => return Err(anyhow::anyhow!("No auth response from Brain")),
+    };
+
+    let auth_json: serde_json::Value = serde_json::from_str(&auth_response).unwrap_or_default();
+    if auth_json.get("status").and_then(|s| s.as_str()) != Some("authenticated") {
+        let error = auth_json
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("Authentication failed");
+        return Err(anyhow::anyhow!("Auth error: {error}"));
+    }
+
+    Ok(WsSession { sink, stream })
+}
+
+fn ws_url(config: &brain_core::BrainConfig) -> String {
+    format!(
+        "ws://{}:{}",
+        config.adapters.http.host, config.adapters.ws.port
+    )
+}
+
+fn first_api_key(config: &brain_core::BrainConfig) -> anyhow::Result<String> {
+    config
         .access
         .api_keys
         .first()
         .map(|k| k.key.clone())
-        .unwrap_or_default();
-
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(&signal_url)
-        .header("Authorization", format!("Bearer {api_key}"))
-        .json(&serde_json::json!({
-            "content": message,
-            "session_id": session_id,
-        }))
-        .timeout(Duration::from_secs(120))
-        .send()
-        .await?
-        .json::<serde_json::Value>()
-        .await?;
-
-    let text = if let Some(t) = resp["response"]["value"].as_str() {
-        t.to_string()
-    } else if let Some(e) = resp["response"]["Error"].as_str() {
-        e.to_string()
-    } else {
-        String::new()
-    };
-    if text.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(text))
-    }
+        .ok_or_else(|| anyhow::anyhow!("No API key configured. Run `brain init`."))
 }
 
 pub(crate) async fn chat_non_interactive(
     config: &brain_core::BrainConfig,
     message: &str,
 ) -> anyhow::Result<()> {
-    let daemon_url = crate::bootstrap::require_daemon(config).await?;
+    // Ensure the daemon is up — gives a clear error instead of a raw WS connect failure.
+    let _ = crate::bootstrap::require_daemon(config).await?;
+    let ws_url = ws_url(config);
+    let api_key = first_api_key(config)?;
     let session_id = uuid::Uuid::new_v4().to_string();
 
-    let response = try_server_chat_via_url(&daemon_url, config, message, &session_id)
+    let response = send_ws_message(&ws_url, &api_key, message, &session_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("Daemon returned empty response"))?;
 
@@ -75,7 +232,10 @@ pub(crate) async fn chat_non_interactive(
 }
 
 pub(crate) async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()> {
-    let daemon_url = crate::bootstrap::require_daemon(config).await?;
+    let _ = crate::bootstrap::require_daemon(config).await?;
+    let ws_url = ws_url(config);
+    let api_key = first_api_key(config)?;
+
     let mut session_id = uuid::Uuid::new_v4().to_string();
 
     let ver = env!("CARGO_PKG_VERSION");
@@ -89,10 +249,14 @@ pub(crate) async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow
     println!();
     println!("  Cortex:  {}", config.llm.model);
     println!("  Memory:  {}", config.data_dir().display());
-    println!("  Synapse: connected to daemon (HTTP)");
+    println!("  Synapse: connected to daemon (WebSocket)");
     println!();
     println!("Signals: /status  /clear  /quit");
     println!();
+
+    // Establish persistent WS connection
+    let mut ws = connect_ws_session(&ws_url, &api_key).await?;
+
     let mut rl = DefaultEditor::new()?;
     let history_path = config.data_dir().join("history.txt");
     let _ = rl.load_history(&history_path);
@@ -128,8 +292,7 @@ pub(crate) async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow
                     _ => {}
                 }
 
-                let response =
-                    try_server_chat_via_url(&daemon_url, config, input, &session_id).await;
+                let response = ws.send_message(input, &session_id).await;
 
                 match response {
                     Ok(Some(response)) => {

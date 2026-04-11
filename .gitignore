@@ -32,6 +32,7 @@ logs/
 *.local.yaml
 *.secrets.yaml
 .codesage
+.qwen/
 
 # Models
 *.onnx

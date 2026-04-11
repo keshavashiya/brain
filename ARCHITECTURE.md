@@ -58,7 +58,7 @@ brain/
 │   │                     State persisted in SQLite (habit_state table)
 │   │
 │   ├── storage/        # Storage abstraction layer
-│   │   ├── sqlite      # SqlitePool: 16 migrations, WAL mode, thread-safe Mutex<Connection>
+│   │   ├── sqlite      # SqlitePool: 17 migrations, WAL mode, thread-safe Mutex<Connection>
 │   │   │                 Tables: semantic_facts, episodes, procedures, scheduled_intents,
 │   │   │                 _migrations, FTS5 virtual tables (episodes_fts)
 │   │   ├── ruvector    # RuVectorStore: wraps ruvector-core (external crate, crates.io)
@@ -86,8 +86,9 @@ brain/
 ├── crates/cli/         # `brain` binary — all CLI commands:
 │                         init, chat, status, start, stop, serve, mcp,
 │                         export, import, service install/uninstall, deps up/down/status
-│                         CLI commands delegate to the running daemon via HTTP.
-│                         Contains: all action backend impls
+│                         CLI commands delegate to the running daemon via HTTP/WS.
+│
+├── crates/backends/    # Action backends and resilience primitives
 │                         (SearxngSearchBackend, TavilySearchBackend, CustomSearchBackend,
 │                          CliSchedulingBackend, WebhookMessageBackend),
 │                         CircuitBreaker, resilient_send, promote_candidates
@@ -148,8 +149,7 @@ SignalProcessor::process(&signal)
      ├─ 1. Amygdala: score importance (keyword heuristics + novelty) → f32 [0.0–1.0]
      │
      ├─ 2. Thalamus: classify intent
-     │         Regex fast-path first → async LLM fallback (config: llm.intent_llm_fallback
-     │         or env BRAIN_INTENT_LLM_FALLBACK) if no match
+     │         Regex fast-path first → async LLM fallback if no match
      │         → Classification { intent, confidence, method: Regex|Llm|Fallback }
      │
      ├─ 3. Cerebellum: match stored procedure triggers (case-insensitive substring)
@@ -777,7 +777,7 @@ The `BrainConfig` struct in `crates/core/src/config.rs` maps 1-to-1 with the YAM
 
 `BrainConfig::validate()` runs before `brain serve` and `brain start`. It returns:
 - `Err(String)` for hard errors that must block startup (port conflicts, invalid LLM URL)
-- `Ok(Vec<String>)` for soft warnings printed to stderr (demo key in use, zero timeout, etc.)
+- `Ok(Vec<String>)` for soft warnings printed to stderr (missing API keys, zero timeout, etc.)
 
 ---
 

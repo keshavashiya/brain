@@ -306,8 +306,8 @@ impl ActionDispatcher {
     /// Execute a sandboxed command.
     async fn execute_command(&self, command: &str, args: &[String]) -> ActionResult {
         // Check allowlist
-        if !self.config.command_allowlist.contains(&command.to_string()) {
-            return ActionResult::failure(format!("Command '{}' is not in the allowlist", command));
+        if !self.config.command_allowlist.iter().any(|c| c == command) {
+            return ActionResult::failure(format!("Command '{command}' is not in the allowlist"));
         }
 
         // Validate arguments against deny-lists
@@ -527,12 +527,29 @@ fn validate_args(command: &str, args: &[String]) -> Result<(), String> {
         }
         if arg.starts_with('/') {
             // Reject absolute paths unless in /tmp or $HOME
-            let canonical = std::path::Path::new(arg).canonicalize();
-            let (Ok(canonical), Some(home)) = (canonical, home.clone()) else {
-                return Err("Cannot validate path: HOME not set and path is absolute".to_string());
+            let path = std::path::Path::new(arg);
+            // Check /tmp prefix on the ORIGINAL path (avoids macOS /tmp → /private/tmp issue)
+            if arg.starts_with("/tmp/") || arg == "/tmp" {
+                continue;
+            }
+            let canonical = if path.exists() {
+                path.canonicalize().ok()
+            } else {
+                // For non-existent paths, canonicalize the parent and re-join
+                if let Some(parent) = path.parent() {
+                    parent
+                        .canonicalize()
+                        .ok()
+                        .map(|p| p.join(path.file_name().unwrap_or_default()))
+                } else {
+                    None
+                }
+            };
+            let (Some(canonical), Some(home)) = (canonical, home.clone()) else {
+                return Err("Cannot validate path: HOME not set or parent missing".to_string());
             };
             let canonical_str = canonical.to_string_lossy();
-            if !canonical_str.starts_with(&home) && !canonical_str.starts_with("/tmp") {
+            if !canonical_str.starts_with(&home) {
                 return Err(format!("Path '{}' is outside allowed directories", arg));
             }
         }
@@ -862,8 +879,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_web_search_disabled() {
-        let mut cfg = ActionConfig::default();
-        cfg.enable_web_search = false;
+        let cfg = ActionConfig {
+            enable_web_search: false,
+            ..ActionConfig::default()
+        };
         let dispatcher = ActionDispatcher::new(cfg);
         let result = dispatcher
             .dispatch(&Action::WebSearch {
@@ -910,8 +929,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_schedule_task_backend_matrix() {
-        let mut disabled = ActionConfig::default();
-        disabled.enable_scheduling = false;
+        let mut disabled = ActionConfig {
+            enable_scheduling: false,
+            ..ActionConfig::default()
+        };
         let dispatcher = ActionDispatcher::new(disabled.clone());
         let result = dispatcher
             .dispatch(&Action::ScheduleTask {
@@ -961,8 +982,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_message_backend_matrix() {
-        let mut disabled = ActionConfig::default();
-        disabled.enable_channel_send = false;
+        let mut disabled = ActionConfig {
+            enable_channel_send: false,
+            ..ActionConfig::default()
+        };
         let dispatcher = ActionDispatcher::new(disabled.clone());
         let result = dispatcher
             .dispatch(&Action::SendMessage {

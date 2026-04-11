@@ -602,7 +602,9 @@ pub async fn serve_http(
         .route("/", post(http_handler))
         .route("/mcp", post(http_handler))
         .with_state(state)
-        .layer(brain_core::cors::localhost_cors());
+        .layer(brain_core::cors::localhost_cors())
+        .layer(axum::extract::DefaultBodyLimit::max(1_048_576))
+        .layer(tower::limit::ConcurrencyLimitLayer::new(100));
 
     let addr: std::net::SocketAddr = format!("{host}:{port}").parse()?;
     tracing::info!("Synapse MCP online at http://{addr}");
@@ -665,14 +667,15 @@ mod tests {
         (McpServer::new(Arc::new(processor), vec![]), temp)
     }
 
-    /// Create a test server WITH the demo API key (auth enabled).
-    async fn make_server_with_auth() -> (McpServer, tempfile::TempDir) {
+    /// Create a test server WITH the generated API key (auth enabled).
+    async fn make_server_with_auth() -> (McpServer, tempfile::TempDir, String) {
         let temp = tempfile::tempdir().unwrap();
         let mut config = brain_core::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let api_key = config.access.api_keys.first().unwrap().key.clone();
         let api_keys = config.access.api_keys.clone();
         let processor = signal::SignalProcessor::new(config).await.unwrap();
-        (McpServer::new(Arc::new(processor), api_keys), temp)
+        (McpServer::new(Arc::new(processor), api_keys), temp, api_key)
     }
 
     #[tokio::test]
@@ -929,13 +932,14 @@ mod tests {
 
     #[test]
     fn test_validate_key_with_valid_key() {
-        let keys = brain_core::BrainConfig::default().access.api_keys;
+        let config = brain_core::BrainConfig::default();
+        let keys = config.access.api_keys;
         let server_keys = keys.clone();
-        // Simulate McpServer.validate_key() logic
-        assert!(server_keys.iter().any(|k| k.key == "demokey123"));
+        // Ensure the generated key is present
+        assert!(!server_keys.is_empty(), "should have at least one API key");
     }
 
-    /// validate_key() with bad key returns false — covered by async integration tests below.
+    // validate_key() with bad key returns false — covered by async integration tests below.
 
     /// MCP HTTP: missing x-api-key header → 401.
     #[tokio::test]
@@ -1025,6 +1029,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut config = brain_core::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let api_key = config.access.api_keys.first().unwrap().key.clone();
         let api_keys = config.access.api_keys.clone();
         let processor = signal::SignalProcessor::new(config).await.unwrap();
 
@@ -1046,7 +1051,7 @@ mod tests {
             .method(http::Method::POST)
             .uri("/mcp")
             .header("content-type", "application/json")
-            .header("x-api-key", "demokey123")
+            .header("x-api-key", &api_key)
             .body(Body::from(serde_json::to_string(&body).unwrap()))
             .unwrap();
 
@@ -1070,11 +1075,11 @@ mod tests {
         assert!(server.validate_key(""));
     }
 
-    /// validate_key() returns true for demo key when auth is enabled.
+    /// validate_key() returns true for generated key when auth is enabled.
     #[tokio::test]
-    async fn test_validate_key_demo_key_ok() {
-        let (server, _tmp) = make_server_with_auth().await;
-        assert!(server.validate_key("demokey123"));
+    async fn test_validate_key_generated_key_ok() {
+        let (server, _tmp, api_key) = make_server_with_auth().await;
+        assert!(server.validate_key(&api_key));
         assert!(!server.validate_key("wrongkey"));
     }
 

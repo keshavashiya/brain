@@ -26,6 +26,7 @@ async fn test_cross_protocol_memory_parity() {
     let temp = tempfile::tempdir().unwrap();
     let mut config = brain_core::BrainConfig::default();
     config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+    let api_key = config.access.api_keys.first().unwrap().key.clone();
 
     let processor = Arc::new(SignalProcessor::new(config).await.unwrap());
 
@@ -48,7 +49,7 @@ async fn test_cross_protocol_memory_parity() {
     // 1) Store via HTTP
     let http_store = client
         .post(format!("http://127.0.0.1:{http_port}/v1/signals"))
-        .bearer_auth("demokey123")
+        .bearer_auth(&api_key)
         .json(&json!({
             "content": "Remember project uses bun",
             "namespace": "work",
@@ -65,9 +66,11 @@ async fn test_cross_protocol_memory_parity() {
     let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{ws_port}"))
         .await
         .unwrap();
-    ws.send(Message::Text(r#"{"api_key":"demokey123"}"#.into()))
-        .await
-        .unwrap();
+    ws.send(Message::Text(
+        serde_json::json!({"api_key": api_key}).to_string().into(),
+    ))
+    .await
+    .unwrap();
     let auth = ws
         .next()
         .await
@@ -112,7 +115,7 @@ async fn test_cross_protocol_memory_parity() {
     // 4) Verify via MCP HTTP transport
     let mcp_search = client
         .post(format!("http://127.0.0.1:{mcp_port}/mcp"))
-        .header("x-api-key", "demokey123")
+        .header("x-api-key", &api_key)
         .json(&json!({
             "jsonrpc":"2.0",
             "id": 1,
@@ -141,7 +144,7 @@ async fn test_cross_protocol_memory_parity() {
         .get(format!(
             "http://127.0.0.1:{http_port}/v1/memory/facts?namespace=work"
         ))
-        .bearer_auth("demokey123")
+        .bearer_auth(&api_key)
         .send()
         .await
         .unwrap();

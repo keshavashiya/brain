@@ -67,10 +67,6 @@ pub struct LlmConfig {
     /// Can also be set via `BRAIN_LLM__API_KEY` environment variable.
     #[serde(default)]
     pub api_key: String,
-    /// Deprecated toggle: intent routing now uses LLM-first classification when
-    /// an LLM provider is available. Kept for backwards-compatible config parsing.
-    #[serde(default)]
-    pub intent_llm_fallback: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -498,9 +494,15 @@ impl BrainConfig {
             std::fs::create_dir_all(parent)?;
         }
 
-        // Generate a random API key to replace the demo key
+        // Generate a random API key and inject it into the empty api_keys list
         let api_key = Self::generate_api_key();
-        let config = DEFAULT_CONFIG.replace("demokey123", &api_key);
+        let config = DEFAULT_CONFIG.replace(
+            "api_keys: []",
+            &format!(
+                "api_keys:\n    - key: \"{}\"\n      name: \"Default Key\"\n      permissions: [read, write]",
+                api_key
+            ),
+        );
 
         std::fs::write(&config_path, config)?;
         Ok(Some((config_path, api_key)))
@@ -574,9 +576,7 @@ impl BrainConfig {
 
         // ── Soft warnings ─────────────────────────────────────────────────────
         if self.access.api_keys.is_empty() {
-            warnings.push("No API keys configured — all adapters will reject authenticated requests. Add at least one key under 'access.api_keys'.".to_string());
-        } else if self.access.api_keys.iter().any(|k| k.key == "demokey123") {
-            warnings.push("Demo API key 'demokey123' is still active. Replace it with a strong key in production.".to_string());
+            warnings.push("No API keys configured — all adapters will reject authenticated requests. Run `brain init` or add a key under 'access.api_keys'.".to_string());
         }
 
         if self.llm.temperature > 1.5 {
@@ -687,7 +687,6 @@ impl Default for BrainConfig {
                 temperature: 0.7,
                 max_tokens: 4096,
                 api_key: String::new(),
-                intent_llm_fallback: false,
             },
             embedding: EmbeddingConfig {
                 model: "nomic-embed-text".to_string(),
@@ -720,7 +719,6 @@ impl Default for BrainConfig {
             security: SecurityConfig {
                 exec_allowlist: vec![
                     "ls".into(),
-                    "cat".into(),
                     "grep".into(),
                     "find".into(),
                     "git".into(),
@@ -785,8 +783,8 @@ impl Default for BrainConfig {
             },
             access: AccessConfig {
                 api_keys: vec![ApiKeyConfig {
-                    key: "demokey123".to_string(),
-                    name: "Demo Key".to_string(),
+                    key: Self::generate_api_key(),
+                    name: "Default Key".to_string(),
                     permissions: vec!["read".to_string(), "write".to_string()],
                 }],
             },
@@ -882,13 +880,14 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_default_has_demo_key_warning() {
+    fn test_validate_generated_key_no_warning() {
+        // A freshly generated key should NOT produce any demo-key or empty-keys warning.
         let mut config = BrainConfig::default();
         config.brain.data_dir = writable_test_data_dir();
         let warnings = config.validate().expect("default config should be valid");
         assert!(
-            warnings.iter().any(|w| w.contains("demokey123")),
-            "expected demo-key warning, got: {:?}",
+            !warnings.iter().any(|w| w.contains("No API keys")),
+            "should not have empty-keys warning with a generated key, got: {:?}",
             warnings
         );
     }

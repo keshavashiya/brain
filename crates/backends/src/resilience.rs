@@ -44,6 +44,8 @@ impl CircuitBreaker {
             .unwrap_or_default()
             .as_millis() as u64;
         if now.saturating_sub(last_fail) >= self.cooldown_ms {
+            // Cooldown elapsed — reset counter so a fresh probe starts clean.
+            self.consecutive_failures.store(0, Ordering::Relaxed);
             return false;
         }
         true
@@ -86,7 +88,9 @@ fn is_transient(err: &reqwest::Error) -> bool {
         return true;
     }
     if let Some(status) = err.status() {
-        return status.is_server_error();
+        return status.is_server_error()
+            || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+            || status == reqwest::StatusCode::REQUEST_TIMEOUT;
     }
     false
 }
@@ -94,6 +98,8 @@ fn is_transient(err: &reqwest::Error) -> bool {
 /// Returns true if the HTTP status is transient (worth retrying).
 fn is_transient_status(status: reqwest::StatusCode) -> bool {
     status.is_server_error()
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS // 429
+        || status == reqwest::StatusCode::REQUEST_TIMEOUT // 408
 }
 
 /// Send an HTTP request with retry + circuit breaker.

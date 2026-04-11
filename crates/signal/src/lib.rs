@@ -885,6 +885,12 @@ impl SignalProcessor {
 
         // Reuse caller-supplied session or create a new one
         let session_id = if let Some(ref sid) = signal.session_id {
+            // Ensure the session row exists so FK constraints on episodes never fail.
+            // This handles the case where a client reuses a session_id from a
+            // previous daemon run that was cleared.
+            self.episodic
+                .ensure_session(sid, &signal.channel)
+                .map_err(|e| SignalError::Storage(e.to_string()))?;
             sid.clone()
         } else {
             self.episodic
@@ -1082,7 +1088,8 @@ impl SignalProcessor {
     ///
     /// Call this after streaming LLM generation finishes to persist the
     /// assistant turn in episodic memory. The `session_id` comes from the
-    /// `PipelineResult::LlmReady` variant.
+    /// `PipelineResult::LlmReady` variant. Ensures the session row exists
+    /// first to avoid FK constraint violations.
     pub fn finalize_streaming(
         &self,
         session_id: &str,
@@ -1090,6 +1097,10 @@ impl SignalProcessor {
         namespace: &str,
         agent: Option<&str>,
     ) -> Result<(), SignalError> {
+        self.episodic
+            .ensure_session(session_id, "streaming")
+            .map_err(|e| SignalError::Storage(e.to_string()))?;
+
         self.episodic
             .store_episode(
                 session_id,

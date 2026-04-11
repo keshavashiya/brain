@@ -110,6 +110,20 @@ impl EpisodicStore {
         Ok(id)
     }
 
+    /// Ensure a session exists (upsert by id). Used when a caller-supplied
+    /// `session_id` is provided — creates the row if missing so FK
+    /// constraints on `episodes.session_id` are never violated.
+    pub fn ensure_session(&self, session_id: &str, channel: &str) -> Result<(), EpisodicError> {
+        self.db.with_conn(|conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO sessions (id, channel) VALUES (?1, ?2)",
+                rusqlite::params![session_id, channel],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     /// End a conversation session.
     pub fn end_session(&self, session_id: &str) -> Result<(), EpisodicError> {
         let now = Utc::now().to_rfc3339();

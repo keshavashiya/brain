@@ -20,7 +20,6 @@ llm:
   api_key: ""                 # Required for openai provider; also settable via BRAIN_LLM__API_KEY env var
   temperature: 0.7
   max_tokens: 4096
-  # intent_llm_fallback: false  # DEPRECATED — no longer used; kept for config compat
 
 embedding:
   model: "nomic-embed-text"    # must be pulled: `ollama pull nomic-embed-text`
@@ -51,7 +50,6 @@ encryption:
 security:
   exec_allowlist:
     - ls
-    - cat
     - grep
     - find
     - git
@@ -126,9 +124,10 @@ adapters:
     port: 19792
 
 access:
-  api_keys:
-    - key: "demokey123"
-      name: "Demo Key"
-      permissions:
-        - read
-        - write
+  api_keys: []
+  # A random API key is generated on `brain init` and printed to stdout.
+  # Add additional keys here if needed:
+  # api_keys:
+  #   - key: "brk_<random-hex>"
+  #     name: "My Key"
+  #     permissions: [read, write]

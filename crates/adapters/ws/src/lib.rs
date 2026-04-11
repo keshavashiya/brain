@@ -4,7 +4,7 @@
 //!
 //! ## Protocol
 //! 1. Client connects (WebSocket handshake).
-//! 2. Client sends first text frame: `{"api_key":"demokey123"}` — authentication.
+//! 2. Client sends first text frame: `{"api_key":"<key>"}` — authentication.
 //! 3. Server replies with `{"status":"authenticated","conn_id":"<uuid>"}` or
 //!    `{"status":"error","message":"..."}` then closes.
 //! 4. Subsequent text frames are `SignalRequest` JSON; server replies with
@@ -458,7 +458,8 @@ mod tests {
     #[test]
     fn test_validate_key_valid() {
         let keys = demo_keys();
-        assert!(validate_key(&keys, "demokey123"));
+        let api_key = &keys.first().unwrap().key;
+        assert!(validate_key(&keys, api_key));
     }
 
     #[test]
@@ -470,8 +471,8 @@ mod tests {
 
     #[test]
     fn test_validate_key_empty_list() {
-        // With empty key list, auth is disabled (open access) — all keys pass
-        assert!(validate_key(&[], "demokey123"));
+        // With empty key list, auth is disabled (open access) — any key passes
+        assert!(validate_key(&[], "anykey"));
     }
 
     #[test]
@@ -545,6 +546,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut config = brain_core::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let api_key = config.access.api_keys.first().unwrap().key.clone();
         let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
         let port = random_port();
 
@@ -556,7 +558,9 @@ mod tests {
             .await
             .unwrap();
         ws_ok
-            .send(Message::Text(r#"{"api_key":"demokey123"}"#.into()))
+            .send(Message::Text(
+                serde_json::json!({"api_key": api_key}).to_string().into(),
+            ))
             .await
             .unwrap();
         let auth_ok = ws_ok.next().await.unwrap().unwrap();
@@ -589,6 +593,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut config = brain_core::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let api_key = config.access.api_keys.first().unwrap().key.clone();
         let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
         let port = random_port();
 
@@ -598,9 +603,10 @@ mod tests {
         let mut handles = Vec::new();
         for i in 0..3 {
             let url = format!("ws://127.0.0.1:{port}");
+            let key = api_key.clone();
             handles.push(tokio::spawn(async move {
                 let (mut ws, _) = connect_async(url).await.unwrap();
-                ws.send(Message::Text(r#"{"api_key":"demokey123"}"#.into()))
+                ws.send(Message::Text(serde_json::json!({"api_key": key}).to_string().into()))
                     .await
                     .unwrap();
                 let _ = ws.next().await;

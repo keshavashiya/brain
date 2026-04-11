@@ -118,12 +118,12 @@ impl SqlitePool {
 
         let conn = Connection::open(path)?;
 
-        // Performance and safety pragmas (skip foreign_keys for now - handled manually)
+        // Performance and safety pragmas — foreign_keys enforced by SQLite.
         conn.execute_batch(
             "
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous = NORMAL;
-            PRAGMA foreign_keys = OFF;
+            PRAGMA foreign_keys = ON;
             PRAGMA busy_timeout = 5000;
             PRAGMA cache_size = -8000;
             ",
@@ -406,7 +406,7 @@ impl SqlitePool {
             if current_version < migrations.last().map_or(0, |m| m.0) {
                 info!(
                     "Migrations complete (v{current_version} → v{})",
-                    migrations.last().unwrap().0
+                    migrations.last().expect("BUG: migrations list is empty").0
                 );
             }
 

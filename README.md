@@ -576,7 +576,6 @@ llm:
   api_key: ""                      # required for openai provider
   temperature: 0.7
   max_tokens: 4096
-  intent_llm_fallback: false       # enable LLM fallback when regex intent classification is uncertain
 ```
 
 To use OpenAI or OpenRouter:
@@ -682,7 +681,7 @@ cargo run -p brainos -- serve --http --mcp
 
 ### Workspace Structure
 
-The project is a Cargo workspace with 15 crates. All internal dependencies use both `path` (for local development) and `version` (for crates.io), so no Cargo.toml changes are needed to switch between local and published builds.
+The project is a Cargo workspace with 16 crates. All internal dependencies use both `path` (for local development) and `version` (for crates.io), so no Cargo.toml changes are needed to switch between local and published builds.
 
 ```
 crates/
@@ -695,12 +694,13 @@ crates/
 ├── signal/         # brainos-signal      — Central signal processor
 ├── cerebellum/     # brainos-cerebellum  — Procedural memory
 ├── ganglia/        # brainos-ganglia     — Proactivity engine
+├── backends/       # brainos-backends    — Resilience, search & messaging backends
 ├── bridge/         # brainos-bridge      — WebSocket relay client
 ├── adapters/
 │   ├── http/       # brainos-httpadapter — Axum REST API
 │   ├── ws/         # brainos-wsadapter   — WebSocket adapter
 │   ├── grpc/       # brainos-grpcadapter — gRPC adapter
-│   └── mcp/        # brainos-mcp        — MCP adapter
+│   └── mcp/        # brainos-mcp         — MCP adapter
 └── cli/            # brainos (binary: brain) — CLI entry point
 ```
 
