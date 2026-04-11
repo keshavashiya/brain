@@ -54,6 +54,8 @@ pub struct FtsResult {
     pub timestamp: String,
     /// Originating agent (if known).
     pub agent: Option<String>,
+    /// Importance score from the episodes table.
+    pub importance: f64,
 }
 
 /// Sanitize user input for FTS5 MATCH queries.
@@ -163,7 +165,8 @@ impl EpisodicStore {
         let namespace = namespace.unwrap_or("personal");
 
         self.db.with_conn(|conn| {
-            conn.execute(
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
                 "INSERT INTO episodes (id, session_id, namespace, role, content, importance, agent)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
@@ -179,12 +182,13 @@ impl EpisodicStore {
             let row_id = conn.last_insert_rowid();
 
             if !is_encrypted {
-                conn.execute(
+                tx.execute(
                     "INSERT INTO episodes_fts (rowid, content) VALUES (?1, ?2)",
                     rusqlite::params![row_id, content],
                 )?;
             }
 
+            tx.commit()?;
             Ok(())
         })?;
         Ok(id)
@@ -274,7 +278,7 @@ impl EpisodicStore {
         Ok(self.db.with_conn(|conn| {
             // Build WHERE clause dynamically based on optional filters
             let mut sql = String::from(
-                "SELECT e.id, f.content, f.rank, e.timestamp, e.agent
+                "SELECT e.id, f.content, f.rank, e.timestamp, e.agent, e.importance
                  FROM episodes_fts f
                  JOIN episodes e ON e.rowid = f.rowid
                  WHERE episodes_fts MATCH ?1",
@@ -309,6 +313,7 @@ impl EpisodicStore {
                         rank: row.get(2)?,
                         timestamp: row.get(3)?,
                         agent: row.get(4)?,
+                        importance: row.get(5)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;

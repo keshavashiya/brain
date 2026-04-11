@@ -56,6 +56,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # Configuration
 figment = { version = "0.10", features = ["yaml", "env"] }
 
+# Async traits
+async-trait = "0.1"
+
 # Async streams
 futures = "0.3"
 

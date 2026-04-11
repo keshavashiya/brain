@@ -167,10 +167,9 @@ impl OllamaProvider {
         })
     }
 
-    /// Create with default config. Panics only if TLS initialisation fails (extremely rare).
-    pub fn default_config() -> Self {
+    /// Create with default config.
+    pub fn default_config() -> Result<Self, LlmError> {
         Self::new("http://localhost:11434", "qwen2.5-coder:7b", 0.7, 4096)
-            .expect("Failed to initialise default Ollama HTTP client")
     }
 
     fn convert_messages(messages: &[Message]) -> Vec<OllamaMessage> {
@@ -257,11 +256,16 @@ impl LlmProvider for OllamaProvider {
 
         let byte_stream = resp.bytes_stream();
 
-        // State: (byte_stream, leftover buffer for incomplete lines)
+        // State: (byte_stream, leftover buffer, done flag)
         let stream = try_unfold(
-            (Box::pin(byte_stream), String::new()),
-            |(mut byte_stream, mut buf)| async move {
+            (Box::pin(byte_stream), String::new(), false),
+            |(mut byte_stream, mut buf, done)| async move {
                 use futures::TryStreamExt;
+
+                // If the previous chunk signalled done, terminate the stream
+                if done {
+                    return Ok(None);
+                }
 
                 loop {
                     // Try to extract a complete line from the buffer
@@ -276,15 +280,10 @@ impl LlmProvider for OllamaProvider {
 
                         match serde_json::from_str::<OllamaResponse>(line) {
                             Ok(data) => {
+                                let is_done = data.done;
                                 let content = data.message.map(|m| m.content).unwrap_or_default();
-                                let chunk = ResponseChunk {
-                                    content,
-                                    is_done: data.done,
-                                };
-                                if data.done {
-                                    return Ok(Some((chunk, (byte_stream, buf))));
-                                }
-                                return Ok(Some((chunk, (byte_stream, buf))));
+                                let chunk = ResponseChunk { content, is_done };
+                                return Ok(Some((chunk, (byte_stream, buf, is_done))));
                             }
                             Err(e) => {
                                 return Err(LlmError::InvalidFormat(format!(
@@ -312,7 +311,7 @@ impl LlmProvider for OllamaProvider {
                                             content,
                                             is_done: true,
                                         },
-                                        (byte_stream, String::new()),
+                                        (byte_stream, String::new(), true),
                                     )));
                                 }
                             }
@@ -434,7 +433,7 @@ impl OpenAiProvider {
     }
 
     /// Create for OpenAI API.
-    pub fn openai(api_key: &str, model: &str) -> Self {
+    pub fn openai(api_key: &str, model: &str) -> Result<Self, LlmError> {
         Self::new(
             "https://api.openai.com/v1",
             Some(api_key),
@@ -442,11 +441,10 @@ impl OpenAiProvider {
             0.7,
             Some(4096),
         )
-        .expect("Failed to initialise OpenAI HTTP client")
     }
 
     /// Create for OpenRouter.
-    pub fn openrouter(api_key: &str, model: &str) -> Self {
+    pub fn openrouter(api_key: &str, model: &str) -> Result<Self, LlmError> {
         Self::new(
             "https://openrouter.ai/api/v1",
             Some(api_key),
@@ -454,7 +452,6 @@ impl OpenAiProvider {
             0.7,
             Some(4096),
         )
-        .expect("Failed to initialise OpenRouter HTTP client")
     }
 
     fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
@@ -658,34 +655,31 @@ impl Default for ProviderConfig {
 }
 
 /// Create an LLM provider from configuration.
-pub fn create_provider(config: &ProviderConfig) -> Box<dyn LlmProvider> {
+pub fn create_provider(config: &ProviderConfig) -> Result<Box<dyn LlmProvider>, LlmError> {
     match config.provider.as_str() {
-        "ollama" => Box::new(
-            OllamaProvider::new(
+        "ollama" => {
+            let provider = OllamaProvider::new(
                 &config.base_url,
                 &config.model,
                 config.temperature,
                 config.max_tokens,
             )
-            .unwrap_or_else(|e| {
+            .or_else(|e| {
                 tracing::error!(error = %e, "Failed to create Ollama provider, falling back to default");
                 OllamaProvider::default_config()
-            }),
-        ),
-        "openai" => Box::new(
-            OpenAiProvider::new(
-                &config.base_url,
-                config.api_key.as_deref(),
-                &config.model,
-                config.temperature,
-                Some(config.max_tokens),
-            )
-            // TLS initialisation failure is unrecoverable — surface clearly.
-            .expect("Failed to initialise OpenAI HTTP client"),
-        ),
+            })?;
+            Ok(Box::new(provider))
+        }
+        "openai" => Ok(Box::new(OpenAiProvider::new(
+            &config.base_url,
+            config.api_key.as_deref(),
+            &config.model,
+            config.temperature,
+            Some(config.max_tokens),
+        )?)),
         other => {
             tracing::warn!(provider = %other, "Unknown LLM provider, falling back to default Ollama");
-            Box::new(OllamaProvider::default_config())
+            Ok(Box::new(OllamaProvider::default_config()?))
         }
     }
 }
@@ -726,13 +720,13 @@ mod tests {
 
     #[test]
     fn test_openai_provider_creation() {
-        let provider = OpenAiProvider::openai("test-key", "gpt-4");
+        let provider = OpenAiProvider::openai("test-key", "gpt-4").unwrap();
         assert_eq!(provider.name(), "openai");
     }
 
     #[test]
     fn test_openrouter_provider_creation() {
-        let provider = OpenAiProvider::openrouter("test-key", "anthropic/claude-3-opus");
+        let provider = OpenAiProvider::openrouter("test-key", "anthropic/claude-3-opus").unwrap();
         assert_eq!(provider.name(), "openai");
     }
 

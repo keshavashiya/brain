@@ -103,9 +103,9 @@ impl UserProfile {
         parts.join(" ")
     }
 
-    /// Estimate token count (rough approximation: ~4 chars per token).
+    /// Estimate token count (conservative: ~2 chars per token to handle non-ASCII safely).
     pub fn estimate_tokens(&self) -> usize {
-        self.to_context_string().len() / 4
+        self.to_context_string().chars().count() / 2
     }
 }
 
@@ -197,7 +197,7 @@ You are the user's partner in thought. Your goal is to make their digital life f
         });
 
         // 2. Add memories as system context (if within budget)
-        let mut current_tokens = messages[0].content.len() / 4;
+        let mut current_tokens = messages[0].content.chars().count() / 2;
         let mut memory_context = String::new();
 
         for memory in memories {
@@ -209,7 +209,7 @@ You are the user's partner in thought. Your goal is to make their digital life f
             } else {
                 format!("- [{:?}] {}\n", memory.source, memory.content)
             };
-            let memory_tokens = memory_text.len() / 4;
+            let memory_tokens = memory_text.chars().count() / 2;
 
             if current_tokens + memory_tokens > memory_budget {
                 break;
@@ -232,7 +232,7 @@ You are the user's partner in thought. Your goal is to make their digital life f
 
         // Start from most recent and work backwards
         for msg in conversation_history.iter().rev() {
-            let msg_tokens = msg.content.len() / 4;
+            let msg_tokens = msg.content.chars().count() / 2;
             if history_tokens + msg_tokens > self.budget.conversation_history {
                 break;
             }
@@ -255,7 +255,7 @@ You are the user's partner in thought. Your goal is to make their digital life f
 
     /// Quick estimate of total tokens in messages.
     pub fn estimate_tokens(messages: &[Message]) -> usize {
-        messages.iter().map(|m| m.content.len() / 4).sum()
+        messages.iter().map(|m| m.content.chars().count() / 2).sum()
     }
 }
 
@@ -441,6 +441,6 @@ mod tests {
 
         let tokens = ContextAssembler::estimate_tokens(&messages);
         assert!(tokens > 0);
-        assert_eq!(tokens, 11 / 4); // "Hello world" is 11 chars
+        assert_eq!(tokens, 11 / 2); // "Hello world" is 11 chars, ~2 chars/token
     }
 }

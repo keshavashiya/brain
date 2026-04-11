@@ -84,8 +84,13 @@ pub(crate) async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Res
         temperature: config.llm.temperature,
         max_tokens: config.llm.max_tokens as i32,
     };
-    let provider = cortex::llm::create_provider(&llm_cfg);
-    let llm_healthy = provider.health_check().await;
+    let llm_healthy = match cortex::llm::create_provider(&llm_cfg) {
+        Ok(provider) => provider.health_check().await,
+        Err(e) => {
+            tracing::warn!("Failed to create LLM provider for health check: {e}");
+            false
+        }
+    };
     println!(
         "  Cortex:       {}",
         if llm_healthy {

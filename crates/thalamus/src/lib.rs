@@ -252,7 +252,7 @@ impl IntentFallback for LlmIntentFallback {
                     .trim()
                     .to_string();
                 let (command, mut args) = Self::split_command(&raw);
-                if !payload.args.clone().unwrap_or_default().is_empty() {
+                if payload.args.as_ref().is_some_and(|a| !a.is_empty()) {
                     args = payload.args.unwrap_or_default();
                 }
                 if command.is_empty() {
@@ -464,9 +464,14 @@ impl IntentClassifier {
     }
 
     /// Build a pattern with named extractors.
+    ///
+    /// # Safety
+    /// All patterns are hardcoded string literals verified by tests.
+    /// `unwrap` is safe here because invalid regex is a programmer error caught at test time.
     fn build_pattern(pattern: &str, extractors: &[(&str, usize)]) -> IntentPattern {
         IntentPattern {
-            regex: Regex::new(pattern).expect("Invalid regex pattern"),
+            regex: Regex::new(pattern)
+                .unwrap_or_else(|e| panic!("BUG: hardcoded regex '{pattern}' is invalid: {e}")),
             extractors: extractors
                 .iter()
                 .map(|(name, idx)| (name.to_string(), *idx))

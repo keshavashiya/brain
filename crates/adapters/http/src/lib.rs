@@ -260,6 +260,7 @@ pub fn create_router(
     });
 
     // Limit concurrent /v1/* requests (100 in-flight per instance)
+    // Limit request body size to 1 MB to prevent memory exhaustion
     let v1_routes = Router::new()
         .route("/v1/signals", post(post_signal_handler))
         .route("/v1/signals/:id", get(get_signal_handler))
@@ -271,6 +272,7 @@ pub fn create_router(
         .route("/v1/schedules", get(list_schedules_handler))
         .route("/v1/schedules/:id", delete(cancel_schedule_handler))
         .route("/v1/events", get(sse_events_handler))
+        .layer(axum::extract::DefaultBodyLimit::max(1_048_576))
         .layer(tower::limit::ConcurrencyLimitLayer::new(100));
 
     let router = Router::new()

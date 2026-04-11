@@ -43,12 +43,15 @@ fn build_action_dispatcher(
 ) -> anyhow::Result<cortex::actions::ActionDispatcher> {
     let embedding_dim = processor.embedding_dim();
     let llm_api_key = resolve_llm_api_key(config);
-    let embedder = Arc::new(tokio::sync::Mutex::new(hippocampus::Embedder::from_config(
-        &config.llm.provider,
-        &config.llm.base_url,
-        &config.embedding.model,
-        &llm_api_key,
-    )));
+    let embedder = Arc::new(tokio::sync::Mutex::new(
+        hippocampus::Embedder::from_config(
+            &config.llm.provider,
+            &config.llm.base_url,
+            &config.embedding.model,
+            &llm_api_key,
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to create embedding provider: {e}"))?,
+    ));
 
     let action_backend = Arc::new(DefaultMemoryBackend {
         semantic: processor.semantic().cloned(),

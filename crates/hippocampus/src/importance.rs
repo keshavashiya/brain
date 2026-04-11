@@ -146,26 +146,31 @@ fn has_word(text: &str, words: &[&str]) -> bool {
 
 /// Returns true if `word` appears in `text` surrounded by word boundaries.
 fn contains_whole_word(text: &str, word: &str) -> bool {
-    let word_bytes = word.as_bytes();
-    let text_bytes = text.as_bytes();
-    let word_len = word_bytes.len();
+    let mut search_from = 0;
+    while let Some(pos) = text[search_from..].find(word) {
+        let abs_pos = search_from + pos;
+        let end_pos = abs_pos + word.len();
 
-    if word_len > text_bytes.len() {
-        return false;
-    }
-
-    for start in 0..=(text_bytes.len() - word_len) {
-        if &text_bytes[start..start + word_len] != word_bytes {
-            continue;
-        }
-        // Check left boundary: start of string or non-alphabetic
-        let left_ok = start == 0 || !text_bytes[start - 1].is_ascii_alphabetic();
-        // Check right boundary: end of string or non-alphabetic
-        let right_ok = start + word_len == text_bytes.len()
-            || !text_bytes[start + word_len].is_ascii_alphabetic();
+        // Check left boundary: start of string or non-alphabetic char
+        let left_ok = abs_pos == 0
+            || text[..abs_pos]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphabetic());
+        // Check right boundary: end of string or non-alphabetic char
+        let right_ok = end_pos == text.len()
+            || text[end_pos..]
+                .chars()
+                .next()
+                .is_none_or(|c| !c.is_alphabetic());
 
         if left_ok && right_ok {
             return true;
+        }
+        // Advance past this match
+        search_from = abs_pos + 1;
+        if search_from >= text.len() {
+            break;
         }
     }
     false

@@ -409,7 +409,9 @@ impl SignalProcessor {
             temperature: config.llm.temperature,
             max_tokens: config.llm.max_tokens as i32,
         };
-        let llm: Arc<dyn cortex::LlmProvider> = cortex::llm::create_provider(&llm_config).into();
+        let llm: Arc<dyn cortex::LlmProvider> = cortex::llm::create_provider(&llm_config)
+            .map_err(|e| SignalError::Init(format!("Failed to create LLM provider: {e}")))?
+            .into();
 
         // Create embedder — provider is selected from llm.provider config.
         // The model and dimension come from the embedding config section.
@@ -426,7 +428,8 @@ impl SignalProcessor {
             &config.llm.base_url,
             &config.embedding.model,
             &llm_api_key,
-        );
+        )
+        .map_err(|e| SignalError::Init(format!("Failed to create embedding provider: {e}")))?;
         let embedder = tokio::sync::Mutex::new(embedder_inner);
 
         // Create semantic store (optional — fails gracefully if RuVector unavailable).

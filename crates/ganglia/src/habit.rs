@@ -73,7 +73,7 @@ impl HabitEngine {
     ///
     /// Returns patterns ordered by occurrence count descending.
     pub fn detect_patterns(&self) -> Result<Vec<TopicPattern>, GangliaError> {
-        let cutoff = Utc::now() - chrono::Duration::days(self.config.lookback_days as i64);
+        let cutoff = Utc::now() - chrono::TimeDelta::days(self.config.lookback_days as i64);
         let cutoff_str = cutoff.to_rfc3339();
 
         let rows: Vec<(String, String, Option<String>)> = self.db.with_conn(|conn| {
@@ -227,7 +227,7 @@ impl HabitEngine {
             Some(s) => {
                 let last = chrono::DateTime::parse_from_rfc3339(&s)
                     .map(|d| d.with_timezone(&Utc))
-                    .unwrap_or_else(|_| Utc::now() - chrono::Duration::hours(25));
+                    .unwrap_or_else(|_| Utc::now() - chrono::TimeDelta::hours(25));
                 let mins = (Utc::now() - last).num_minutes().max(0) as u32;
                 Ok(mins)
             }

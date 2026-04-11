@@ -52,12 +52,18 @@ pub struct SemanticResult {
 pub struct SemanticStore {
     db: SqlitePool,
     ruv: RuVectorStore,
+    /// Write lock to prevent TOCTOU races during dedup-then-insert.
+    write_lock: std::sync::Arc<tokio::sync::Mutex<()>>,
 }
 
 impl SemanticStore {
     /// Create a new semantic store.
     pub fn new(db: SqlitePool, ruv: RuVectorStore) -> Self {
-        Self { db, ruv }
+        Self {
+            db,
+            ruv,
+            write_lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+        }
     }
 
     /// Store a new fact in both SQLite and RuVector.
@@ -80,6 +86,9 @@ impl SemanticStore {
     ) -> Result<String, SemanticError> {
         let content = format!("{subject} {predicate} {object}");
         let now = chrono::Utc::now().to_rfc3339();
+
+        // Hold write lock to prevent TOCTOU race between dedup check and insert.
+        let _guard = self.write_lock.lock().await;
 
         // Deduplication: check for highly similar facts in the same namespace and category.
         let similar = self
@@ -213,33 +222,77 @@ impl SemanticStore {
         let ruv_results: Vec<VectorResult> =
             self.ruv.search("facts_vec", query_vector, fetch_k).await?;
 
+        if ruv_results.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Batch-fetch all candidate facts in a single query (avoids N+1)
+        let ids: Vec<&str> = ruv_results.iter().map(|vr| vr.id.as_str()).collect();
+        let placeholders: String = (1..=ids.len())
+            .map(|i| format!("?{i}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, updated_at, agent, superseded_by
+             FROM semantic_facts WHERE id IN ({placeholders})"
+        );
+
+        let pool = &self.db;
+        let fact_map: std::collections::HashMap<String, Option<(Fact, String)>> =
+            self.db.with_conn(|conn| {
+                let mut stmt = conn.prepare(&sql)?;
+                let params: Vec<&dyn rusqlite::types::ToSql> = ids
+                    .iter()
+                    .map(|id| id as &dyn rusqlite::types::ToSql)
+                    .collect();
+                let rows = stmt.query_map(params.as_slice(), |row| {
+                    let raw_object: String = row.get(5)?;
+                    let updated_at: String = row.get(8)?;
+                    let superseded_by: Option<String> = row.get(10)?;
+                    Ok((
+                        Fact {
+                            id: row.get(0)?,
+                            namespace: row.get(1)?,
+                            category: row.get(2)?,
+                            subject: row.get(3)?,
+                            predicate: row.get(4)?,
+                            object: String::new(),
+                            confidence: row.get(6)?,
+                            source_episode_id: row.get(7)?,
+                            agent: row.get(9)?,
+                        },
+                        raw_object,
+                        updated_at,
+                        superseded_by,
+                    ))
+                })?;
+
+                let mut map = std::collections::HashMap::new();
+                for (mut fact, raw_object, updated_at, superseded_by) in rows.flatten() {
+                    if superseded_by.is_some() {
+                        map.insert(fact.id.clone(), None);
+                        continue;
+                    }
+                    match pool.try_decrypt_content(&raw_object) {
+                        Some(obj) => {
+                            fact.object = obj;
+                            map.insert(fact.id.clone(), Some((fact, updated_at)));
+                        }
+                        None => {
+                            map.insert(fact.id.clone(), None);
+                        }
+                    }
+                }
+                Ok(map)
+            })?;
+
+        // Build results in RuVector-ranked order, applying filters
         let mut results = Vec::new();
-        for vr in ruv_results {
+        for vr in &ruv_results {
             if results.len() >= top_k {
                 break;
             }
-            // Look up the full fact + timestamp from SQLite
-            let fact_opt = self.get_fact_with_timestamp(&vr.id)?;
-            if let Some((fact, created_at)) = fact_opt {
-                // Skip superseded facts
-                let is_superseded = self
-                    .db
-                    .with_conn(|conn| {
-                        let superseded: Option<String> = conn
-                            .query_row(
-                                "SELECT superseded_by FROM semantic_facts WHERE id = ?1",
-                                [&vr.id],
-                                |row| row.get(0),
-                            )
-                            .unwrap_or(None);
-                        Ok(superseded.is_some())
-                    })
-                    .unwrap_or(false);
-
-                if is_superseded {
-                    continue;
-                }
-
+            if let Some(Some((ref fact, ref created_at))) = fact_map.get(&vr.id) {
                 // Filter by namespace if specified
                 if namespace.is_some_and(|ns| ns != fact.namespace) {
                     continue;
@@ -249,9 +302,9 @@ impl SemanticStore {
                     continue;
                 }
                 results.push(SemanticResult {
-                    fact,
+                    fact: fact.clone(),
                     distance: vr.distance,
-                    created_at,
+                    created_at: created_at.clone(),
                 });
             }
         }
@@ -302,49 +355,6 @@ impl SemanticStore {
 
     /// Get a fact and its updated_at timestamp by ID.
     ///
-    /// Returns `None` if the fact does not exist or its content cannot be decrypted.
-    fn get_fact_with_timestamp(
-        &self,
-        fact_id: &str,
-    ) -> Result<Option<(Fact, String)>, SemanticError> {
-        let pool = &self.db;
-        Ok(self.db.with_conn(|conn| {
-            let result = conn.query_row(
-                "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, updated_at, agent
-                 FROM semantic_facts WHERE id = ?1",
-                [fact_id],
-                |row| {
-                    let raw_object: String = row.get(5)?;
-                    let updated_at: String = row.get(8)?;
-                    Ok((Fact {
-                        id: row.get(0)?,
-                        namespace: row.get(1)?,
-                        category: row.get(2)?,
-                        subject: row.get(3)?,
-                        predicate: row.get(4)?,
-                        object: String::new(), // filled below
-                        confidence: row.get(6)?,
-                        source_episode_id: row.get(7)?,
-                        agent: row.get(9)?,
-                    }, raw_object, updated_at))
-                },
-            );
-            match result {
-                Ok((mut fact, raw_object, updated_at)) => {
-                    match pool.try_decrypt_content(&raw_object) {
-                        Some(obj) => {
-                            fact.object = obj;
-                            Ok(Some((fact, updated_at)))
-                        }
-                        None => Ok(None),
-                    }
-                }
-                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-                Err(e) => Err(e.into()),
-            }
-        })?)
-    }
-
     /// Get all facts by category, optionally filtered by namespace.
     pub fn get_facts_by_category(
         &self,
@@ -660,7 +670,7 @@ impl SemanticStore {
                      FROM semantic_facts
                      WHERE superseded_by IS NULL
                        AND (namespace = ?2 OR namespace LIKE ?3)
-                       AND (subject LIKE ?1 OR predicate LIKE ?1 OR object LIKE ?1)
+                       AND (subject LIKE ?1 ESCAPE '\\' OR predicate LIKE ?1 ESCAPE '\\' OR object LIKE ?1 ESCAPE '\\')
                      ORDER BY rowid DESC
                      LIMIT 50",
                 )?;
@@ -672,7 +682,7 @@ impl SemanticStore {
                     "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
                      FROM semantic_facts
                      WHERE superseded_by IS NULL
-                       AND (subject LIKE ?1 OR predicate LIKE ?1 OR object LIKE ?1)
+                       AND (subject LIKE ?1 ESCAPE '\\' OR predicate LIKE ?1 ESCAPE '\\' OR object LIKE ?1 ESCAPE '\\')
                      ORDER BY rowid DESC
                      LIMIT 50",
                 )?;

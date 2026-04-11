@@ -689,7 +689,7 @@ impl SqlitePool {
         self.with_conn(|conn| {
             let deleted = conn.execute(
                 "DELETE FROM notification_outbox
-                 WHERE delivered_at IS NOT NULL
+                 WHERE (delivered_at IS NOT NULL AND created_at < datetime('now', ?1))
                     OR created_at < datetime('now', ?1)",
                 [format!("-{max_age_days} days")],
             )?;
@@ -1123,11 +1123,21 @@ mod tests {
         let id = pool.insert_notification("test", 1, "test", None).unwrap();
         pool.mark_notification_delivered(&id).unwrap();
 
-        // Prune delivered notifications (max_age_days=0 would prune nothing recent,
-        // but delivered_at IS NOT NULL clause catches delivered ones)
+        // Recently delivered notifications should NOT be pruned (M11 fix)
         let pruned = pool.prune_notifications(365).unwrap();
-        assert_eq!(pruned, 1);
-        assert!(pool.pending_notifications(10).unwrap().is_empty());
+        assert_eq!(pruned, 0, "recently delivered notifications should be kept");
+
+        // Backdate the notification to simulate aging, then prune should work
+        pool.with_conn(|conn| {
+            conn.execute(
+                "UPDATE notification_outbox SET created_at = datetime('now', '-400 days') WHERE id = ?1",
+                [&id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let pruned = pool.prune_notifications(365).unwrap();
+        assert_eq!(pruned, 1, "old delivered notification should be pruned");
     }
 
     #[test]

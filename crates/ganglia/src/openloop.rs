@@ -113,7 +113,7 @@ impl OpenLoopDetector {
     /// Fetch user episodes within the scan window.
     fn fetch_episodes(&self) -> Result<Vec<EpisodeRow>, GangliaError> {
         let scan_cutoff =
-            Utc::now() - chrono::Duration::hours(self.config.scan_window_hours as i64);
+            Utc::now() - chrono::TimeDelta::hours(self.config.scan_window_hours as i64);
         let scan_str = scan_cutoff.to_rfc3339();
 
         self.db
@@ -142,7 +142,7 @@ impl OpenLoopDetector {
     pub fn detect_open_loops(&self) -> Result<Vec<OpenLoop>, GangliaError> {
         let now = Utc::now();
         let resolution_cutoff =
-            now - chrono::Duration::hours(self.config.resolution_window_hours as i64);
+            now - chrono::TimeDelta::hours(self.config.resolution_window_hours as i64);
 
         let episodes = self.fetch_episodes()?;
 
@@ -270,7 +270,7 @@ impl OpenLoopDetector {
         episodes: &[EpisodeRow],
     ) -> Result<Vec<OpenLoop>, cortex::LlmError> {
         let resolution_cutoff =
-            Utc::now() - chrono::Duration::hours(self.config.resolution_window_hours as i64);
+            Utc::now() - chrono::TimeDelta::hours(self.config.resolution_window_hours as i64);
         let cutoff_str = resolution_cutoff.to_rfc3339();
 
         let mut message_lines = String::new();
@@ -417,7 +417,7 @@ mod tests {
     }
 
     fn insert_episode(pool: &SqlitePool, id: &str, content: &str, hours_ago: i64) {
-        let ts = (Utc::now() - chrono::Duration::hours(hours_ago)).to_rfc3339();
+        let ts = (Utc::now() - chrono::TimeDelta::hours(hours_ago)).to_rfc3339();
         pool.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO episodes (id, session_id, role, content, timestamp)
@@ -474,7 +474,7 @@ mod tests {
     #[test]
     fn test_open_loop_too_recent_not_flagged() {
         let (detector, pool) = test_detector();
-        let ts = (Utc::now() - chrono::Duration::minutes(30)).to_rfc3339();
+        let ts = (Utc::now() - chrono::TimeDelta::minutes(30)).to_rfc3339();
         pool.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO episodes (id, session_id, role, content, timestamp)
@@ -527,7 +527,7 @@ mod tests {
     #[test]
     fn test_open_loop_assistant_messages_ignored() {
         let (detector, pool) = test_detector();
-        let ts = (Utc::now() - chrono::Duration::hours(5)).to_rfc3339();
+        let ts = (Utc::now() - chrono::TimeDelta::hours(5)).to_rfc3339();
         pool.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO episodes (id, session_id, role, content, timestamp)
@@ -545,7 +545,7 @@ mod tests {
     #[test]
     fn test_open_loop_with_agent_attribution() {
         let (detector, pool) = test_detector();
-        let ts = (Utc::now() - chrono::Duration::hours(5)).to_rfc3339();
+        let ts = (Utc::now() - chrono::TimeDelta::hours(5)).to_rfc3339();
         pool.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO episodes (id, session_id, role, content, timestamp, agent)
@@ -568,7 +568,7 @@ mod tests {
     #[test]
     fn test_open_loop_non_ascii_no_panic() {
         let (detector, pool) = test_detector();
-        let ts = (Utc::now() - chrono::Duration::hours(5)).to_rfc3339();
+        let ts = (Utc::now() - chrono::TimeDelta::hours(5)).to_rfc3339();
         pool.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO episodes (id, session_id, role, content, timestamp)
@@ -722,7 +722,7 @@ mod tests {
         })
         .unwrap();
 
-        let ts = (Utc::now() - chrono::Duration::hours(5)).to_rfc3339();
+        let ts = (Utc::now() - chrono::TimeDelta::hours(5)).to_rfc3339();
         pool.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO episodes (id, session_id, role, content, timestamp)

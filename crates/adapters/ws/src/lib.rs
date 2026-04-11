@@ -20,7 +20,7 @@ use brain_core::ApiKeyConfig;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tokio_tungstenite::{accept_async, tungstenite::Message};
+use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
 use signal::{Signal, SignalResponse, SignalSource};
@@ -123,7 +123,12 @@ pub async fn serve(
             .insert(conn_id, ConnectionInfo { id: conn_id, peer });
 
         tokio::spawn(async move {
-            match accept_async(tcp_stream).await {
+            // Limit max message size to 1 MB to prevent memory exhaustion
+            let mut ws_config =
+                tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
+            ws_config.max_message_size = Some(1_048_576);
+            ws_config.max_frame_size = Some(1_048_576);
+            match tokio_tungstenite::accept_async_with_config(tcp_stream, Some(ws_config)).await {
                 Ok(ws_stream) => {
                     tracing::info!(
                         conn_id = %conn_id,

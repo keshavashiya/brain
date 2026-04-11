@@ -43,7 +43,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
-async-trait = "0.1"
+async-trait = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
 

@@ -22,5 +22,5 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 reqwest = { workspace = true }
 chrono = { workspace = true }
-async-trait = "0.1"
+async-trait = { workspace = true }
 futures = { workspace = true }

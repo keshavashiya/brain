@@ -48,6 +48,9 @@ pub enum EmbeddingError {
 
     #[error("Provider not available: {0}")]
     ProviderUnavailable(String),
+
+    #[error("Provider initialization error: {0}")]
+    Provider(String),
 }
 
 /// Deterministically generate a non-zero fallback embedding and normalize it.
@@ -155,17 +158,17 @@ struct OllamaEmbedResponse {
 }
 
 impl OllamaProvider {
-    pub fn new(base_url: &str, model: &str) -> Self {
+    pub fn new(base_url: &str, model: &str) -> Result<Self, EmbeddingError> {
         // Ollama may need to load the model on first call — allow up to 120s
         let client = reqwest::Client::builder()
             .timeout(brain_core::timeouts::EMBEDDING_OLLAMA)
             .build()
-            .expect("Failed to create HTTP client");
-        Self {
+            .map_err(|e| EmbeddingError::Provider(format!("Failed to create HTTP client: {e}")))?;
+        Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
-        }
+        })
     }
 
     /// Check if the Ollama server is reachable.
@@ -249,17 +252,17 @@ struct OpenAIEmbedData {
 }
 
 impl OpenAIProvider {
-    pub fn new(base_url: &str, model: &str, api_key: &str) -> Self {
+    pub fn new(base_url: &str, model: &str, api_key: &str) -> Result<Self, EmbeddingError> {
         let client = reqwest::Client::builder()
             .timeout(brain_core::timeouts::EMBEDDING_OPENAI)
             .build()
-            .expect("Failed to create HTTP client");
-        Self {
+            .map_err(|e| EmbeddingError::Provider(format!("Failed to create HTTP client: {e}")))?;
+        Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
             api_key: api_key.to_string(),
-        }
+        })
     }
 
     pub async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
@@ -326,25 +329,30 @@ impl std::fmt::Debug for Embedder {
 
 impl Embedder {
     /// Create an Ollama-backed embedder.
-    pub fn for_ollama(base_url: &str, model: &str) -> Self {
+    pub fn for_ollama(base_url: &str, model: &str) -> Result<Self, EmbeddingError> {
         info!(model, "Embedding provider: Ollama");
-        Self::Ollama(OllamaProvider::new(base_url, model))
+        Ok(Self::Ollama(OllamaProvider::new(base_url, model)?))
     }
 
     /// Create an OpenAI-compatible embedder.
-    pub fn for_openai(base_url: &str, model: &str, api_key: &str) -> Self {
+    pub fn for_openai(base_url: &str, model: &str, api_key: &str) -> Result<Self, EmbeddingError> {
         info!(model, base_url, "Embedding provider: OpenAI-compatible");
-        Self::OpenAI(OpenAIProvider::new(base_url, model, api_key))
+        Ok(Self::OpenAI(OpenAIProvider::new(base_url, model, api_key)?))
     }
 
     /// Create an embedder from Brain config settings.
     ///
     /// Selects the appropriate backend (Ollama or OpenAI-compatible)
     /// based on `provider`. Returns `None` if no provider is configured.
-    pub fn from_config(provider: &str, base_url: &str, model: &str, api_key: &str) -> Option<Self> {
+    pub fn from_config(
+        provider: &str,
+        base_url: &str,
+        model: &str,
+        api_key: &str,
+    ) -> Result<Option<Self>, EmbeddingError> {
         match provider {
-            "openai" => Some(Self::for_openai(base_url, model, api_key)),
-            _ => Some(Self::for_ollama(base_url, model)),
+            "openai" => Ok(Some(Self::for_openai(base_url, model, api_key)?)),
+            _ => Ok(Some(Self::for_ollama(base_url, model)?)),
         }
     }
 
@@ -379,14 +387,14 @@ mod tests {
 
     #[test]
     fn test_ollama_provider_new() {
-        let p = OllamaProvider::new("http://localhost:11434", "nomic-embed-text");
+        let p = OllamaProvider::new("http://localhost:11434", "nomic-embed-text").unwrap();
         assert_eq!(p.model, "nomic-embed-text");
         assert_eq!(p.base_url, "http://localhost:11434");
     }
 
     #[test]
     fn test_ollama_provider_trims_trailing_slash() {
-        let p = OllamaProvider::new("http://localhost:11434/", "nomic-embed-text");
+        let p = OllamaProvider::new("http://localhost:11434/", "nomic-embed-text").unwrap();
         assert_eq!(p.base_url, "http://localhost:11434");
     }
 
@@ -396,17 +404,19 @@ mod tests {
             "https://api.openai.com/v1",
             "text-embedding-3-small",
             "sk-x",
-        );
+        )
+        .unwrap();
         assert_eq!(p.model, "text-embedding-3-small");
         assert_eq!(p.base_url, "https://api.openai.com/v1");
     }
 
     #[test]
     fn test_embedder_provider_name() {
-        let e = Embedder::for_ollama("http://localhost:11434", "nomic-embed-text");
+        let e = Embedder::for_ollama("http://localhost:11434", "nomic-embed-text").unwrap();
         assert_eq!(e.provider_name(), "ollama");
 
-        let e2 = Embedder::for_openai("https://api.openai.com/v1", "text-embedding-3-small", "k");
+        let e2 = Embedder::for_openai("https://api.openai.com/v1", "text-embedding-3-small", "k")
+            .unwrap();
         assert_eq!(e2.provider_name(), "openai");
     }
 
@@ -414,7 +424,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "Requires Ollama server running locally with nomic-embed-text"]
     async fn test_ollama_embed_live() {
-        let e = Embedder::for_ollama("http://localhost:11434", "nomic-embed-text");
+        let e = Embedder::for_ollama("http://localhost:11434", "nomic-embed-text").unwrap();
         let v = e.embed("Hello, world!").await.unwrap();
         assert_eq!(v.len(), 768, "nomic-embed-text produces 768-dim vectors");
     }

@@ -91,9 +91,8 @@ impl Consolidator {
         let mut promotion_candidates = Vec::new();
 
         // Get all episodes sorted by importance (lowest first)
-        let db = episodic.pool();
         let pool = episodic.pool();
-        let candidates = db.with_conn(|conn| {
+        let candidates = pool.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT rowid, id, namespace, content, importance, decay_rate, reinforcement_count,
                         COALESCE(last_accessed, timestamp) as last_access_time
@@ -143,7 +142,7 @@ impl Consolidator {
             let retention = forgetting_curve(candidate.importance, hours, candidate.decay_rate);
 
             if retention < self.config.prune_threshold {
-                let delete_ok = db
+                let delete_ok = pool
                     .with_conn(|conn| {
                         let tx = conn.unchecked_transaction()?;
                         // Clear source_episode_id reference (preserve facts, just orphan them)
@@ -226,7 +225,7 @@ mod tests {
     #[test]
     fn test_parse_hours_since_rfc3339() {
         let now = chrono::Utc::now();
-        let one_hour_ago = (now - chrono::Duration::hours(1)).to_rfc3339();
+        let one_hour_ago = (now - chrono::TimeDelta::hours(1)).to_rfc3339();
         let hours = parse_hours_since(&one_hour_ago, &now);
         assert!((hours - 1.0).abs() < 0.1, "Expected ~1.0 hour, got {hours}");
     }
@@ -234,7 +233,7 @@ mod tests {
     #[test]
     fn test_parse_hours_since_sqlite_format() {
         let now = chrono::Utc::now();
-        let two_hours_ago = (now - chrono::Duration::hours(2))
+        let two_hours_ago = (now - chrono::TimeDelta::hours(2))
             .format("%Y-%m-%d %H:%M:%S")
             .to_string();
         let hours = parse_hours_since(&two_hours_ago, &now);

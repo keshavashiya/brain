@@ -180,7 +180,7 @@ impl RecallEngine {
         for (id, rrf_score) in &fused {
             // Try episodic first
             if let Some(fts) = bm25_results.iter().find(|r| &r.episode_id == id) {
-                let importance = 0.5; // default for BM25 hits
+                let importance = fts.importance;
                 let hours = parse_elapsed_hours(&fts.timestamp, &now);
                 let retention = forgetting_curve(importance, hours, self.config.decay_rate);
                 let final_score = rrf_score
