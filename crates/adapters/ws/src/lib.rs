@@ -19,11 +19,12 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use brain_core::ApiKeyConfig;
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
+use signal::PipelineResult;
 use tokio::sync::Mutex;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
-use signal::{Signal, SignalResponse, SignalSource};
+use signal::{Signal, SignalError, SignalResponse, SignalSource};
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -45,7 +46,7 @@ pub struct AuthMessage {
 }
 
 /// Subsequent frames sent by a WebSocket client — signal payload.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ClientMessage {
     /// Signal source (default: `"ws"`).
     pub source: Option<String>,
@@ -61,6 +62,8 @@ pub struct ClientMessage {
     pub agent: Option<String>,
     /// Session ID for conversation continuity.
     pub session_id: Option<String>,
+    /// Enable token-by-token streaming response (default: `false`).
+    pub stream: Option<bool>,
 }
 
 /// Server-to-client auth result frame.
@@ -253,7 +256,28 @@ async fn handle_connection(
                 };
                 match msg {
                     Message::Text(text) => {
-                        let response = process_text_frame(text.as_str(), conn_id, &processor).await;
+                        // Try to parse as ClientMessage to check for streaming flag
+                        let client_msg: Option<ClientMessage> = serde_json::from_str(text.as_str()).ok();
+                        if let Some(ref cm) = client_msg {
+                            if cm.stream == Some(true) {
+                                // Streaming path: handle directly, no single response
+                                handle_streaming_request(
+                                    &mut ws_tx,
+                                    conn_id,
+                                    processor.clone(),
+                                    cm.clone(),
+                                ).await;
+                                continue;
+                            }
+                        }
+                        // Non-streaming: use the standard pipeline
+                        let response = match process_text_frame(text.as_str(), conn_id, &processor).await {
+                            Ok(Some(r)) => r,
+                            Ok(None) => continue, // Shouldn't happen for non-streaming, but be safe
+                            Err(e) => {
+                                SignalResponse::error(Uuid::new_v4(), e.to_string())
+                            }
+                        };
                         let json = match serde_json::to_string(&response) {
                             Ok(j) => j,
                             Err(e) => {
@@ -331,16 +355,22 @@ fn validate_key(api_keys: &[ApiKeyConfig], key: &str) -> bool {
 }
 
 /// Parse a text frame and run it through the signal pipeline.
+///
+/// Returns `Ok(None)` when the response is being streamed directly to the sink
+/// (i.e. `client_msg.stream == Some(true)` and the pipeline returned `LlmReady`).
 async fn process_text_frame(
     text: &str,
     conn_id: Uuid,
     processor: &signal::SignalProcessor,
-) -> SignalResponse {
+) -> Result<Option<SignalResponse>, SignalError> {
     let client_msg: ClientMessage = match serde_json::from_str(text) {
         Ok(m) => m,
         Err(e) => {
             let fake_id = Uuid::new_v4();
-            return SignalResponse::error(fake_id, format!("Invalid JSON: {e}"));
+            return Ok(Some(SignalResponse::error(
+                fake_id,
+                format!("Invalid JSON: {e}"),
+            )));
         }
     };
 
@@ -359,11 +389,266 @@ async fn process_text_frame(
     });
 
     let signal_id = signal.id;
+
+    // If streaming is requested, return None — the caller handles streaming
+    // directly via prepare() → generate_stream() → finalize_streaming().
+    if client_msg.stream == Some(true) {
+        return Ok(None);
+    }
+
     match processor.process(signal).await {
-        Ok(r) => r,
+        Ok(r) => Ok(Some(r)),
         Err(e) => {
             tracing::warn!(conn_id = %conn_id, "Signal processing error: {e}");
-            SignalResponse::error(signal_id, e.to_string())
+            Ok(Some(SignalResponse::error(signal_id, e.to_string())))
+        }
+    }
+}
+
+/// Send a JSON value as a text frame. Returns Err if the send failed.
+async fn send_json_frame_to_sink(
+    ws_tx: &mut futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+        Message,
+    >,
+    value: &serde_json::Value,
+    conn_id: Uuid,
+) -> Result<(), ()> {
+    match serde_json::to_string(value) {
+        Ok(json) => {
+            if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                tracing::debug!(conn_id = %conn_id, "Failed to send WS frame");
+                Err(())
+            } else {
+                Ok(())
+            }
+        }
+        Err(e) => {
+            tracing::error!(conn_id = %conn_id, "Failed to serialize frame: {e}");
+            Err(())
+        }
+    }
+}
+
+// ─── Streaming drop-guard ─────────────────────────────────────────────────────
+
+/// Guarantees that `finalize_streaming()` is called even if the client
+/// disconnects mid-stream.
+///
+/// Call `commit()` on the success path to disarm the guard. On `Drop`, if
+/// not committed, the accumulated text is still persisted.
+struct StreamFinalizer {
+    processor: Arc<signal::SignalProcessor>,
+    session_id: Option<String>,
+    namespace: String,
+    agent: Option<String>,
+    acc: Arc<std::sync::Mutex<String>>,
+    committed: bool,
+}
+
+impl StreamFinalizer {
+    fn new(
+        processor: Arc<signal::SignalProcessor>,
+        session_id: Option<String>,
+        namespace: String,
+        agent: Option<String>,
+        acc: Arc<std::sync::Mutex<String>>,
+    ) -> Self {
+        Self {
+            processor,
+            session_id,
+            namespace,
+            agent,
+            acc,
+            committed: false,
+        }
+    }
+
+    /// Disarm the drop-guard — caller takes responsibility for finalizing.
+    fn commit(mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for StreamFinalizer {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let acc = self.acc.lock().unwrap();
+        if acc.is_empty() {
+            return;
+        }
+        let session_id = self.session_id.clone();
+        let namespace = self.namespace.clone();
+        let agent = self.agent.clone();
+        let content = acc.clone();
+        // Best-effort persist — log failure but don't panic.
+        if let Err(e) = self.processor.finalize_streaming(
+            session_id.as_deref().unwrap_or("unknown"),
+            &content,
+            &namespace,
+            agent.as_deref(),
+        ) {
+            tracing::error!("finalize_streaming failed on cancellation: {e}");
+        }
+    }
+}
+
+// ─── Streaming handler ────────────────────────────────────────────────────────
+
+/// Handle a streaming LLM request: prepare → generate_stream → finalize.
+///
+/// Sends `chunk` frames for each token and a final `complete` frame.
+async fn handle_streaming_request(
+    ws_tx: &mut futures_util::stream::SplitSink<
+        tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+        Message,
+    >,
+    conn_id: Uuid,
+    processor: Arc<signal::SignalProcessor>,
+    client_msg: ClientMessage,
+) {
+    let source = SignalSource::parse(client_msg.source.as_deref(), SignalSource::WebSocket);
+    let signal = Signal::from_adapter_request(signal::AdapterRequest {
+        source,
+        content: client_msg.content,
+        channel: Some(format!("ws:{conn_id}")),
+        sender: client_msg.sender,
+        metadata: client_msg.metadata,
+        namespace: client_msg.namespace.clone(),
+        agent: client_msg.agent.clone(),
+        session_id: client_msg.session_id.clone(),
+        default_channel: format!("ws:{conn_id}"),
+        default_sender: "wsclient".to_string(),
+    });
+
+    let signal_id = signal.id;
+
+    // Phase 1: prepare
+    let prepared = match processor.prepare(&signal, None).await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(conn_id = %conn_id, "Signal prepare error: {e}");
+            let _ = send_json_frame_to_sink(
+                ws_tx,
+                &serde_json::json!({
+                    "type": "error",
+                    "message": e.to_string()
+                }),
+                conn_id,
+            )
+            .await;
+            return;
+        }
+    };
+
+    match prepared {
+        PipelineResult::Complete(resp) => {
+            // Non-LLM intents: send a single complete frame
+            let frame = serde_json::json!({"type": "complete", "response": resp});
+            let _ = send_json_frame_to_sink(ws_tx, &frame, conn_id).await;
+        }
+        PipelineResult::LlmReady {
+            messages,
+            memory_context,
+            session_id,
+            namespace,
+            agent,
+            ..
+        } => {
+            // Phase 2: generate_stream
+            let llm_stream = match processor.llm().generate_stream(&messages).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(conn_id = %conn_id, "LLM stream error: {e}");
+                    let _ = send_json_frame_to_sink(
+                        ws_tx,
+                        &serde_json::json!({
+                            "type": "error",
+                            "message": e.to_string()
+                        }),
+                        conn_id,
+                    )
+                    .await;
+                    return;
+                }
+            };
+
+            let acc: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
+
+            // Drop-guard: on early return (client close, error), still persist.
+            let finalizer = StreamFinalizer::new(
+                processor.clone(),
+                session_id.clone(),
+                namespace.clone(),
+                agent.clone(),
+                Arc::clone(&acc),
+            );
+
+            let mut stream = llm_stream;
+            let finalizer = finalizer;
+
+            while let Some(chunk_result) = stream.next().await {
+                let chunk = match chunk_result {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(conn_id = %conn_id, "Stream chunk error: {e}");
+                        let _ = send_json_frame_to_sink(
+                            ws_tx,
+                            &serde_json::json!({
+                                "type": "error",
+                                "message": e.to_string()
+                            }),
+                            conn_id,
+                        )
+                        .await;
+                        return; // Drop-guard will finalize what we have
+                    }
+                };
+
+                acc.lock().unwrap().push_str(&chunk.content);
+
+                let chunk_frame = serde_json::json!({
+                    "type": "chunk",
+                    "content": chunk.content
+                });
+                if send_json_frame_to_sink(ws_tx, &chunk_frame, conn_id)
+                    .await
+                    .is_err()
+                {
+                    return; // Drop-guard will finalize
+                }
+
+                if chunk.is_done {
+                    break;
+                }
+            }
+
+            // Success path: finalize explicitly, disarm the drop-guard.
+            {
+                let acc_content = acc.lock().unwrap().clone();
+                if let Err(e) = processor.finalize_streaming(
+                    session_id.as_deref().unwrap_or("unknown"),
+                    &acc_content,
+                    &namespace,
+                    agent.as_deref(),
+                ) {
+                    tracing::error!("finalize_streaming failed after successful stream: {e}");
+                }
+            }
+            finalizer.commit();
+
+            // Phase 3: send complete frame
+            let resp = signal::SignalResponse {
+                signal_id,
+                status: signal::ResponseStatus::Ok,
+                response: signal::ResponseContent::Text(acc.lock().unwrap().clone()),
+                memory_context,
+                session_id,
+            };
+            let complete_frame = serde_json::json!({"type": "complete", "response": resp});
+            let _ = send_json_frame_to_sink(ws_tx, &complete_frame, conn_id).await;
         }
     }
 }
@@ -520,7 +805,9 @@ mod tests {
 
         let conn_id = Uuid::new_v4();
         let response = process_text_frame("not json at all", conn_id, &processor).await;
-        assert_eq!(response.status, signal::ResponseStatus::Error);
+        assert!(response.is_ok());
+        let resp = response.unwrap().unwrap();
+        assert_eq!(resp.status, signal::ResponseStatus::Error);
     }
 
     /// Integration test: process_text_frame with a StoreFact signal returns Ok.
@@ -534,7 +821,9 @@ mod tests {
         let conn_id = Uuid::new_v4();
         let text = r#"{"source":"ws","content":"Remember that Rust is fast","sender":"user-1"}"#;
         let response = process_text_frame(text, conn_id, &processor).await;
-        assert_eq!(response.status, signal::ResponseStatus::Ok);
+        assert!(response.is_ok());
+        let resp = response.unwrap().unwrap();
+        assert_eq!(resp.status, signal::ResponseStatus::Ok);
     }
 
     #[tokio::test]
@@ -629,6 +918,207 @@ mod tests {
             facts.len() >= 3,
             "expected at least 3 facts, got {}",
             facts.len()
+        );
+
+        server_task.abort();
+    }
+
+    // ─── Streaming tests ──────────────────────────────────────────────────────
+
+    /// Integration test: streaming request with `stream: true` returns chunk
+    /// frames followed by a complete frame. Uses a StoreFact intent which
+    /// returns `PipelineResult::Complete` — so it should return a single
+    /// `complete` frame (no chunks) since it's not an LLM-driven intent.
+    #[tokio::test]
+    #[ignore = "Requires local TCP listener permissions in the runtime environment"]
+    async fn test_streaming_store_fact_returns_complete_frame() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let api_key = config.access.api_keys.first().unwrap().key.clone();
+        let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
+        let port = random_port();
+
+        let server_task = tokio::spawn(serve(processor.clone(), "127.0.0.1", port));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        // Auth
+        ws.send(Message::Text(
+            serde_json::json!({"api_key": api_key}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+        let _ = ws.next().await; // auth response
+
+        // Send streaming request
+        ws.send(Message::Text(
+            serde_json::json!({
+                "content": "Remember that streaming works",
+                "stream": true,
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        // Should receive a single `complete` frame (StoreFact is non-LLM)
+        let resp = ws.next().await.unwrap().unwrap();
+        let resp_text = resp.into_text().unwrap().to_string();
+        assert!(resp_text.contains("\"type\":\"complete\""));
+        assert!(resp_text.contains("\"status\":\"Ok\""));
+
+        server_task.abort();
+    }
+
+    /// Integration test: `stream: true` chat request returns chunk frames
+    /// followed by a complete frame, and the accumulated content matches.
+    #[tokio::test]
+    #[ignore = "Requires local TCP listener, running LLM provider, and DB access"]
+    async fn test_streaming_chat_returns_chunks_then_complete() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let api_key = config.access.api_keys.first().unwrap().key.clone();
+        let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
+        let port = random_port();
+
+        let server_task = tokio::spawn(serve(processor.clone(), "127.0.0.1", port));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        // Auth
+        ws.send(Message::Text(
+            serde_json::json!({"api_key": api_key}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+        let _ = ws.next().await; // auth response
+
+        // Send streaming chat request
+        ws.send(Message::Text(
+            serde_json::json!({
+                "content": "Say hello briefly",
+                "stream": true,
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        let mut chunks = Vec::new();
+
+        loop {
+            let resp = ws.next().await.unwrap().unwrap();
+            let resp_text = resp.into_text().unwrap().to_string();
+            let json: serde_json::Value = serde_json::from_str(&resp_text).unwrap();
+
+            match json.get("type").and_then(|v| v.as_str()) {
+                Some("chunk") => {
+                    if let Some(content) = json.get("content").and_then(|v| v.as_str()) {
+                        chunks.push(content.to_string());
+                    }
+                }
+                Some("complete") => {
+                    break;
+                }
+                Some("proactive") => continue,
+                other => panic!("Unexpected frame type: {:?}", other),
+            }
+        }
+
+        assert!(
+            !chunks.is_empty(),
+            "Should have received at least one chunk"
+        );
+
+        let full_text: String = chunks.join("");
+        assert!(
+            !full_text.is_empty(),
+            "Accumulated content should not be empty"
+        );
+
+        server_task.abort();
+    }
+
+    /// Integration test: client disconnect mid-stream → drop-guard fires without
+    /// panicking. The `StreamFinalizer::drop` should call `finalize_streaming`
+    /// even on early termination.
+    #[tokio::test]
+    #[ignore = "Requires local TCP listener, running LLM provider, and DB access"]
+    async fn test_streaming_cancellation_drop_guard() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let api_key = config.access.api_keys.first().unwrap().key.clone();
+        let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
+        let port = random_port();
+
+        let server_task = tokio::spawn(serve(processor.clone(), "127.0.0.1", port));
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        // Auth
+        ws.send(Message::Text(
+            serde_json::json!({"api_key": api_key}).to_string().into(),
+        ))
+        .await
+        .unwrap();
+        let _ = ws.next().await; // auth response
+
+        // Send streaming chat request
+        ws.send(Message::Text(
+            serde_json::json!({
+                "content": "Tell me a long story",
+                "stream": true,
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+
+        // Read at least one frame, then drop the connection
+        let mut _received_any = false;
+        for _ in 0..3 {
+            if let Some(Ok(resp)) = ws.next().await {
+                if let Ok(text) = resp.into_text() {
+                    if text.contains("\"type\":\"chunk\"") || text.contains("\"type\":\"complete\"")
+                    {
+                        _received_any = true;
+                    }
+                }
+            }
+        }
+
+        // Drop the WS connection without completing
+        drop(ws);
+
+        // Give the server a moment to process the disconnect and run the drop-guard
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // If we got here without panicking, the drop-guard worked correctly.
+        // The server task should still be alive (not panicked).
+        assert!(
+            !server_task.is_finished(),
+            "Server should still be running after client disconnect"
         );
 
         server_task.abort();

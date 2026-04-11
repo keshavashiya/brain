@@ -3,7 +3,7 @@
 //! Uses WebSocket for communication with the daemon, enabling lower latency
 //! and a consistent protocol across all adapters.
 
-use std::io::stdout;
+use std::io::{stdout, Write};
 
 use crossterm::style::{Color, Print, ResetColor, SetForegroundColor};
 use crossterm::ExecutableCommand;
@@ -59,15 +59,16 @@ async fn send_ws_message(
         return Err(anyhow::anyhow!("Auth error: {error}"));
     }
 
-    // Phase 2: Send signal
+    // Phase 2: Send signal with streaming enabled
     let signal = serde_json::json!({
         "content": message,
         "session_id": session_id,
+        "stream": true,
     });
     sink.send(Message::Text(signal.to_string().into())).await?;
 
-    // Phase 3: Read response — skip proactive notifications, which the server
-    // may push unsolicited on the same stream before the real reply.
+    // Phase 3: Read response — stream tokens as they arrive
+    let mut full_text = String::new();
     loop {
         let frame = match stream.next().await {
             Some(Ok(frame)) => frame,
@@ -89,18 +90,56 @@ async fn send_ws_message(
 
         let response_json: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
 
-        if response_json.get("type").and_then(|v| v.as_str()) == Some("proactive") {
-            continue; // ignore unsolicited pushes, keep waiting for the reply
+        match response_json.get("type").and_then(|v| v.as_str()) {
+            Some("proactive") => {
+                // Skip proactive notifications inline
+                if let Some(content) = response_json["content"].as_str() {
+                    let mut out = stdout();
+                    out.execute(SetForegroundColor(Color::Yellow))?;
+                    out.execute(Print("[proactive] "))?;
+                    out.execute(ResetColor)?;
+                    println!("{content}");
+                }
+            }
+            Some("chunk") => {
+                if let Some(content) = response_json["content"].as_str() {
+                    print!("{content}");
+                    stdout().flush()?;
+                    full_text.push_str(content);
+                }
+            }
+            Some("complete") => {
+                // Extract full text from response if not already captured
+                if full_text.is_empty() {
+                    if let Some(value) = response_json
+                        .get("response")
+                        .and_then(|r| r.get("value").or_else(|| r.get("Error")))
+                        .and_then(|v| v.as_str())
+                    {
+                        full_text = value.to_string();
+                    }
+                }
+                println!(); // trailing newline after streamed tokens
+                break;
+            }
+            Some("error") => {
+                let error_msg = response_json
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("Unknown error")
+                    .to_string();
+                let mut out = stdout();
+                out.execute(SetForegroundColor(Color::Red))?;
+                out.execute(Print(&error_msg))?;
+                out.execute(ResetColor)?;
+                println!();
+                return Err(anyhow::anyhow!(error_msg));
+            }
+            _ => continue,
         }
-
-        let reply = response_json
-            .get("response")
-            .and_then(|r| r.get("value").or_else(|| r.get("Error")))
-            .and_then(|v| v.as_str())
-            .map(String::from);
-
-        return Ok(reply.filter(|t| !t.is_empty()));
     }
+
+    Ok(Some(full_text).filter(|t| !t.is_empty()))
 }
 
 /// Persistent WS connection for interactive mode.
@@ -118,11 +157,13 @@ impl WsSession {
         let signal = serde_json::json!({
             "content": message,
             "session_id": session_id,
+            "stream": true,
         });
         self.sink
             .send(Message::Text(signal.to_string().into()))
             .await?;
 
+        let mut full_text = String::new();
         loop {
             let frame = match self.stream.next().await {
                 Some(Ok(frame)) => frame,
@@ -135,26 +176,53 @@ impl WsSession {
                     let response_json: serde_json::Value =
                         serde_json::from_str(&t).unwrap_or_default();
 
-                    // Skip proactive notifications — they're pushed unsolicited
-                    if response_json.get("type").and_then(|v| v.as_str()) == Some("proactive") {
-                        // Print proactive notifications inline so the user sees them
-                        if let Some(content) = response_json["content"].as_str() {
-                            let mut out = stdout();
-                            out.execute(SetForegroundColor(Color::Yellow))?;
-                            out.execute(Print("[proactive] "))?;
-                            out.execute(ResetColor)?;
-                            println!("{content}");
+                    match response_json.get("type").and_then(|v| v.as_str()) {
+                        Some("proactive") => {
+                            // Print proactive notifications inline so the user sees them
+                            if let Some(content) = response_json["content"].as_str() {
+                                let mut out = stdout();
+                                out.execute(SetForegroundColor(Color::Yellow))?;
+                                out.execute(Print("[proactive] "))?;
+                                out.execute(ResetColor)?;
+                                println!("{content}");
+                            }
                         }
-                        continue; // keep waiting for the actual response
+                        Some("chunk") => {
+                            if let Some(content) = response_json["content"].as_str() {
+                                print!("{content}");
+                                stdout().flush()?;
+                                full_text.push_str(content);
+                            }
+                        }
+                        Some("complete") => {
+                            // Extract full text from response if not already captured
+                            if full_text.is_empty() {
+                                if let Some(value) = response_json
+                                    .get("response")
+                                    .and_then(|r| r.get("value").or_else(|| r.get("Error")))
+                                    .and_then(|v| v.as_str())
+                                {
+                                    full_text = value.to_string();
+                                }
+                            }
+                            println!(); // trailing newline after streamed tokens
+                            return Ok(Some(full_text).filter(|t| !t.is_empty()));
+                        }
+                        Some("error") => {
+                            let error_msg = response_json
+                                .get("message")
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("Unknown error")
+                                .to_string();
+                            let mut out = stdout();
+                            out.execute(SetForegroundColor(Color::Red))?;
+                            out.execute(Print(&error_msg))?;
+                            out.execute(ResetColor)?;
+                            println!();
+                            return Err(anyhow::anyhow!(error_msg));
+                        }
+                        _ => continue,
                     }
-
-                    let text = response_json
-                        .get("response")
-                        .and_then(|r| r.get("value").or_else(|| r.get("Error")))
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
-
-                    return Ok(text.filter(|t| !t.is_empty()));
                 }
                 Message::Ping(data) => {
                     let _ = self.sink.send(Message::Pong(data)).await;
