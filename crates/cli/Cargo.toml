@@ -14,6 +14,13 @@ categories.workspace = true
 name = "brain"
 path = "src/main.rs"
 
+[features]
+default = ["grpc", "bridge", "encryption", "ganglia"]
+grpc = ["dep:grpcadapter"]
+bridge = ["dep:bridge"]
+encryption = ["storage/encryption", "signal/encryption"]
+ganglia = ["dep:ganglia"]
+
 [dependencies]
 brain_core = { workspace = true }
 storage = { workspace = true }
@@ -22,12 +29,12 @@ hippocampus = { workspace = true }
 cortex = { workspace = true }
 thalamus = { workspace = true }
 signal = { workspace = true }
-ganglia = { workspace = true }
+ganglia = { workspace = true, optional = true }
 httpadapter = { workspace = true }
 wsadapter = { workspace = true }
-grpcadapter = { workspace = true }
+grpcadapter = { workspace = true, optional = true }
 mcp = { workspace = true }
-bridge = { workspace = true }
+bridge = { workspace = true, optional = true }
 backends = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = "0.3"

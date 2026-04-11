@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use brain_core::metrics::SubsystemMetrics;
+
 use crate::resilience::{resilient_send, CircuitBreaker};
 
 pub const DEFAULT_MESSAGE_BODY: &str = r#"{"channel":"{{channel}}","recipient":"{{recipient}}","content":"{{content}}","namespace":"{{namespace}}","timestamp":"{{timestamp}}"}"#;
@@ -44,21 +46,36 @@ impl WebhookMessageBackend {
         timeout_ms: u64,
         resilience: &brain_core::config::ResilienceConfig,
     ) -> anyhow::Result<Self> {
+        Self::new_with_metrics(channels, timeout_ms, resilience, None)
+    }
+
+    pub fn new_with_metrics(
+        channels: &HashMap<String, brain_core::config::ChannelConfig>,
+        timeout_ms: u64,
+        resilience: &brain_core::config::ResilienceConfig,
+        metrics: Option<Arc<SubsystemMetrics>>,
+    ) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(timeout_ms.max(1)))
             .build()
             .map_err(|e| anyhow::anyhow!("message client init failed: {e}"))?;
+        let cb = CircuitBreaker::new(
+            "webhook-message",
+            resilience.circuit_breaker_threshold,
+            resilience.circuit_breaker_cooldown_secs,
+        );
+        let cb = if let Some(m) = metrics {
+            cb.with_metrics(m)
+        } else {
+            cb
+        };
         Ok(Self {
             channels: channels
                 .iter()
                 .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
                 .collect(),
             client,
-            circuit_breaker: Arc::new(CircuitBreaker::new(
-                "webhook-message",
-                resilience.circuit_breaker_threshold,
-                resilience.circuit_breaker_cooldown_secs,
-            )),
+            circuit_breaker: Arc::new(cb),
             max_retries: resilience.max_retries,
             retry_base_ms: resilience.retry_base_ms,
         })
@@ -294,5 +311,112 @@ mod tests {
         assert_eq!(json_escape(r#"say "hi""#), r#"say \"hi\""#);
         assert_eq!(json_escape("a\nb"), r#"a\nb"#);
         assert_eq!(json_escape("back\\slash"), r#"back\\slash"#);
+    }
+
+    // ─── Mock HTTP tests ────────────────────────────────────────────────────
+
+    fn fast_resilience() -> brain_core::config::ResilienceConfig {
+        brain_core::config::ResilienceConfig {
+            max_retries: 0,
+            retry_base_ms: 10,
+            circuit_breaker_threshold: 5,
+            circuit_breaker_cooldown_secs: 60,
+        }
+    }
+
+    fn build_channels(name: &str, url: &str) -> HashMap<String, brain_core::config::ChannelConfig> {
+        let mut map = HashMap::new();
+        map.insert(
+            name.to_string(),
+            brain_core::config::ChannelConfig {
+                url: url.to_string(),
+                body: String::new(),
+                headers: HashMap::new(),
+            },
+        );
+        map
+    }
+
+    #[tokio::test]
+    async fn test_webhook_send_success() {
+        use cortex::actions::MessageBackend;
+
+        let mut server = mockito::Server::new_async().await;
+        let mock = server
+            .mock("POST", "/hook")
+            .match_header("content-type", "application/json")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"id": "delivery-123", "status": "sent"}"#)
+            .create_async()
+            .await;
+
+        let webhook_url = format!("{}/hook", server.url());
+        let channels = build_channels("alerts", &webhook_url);
+        let backend = WebhookMessageBackend::new(&channels, 5000, &fast_resilience()).unwrap();
+        let result = backend
+            .send("alerts", "alice", "server is down", "work")
+            .await
+            .unwrap();
+        assert_eq!(result.delivery_id, "delivery-123");
+        assert_eq!(result.status, "sent");
+        mock.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn test_webhook_send_5xx_fails() {
+        use cortex::actions::MessageBackend;
+
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/hook")
+            .with_status(500)
+            .with_body("server error")
+            .expect_at_least(1)
+            .create_async()
+            .await;
+
+        let webhook_url = format!("{}/hook", server.url());
+        let channels = build_channels("alerts", &webhook_url);
+        let backend = WebhookMessageBackend::new(&channels, 5000, &fast_resilience()).unwrap();
+        let result = backend.send("alerts", "alice", "boom", "work").await;
+        assert!(result.is_err(), "expected 5xx to fail");
+    }
+
+    #[tokio::test]
+    async fn test_webhook_unknown_channel_returns_invalid_args() {
+        use cortex::actions::MessageBackend;
+
+        let channels = build_channels("alerts", "http://unused");
+        let backend = WebhookMessageBackend::new(&channels, 5000, &fast_resilience()).unwrap();
+        let err = backend
+            .send("unknown-channel", "alice", "hi", "work")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, cortex::actions::ActionError::InvalidArguments(_)),
+            "expected InvalidArguments error, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_webhook_fallback_delivery_id_when_no_body_id() {
+        use cortex::actions::MessageBackend;
+
+        let mut server = mockito::Server::new_async().await;
+        let _mock = server
+            .mock("POST", "/hook")
+            .with_status(200)
+            .with_body(r#"{"other": "field"}"#)
+            .create_async()
+            .await;
+
+        let webhook_url = format!("{}/hook", server.url());
+        let channels = build_channels("alerts", &webhook_url);
+        let backend = WebhookMessageBackend::new(&channels, 5000, &fast_resilience()).unwrap();
+        let result = backend.send("alerts", "alice", "hi", "work").await.unwrap();
+        // Fallback ID is a generated timestamp-based token starting with "msg-"
+        assert!(result.delivery_id.starts_with("msg-"));
+        assert_eq!(result.status, "accepted");
     }
 }

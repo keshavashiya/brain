@@ -336,6 +336,8 @@ pub struct SignalProcessor {
     notification_router: Option<notification::NotificationRouter>,
     /// Action dispatcher for executing tool intents (set via builder).
     action_dispatcher: Option<cortex::actions::ActionDispatcher>,
+    /// Cross-subsystem metrics (embedding, consolidation, circuit breaker, intent).
+    metrics: Arc<brain_core::metrics::SubsystemMetrics>,
 }
 
 /// Resolve the LLM API key from config, with env var fallback for backwards compatibility.
@@ -362,7 +364,12 @@ impl SignalProcessor {
     /// Opens the SQLite database, connects to RuVector, creates the LLM provider,
     /// and wires the intent classifier, importance scorer, and context assembler.
     pub async fn new(config: brain_core::BrainConfig) -> Result<Self, SignalError> {
-        Self::new_with_encryptor(config, None).await
+        Self::new_with_encryptor(
+            config,
+            #[cfg(feature = "encryption")]
+            None,
+        )
+        .await
     }
 
     /// Like `new`, but wires an `Encryptor` into all storage backends.
@@ -372,18 +379,20 @@ impl SignalProcessor {
     /// encrypted in their JSON files on disk.
     pub async fn new_with_encryptor(
         config: brain_core::BrainConfig,
-        encryptor: Option<storage::Encryptor>,
+        #[cfg(feature = "encryption")] encryptor: Option<storage::Encryptor>,
     ) -> Result<Self, SignalError> {
         // Open SQLite pool — attach encryptor if provided
         let db = {
             let pool = storage::SqlitePool::open(&config.sqlite_path())
                 .map_err(|e| SignalError::Init(format!("SQLite: {e}")))?;
-            if let Some(enc) = encryptor.clone() {
+            #[cfg(feature = "encryption")]
+            let pool = if let Some(enc) = encryptor.clone() {
                 tracing::info!("Encryption enabled: SQLite content columns will be encrypted");
                 pool.with_encryptor(enc)
             } else {
                 pool
-            }
+            };
+            pool
         };
 
         // Create episodic store
@@ -436,6 +445,7 @@ impl SignalProcessor {
             .await
         {
             Ok(ruv) => {
+                #[cfg(feature = "encryption")]
                 if encryptor.is_some() {
                     tracing::info!("Encryption enabled: vector IDs stored in ruvector-core, content encrypted in SQLite");
                 }
@@ -487,6 +497,7 @@ impl SignalProcessor {
             events_tx,
             notification_router: None,
             action_dispatcher: None,
+            metrics: Arc::new(brain_core::metrics::SubsystemMetrics::new()),
         };
 
         // Warm up the LLM model in the background to avoid first-call timeout
@@ -600,6 +611,10 @@ impl SignalProcessor {
 
         // 2. Classify intent via Thalamus
         let classification = self.classifier.classify(&signal.content).await;
+        self.metrics.inc_intent_classification();
+        if matches!(classification.method, thalamus::ClassificationMethod::Llm) {
+            self.metrics.inc_intent_llm_fallback();
+        }
 
         tracing::info!(
             signal_id = %signal_id,
@@ -1091,6 +1106,7 @@ impl SignalProcessor {
     /// Falls back to a deterministic, non-zero normalized vector if no provider
     /// is available or if the call fails.
     async fn embed_text(&self, text: &str) -> Vec<f32> {
+        self.metrics.inc_embedding_request();
         let mut guard = self.embedder.lock().await;
         match &mut *guard {
             Some(embedder) => match embedder.embed(text).await {
@@ -1099,6 +1115,7 @@ impl SignalProcessor {
                 }
                 Err(e) => {
                     tracing::warn!("Embedding failed, using deterministic fallback vector: {e}");
+                    self.metrics.inc_embedding_fallback();
                     hippocampus::embedding::deterministic_fallback_embedding(
                         text,
                         self.embedding_dim,
@@ -1106,6 +1123,7 @@ impl SignalProcessor {
                 }
             },
             None => {
+                self.metrics.inc_embedding_fallback();
                 hippocampus::embedding::deterministic_fallback_embedding(text, self.embedding_dim)
             }
         }
@@ -1238,6 +1256,11 @@ impl SignalProcessor {
     /// Expose the embedding dimension (for adapter use).
     pub fn embedding_dim(&self) -> usize {
         self.embedding_dim
+    }
+
+    /// Expose the subsystem metrics handle (for adapter use / instrumentation).
+    pub fn metrics(&self) -> &Arc<brain_core::metrics::SubsystemMetrics> {
+        &self.metrics
     }
 
     /// Get a cloneable handle to the LLM provider (for adapter use).

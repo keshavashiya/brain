@@ -20,6 +20,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace
 
+  check-minimal:
+    name: Check (no default features)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check -p brainos --no-default-features
+      - run: cargo check -p brainos --no-default-features --features encryption
+      - run: cargo check -p brainos --no-default-features --features grpc
+      - run: cargo check -p brainos --no-default-features --features ganglia
+      - run: cargo check -p brainos --no-default-features --features bridge
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest

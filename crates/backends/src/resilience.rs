@@ -1,6 +1,9 @@
 //! Resilience primitives — circuit breaker and retry logic for HTTP backends.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
+
+use brain_core::metrics::SubsystemMetrics;
 
 /// Tracks consecutive failures and opens a circuit after a threshold is reached.
 pub struct CircuitBreaker {
@@ -9,6 +12,7 @@ pub struct CircuitBreaker {
     threshold: u32,
     cooldown_ms: u64,
     pub name: String,
+    metrics: Option<Arc<SubsystemMetrics>>,
 }
 
 impl CircuitBreaker {
@@ -19,7 +23,14 @@ impl CircuitBreaker {
             threshold,
             cooldown_ms: cooldown_secs * 1000,
             name: name.to_string(),
+            metrics: None,
         }
+    }
+
+    /// Attach a metrics handle so state transitions are exported.
+    pub fn with_metrics(mut self, metrics: Arc<SubsystemMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     pub fn is_open(&self) -> bool {
@@ -42,6 +53,9 @@ impl CircuitBreaker {
         let prev = self.consecutive_failures.swap(0, Ordering::Relaxed);
         if prev >= self.threshold {
             tracing::info!(backend = %self.name, "Circuit breaker closed (backend recovered)");
+            if let Some(m) = &self.metrics {
+                m.inc_circuit_reset();
+            }
         }
     }
 
@@ -59,6 +73,9 @@ impl CircuitBreaker {
                 cooldown_secs = self.cooldown_ms / 1000,
                 "Circuit breaker OPEN — backend disabled until cooldown elapses"
             );
+            if let Some(m) = &self.metrics {
+                m.inc_circuit_open();
+            }
         }
     }
 }

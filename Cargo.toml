@@ -97,12 +97,12 @@ tokio-tungstenite = "0.26"
 
 # Internal crates
 brain_core = { package = "brainos-core", path = "crates/core", version = "0.1.0" }
-storage = { package = "brainos-storage", path = "crates/storage", version = "0.1.0" }
+storage = { package = "brainos-storage", path = "crates/storage", version = "0.1.0", default-features = false }
 hippocampus = { package = "brainos-hippocampus", path = "crates/hippocampus", version = "0.1.0" }
 cortex = { package = "brainos-cortex", path = "crates/cortex", version = "0.1.0" }
 thalamus = { package = "brainos-thalamus", path = "crates/thalamus", version = "0.1.0" }
 amygdala = { package = "brainos-amygdala", path = "crates/amygdala", version = "0.1.0" }
-signal = { package = "brainos-signal", path = "crates/signal", version = "0.1.0" }
+signal = { package = "brainos-signal", path = "crates/signal", version = "0.1.0", default-features = false }
 httpadapter = { package = "brainos-httpadapter", path = "crates/adapters/http", version = "0.1.0" }
 wsadapter = { package = "brainos-wsadapter", path = "crates/adapters/ws", version = "0.1.0" }
 grpcadapter = { package = "brainos-grpcadapter", path = "crates/adapters/grpc", version = "0.1.0" }
@@ -111,3 +111,9 @@ cerebellum = { package = "brainos-cerebellum", path = "crates/cerebellum", versi
 ganglia = { package = "brainos-ganglia", path = "crates/ganglia", version = "0.1.0" }
 bridge = { package = "brainos-bridge", path = "crates/bridge", version = "0.1.0" }
 backends = { package = "brainos-backends", path = "crates/backends", version = "0.1.0" }
+
+# Benchmarks
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# Testing
+mockito = "1"

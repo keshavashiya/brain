@@ -23,3 +23,8 @@ lru = { workspace = true }
 [dev-dependencies]
 async-trait = "0.1"
 futures = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "scoring"
+harness = false

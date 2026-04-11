@@ -143,7 +143,7 @@ pub(crate) async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow
                         eprintln!("Daemon returned empty response.");
                     }
                     Err(e) => {
-                        eprintln!("Error: {e}");
+                        eprintln!("{}", crate::errors::friendly_error(&e));
                     }
                 }
             }

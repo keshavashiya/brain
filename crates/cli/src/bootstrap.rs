@@ -5,7 +5,9 @@
 
 use std::sync::Arc;
 
-use crate::encryption::{resolve_encryptor, resolve_llm_api_key};
+#[cfg(feature = "encryption")]
+use crate::encryption::resolve_encryptor;
+use crate::encryption::resolve_llm_api_key;
 use backends::*;
 
 /// Build a fully-wired `SignalProcessor` from config.
@@ -26,9 +28,13 @@ use backends::*;
 pub async fn build_processor(
     config: &brain_core::BrainConfig,
 ) -> anyhow::Result<signal::SignalProcessor> {
-    let encryptor = resolve_encryptor(config)?;
-    let mut processor =
-        signal::SignalProcessor::new_with_encryptor(config.clone(), encryptor).await?;
+    #[cfg(feature = "encryption")]
+    let mut processor = {
+        let encryptor = resolve_encryptor(config)?;
+        signal::SignalProcessor::new_with_encryptor(config.clone(), encryptor).await?
+    };
+    #[cfg(not(feature = "encryption"))]
+    let mut processor = signal::SignalProcessor::new(config.clone()).await?;
 
     let action_dispatcher = build_action_dispatcher(config, &processor)?;
     processor = processor.with_action_dispatcher(action_dispatcher);
@@ -75,6 +81,7 @@ fn build_action_dispatcher(
         let timeout = ws.timeout_ms;
         let endpoint = ws.endpoint.trim();
         let res = &config.actions.resilience;
+        let metrics = Some(processor.metrics().clone());
 
         let backend_result: Result<
             Option<Arc<dyn cortex::actions::WebSearchBackend>>,
@@ -86,7 +93,8 @@ fn build_action_dispatcher(
                 } else {
                     endpoint
                 };
-                SearxngSearchBackend::new(ep, timeout, res).map(|b| Some(Arc::new(b) as _))
+                SearxngSearchBackend::new_with_metrics(ep, timeout, res, metrics.clone())
+                    .map(|b| Some(Arc::new(b) as _))
             }
             brain_core::config::WebSearchProvider::Tavily => {
                 let api_key = ws.api_key.trim();
@@ -101,8 +109,14 @@ fn build_action_dispatcher(
                     } else {
                         endpoint
                     };
-                    TavilySearchBackend::new(ep, api_key, timeout, res)
-                        .map(|b| Some(Arc::new(b) as _))
+                    TavilySearchBackend::new_with_metrics(
+                        ep,
+                        api_key,
+                        timeout,
+                        res,
+                        metrics.clone(),
+                    )
+                    .map(|b| Some(Arc::new(b) as _))
                 }
             }
             brain_core::config::WebSearchProvider::Custom => {
@@ -112,7 +126,8 @@ fn build_action_dispatcher(
                         );
                     Ok(None)
                 } else {
-                    CustomSearchBackend::new(endpoint, timeout, res).map(|b| Some(Arc::new(b) as _))
+                    CustomSearchBackend::new_with_metrics(endpoint, timeout, res, metrics.clone())
+                        .map(|b| Some(Arc::new(b) as _))
                 }
             }
         };
@@ -147,10 +162,11 @@ fn build_action_dispatcher(
             );
         } else {
             let res = &config.actions.resilience;
-            match WebhookMessageBackend::new(
+            match WebhookMessageBackend::new_with_metrics(
                 &config.actions.messaging.channels,
                 config.actions.messaging.timeout_ms,
                 res,
+                Some(processor.metrics().clone()),
             ) {
                 Ok(backend) => {
                     tracing::info!("Message backend configured");
