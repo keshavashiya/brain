@@ -103,6 +103,13 @@ async fn send_ws_message(
             }
             Some("chunk") => {
                 if let Some(content) = response_json["content"].as_str() {
+                    // Print "Brain: " prefix before first token
+                    if full_text.is_empty() {
+                        let mut out = stdout();
+                        out.execute(SetForegroundColor(Color::Green))?;
+                        out.execute(Print("Brain: "))?;
+                        out.execute(ResetColor)?;
+                    }
                     print!("{content}");
                     stdout().flush()?;
                     full_text.push_str(content);
@@ -116,10 +123,17 @@ async fn send_ws_message(
                         .and_then(|r| r.get("value").or_else(|| r.get("Error")))
                         .and_then(|v| v.as_str())
                     {
+                        // Non-streaming path: print with prefix
+                        let mut out = stdout();
+                        out.execute(SetForegroundColor(Color::Green))?;
+                        out.execute(Print("Brain: "))?;
+                        out.execute(ResetColor)?;
+                        println!("{value}");
                         full_text = value.to_string();
                     }
+                } else {
+                    println!(); // trailing newline after streamed tokens
                 }
-                println!(); // trailing newline after streamed tokens
                 break;
             }
             Some("error") => {
@@ -189,6 +203,13 @@ impl WsSession {
                         }
                         Some("chunk") => {
                             if let Some(content) = response_json["content"].as_str() {
+                                // Print "Brain: " prefix before first token
+                                if full_text.is_empty() {
+                                    let mut out = stdout();
+                                    out.execute(SetForegroundColor(Color::Green))?;
+                                    out.execute(Print("Brain: "))?;
+                                    out.execute(ResetColor)?;
+                                }
                                 print!("{content}");
                                 stdout().flush()?;
                                 full_text.push_str(content);
@@ -202,10 +223,17 @@ impl WsSession {
                                     .and_then(|r| r.get("value").or_else(|| r.get("Error")))
                                     .and_then(|v| v.as_str())
                                 {
+                                    // Non-streaming path: print with prefix
+                                    let mut out = stdout();
+                                    out.execute(SetForegroundColor(Color::Green))?;
+                                    out.execute(Print("Brain: "))?;
+                                    out.execute(ResetColor)?;
+                                    println!("{value}");
                                     full_text = value.to_string();
                                 }
+                            } else {
+                                println!(); // trailing newline after streamed tokens
                             }
-                            println!(); // trailing newline after streamed tokens
                             return Ok(Some(full_text).filter(|t| !t.is_empty()));
                         }
                         Some("error") => {
@@ -291,11 +319,9 @@ pub(crate) async fn chat_non_interactive(
     let api_key = first_api_key(config)?;
     let session_id = uuid::Uuid::new_v4().to_string();
 
-    let response = send_ws_message(&ws_url, &api_key, message, &session_id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Daemon returned empty response"))?;
-
-    println!("{response}");
+    let response = send_ws_message(&ws_url, &api_key, message, &session_id).await?;
+    // Response already printed by send_ws_message (streaming or batch).
+    drop(response);
     Ok(())
 }
 
@@ -363,12 +389,8 @@ pub(crate) async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow
                 let response = ws.send_message(input, &session_id).await;
 
                 match response {
-                    Ok(Some(response)) => {
-                        let mut out = stdout();
-                        out.execute(SetForegroundColor(Color::Green))?;
-                        out.execute(Print("Brain: "))?;
-                        out.execute(ResetColor)?;
-                        println!("{response}");
+                    Ok(Some(_)) => {
+                        // Response already printed by send_message with "Brain: " prefix.
                     }
                     Ok(None) => {
                         eprintln!("Daemon returned empty response.");

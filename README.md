@@ -367,9 +367,9 @@ memory:
     forgetting_threshold: 0.05   # episodes with retention < 5% are pruned
 ```
 
-### Proactivity Engine (opt-in)
+### Proactivity Engine
 
-When enabled, Brain becomes bidirectional — it proactively reminds you of things instead of only responding when asked.
+Enabled by default with conservative guardrails (max 2/day, wide quiet hours) — Brain is bidirectional out of the box, proactively reminding you of things instead of only responding when asked. Set `proactivity.enabled: false` in `~/.brain/config.yaml` to disable entirely.
 
 **Habit Detection** — scans episodic memory for recurring patterns (keyword × day-of-week × hour histograms) and nudges you when a pattern matches the current time slot.
 
@@ -382,12 +382,12 @@ When enabled, Brain becomes bidirectional — it proactively reminds you of thin
 
 ```yaml
 proactivity:
-  enabled: false           # opt-in; set to true to activate
-  max_per_day: 5
+  enabled: true            # on by default; set to false to disable
+  max_per_day: 2
   min_interval_minutes: 60
   quiet_hours:
-    start: "22:00"
-    end: "08:00"
+    start: "20:00"
+    end: "10:00"
   delivery:
     outbox: true           # always write to outbox; drain on next interaction
     broadcast: true        # push to live WS/SSE sessions

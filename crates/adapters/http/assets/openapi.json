@@ -17,7 +17,7 @@
         "required": ["status", "version"],
         "properties": {
           "status": { "type": "string", "example": "ok" },
-          "version": { "type": "string", "example": "0.1.0" }
+          "version": { "type": "string", "example": "0.2.0" }
         }
       },
       "SignalRequest": {

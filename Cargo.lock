@@ -399,7 +399,7 @@ dependencies = [
 
 [[package]]
 name = "brainos"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -438,7 +438,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-amygdala"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "brainos-cortex",
@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-backends"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -476,7 +476,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-bridge"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -491,7 +491,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-cerebellum"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "brainos-core",
  "brainos-storage",
@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "figment",
  "getrandom 0.2.17",
@@ -520,7 +520,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-cortex"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -540,7 +540,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-ganglia"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "brainos-core",
@@ -560,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-grpcadapter"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "brainos-core",
@@ -583,7 +583,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-hippocampus"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "brainos-core",
  "brainos-storage",
@@ -603,7 +603,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-httpadapter"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -627,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-mcp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -647,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-signal"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -672,7 +672,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-storage"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -693,7 +693,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-thalamus"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "brainos-cortex",
@@ -708,7 +708,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-wsadapter"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "brainos-core",

@@ -445,7 +445,7 @@ trait MessageBackend   { async fn send(channel, recipient, content, namespace) -
 | Feature enabled, no backend wired | Explicit `"backend not configured"` error |
 | Feature enabled, backend wired | Real execution with structured success output |
 
-**Concrete implementations in `crates/cli/src/main.rs`:**
+**Concrete implementations in `crates/backends/src/`:**
 
 | Backend | Implementation |
 |---------|---------------|
@@ -454,10 +454,10 @@ trait MessageBackend   { async fn send(channel, recipient, content, namespace) -
 | Messaging | `WebhookMessageBackend` (configurable channel → webhook URL + body template) |
 | Memory | `CliMemoryBackend` (wraps `SemanticStore` + `Embedder`) |
 
-**Resilience layer** (shared by all HTTP backends):
+**Resilience layer** (shared by all HTTP backends, `crates/backends/src/resilience.rs`):
 
-- Retry with exponential backoff (`max_retries`, `retry_base_ms`) on 5xx / timeout / connection-refused
-- 4xx errors fail immediately without retry
+- Retry with exponential backoff (`max_retries`, `retry_base_ms`) on 5xx, 408, 429, timeout, or connection-refused
+- Other 4xx errors fail immediately without retry
 - `CircuitBreaker` per backend: atomic consecutive-failure counter + epoch-based cooldown; half-open probe after cooldown elapses
 - Schema validation: structured `tracing::warn!` on unexpected response shapes — never crashes
 
