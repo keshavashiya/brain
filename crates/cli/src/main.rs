@@ -320,15 +320,91 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 }
             }
 
+            // Check for running daemon via HTTP health probe — the only reliable
+            // indicator. PID files can drift on macOS with process_group(0).
+            if let Some(url) = bootstrap::detect_running_daemon(&config).await {
+                println!("Brain is already awake ({url}).");
+                println!(
+                    "  Logs → {}",
+                    config.data_dir().join("logs/brain.log").display()
+                );
+                println!("Run `brain stop` to put it to sleep first.");
+                return Ok(());
+            }
+
+            // If a login service is installed, start it instead of spawning directly.
+            // The service manager (launchd/systemd) will handle the process lifecycle.
+            #[cfg(target_os = "macos")]
+            {
+                use std::path::Path;
+                let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+                if let Some(home) = home {
+                    let plist = home.join("Library").join("LaunchAgents").join("com.brain.plist");
+                    if Path::exists(&plist) {
+                        let plist_str = plist.to_str().unwrap_or("");
+
+                        // Check if the service is loaded (managed by launchd)
+                        let list_out = std::process::Command::new("launchctl")
+                            .arg("list")
+                            .output()
+                            .ok();
+                        let service_loaded = list_out
+                            .map(|o| String::from_utf8_lossy(&o.stdout).contains("com.brain"))
+                            .unwrap_or(false);
+
+                        if service_loaded {
+                            // Service is loaded — check if daemon is actually responding
+                            if bootstrap::detect_running_daemon(&config).await.is_some() {
+                                println!("Brain is already awake (launchd service).");
+                                println!(
+                                    "  Logs → {}",
+                                    config.data_dir().join("logs/brain.log").display()
+                                );
+                                println!("Run `brain stop` to put it to sleep first.");
+                                return Ok(());
+                            }
+                        }
+
+                        // Service plist exists but daemon not running — load and start it.
+                        // Uses `load -w` so it works even if the service was unloaded by `brain stop`.
+                        let _ = std::process::Command::new("launchctl")
+                            .args(["load", "-w", plist_str])
+                            .output();
+
+                        // Wait for service to come alive
+                        for _ in 0..10 {
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            if bootstrap::detect_running_daemon(&config).await.is_some() {
+                                println!("Brain started via launchd service.");
+                                println!(
+                                    "  Logs → {}",
+                                    config.data_dir().join("logs/brain.log").display()
+                                );
+                                return Ok(());
+                            }
+                        }
+
+                        // Service failed to start — fall through to direct spawn
+                        tracing::warn!(
+                            "launchd service failed to start — falling back to direct spawn"
+                        );
+                    }
+                }
+            }
+
+            // No service installed — spawn daemon directly.
+            // First, kill any stale process holding the ports.
             if let Some(pid) = daemon::read_pid(&config) {
                 if daemon::is_process_running(pid) {
-                    println!("Brain is already awake (PID {}).", pid);
-                    println!(
-                        "  Logs → {}",
-                        config.data_dir().join("logs/brain.log").display()
-                    );
-                    println!("Run `brain stop` to put it to sleep first.");
-                    return Ok(());
+                    tracing::warn!(pid, "Stale daemon PID found — killing");
+                    let _ = daemon::stop_process(pid);
+                    // Wait for the daemon to release ports (max 5s).
+                    for _ in 0..10 {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        if bootstrap::detect_running_daemon(&config).await.is_none() {
+                            break;
+                        }
+                    }
                 }
                 daemon::remove_pid(&config);
             }
@@ -379,20 +455,58 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
 
         // ── stop (daemon) ─────────────────────────────────────────────────────
-        Commands::Stop => match daemon::read_pid(&config) {
-            Some(pid) if daemon::is_process_running(pid) => {
-                daemon::stop_process(pid)?;
-                daemon::remove_pid(&config);
-                println!("Brain is asleep (PID {}).", pid);
+        Commands::Stop => {
+            // Check if daemon is running BEFORE stopping the service, so we can
+            // report accurately whether we stopped something or it was already down.
+            let was_running = daemon::is_daemon_running(&config);
+
+            // Always stop the service manager first (if installed) to prevent respawn.
+            // This unloads/disables the service so it doesn't restart the daemon.
+            if daemon::is_service_installed() {
+                daemon::stop_service();
+                // Give the service manager time to propagate the stop
+                std::thread::sleep(std::time::Duration::from_millis(500));
             }
-            Some(_) => {
-                daemon::remove_pid(&config);
-                println!("Brain was already asleep (stale PID file cleaned up).");
+
+            match daemon::read_pid(&config) {
+                Some(pid) if daemon::is_process_running(pid) => {
+                    daemon::stop_process(pid)?;
+                    // Wait for process to exit (max 5s).
+                    for _ in 0..10 {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        if !daemon::is_process_running(pid) {
+                            break;
+                        }
+                    }
+                    daemon::remove_pid(&config);
+                    println!("Brain is asleep (PID {}).", pid);
+                }
+                Some(_) => {
+                    daemon::remove_pid(&config);
+                    println!("Brain was already asleep (stale PID file cleaned up).");
+                }
+                None => {
+                    // No PID file — daemon may have been started by service manager.
+                    // Check HTTP to determine if it was running.
+                    if was_running {
+                        // It was running — wait for the service stop to take effect.
+                        for _ in 0..10 {
+                            std::thread::sleep(std::time::Duration::from_millis(500));
+                            if !daemon::is_daemon_running(&config) {
+                                break;
+                            }
+                        }
+                        if daemon::is_daemon_running(&config) {
+                            println!("Brain stop requested but daemon did not exit cleanly.");
+                        } else {
+                            println!("Brain is asleep.");
+                        }
+                    } else {
+                        println!("Brain is already asleep.");
+                    }
+                }
             }
-            None => {
-                println!("Brain is already asleep.");
-            }
-        },
+        }
 
         // ── serve (foreground) ────────────────────────────────────────────────
         Commands::Serve {

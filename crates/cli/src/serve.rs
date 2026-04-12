@@ -60,21 +60,51 @@ pub(crate) async fn cmd_serve(
     println!("Waking Brain OS...");
 
     let mut set = tokio::task::JoinSet::new();
+    let mut bound_adapters = Vec::new();
+    let mut failed_adapters = Vec::new();
 
+    // Bind adapters sequentially — HTTP is critical (health check endpoint).
+    // If HTTP fails, abort entirely. Other adapters fail gracefully.
     if run_all || http {
         let p = processor.clone();
         let h = host.clone();
         let port = config.adapters.http.port;
-        println!("  Synapse HTTP  → http://{}:{}", h, port);
-        set.spawn(async move { httpadapter::serve(p, &h, port).await });
+        match tokio::net::TcpListener::bind(format!("{h}:{port}")).await {
+            Ok(_listener) => {
+                println!("  Synapse HTTP  → http://{}:{}", h, port);
+                let p = p.clone();
+                let h = h.clone();
+                set.spawn(async move { httpadapter::serve(p, &h, port).await });
+                bound_adapters.push("HTTP");
+            }
+            Err(e) => {
+                failed_adapters.push(format!("HTTP ({h}:{port}): {e}"));
+                anyhow::bail!(
+                    "Cannot bind HTTP synapse at {h}:{port} — {e}\n\
+                     This port is critical for health checks and inter-process communication.\n\
+                     Another Brain daemon may already be running. Try `brain stop` first."
+                );
+            }
+        }
     }
 
     if run_all || ws {
         let p = processor.clone();
         let h = host.clone();
         let port = config.adapters.ws.port;
-        println!("  Synapse WS    → ws://{}:{}", h, port);
-        set.spawn(async move { wsadapter::serve(p, &h, port).await });
+        match tokio::net::TcpListener::bind(format!("{h}:{port}")).await {
+            Ok(_listener) => {
+                println!("  Synapse WS    → ws://{}:{}", h, port);
+                let p = p.clone();
+                let h = h.clone();
+                set.spawn(async move { wsadapter::serve(p, &h, port).await });
+                bound_adapters.push("WebSocket");
+            }
+            Err(e) => {
+                failed_adapters.push(format!("WS ({h}:{port}): {e}"));
+                tracing::warn!(port, "WebSocket synapse bind failed: {e}");
+            }
+        }
     }
 
     #[cfg(feature = "grpc")]
@@ -82,8 +112,19 @@ pub(crate) async fn cmd_serve(
         let p = processor.clone();
         let h = host.clone();
         let port = config.adapters.grpc.port;
-        println!("  Synapse gRPC  → {}:{}", h, port);
-        set.spawn(async move { grpcadapter::serve(p, &h, port).await });
+        match tokio::net::TcpListener::bind(format!("{h}:{port}")).await {
+            Ok(_listener) => {
+                println!("  Synapse gRPC  → {}:{}", h, port);
+                let p = p.clone();
+                let h = h.clone();
+                set.spawn(async move { grpcadapter::serve(p, &h, port).await });
+                bound_adapters.push("gRPC");
+            }
+            Err(e) => {
+                failed_adapters.push(format!("gRPC ({h}:{port}): {e}"));
+                tracing::warn!(port, "gRPC synapse bind failed: {e}");
+            }
+        }
     }
     #[cfg(not(feature = "grpc"))]
     if grpc {
@@ -94,8 +135,27 @@ pub(crate) async fn cmd_serve(
         let p = processor.clone();
         let h = host.clone();
         let port = config.adapters.mcp.port;
-        println!("  Synapse MCP   → http://{}:{}", h, port);
-        set.spawn(async move { mcp::serve_http(p, &h, port).await });
+        match tokio::net::TcpListener::bind(format!("{h}:{port}")).await {
+            Ok(_listener) => {
+                println!("  Synapse MCP   → http://{}:{}", h, port);
+                let p = p.clone();
+                let h = h.clone();
+                set.spawn(async move { mcp::serve_http(p, &h, port).await });
+                bound_adapters.push("MCP");
+            }
+            Err(e) => {
+                failed_adapters.push(format!("MCP ({h}:{port}): {e}"));
+                tracing::warn!(port, "MCP synapse bind failed: {e}");
+            }
+        }
+    }
+
+    // Report partial startup failures
+    if !failed_adapters.is_empty() {
+        tracing::warn!(
+            adapters = ?failed_adapters,
+            "Some adapters failed to bind — continuing with partial setup"
+        );
     }
 
     // ── Proactivity first-run notice ────────────────────────────────

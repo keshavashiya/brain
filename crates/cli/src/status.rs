@@ -1,5 +1,6 @@
 //! Status command — system health and diagnostics display.
 
+use crate::bootstrap;
 use crate::daemon::{is_process_running, read_pid};
 use crate::encryption::resolve_llm_api_key;
 
@@ -8,15 +9,21 @@ pub(crate) async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Res
     println!("  DNA:          v{}", env!("CARGO_PKG_VERSION"));
     println!("  Cortex:       {}", config.data_dir().display());
 
-    // Daemon state
-    match read_pid(config) {
-        Some(pid) if is_process_running(pid) => {
-            println!("  State:        awake (PID {})", pid);
+    // Daemon state via HTTP health probe — the single source of truth.
+    let daemon_running = bootstrap::detect_running_daemon(config).await;
+    match (daemon_running.as_ref(), read_pid(config)) {
+        (Some(_), _) => {
+            let pid = read_pid(config).map(|p| format!(" (PID {p})")).unwrap_or_default();
+            println!("  State:        awake{}", pid);
         }
-        Some(_) => {
+        (None, Some(pid)) if is_process_running(pid) => {
+            // Process running but HTTP not responding — zombie state
+            println!("  State:        zombie (PID {pid}, not responding)");
+        }
+        (None, Some(_)) => {
             println!("  State:        asleep (stale PID file)");
         }
-        None => {
+        (None, None) => {
             println!("  State:        asleep (run `brain start` to wake)");
         }
     }
@@ -100,18 +107,41 @@ pub(crate) async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Res
         }
     );
 
-    // Database stats
-    match storage::SqlitePool::open(&config.sqlite_path()) {
-        Ok(pool) => match pool.table_stats() {
-            Ok(stats) => {
-                println!("\n  Memory Regions:");
-                for (table, count) in stats {
-                    println!("    {}: {} rows", table, count);
+    // Database stats — only query via HTTP when daemon is running.
+    // Opening SQLite directly causes RuVector lock contention.
+    if let Some(base_url) = daemon_running {
+        let client = reqwest::Client::builder()
+            .timeout(brain_core::timeouts::STATUS_CHECK)
+            .build()
+            .unwrap_or_default();
+        let api_key = config
+            .access
+            .api_keys
+            .first()
+            .map(|k| k.key.clone())
+            .unwrap_or_default();
+
+        // Fetch memory stats via HTTP API
+        let stats_url = format!("{}/v1/memory/namespaces", base_url);
+        let req = client.get(&stats_url).header("Authorization", format!("Bearer {}", api_key));
+        if let Ok(resp) = req.send().await {
+            if resp.status().is_success() {
+                if let Ok(json) = resp.json::<serde_json::Value>().await {
+                    if let Some(namespaces) = json.get("namespaces") {
+                        println!("\n  Memory Regions:");
+                        for (ns, info) in namespaces.as_object().unwrap_or(&serde_json::Map::new()) {
+                            if let Some(episodes) = info.get("episodes").and_then(|v| v.as_u64()) {
+                                println!("    {}: {} episodes", ns, episodes);
+                            }
+                        }
+                    }
                 }
             }
-            Err(e) => println!("\n  Hippocampus: error reading stats — {}", e),
-        },
-        Err(e) => println!("\n  Hippocampus: error opening — {}", e),
+        }
+    } else {
+        // Daemon not running — report from config only, don't open files
+        println!("\n  Memory Regions:");
+        println!("    (daemon not running — start with `brain start` to view)");
     }
 
     // External service health

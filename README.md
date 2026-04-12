@@ -109,10 +109,34 @@ brain service uninstall  # Remove
 
 ## Usage
 
+### Lifecycle commands
+
 ```bash
-brain start                          # Start as background daemon
-brain stop                           # Stop the daemon
-brain status                         # Check daemon + adapter status
+brain start                          # Start daemon (or via service if installed)
+brain stop                           # Stop daemon (also stops service if installed)
+brain status                         # Check daemon status via HTTP health probe
+```
+
+**Recommended setup order:**
+
+```bash
+# 1. Initialize (one-time)
+brain init
+
+# 2. Quick test — direct daemon
+brain start
+brain status
+brain stop
+
+# 3. Production — auto-start on login
+brain service install    # registers launchd/systemd/Task Scheduler
+# Brain now wakes automatically on every login — no `brain start` needed
+brain service uninstall  # remove auto-start
+```
+
+### Interactive usage
+
+```bash
 brain chat                           # Interactive chat
 brain chat "remember that I use bun" # One-shot message
 ```

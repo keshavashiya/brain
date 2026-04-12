@@ -97,6 +97,142 @@ pub(crate) fn stop_process(pid: u32) -> anyhow::Result<()> {
     }
 }
 
+/// Check whether a login service (launchd/systemd/schtasks) is installed
+/// and actively managing the Brain daemon.
+pub(crate) fn is_service_installed() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        // Check if launchd plist exists AND is loaded
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        if let Some(home) = home {
+            let plist = home.join("Library").join("LaunchAgents").join("com.brain.plist");
+            if plist.exists() {
+                let out = std::process::Command::new("launchctl")
+                    .arg("list")
+                    .output()
+                    .ok();
+                if let Some(out) = out {
+                    return String::from_utf8_lossy(&out.stdout).contains("com.brain");
+                }
+            }
+        }
+        false
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        if let Some(home) = home {
+            let unit = home.join(".config").join("systemd").join("user").join("brain.service");
+            if unit.exists() {
+                let out = std::process::Command::new("systemctl")
+                    .args(["--user", "is-active", "brain.service"])
+                    .output()
+                    .ok();
+                if let Some(out) = out {
+                    return String::from_utf8_lossy(&out.stdout).trim() == "active";
+                }
+            }
+        }
+        false
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let out = std::process::Command::new("schtasks")
+            .args(["/Query", "/TN", "Brain OS", "/V", "/FO", "LIST"])
+            .output()
+            .ok();
+        if let Some(out) = out {
+            return String::from_utf8_lossy(&out.stdout).contains("Brain OS");
+        }
+        false
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        false
+    }
+}
+
+/// Sync health check — probes the daemon's HTTP /health endpoint.
+/// Returns true if a daemon is responding on the configured HTTP port.
+pub(crate) fn is_daemon_running(config: &brain_core::BrainConfig) -> bool {
+    let host = &config.adapters.http.host;
+    let port = config.adapters.http.port;
+    let health_url = format!("http://{host}:{port}/health");
+
+    let client = reqwest::blocking::Client::builder()
+        .timeout(brain_core::timeouts::HEALTH_CHECK)
+        .build()
+        .ok();
+    if let Some(client) = client {
+        match client.get(&health_url).send() {
+            Ok(resp) => resp.status().is_success(),
+            Err(_) => false,
+        }
+    } else {
+        false
+    }
+}
+
+/// Stop the login service (if installed), preventing auto-restart.
+/// On macOS, this unloads the plist (not just `stop`) to prevent launchd respawn.
+/// On Linux, stops the systemd unit.
+/// On Windows, ends the scheduled task.
+pub(crate) fn stop_service() {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        if let Some(home) = home {
+            let plist = home.join("Library").join("LaunchAgents").join("com.brain.plist");
+            if plist.exists() {
+                if let Some(plist_str) = plist.to_str() {
+                    // Unload (not stop) — this prevents launchd from respawning.
+                    // The plist file remains so `brain start` can reload it.
+                    let _ = std::process::Command::new("launchctl")
+                        .args(["unload", plist_str])
+                        .output();
+                }
+                // Kill any remaining process
+                let _ = std::process::Command::new("pkill")
+                    .args(["-f", "brain serve"])
+                    .output();
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        if let Some(home) = home {
+            let unit = home.join(".config").join("systemd").join("user").join("brain.service");
+            if unit.exists() {
+                // Disable stops and prevents auto-start; --now also stops if running
+                let _ = std::process::Command::new("systemctl")
+                    .args(["--user", "disable", "--now", "brain.service"])
+                    .output();
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // End the task if running, then disable it (prevents auto-start)
+        let _ = std::process::Command::new("schtasks")
+            .args(["/End", "/TN", "Brain OS"])
+            .output();
+        let _ = std::process::Command::new("schtasks")
+            .args(["/Change", "/TN", "Brain OS", "/DISABLE"])
+            .output();
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    {
+        // no-op
+    }
+}
+
 /// Spawn `brain serve` as a detached background process and return its PID.
 pub(crate) fn spawn_daemon(
     log_path: &std::path::Path,

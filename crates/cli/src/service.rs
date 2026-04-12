@@ -61,14 +61,64 @@ pub(crate) fn cmd_service_install() -> anyhow::Result<()> {
             log = log_dir.display(),
         );
 
-        std::fs::write(&plist_path, &plist)?;
-
+        // If a previous plist exists, unload it first (stop the launchd-managed instance).
         let plist_str = plist_path
             .to_str()
             .ok_or_else(|| anyhow::anyhow!("Path contains non-UTF-8 characters"))?;
-        let _ = std::process::Command::new("launchctl")
-            .args(["unload", plist_str])
-            .output();
+        if plist_path.exists() {
+            let _ = std::process::Command::new("launchctl")
+                .args(["unload", plist_str])
+                .output();
+        }
+
+        // Stop any existing Brain daemon — check HTTP health endpoint first (single
+        // source of truth), fall back to PID file. This prevents RuVector lock
+        // contention when launchd starts the new instance.
+        use crate::daemon;
+        let config = brain_core::BrainConfig::load().ok();
+        if let Some(ref cfg) = config {
+            if daemon::is_daemon_running(cfg) {
+                // Daemon respondinging to HTTP — kill via PID if we have it.
+                if let Some(pid) = daemon::read_pid(cfg) {
+                    let _ = daemon::stop_process(pid);
+                } else {
+                    // No PID but HTTP responds — find and kill the process
+                    // by scanning for "brain serve" processes.
+                    let out = std::process::Command::new("pkill")
+                        .args(["-f", "brain serve"])
+                        .output()
+                        .ok();
+                    if let Some(out) = out {
+                        if !out.status.success() {
+                            tracing::debug!("pkill brain serve: {}", String::from_utf8_lossy(&out.stderr));
+                        }
+                    }
+                }
+                // Wait for process to exit and release file locks (max 5s).
+                for _ in 0..10 {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    if !daemon::is_daemon_running(cfg) {
+                        break;
+                    }
+                }
+                daemon::remove_pid(cfg);
+            } else if let Some(pid) = daemon::read_pid(cfg) {
+                // HTTP dead but PID exists — stale process
+                if daemon::is_process_running(pid) {
+                    let _ = daemon::stop_process(pid);
+                    for _ in 0..10 {
+                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        if !daemon::is_process_running(pid) {
+                            break;
+                        }
+                    }
+                }
+                daemon::remove_pid(cfg);
+            }
+        }
+
+        std::fs::write(&plist_path, &plist)?;
+
         let out = std::process::Command::new("launchctl")
             .args(["load", "-w", plist_str])
             .output()
