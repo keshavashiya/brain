@@ -1,0 +1,36 @@
+//! Streaming finalization for SignalProcessor.
+
+use crate::SignalError;
+use crate::SignalProcessor;
+
+impl SignalProcessor {
+    /// Store the assistant response in episodic memory after streaming completes.
+    ///
+    /// Call this after streaming LLM generation finishes to persist the
+    /// assistant turn in episodic memory. The `session_id` comes from the
+    /// `PipelineResult::LlmReady` variant. Ensures the session row exists
+    /// first to avoid FK constraint violations.
+    pub fn finalize_streaming(
+        &self,
+        session_id: &str,
+        assistant_content: &str,
+        namespace: &str,
+        agent: Option<&str>,
+    ) -> Result<(), SignalError> {
+        self.episodic
+            .ensure_session(session_id, "streaming")
+            .map_err(|e| SignalError::Storage(e.to_string()))?;
+
+        self.episodic
+            .store_episode(
+                session_id,
+                "assistant",
+                assistant_content,
+                0.5,
+                Some(namespace),
+                agent,
+            )
+            .map_err(|e| SignalError::Storage(e.to_string()))?;
+        Ok(())
+    }
+}

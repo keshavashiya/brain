@@ -11,6 +11,7 @@ use cortex::actions::Action;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -333,6 +334,132 @@ pub struct NormalizedMessage {
 
 // ─── Intent Classifier ─────────────────────────────────────────────────────
 
+/// Pre-compiled regex patterns compiled once at first access via LazyLock.
+/// Each pattern is paired with its base intent and named capture group extractors.
+struct PatternDef {
+    regex: &'static LazyLock<Regex>,
+    base_intent: Intent,
+    extractors: &'static [(&'static str, usize)],
+}
+
+// ── LazyLock regex patterns (compiled once, zero cost on construction) ──────
+
+static STORE_FACT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:remember|note|keep in mind)\s+(?:that\s+)?(.+?)$")
+        .expect("invariant: STORE_FACT_RE must be valid")
+});
+
+static RECALL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:what did|recall|remember)\s+(.+?)\??$")
+        .expect("invariant: RECALL_RE must be valid")
+});
+
+static FORGET_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:forget|delete|remove)\s+(?:about\s+)?(.+?)$")
+        .expect("invariant: FORGET_RE must be valid")
+});
+
+static EXECUTE_COMMAND_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:run|exec|execute)\s+(?:command\s+)?(\S+)(?:\s+(.*))?$")
+        .expect("invariant: EXECUTE_COMMAND_RE must be valid")
+});
+
+static WEB_SEARCH_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:(?:can you|could you|please|will you|would you)\s+)?(?:search|look up|google|web search|look for)\s+(?:for\s+|about\s+|up\s+)?(.+?)(?:\?)?$")
+        .expect("invariant: WEB_SEARCH_RE (main) must be valid")
+});
+
+static WEB_SEARCH_FIND_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:(?:can you|could you|please|will you|would you)\s+)?find\s+(?:information\s+)?(?:about|for)\s+(.+?)(?:\?)?$")
+        .expect("invariant: WEB_SEARCH_FIND_RE must be valid")
+});
+
+static SCHEDULE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:remind me|schedule|set reminder)\s+(?:to\s+)?(.+?)$")
+        .expect("invariant: SCHEDULE_RE must be valid")
+});
+
+static SEND_MESSAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:send|message|text)\s+(?:via\s+(\w+)\s+)?(?:to\s+)?(.+?)\s+(?:saying\s+|:\s+)(.+?)$")
+        .expect("invariant: SEND_MESSAGE_RE must be valid")
+});
+
+static STATUS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^/status$")
+        .expect("invariant: STATUS_RE must be valid")
+});
+
+/// All patterns in priority order — first match wins.
+const PATTERNS: &[PatternDef] = &[
+    PatternDef {
+        regex: &STORE_FACT_RE,
+        base_intent: Intent::StoreFact {
+            subject: String::new(),
+            predicate: String::new(),
+            object: String::new(),
+        },
+        extractors: &[("content", 1)],
+    },
+    PatternDef {
+        regex: &RECALL_RE,
+        base_intent: Intent::Recall {
+            query: String::new(),
+        },
+        extractors: &[("query", 1)],
+    },
+    PatternDef {
+        regex: &FORGET_RE,
+        base_intent: Intent::Forget {
+            target: String::new(),
+        },
+        extractors: &[("target", 1)],
+    },
+    PatternDef {
+        regex: &EXECUTE_COMMAND_RE,
+        base_intent: Intent::ExecuteCommand {
+            command: String::new(),
+            args: Vec::new(),
+        },
+        extractors: &[("command", 1), ("args", 2)],
+    },
+    PatternDef {
+        regex: &WEB_SEARCH_RE,
+        base_intent: Intent::WebSearch {
+            query: String::new(),
+        },
+        extractors: &[("query", 1)],
+    },
+    PatternDef {
+        regex: &WEB_SEARCH_FIND_RE,
+        base_intent: Intent::WebSearch {
+            query: String::new(),
+        },
+        extractors: &[("query", 1)],
+    },
+    PatternDef {
+        regex: &SCHEDULE_RE,
+        base_intent: Intent::Schedule {
+            description: String::new(),
+            cron: None,
+        },
+        extractors: &[("description", 1)],
+    },
+    PatternDef {
+        regex: &SEND_MESSAGE_RE,
+        base_intent: Intent::SendMessage {
+            channel: String::new(),
+            recipient: String::new(),
+            content: String::new(),
+        },
+        extractors: &[("channel", 1), ("recipient", 2), ("content", 3)],
+    },
+    PatternDef {
+        regex: &STATUS_RE,
+        base_intent: Intent::SystemStatus,
+        extractors: &[],
+    },
+];
+
 /// Intent classifier using two-tier approach.
 pub struct IntentClassifier {
     patterns: Vec<(IntentPattern, Intent)>,
@@ -347,109 +474,25 @@ struct IntentPattern {
 
 impl IntentClassifier {
     /// Create a new classifier with built-in patterns.
+    ///
+    /// Regex patterns are pre-compiled via `LazyLock` — construction cost is
+    /// just cloning the pattern definitions into a Vec (sub-millisecond).
     #[allow(clippy::vec_init_then_push)]
     pub fn new() -> Self {
         let mut patterns = Vec::new();
 
-        // Store fact patterns
-        patterns.push((
-            Self::build_pattern(
-                r"(?i)^(?:remember|note|keep in mind)\s+(?:that\s+)?(.+?)$",
-                &[("content", 1)],
-            ),
-            Intent::StoreFact {
-                subject: String::new(),
-                predicate: String::new(),
-                object: String::new(),
-            },
-        ));
-
-        // Recall patterns
-        patterns.push((
-            Self::build_pattern(
-                r"(?i)^(?:what did|recall|remember)\s+(.+?)\??$",
-                &[("query", 1)],
-            ),
-            Intent::Recall {
-                query: String::new(),
-            },
-        ));
-
-        // Forget patterns
-        patterns.push((
-            Self::build_pattern(
-                r"(?i)^(?:forget|delete|remove)\s+(?:about\s+)?(.+?)$",
-                &[("target", 1)],
-            ),
-            Intent::Forget {
-                target: String::new(),
-            },
-        ));
-
-        // Execute command patterns - must be explicit shell commands only
-        patterns.push((
-            Self::build_pattern(
-                r"(?i)^(?:run|exec|execute)\s+(?:command\s+)?(\S+)(?:\s+(.*))?$",
-                &[("command", 1), ("args", 2)],
-            ),
-            Intent::ExecuteCommand {
-                command: String::new(),
-                args: Vec::new(),
-            },
-        ));
-
-        // Web search patterns
-        // Note: "find" requires "about/for/info" to avoid false positives like "find the bug"
-        patterns.push((
-            Self::build_pattern(
-                r"(?i)^(?:(?:can you|could you|please|will you|would you)\s+)?(?:search|look up|google|web search|look for)\s+(?:for\s+|about\s+|up\s+)?(.+?)(?:\?)?$",
-                &[("query", 1)],
-            ),
-            Intent::WebSearch {
-                query: String::new(),
-            },
-        ));
-        // "find" only triggers web search when paired with "about", "for", or "information"
-        patterns.push((
-            Self::build_pattern(
-                r"(?i)^(?:(?:can you|could you|please|will you|would you)\s+)?find\s+(?:information\s+)?(?:about|for)\s+(.+?)(?:\?)?$",
-                &[("query", 1)],
-            ),
-            Intent::WebSearch {
-                query: String::new(),
-            },
-        ));
-
-        // Schedule patterns
-        patterns.push((
-            Self::build_pattern(
-                r"(?i)^(?:remind me|schedule|set reminder)\s+(?:to\s+)?(.+?)$",
-                &[("description", 1)],
-            ),
-            Intent::Schedule {
-                description: String::new(),
-                cron: None,
-            },
-        ));
-
-        // Send message patterns
-        patterns.push((
-            Self::build_pattern(
-                r"(?i)^(?:send|message|text)\s+(?:via\s+(\w+)\s+)?(?:to\s+)?(.+?)\s+(?:saying\s+|:\s+)(.+?)$",
-                &[("channel", 1), ("recipient", 2), ("content", 3)],
-            ),
-            Intent::SendMessage {
-                channel: String::new(),
-                recipient: String::new(),
-                content: String::new(),
-            },
-        ));
-
-        // Status patterns
-        patterns.push((
-            Self::build_pattern(r"(?i)^/status$", &[]),
-            Intent::SystemStatus,
-        ));
+        for pdef in PATTERNS {
+            let extractors: HashMap<String, usize> = pdef
+                .extractors
+                .iter()
+                .map(|(name, idx)| (name.to_string(), *idx))
+                .collect();
+            let pattern = IntentPattern {
+                regex: (**pdef.regex).clone(),
+                extractors,
+            };
+            patterns.push((pattern, pdef.base_intent.clone()));
+        }
 
         Self {
             patterns,
@@ -461,22 +504,6 @@ impl IntentClassifier {
     pub fn with_llm_fallback(mut self, fallback: Arc<dyn IntentFallback>) -> Self {
         self.llm_fallback = Some(fallback);
         self
-    }
-
-    /// Build a pattern with named extractors.
-    ///
-    /// # Safety
-    /// All patterns are hardcoded string literals verified by tests.
-    /// `unwrap` is safe here because invalid regex is a programmer error caught at test time.
-    fn build_pattern(pattern: &str, extractors: &[(&str, usize)]) -> IntentPattern {
-        IntentPattern {
-            regex: Regex::new(pattern)
-                .unwrap_or_else(|e| panic!("BUG: hardcoded regex '{pattern}' is invalid: {e}")),
-            extractors: extractors
-                .iter()
-                .map(|(name, idx)| (name.to_string(), *idx))
-                .collect(),
-        }
     }
 
     /// Classify input using regex patterns (fallback when LLM is unavailable).
@@ -776,6 +803,15 @@ impl Default for SignalRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn all_patterns_compile() {
+        // Forces LazyLock::force on every entry; panics at test time
+        // if any pattern literal is invalid.
+        for p in PATTERNS {
+            let _ = &**p.regex;
+        }
+    }
 
     /// Mock IntentFallback that returns a fixed classification for testing.
     struct MockFallback {

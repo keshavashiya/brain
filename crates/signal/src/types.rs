@@ -1,0 +1,312 @@
+//! Type definitions for the signal processing layer.
+//!
+//! Contains signal, response, error types, the adapter trait, and
+//! helper functions — everything that isn't an `impl SignalProcessor` method.
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use thiserror::Error;
+use uuid::Uuid;
+
+// ─── Errors ──────────────────────────────────────────────────────────────────
+
+/// Errors from the signal processing layer.
+#[derive(Debug, Error)]
+pub enum SignalError {
+    #[error("Processing error: {0}")]
+    Processing(String),
+
+    #[error("Storage error: {0}")]
+    Storage(String),
+
+    #[error("LLM error: {0}")]
+    Llm(#[from] cortex::LlmError),
+
+    #[error("Initialization error: {0}")]
+    Init(String),
+}
+
+// ─── Signal Types ─────────────────────────────────────────────────────────────
+
+/// The source protocol of an incoming signal.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SignalSource {
+    Cli,
+    Http,
+    WebSocket,
+    Mcp,
+    Grpc,
+}
+
+impl SignalSource {
+    /// Parse a source string into a SignalSource variant.
+    /// Returns the given `default` for unrecognized or None values.
+    pub fn parse(s: Option<&str>, default: SignalSource) -> SignalSource {
+        match s {
+            Some("cli") => SignalSource::Cli,
+            Some("http") => SignalSource::Http,
+            Some("ws") | Some("websocket") => SignalSource::WebSocket,
+            Some("mcp") => SignalSource::Mcp,
+            Some("grpc") => SignalSource::Grpc,
+            _ => default,
+        }
+    }
+}
+
+/// A unified signal — the single input type for all protocol adapters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Signal {
+    pub id: Uuid,
+    pub source: SignalSource,
+    pub channel: String,
+    pub sender: String,
+    pub content: String,
+    pub metadata: HashMap<String, String>,
+    pub timestamp: DateTime<Utc>,
+    /// Memory namespace for this signal (default: "personal").
+    #[serde(default = "default_namespace")]
+    pub namespace: String,
+    /// Originating AI agent (e.g. "claude-code", "opencode"). Optional.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// Optional session ID for conversation continuity.
+    /// When provided, the processor reuses this session instead of creating a new one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+fn default_namespace() -> String {
+    "personal".to_string()
+}
+
+impl Signal {
+    /// Create a new Signal with a generated UUID and current timestamp.
+    pub fn new(
+        source: SignalSource,
+        channel: impl Into<String>,
+        sender: impl Into<String>,
+        content: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            source,
+            channel: channel.into(),
+            sender: sender.into(),
+            content: content.into(),
+            metadata: HashMap::new(),
+            timestamp: Utc::now(),
+            namespace: "personal".to_string(),
+            agent: None,
+            session_id: None,
+        }
+    }
+
+    /// Builder: set the originating agent identity.
+    pub fn with_agent(mut self, agent: impl Into<String>) -> Self {
+        self.agent = Some(agent.into());
+        self
+    }
+
+    /// Builder: set the memory namespace.
+    pub fn with_namespace(mut self, ns: impl Into<String>) -> Self {
+        self.namespace = ns.into();
+        self
+    }
+
+    /// Builder: set the metadata map.
+    pub fn with_metadata(mut self, meta: HashMap<String, String>) -> Self {
+        self.metadata = meta;
+        self
+    }
+
+    /// Builder: set namespace from an Option (no-op if None).
+    pub fn with_namespace_opt(mut self, ns: Option<String>) -> Self {
+        if let Some(n) = ns {
+            self.namespace = n;
+        }
+        self
+    }
+
+    /// Builder: set agent from an Option (no-op if None).
+    pub fn with_agent_opt(mut self, agent: Option<String>) -> Self {
+        if let Some(a) = agent {
+            self.agent = Some(a);
+        }
+        self
+    }
+
+    /// Builder: set session ID for conversation continuity.
+    pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// Builder: set session ID from an Option (no-op if None).
+    pub fn with_session_id_opt(mut self, session_id: Option<String>) -> Self {
+        self.session_id = session_id;
+        self
+    }
+
+    /// Build a Signal from an [`AdapterRequest`], applying defaults for missing optional fields.
+    pub fn from_adapter_request(req: AdapterRequest) -> Self {
+        Signal::new(
+            req.source,
+            req.channel.unwrap_or(req.default_channel),
+            req.sender.unwrap_or(req.default_sender),
+            req.content,
+        )
+        .with_metadata(req.metadata.unwrap_or_default())
+        .with_namespace_opt(req.namespace)
+        .with_agent_opt(req.agent)
+        .with_session_id_opt(req.session_id)
+    }
+}
+
+/// Fields from an adapter request used to construct a [`Signal`].
+///
+/// Replaces the previous 10-parameter positional API to prevent argument mis-ordering.
+pub struct AdapterRequest {
+    pub source: SignalSource,
+    pub content: String,
+    pub channel: Option<String>,
+    pub sender: Option<String>,
+    pub metadata: Option<HashMap<String, String>>,
+    pub namespace: Option<String>,
+    pub agent: Option<String>,
+    pub session_id: Option<String>,
+    pub default_channel: String,
+    pub default_sender: String,
+}
+
+// ─── Response Types ───────────────────────────────────────────────────────────
+
+/// Status of a signal response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ResponseStatus {
+    Ok,
+    Error,
+    Processing,
+}
+
+/// Content payload of a signal response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value")]
+pub enum ResponseContent {
+    Text(String),
+    Json(serde_json::Value),
+    Error(String),
+}
+
+// ─── Export / Import types ───────────────────────────────────────────────────
+
+pub use storage::{ExportedEpisode, ExportedFact};
+
+/// Memory context included in every response — tracks what memory was used.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MemoryContext {
+    /// Number of semantic facts used to construct the response.
+    pub facts_used: usize,
+    /// Number of episodic memories used to construct the response.
+    pub episodes_used: usize,
+}
+
+/// The response to a processed signal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalResponse {
+    pub signal_id: Uuid,
+    pub status: ResponseStatus,
+    pub response: ResponseContent,
+    pub memory_context: MemoryContext,
+    /// Session ID for conversation continuity. Clients should send this back
+    /// in subsequent signals to maintain the same conversation context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+}
+
+impl SignalResponse {
+    /// Create a successful text response.
+    pub fn ok(signal_id: Uuid, text: impl Into<String>) -> Self {
+        Self {
+            signal_id,
+            status: ResponseStatus::Ok,
+            response: ResponseContent::Text(text.into()),
+            memory_context: MemoryContext::default(),
+            session_id: None,
+        }
+    }
+
+    /// Create an error response.
+    pub fn error(signal_id: Uuid, error: impl Into<String>) -> Self {
+        Self {
+            signal_id,
+            status: ResponseStatus::Error,
+            response: ResponseContent::Error(error.into()),
+            memory_context: MemoryContext::default(),
+            session_id: None,
+        }
+    }
+}
+
+/// Broadcast event emitted after a signal has been processed successfully.
+#[derive(Debug, Clone)]
+pub struct SignalProcessedEvent {
+    pub signal_id: Uuid,
+    pub source: SignalSource,
+    pub channel: String,
+    pub sender: String,
+    pub namespace: String,
+    pub status: ResponseStatus,
+    pub response: String,
+    pub facts_used: usize,
+    pub episodes_used: usize,
+    pub timestamp: DateTime<Utc>,
+}
+
+// ─── Pipeline Result ─────────────────────────────────────────────────────────
+
+/// Result of the `prepare()` pipeline phase.
+///
+/// Either the intent was handled directly (StoreFact, Forget, SystemStatus, Actions)
+/// and a complete response is returned, or the pipeline assembled LLM messages
+/// and the caller decides whether to use streaming or batch generation.
+pub enum PipelineResult {
+    /// Intent handled directly. Response is complete.
+    Complete(SignalResponse),
+    /// Chat/Recall: pipeline done, LLM messages assembled.
+    /// Caller chooses streaming vs batch generation.
+    LlmReady {
+        signal_id: Uuid,
+        messages: Vec<cortex::llm::Message>,
+        memory_context: MemoryContext,
+        session_id: Option<String>,
+        user_content: String,
+        namespace: String,
+        agent: Option<String>,
+    },
+}
+
+// ─── Signal Adapter Trait ─────────────────────────────────────────────────────
+
+/// Trait implemented by all protocol adapters (HTTP, WebSocket, MCP, gRPC, CLI).
+///
+/// Each adapter converts protocol-specific messages into Signal values,
+/// submits them to SignalProcessor, and delivers the SignalResponse back
+/// to the originating client via `send()`.
+#[async_trait::async_trait]
+pub trait SignalAdapter: Send + Sync {
+    /// Return the source type for this adapter.
+    fn source(&self) -> SignalSource;
+
+    /// Send a response back to the adapter's client.
+    async fn send(&self, response: SignalResponse) -> Result<(), SignalError>;
+}
+
+/// Extract text content from a ResponseContent variant.
+pub fn response_to_text(content: &ResponseContent) -> String {
+    match content {
+        ResponseContent::Text(t) => t.clone(),
+        ResponseContent::Json(v) => v.to_string(),
+        ResponseContent::Error(e) => e.clone(),
+    }
+}

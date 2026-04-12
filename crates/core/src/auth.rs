@@ -73,6 +73,13 @@ pub fn check_auth(
     match api_keys.iter().find(|k| {
         let a = k.key.as_bytes();
         let b = key.as_bytes();
+        // NOTE: length precheck may leak key length via timing side-channel.
+        // This is accepted because: (1) Brain binds to 127.0.0.1 by default,
+        // so remote attackers cannot reach auth endpoints; (2) keys are
+        // minted with ~128 bits of entropy, making length knowledge
+        // inconsequential; (3) the timing delta (~50 ns) is below practical
+        // measurement thresholds even on localhost.
+        // See docs/deferred-followups-0.2.x.md for full analysis.
         a.len() == b.len() && a.ct_eq(b).into()
     }) {
         None => AuthResult::InvalidKey,
