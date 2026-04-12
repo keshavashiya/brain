@@ -72,14 +72,52 @@ actions:
     enabled: false
     timeout_ms: 3000
     channels: {}
-    # Channel config — URL-only shorthand or full config with body template + headers:
-    #   alerts: "https://example.com/hook"              # shorthand: URL only, default JSON body
-    #   slack:
-    #     url: "https://hooks.slack.com/services/T/B/x"
-    #     body: '{"text": "{{content}}"}'               # template: {{channel}} {{recipient}} {{content}} {{namespace}} {{timestamp}}
+    # ─────────────────────────────────────────────────────────────────────
+    # Channel configuration — each key becomes a webhook destination for
+    # both proactive notifications (proactivity.delivery.webhook_channels)
+    # and explicit SendMessage intents ("send via <channel> to <recipient>").
+    #
+    # Template placeholders in body:
+    #   {{channel}}    — the channel key (e.g. "discord")
+    #   {{recipient}}  — target user/role (empty for proactive notifications)
+    #   {{content}}    — the message text (auto JSON-escaped)
+    #   {{namespace}}  — memory namespace (default: "personal")
+    #   {{timestamp}}  — ISO 8601 UTC timestamp
+    #
+    # Shorthand (URL only — uses default JSON body):
+    #   alerts: "https://example.com/hook"
+    #
+    # Full config (custom body template + headers):
+    # ─────────────────────────────────────────────────────────────────────
+    #
+    # ── Discord (via Webhook URL) ────────────────────────────────────────
+    # Create a webhook in Discord: Channel Settings → Integrations → Webhooks
+    #   discord:
+    #     url: "https://discord.com/api/webhooks/<WEBHOOK_ID>/<WEBHOOK_TOKEN>"
+    #     body: '{"content": "{{content}}"}'
+    #     headers: {}
+    #
+    # ── Telegram (via Bot API) ──────────────────────────────────────────
+    # Create a bot via @BotFather, get CHAT_ID via your bot's updates API:
     #   telegram:
-    #     url: "https://api.telegram.org/bot<TOKEN>/sendMessage"
-    #     body: '{"chat_id": "<CHAT_ID>", "text": "[{{channel}}] {{content}}"}'
+    #     url: "https://api.telegram.org/bot<BOT_TOKEN>/sendMessage"
+    #     body: '{"chat_id": "<CHAT_ID>", "text": "{{content}}", "parse_mode": "Markdown"}'
+    #     headers:
+    #       Authorization: "Bearer <BOT_TOKEN>"
+    #
+    # ── Slack (via Incoming Webhook) ────────────────────────────────────
+    #   slack:
+    #     url: "https://hooks.slack.com/services/T00/B00/xxx"
+    #     body: '{"text": "{{content}}"}'
+    #     headers: {}
+    #
+    # ── Generic Webhook (any HTTP endpoint) ─────────────────────────────
+    #   webhook:
+    #     url: "https://hooks.example.com/services/brain"
+    #     body: '{"channel": "{{channel}}", "message": "{{content}}", "ts": "{{timestamp}}"}'
+    #     headers:
+    #       X-API-Key: "your-api-key-here"
+    #       Content-Type: "application/json"
   resilience:
     max_retries: 2            # retries on transient errors (5xx, timeout, connection refused)
     retry_base_ms: 500        # base delay; doubles each retry (500 → 1000 → 2000)
@@ -98,6 +136,7 @@ proactivity:
     outbox: true               # Always write to outbox; drain on next interaction
     broadcast: true            # Push to live WS/SSE sessions
     webhook_channels: []       # Channel keys from actions.messaging.channels to receive proactive notifications
+                               # Example: ["discord", "telegram"]
     max_outbox_age_days: 7     # Prune stale undelivered outbox items during consolidation
   open_loop:
     enabled: true              # Detect unresolved commitments (requires proactivity.enabled: true)

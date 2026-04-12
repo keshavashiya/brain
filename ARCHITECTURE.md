@@ -4,7 +4,24 @@ This document covers the internal design of Brain OS: key abstractions, data flo
 
 ---
 
+## Table of Contents
+
+- [Crate Map](#crate-map)
+- [Data Flow](#data-flow-signal-ingestion)
+- [Key Types](#key-types)
+- [Storage Layer](#storage-layer)
+- [Background Loops](#background-loop-architecture)
+- [Action Backends](#action-dispatcher-backends-internal)
+- [Memory Namespaces](#memory-namespaces)
+- [Security Model](#security-model)
+- [Bridge Pattern](#bridge-pattern-external-gateway-relay)
+
+---
+
 ## Crate Map
+
+<details>
+<summary><strong>Full directory tree</strong></summary>
 
 ```
 brain/
@@ -102,7 +119,9 @@ brain/
                           Used by external relay projects to connect messaging platforms to Brain.
 ```
 
-### Workspace Members (`Cargo.toml`)
+</details>
+
+### Workspace Members
 
 ```
 core  storage  hippocampus  cortex  thalamus  amygdala  signal
@@ -192,9 +211,8 @@ The `SignalResponse` is returned directly to the calling adapter, which sends it
 
 ## Key Types
 
-### `Signal` (`crates/signal/src/lib.rs`)
-
-The universal input envelope — every adapter builds one of these before calling `SignalProcessor::process`.
+<details>
+<summary><strong>Signal</strong> — universal input envelope</summary>
 
 ```rust
 pub struct Signal {
@@ -210,7 +228,10 @@ pub struct Signal {
 }
 ```
 
-### `SignalResponse`
+</details>
+
+<details>
+<summary><strong>SignalResponse</strong> — output envelope</summary>
 
 ```rust
 pub struct SignalResponse {
@@ -224,9 +245,10 @@ pub struct SignalResponse {
 }
 ```
 
-### `SignalAdapter` trait
+</details>
 
-The interface every protocol adapter implements. It is thin by design — adapters translate wire formats, not business logic.
+<details>
+<summary><strong>SignalAdapter</strong> trait</summary>
 
 ```rust
 #[async_trait]
@@ -236,9 +258,12 @@ pub trait SignalAdapter: Send + Sync {
 }
 ```
 
-### `SignalProcessor`
+Thin by design — adapters translate wire formats, not business logic.
 
-Constructed once at startup and shared via `Arc<>`:
+</details>
+
+<details>
+<summary><strong>SignalProcessor</strong> — public API surface</summary>
 
 ```rust
 impl SignalProcessor {
@@ -248,7 +273,7 @@ impl SignalProcessor {
 
     pub async fn process(&self, signal: Signal) -> Result<SignalResponse, SignalError>;
 
-    // Direct memory operations — used by adapters that bypass intent classification
+    // Direct memory operations — adapters bypass intent classification
     pub async fn store_fact_direct(&self, ns: &str, cat: &str, sub: &str,
         pred: &str, obj: &str) -> Result<String, SignalError>;
     pub async fn search_facts(&self, query: &str, top_k: usize,
@@ -273,15 +298,18 @@ impl SignalProcessor {
 }
 ```
 
+</details>
+
 ---
 
 ## Storage Layer
 
-### SQLite (`crates/storage/src/sqlite.rs`)
+### SQLite
 
-Migration-based schema versioned in a `MIGRATIONS` slice. The runner compares `MAX(version)` in the `_migrations` table against the max in-code version and runs missing migrations in order.
+Migration-based schema (17 migrations). WAL mode enabled. Thread safety via `Mutex<Connection>`.
 
-**Tables:**
+<details>
+<summary><strong>Tables</strong></summary>
 
 | Table | Purpose |
 |-------|---------|
@@ -292,43 +320,37 @@ Migration-based schema versioned in a `MIGRATIONS` slice. The runner compares `M
 | `user_profile` | Key-value store for user preferences |
 | `procedures` | trigger_pattern → steps_json automation rules |
 | `audit_log` | Action audit trail (action type, input, output, timestamps) |
-| `scheduled_intents` | Persisted scheduling intents (background poller fires & delivers via NotificationRouter) |
+| `scheduled_intents` | Persisted scheduling intents |
 | `episode_promotions` | Idempotency log for episode → semantic-fact promotions |
 | `notification_outbox` | Proactive notification queue with priority and delivery status |
-| `habit_state` | Rate-limit state for proactivity engine (daily count, last sent) — created on-demand by HabitEngine, not in core migrations |
+| `habit_state` | Rate-limit state for proactivity engine |
 | `_migrations` | Applied migration version log |
 
-**WAL mode** is enabled for concurrent reads alongside writes.
-**Thread safety** is via `Mutex<Connection>` — one connection, one writer at a time.
-**Encryption** is opt-in: `SqlitePool::with_encryptor(enc)` wraps the pool so `encrypt_content` / `decrypt_content` are called transparently on write/read of content columns.
+</details>
 
-### Vector Index (`crates/storage/src/ruvector.rs`)
+### Vector Index
 
-Brain uses [`ruvector-core`](https://crates.io/crates/ruvector-core) (crates.io) as an external dependency for HNSW approximate nearest-neighbour search. The wrapper in `storage/src/ruvector.rs` provides a multi-table interface.
+Uses [`ruvector-core`](https://crates.io/crates/ruvector-core) for HNSW approximate nearest-neighbour search. Storage: `~/.brain/ruvector/{facts_vec.db, episodes_vec.db}`.
 
-> All vector logic lives in `storage/src/ruvector.rs` using `ruvector-core` from crates.io.
+<details>
+<summary><strong>Robustness guarantees</strong></summary>
 
-**Storage layout:**
+Before any insert or search:
 
-```
-~/.brain/ruvector/
-  facts_vec.db      # HNSW index for semantic fact vectors
-  episodes_vec.db   # HNSW index for episode vectors (future use)
-```
-
-**Robustness guarantees before any insert or search:**
-
-1. Dimension check — vectors with wrong size get a deterministic fallback
+1. Dimension check — vectors with wrong size get deterministic fallback
 2. Finite check — NaN / Inf values trigger deterministic fallback
-3. Zero-norm check — zero vectors get a deterministic fallback
+3. Zero-norm check — zero vectors get deterministic fallback
 4. L2 normalization applied to all vectors
-5. Deterministic per-ID jitter applied on insert to avoid pathological duplicate-distance panics in HNSW
+5. Deterministic per-ID jitter on insert to avoid pathological HNSW duplicate-distance panics
 
-The `deterministic_fallback_embedding(seed, dimensions)` function (FNV-1a hash → xorshift64* PRNG → normalized) ensures that even when the embedding provider is down, all memory writes succeed with meaningful (though semantically approximate) vectors.
+The `deterministic_fallback_embedding(seed, dimensions)` function (FNV-1a hash → xorshift64* PRNG → normalized) ensures writes never fail silently.
 
-### Hybrid Search (`crates/hippocampus/src/search.rs`)
+</details>
 
-`RecallEngine::recall()` pipeline:
+### Hybrid Search
+
+<details>
+<summary><strong>RecallEngine pipeline</strong></summary>
 
 ```
 1. EpisodicStore::search_bm25(query, limit, namespace)  → BM25 ranked list
@@ -342,7 +364,9 @@ The `deterministic_fallback_embedding(seed, dimensions)` function (FNV-1a hash �
 5. Sort by final_score descending → return top_k
 ```
 
-RRF correctly handles overlap boosting (items appearing in both lists score higher) and disjoint lists, with full unit test coverage.
+RRF handles overlap boosting (items in both lists score higher) and disjoint lists, with full unit test coverage.
+
+</details>
 
 ---
 
@@ -350,14 +374,16 @@ RRF correctly handles overlap boosting (items appearing in both lists score high
 
 `brain serve` / `brain start` spawns adapter tasks and optional intelligence tasks into a single `tokio::task::JoinSet`. All tasks share `Arc<SignalProcessor>` and are aborted cleanly on Ctrl+C or SIGTERM.
 
+<details>
+<summary><strong>Pseudocode</strong></summary>
+
 ```rust
-// Pseudocode of what brain serve spawns
 let mut set = tokio::task::JoinSet::new();
 
 // ── Protocol adapters (always started) ───────────────────────────────────────
 set.spawn(httpadapter::serve(processor.clone(), host, http_port));
 set.spawn(wsadapter::serve(processor.clone(), host, ws_port));
-set.spawn(grpcadapter::serve(processor.clone(), host, grpc_port));
+set.spawn(grpcadapter::serve(processor.clone(), host, grpc_port));  // #[cfg(feature = "grpc")]
 set.spawn(mcp::serve_http(processor.clone(), host, mcp_port));
 
 // ── Memory consolidation (enabled: true by default) ───────────────────────────
@@ -374,7 +400,7 @@ if config.memory.consolidation.enabled {
     });
 }
 
-// ── Proactivity / habit engine (enabled: false by default) ───────────────────
+// ── Proactivity / habit engine ───────────────────────────────────────────────
 if config.proactivity.enabled {
     set.spawn(async move {
         let engine = HabitEngine::new(db, habit_cfg);
@@ -389,7 +415,7 @@ if config.proactivity.enabled {
     });
 }
 
-// ── Open-loop detection (enabled: true under proactivity) ────────────────────
+// ── Open-loop detection ──────────────────────────────────────────────────────
 if config.proactivity.enabled && config.proactivity.open_loop.enabled {
     set.spawn(async move {
         let detector = OpenLoopDetector::new(db, open_loop_cfg);
@@ -414,52 +440,84 @@ set.abort_all();
 processor.shutdown();           // WAL checkpoint
 ```
 
+</details>
+
 **Default configuration:**
 
 | Loop | Enabled by default | Interval |
 |------|--------------------|----------|
 | Memory consolidation | Yes | 24 hours |
-| Proactivity / habit detection | No (opt-in) | `min_interval_minutes` (60) |
-| Open-loop detection | No (opt-in, under proactivity) | `check_interval_minutes` (120) |
+| Proactivity / habit detection | Yes | `min_interval_minutes` (60) |
+| Open-loop detection | Yes | `check_interval_minutes` (120) |
+| Scheduled intent poller | No | 60 seconds |
 
 ---
 
 ## Action Dispatcher Backends (Internal)
 
-`cortex::ActionDispatcher` supports pluggable backend traits. All action execution remains internal — no new public HTTP or gRPC endpoints expose action dispatch in this cycle.
-
-**Traits:**
+<details>
+<summary><strong>Traits & dispatch contract</strong></summary>
 
 ```rust
-trait MemoryBackend    { async fn store_fact(..) / async fn recall(..) }
-trait WebSearchBackend { async fn search(query, top_k) -> Vec<SearchHit> }
-trait SchedulingBackend{ async fn schedule(description, cron, namespace) -> ScheduleOutcome }
-trait MessageBackend   { async fn send(channel, recipient, content, namespace) -> MessageOutcome }
+trait MemoryBackend    { async fn store_fact(ns, cat, sub, pred, obj) -> Result<String>;
+                         async fn recall(query, top_k, ns) -> Result<Vec<MemoryFact>>; }
+trait WebSearchBackend { async fn search(query, top_k) -> Result<Vec<SearchHit>>; }
+trait SchedulingBackend{ async fn schedule(description, cron, ns) -> Result<ScheduleOutcome>; }
+trait MessageBackend   { async fn send(channel, recipient, content, ns) -> Result<MessageOutcome>; }
 ```
 
 **Dispatch contract (deterministic):**
 
 | State | Result |
 |-------|--------|
-| Feature disabled in config | Explicit `"disabled by config"` error — never silently ignored |
+| Feature disabled in config | Explicit `"disabled by config"` error |
 | Feature enabled, no backend wired | Explicit `"backend not configured"` error |
 | Feature enabled, backend wired | Real execution with structured success output |
 
-**Concrete implementations in `crates/backends/src/`:**
+</details>
+
+<details>
+<summary><strong>Concrete implementations</strong></summary>
 
 | Backend | Implementation |
 |---------|---------------|
 | Web search | `SearxngSearchBackend`, `TavilySearchBackend`, `CustomSearchBackend` |
 | Scheduling | `CliSchedulingBackend` (SQLite persist + 60s background poller) |
-| Messaging | `WebhookMessageBackend` (configurable channel → webhook URL + body template) |
+| Messaging | `WebhookMessageBackend` (dual-trait — see below) |
 | Memory | `CliMemoryBackend` (wraps `SemanticStore` + `Embedder`) |
 
-**Resilience layer** (shared by all HTTP backends, `crates/backends/src/resilience.rs`):
+</details>
 
-- Retry with exponential backoff (`max_retries`, `retry_base_ms`) on 5xx, 408, 429, timeout, or connection-refused
-- Other 4xx errors fail immediately without retry
-- `CircuitBreaker` per backend: atomic consecutive-failure counter + epoch-based cooldown; half-open probe after cooldown elapses
+<details>
+<summary><strong>WebhookMessageBackend — dual-trait design</strong></summary>
+
+`WebhookMessageBackend` implements two traits for two distinct use cases:
+
+| Aspect | `WebhookSender` (proactive) | `MessageBackend` (explicit) |
+|--------|----------------------------|----------------------------|
+| Source | `signal::notification` | `cortex::actions` |
+| Method | `send_notification(channel, content, namespace)` | `send(channel, recipient, content, namespace)` |
+| Return | `Result<(), String>` | `Result<MessageOutcome, ActionError>` |
+| Recipient | Hardcoded `""` (no recipient for proactive) | Passed through from intent |
+| Response parsing | Only checks HTTP 2xx | Parses JSON for `id`/`delivery_id` + `status` |
+| Triggered by | HabitEngine, OpenLoopDetector, scheduler | User: "send via discord to alice saying hi" |
+
+Both share the same channel lookup (lowercased), template rendering, `resilient_send()` with circuit breaker, and `reqwest::Client`.
+
+</details>
+
+<details>
+<summary><strong>Resilience layer</strong></summary>
+
+Shared by all HTTP backends (`crates/backends/src/resilience.rs`):
+
+- Retry with exponential backoff (`max_retries`, `retry_base_ms`) on 5xx, 429, 408, timeout, or connection errors
+- Other 4xx errors fail immediately without retry (but still record a failure for circuit breaker tracking)
+- Backoff capped at `retry_base_ms × 32` (exponent clamped at `min(5)`)
+- `CircuitBreaker` per backend: atomic consecutive-failure counter + epoch-based cooldown; half-open probe resets counter on success
 - Schema validation: structured `tracing::warn!` on unexpected response shapes — never crashes
+
+</details>
 
 ---
 
@@ -486,7 +544,7 @@ The default namespace is `"personal"`. Namespaces are a first-class schema conce
 | CORS | `localhost_cors()` — only `127.0.0.1` and `localhost` origins allowed |
 | Error exposure | HTTP 500 returns opaque message; real error logged server-side only |
 | Shell execution | `security.exec_allowlist` in config; configurable `exec_timeout_seconds` |
-| Encryption at rest | AES-256-GCM via `brain init --encrypt` (opt-in); Argon2id key derivation. **Note:** FTS5 full-text search is disabled when encryption is active — hybrid search relies on vector similarity only |
+| Encryption at rest | AES-256-GCM via `brain init --encrypt` (opt-in); Argon2id key derivation. **Note:** FTS5 full-text search is disabled when encryption is active |
 | LLM client failures | `Result<>` throughout — TLS failures surface as errors, never panics |
 | Embedding fallback | Deterministic non-zero vectors when provider is down — writes never fail silently |
 
@@ -496,7 +554,8 @@ The default namespace is `"personal"`. Namespaces are a first-class schema conce
 
 Brain is local and protocol-agnostic. It does not reach outward to any external platform. External applications that live on messaging platforms (Slack, Telegram, Discord, custom agents) connect **inward** to Brain via its standard protocols.
 
-### Design Principle
+<details>
+<summary><strong>Design principle</strong></summary>
 
 ```
 External Platform          Bridge (external repo)              Brain OS
@@ -514,9 +573,12 @@ The bridge is **not** inside Brain. It is a separate process (and typically a se
 3. Wraps them as `{"content": "...", "sender": "...", "namespace": "..."}` and sends to Brain
 4. Receives `SignalResponse` from Brain and relays the response back to the platform
 
-### `crates/bridge/` Library
+</details>
 
-`BridgeClient` in `crates/bridge/src/lib.rs` is a ready-to-use Rust client for building these relays:
+<details>
+<summary><strong><code>crates/bridge/</code> library</strong></summary>
+
+`BridgeClient` in `crates/bridge/src/lib.rs`:
 
 ```rust
 pub struct BridgeClient { url: String, config: BridgeConfig }
@@ -532,306 +594,24 @@ impl BridgeClient {
         Fut: Future<Output = BridgeMessage>;
 
     /// Bidirectional: relay inbound messages AND push proactive notifications outbound.
-    pub async fn connect_and_relay_bidirectional<F, Fut>(
-        &self, handler: F,
-        proactive_rx: Option<broadcast::Receiver<BridgeMessage>>,
-    ) -> Result<(), BridgeError>;
-}
-
-pub struct BridgeConfig {
-    pub initial_backoff_ms: u64,          // default: 1 000ms
-    pub max_backoff_ms: u64,              // default: 60 000ms
-    pub max_reconnect_attempts: Option<u32>, // default: None (reconnect forever)
-}
-```
-
-`BridgeMessage` is a simple JSON-serializable envelope `{ id, content, source?, metadata? }`. The client handles ping/pong keep-alive, clean disconnect detection, and backoff.
-
-### Minimal bridge example (external project)
-
-```rust
-// In YOUR relay project — not inside Brain OS
-use bridge::{BridgeClient, BridgeConfig, BridgeMessage};
-
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    let client = BridgeClient::new(
-        "ws://your-external-gateway.example.com/brain-relay",
-        BridgeConfig::default(),
-    );
-
-    client.connect_and_relay(|msg| async move {
-        // Forward to Brain's WebSocket, get response, relay back
-        let brain_reply = send_to_brain_ws(&msg.content).await;
-        BridgeMessage::reply(&msg, brain_reply)
-    }).await?;
-
-    Ok(())
-}
-```
-
-### Why this design is correct
-
-- Brain has **zero** platform-specific code
-- Adding support for a new platform requires **no changes** to Brain
-- The bridge reconnects automatically — Brain never needs to know the bridge was disconnected
-- All Brain protocols (HTTP, WS, gRPC, MCP) are available to the bridge; WebSocket is the natural fit for bidirectional relay
-
-
-
----
-
-## Integrating External Applications
-
-Brain is protocol-agnostic. External applications connect via its standard interfaces — they do not live inside this repository.
-
-```
-Brain OS (this repo)                  External App (separate repo / process)
-────────────────────                  ──────────────────────────────────────
-  brain serve                           OpenCode, Claude Code, shell script, etc.
-       │                                        │
-       │  HTTP REST / WS / MCP / gRPC           │
-       │◄────────────────────────────────────── │
-       │                                        │
-  SignalProcessor                        app-specific logic
-  hippocampus                            thin Brain client (HTTP calls)
-```
-
-### Integration Patterns
-
-**1. HTTP REST (simplest — any language, no SDK needed)**
-
-```bash
-curl -X POST http://localhost:19789/v1/signals \
-  -H "Authorization: Bearer your-key" \
-  -H "Content-Type: application/json" \
-  -d '{"source":"myapp","sender":"agent","content":"user prefers tabs over spaces"}'
-```
-
-**2. MCP (for AI coding assistants)**
-
-AI agents that speak MCP declare Brain as a server and call `memory_search`, `memory_store`, etc. as native tools — no HTTP client code needed:
-
-```json
-{
-  "mcpServers": {
-    "brain": { "command": "brain", "args": ["mcp"] }
-  }
-}
-```
-
-**3. WebSocket (real-time / streaming)**
-
-Connect to `ws://localhost:19790`, authenticate with first frame, then send signal payloads:
-
-```json
-{ "api_key": "your-key" }
-```
-
-Then:
-
-```json
-{ "content": "what do I know about Rust?", "namespace": "work" }
-```
-
-**4. gRPC (high-throughput / typed clients)**
-
-Generate client stubs from the proto files in `crates/adapters/grpc/proto/`:
-- `memory.proto` — `MemoryService` (Search, Store, GetFacts, StreamSignals)
-- `agent.proto` — `AgentService` (Connect, SendSignal, ReceiveSignals)
-
-`AgentService.ReceiveSignals` is a live server-streaming RPC: subscribers receive an initial `connected` event, then fan-out updates for every signal processed by `SignalProcessor`.
-
-### Minimal Python client (no SDK needed)
-
-```python
-import requests
-
-class BrainClient:
-    def __init__(self, api_key, base="http://localhost:19789"):
-        self.s = requests.Session()
-        self.s.headers["Authorization"] = f"Bearer {api_key}"
-        self.base = base
-
-    def remember(self, text, namespace="personal"):
-        self.s.post(f"{self.base}/v1/signals",
-            json={"source": "python", "content": text, "namespace": namespace})
-
-    def search(self, query, top_k=5, namespace=None):
-        body = {"query": query, "top_k": top_k}
-        if namespace:
-            body["namespace"] = namespace
-        return self.s.post(f"{self.base}/v1/memory/search", json=body).json()
-```
-
-A Rust client crate or Python/JS SDK can be published separately as the API stabilises.
-
----
-
-## Building a New Protocol Adapter
-
-### What an adapter is
-
-An adapter is a **protocol transport layer** — it listens on a socket (or stdin/stdout), authenticates the caller, translates the wire format into a `Signal`, calls the shared `SignalProcessor`, and sends `SignalResponse` back in the protocol-appropriate format.
-
-Brain ships four protocol adapters: HTTP REST, WebSocket, gRPC, and MCP (stdio + HTTP). Adding a new adapter means adding a new _transport_, not a new platform integration.
-
-```
-External apps never live inside Brain.
-They connect to Brain using an existing protocol:
-
-  Your script      ──── HTTP ────► Brain
-  Your agent       ──── MCP  ────► Brain
-  Any chat UI      ──── WS   ────► Brain
-  Any gRPC client  ──── gRPC ────► Brain
-  External relay   ──── WS   ────► Brain (via crates/bridge)
-```
-
-If you want to connect a messaging platform, CLI tool, or AI agent to Brain, call Brain's existing HTTP/WS/MCP/gRPC API from that app — you do not add a "Slack adapter" or "Telegram adapter" inside Brain.
-
-### When to add a new protocol adapter
-
-Add a new adapter when you need a transport that Brain doesn't yet speak — for example Unix domain sockets, AMQP, or a custom binary protocol.
-
-### SSE (Server-Sent Events) — Already Implemented
-
-SSE is built into the HTTP adapter and provides one-directional streaming (server pushes, client reads) for proactive notifications. It's ideal for browser clients that want to receive real-time nudges without maintaining a WebSocket connection.
-
-**Endpoint:** `GET /v1/events`
-
-```bash
-# Authenticated SSE stream
-curl -N http://localhost:19789/v1/events \
-  -H "Authorization: Bearer YOUR_API_KEY"
-```
-
-**Response format:**
-```json
-event: notification
-data: {"type":"proactive","content":"You usually work on \"auth\" around this time...","triggered_by":"habit:auth","priority":1,"agent":null}
-```
-
-**Implementation:**
-- Route registered in `crates/adapters/http/src/lib.rs`
-- Handler at `sse_events_handler`
-- Subscribes to `NotificationRouter::subscribe()` broadcast channel
-- Streams proactive notifications as SSE events
-- Supports keep-alive and lagged client detection
-
-The SSE endpoint is used by:
-- Browser-based clients that want real-time proactive notifications
-- `brain chat` for displaying nudges at session start
-
-**Key insight:** all adapters follow the same contract: receive input → build `Signal` → call `processor.process()` → return output. The `SignalProcessor` is shared by `Arc` so memory is consistent regardless of which adapter handled the request.
-
----
-
-## LLM Providers
-
-The `LlmProvider` trait in `crates/cortex/src/llm.rs`:
-
-```rust
-#[async_trait]
-pub trait LlmProvider: Send + Sync {
-    async fn generate(&self, messages: &[Message]) -> Result<Response, LlmError>;
-    async fn generate_stream(
+    pub async fn connect_and_relay_bidirectional<F, Fut, N, NFut>(
         &self,
-        messages: &[Message],
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<ResponseChunk, LlmError>> + Send>>, LlmError>;
-    async fn health_check(&self) -> bool;
-    fn name(&self) -> &str;
+        handler: F,
+        notifications: N,
+    ) -> Result<(), BridgeError>
+    where
+        F: Fn(BridgeMessage) -> Fut + Clone,
+        Fut: Future<Output = BridgeMessage>,
+        N: Fn() -> NFut + Clone,
+        NFut: Future<Output = Option<BridgeMessage>>;
 }
 ```
 
-**Implementations:**
+Features:
+- Exponential backoff reconnection (1s → 2s → 4s → … → 60s max)
+- Ping/pong keep-alive (every 30s)
+- JSON message serialization
+- `BridgeMessage::reply()`, `BridgeMessage::from_json()`
+- `BridgeConfig` with configurable `max_backoff_secs`, `ping_interval_secs`, `connection_timeout_secs`
 
-| Provider | Type | Notes |
-|----------|------|-------|
-| `OllamaProvider` | Local | Calls `POST /api/chat` on the local Ollama server |
-| `OpenAiProvider` | Remote / local | Any OpenAI-compatible endpoint (OpenAI, OpenRouter, vLLM, LM Studio) |
-
-`create_provider(config: &ProviderConfig)` selects the implementation based on `llm.provider` in config. New providers implement `LlmProvider` and register in `create_provider()`.
-
-Both providers support:
-- Non-streaming `generate()` — waits for full response
-- Streaming `generate_stream()` — returns a `Pin<Box<dyn Stream<Item = ResponseChunk>>>` for real-time output
-- `health_check()` — used by `brain status`
-
----
-
-## Configuration System
-
-Config is loaded with [Figment](https://docs.rs/figment) in priority order:
-
-```
-Environment variables   BRAIN_LLM__MODEL=gpt-4o
-        ↓ override
-~/.brain/config.yaml    (user overrides — created by `brain init`)
-        ↓ override
-crates/core/default.yaml  (compiled-in defaults via include_str!)
-```
-
-The `BrainConfig` struct in `crates/core/src/config.rs` maps 1-to-1 with the YAML keys. Double-underscore (`__`) is the env-var nesting separator (e.g. `BRAIN_ACTIONS__WEB_SEARCH__ENABLED=false`).
-
-**LLM API key resolution:** `llm.api_key` in config, with `BRAIN_LLM__API_KEY` env var as fallback. Config takes precedence when non-empty. Both the LLM provider and the embedding provider share this key.
-
-`BrainConfig::validate()` runs before `brain serve` and `brain start`. It returns:
-- `Err(String)` for hard errors that must block startup (port conflicts, invalid LLM URL)
-- `Ok(Vec<String>)` for soft warnings printed to stderr (missing API keys, zero timeout, etc.)
-
----
-
-## Proactivity Engine (`crates/ganglia`)
-
-`HabitEngine` detects recurring patterns in episodic memory using keyword × day-of-week × hour histograms and generates proactive suggestions. `OpenLoopDetector` scans for unresolved commitments and generates reminders. Both are **disabled by default** (`proactivity.enabled: false`).
-
-When enabled, `brain serve` spawns background tasks on the `JoinSet`:
-- **HabitEngine** fires every `min_interval_minutes`. If a recurring pattern matches the current time slot and all rate limits pass, it delivers through the `NotificationRouter` (outbox + broadcast + webhooks).
-- **OpenLoopDetector** fires every `check_interval_minutes`. It scans for commitment phrases ("I need to", "remind me to", "I should", etc.) in episodic memory and checks whether a later episode resolves the commitment. Unresolved items older than `resolution_window_hours` trigger a reminder.
-
-Both engines share the `NotificationRouter` for delivery and the `HabitEngine` rate limits (`max_per_day`, `min_interval_minutes`, quiet hours).
-
-Rate-limit state (`last_sent`, `daily_count`) is persisted in a `habit_state` SQLite table, so limits survive daemon restarts.
-
-At `brain chat` session start, pending outbox notifications are drained and displayed as nudges. Open-loop detection also runs inline for immediate feedback.
-
-> **Note:** Quiet hours are evaluated in UTC. If you are not in UTC, adjust `start`/`end` by your UTC offset.
-
----
-
-## Memory Consolidation (`crates/hippocampus/consolidation`)
-
-`Consolidator` prunes low-retention episodes using the forgetting curve and promotes reinforced episodes to permanent semantic facts. **Enabled by default** (`memory.consolidation.enabled: true`, interval: 24 hours).
-
-**Pipeline per run:**
-
-1. Fetch all episodes ordered by importance ASC (up to `max_prune_per_run × 2`)
-2. For each: compute `retention = importance × e^(−decay_rate × hours_since_last_access)`
-3. If `retention < prune_threshold` (default: 0.05): `DELETE FROM episodes WHERE id = ?`
-4. If `reinforcement_count >= promotion_threshold` (default: 3): add to `promotion_candidates`
-5. Return `ConsolidationReport { episodes_pruned, episodes_promoted, episodes_remaining, promotion_candidates }`
-
-The daemon loop in `brain serve` calls `promote_candidates()` after each consolidation run, which parses each candidate's content with `IntentClassifier::parse_store_fact_content()`, stores it as a semantic fact, and records the promotion in `episode_promotions` for idempotency.
-
----
-
-## Procedure Store (`crates/cerebellum`)
-
-`ProcedureStore` stores trigger-pattern → `steps_json` automation rules. When a signal arrives, `SignalProcessor` calls `procedures.match_trigger(&signal.content)` (case-insensitive substring match). Matching procedures have their steps injected into the LLM context as synthetic prior messages and their `use_count` incremented.
-
-**API:**
-
-```rust
-impl ProcedureStore {
-    fn store_procedure(trigger: &str, steps: &[String]) -> Result<String, Result<(), SignalError>;  // returns id
-    fn match_trigger(input: &str)  -> Result<Vec<Procedure>>;
-    fn get_procedure(id: &str)     -> Result<Procedure>;
-    fn list_procedures()           -> Result<Vec<Procedure>>;
-    fn update_steps(id, new_steps) -> Result<()>;
-    fn delete_procedure(id: &str)  -> Result<()>;
-    fn record_execution(id: &str)  -> Result<()>;
-    fn count()                     -> Result<i64>;
-}
-```
-
-Managed via the MCP `memory_procedures` tool (`list` / `store` / `delete` actions).
+</details>
