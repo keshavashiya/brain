@@ -339,7 +339,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 use std::path::Path;
                 let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
                 if let Some(home) = home {
-                    let plist = home.join("Library").join("LaunchAgents").join("com.brain.plist");
+                    let plist = home
+                        .join("Library")
+                        .join("LaunchAgents")
+                        .join("com.brain.plist");
                     if Path::exists(&plist) {
                         let plist_str = plist.to_str().unwrap_or("");
 

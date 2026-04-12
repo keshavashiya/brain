@@ -13,7 +13,9 @@ pub(crate) async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Res
     let daemon_running = bootstrap::detect_running_daemon(config).await;
     match (daemon_running.as_ref(), read_pid(config)) {
         (Some(_), _) => {
-            let pid = read_pid(config).map(|p| format!(" (PID {p})")).unwrap_or_default();
+            let pid = read_pid(config)
+                .map(|p| format!(" (PID {p})"))
+                .unwrap_or_default();
             println!("  State:        awake{}", pid);
         }
         (None, Some(pid)) if is_process_running(pid) => {
@@ -123,13 +125,16 @@ pub(crate) async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Res
 
         // Fetch memory stats via HTTP API
         let stats_url = format!("{}/v1/memory/namespaces", base_url);
-        let req = client.get(&stats_url).header("Authorization", format!("Bearer {}", api_key));
+        let req = client
+            .get(&stats_url)
+            .header("Authorization", format!("Bearer {}", api_key));
         if let Ok(resp) = req.send().await {
             if resp.status().is_success() {
                 if let Ok(json) = resp.json::<serde_json::Value>().await {
                     if let Some(namespaces) = json.get("namespaces") {
                         println!("\n  Memory Regions:");
-                        for (ns, info) in namespaces.as_object().unwrap_or(&serde_json::Map::new()) {
+                        for (ns, info) in namespaces.as_object().unwrap_or(&serde_json::Map::new())
+                        {
                             if let Some(episodes) = info.get("episodes").and_then(|v| v.as_u64()) {
                                 println!("    {}: {} episodes", ns, episodes);
                             }

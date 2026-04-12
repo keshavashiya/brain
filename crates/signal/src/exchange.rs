@@ -1,7 +1,7 @@
 //! Export / import operations for SignalProcessor.
 
-use crate::types::ExportedFact;
 use crate::types::ExportedEpisode;
+use crate::types::ExportedFact;
 use crate::SignalError;
 use crate::SignalProcessor;
 
@@ -31,10 +31,7 @@ impl SignalProcessor {
     }
 
     /// Import episodes into SQLite (ON CONFLICT DO NOTHING). Returns count of newly imported episodes.
-    pub fn import_episodes(
-        &self,
-        episodes: &[ExportedEpisode],
-    ) -> Result<usize, SignalError> {
+    pub fn import_episodes(&self, episodes: &[ExportedEpisode]) -> Result<usize, SignalError> {
         self.episodic
             .pool()
             .import_episodes(episodes)

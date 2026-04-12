@@ -90,7 +90,10 @@ pub(crate) fn cmd_service_install() -> anyhow::Result<()> {
                         .ok();
                     if let Some(out) = out {
                         if !out.status.success() {
-                            tracing::debug!("pkill brain serve: {}", String::from_utf8_lossy(&out.stderr));
+                            tracing::debug!(
+                                "pkill brain serve: {}",
+                                String::from_utf8_lossy(&out.stderr)
+                            );
                         }
                     }
                 }

@@ -105,10 +105,7 @@ impl SignalProcessor {
     }
 
     /// Cancel a scheduled intent by ID. Returns true if the intent was found and cancelled.
-    pub fn cancel_scheduled_intent(
-        &self,
-        id: &str,
-    ) -> Result<bool, crate::types::SignalError> {
+    pub fn cancel_scheduled_intent(&self, id: &str) -> Result<bool, crate::types::SignalError> {
         self.episodic
             .pool()
             .cancel_scheduled_intent(id)
@@ -116,7 +113,9 @@ impl SignalProcessor {
     }
 
     /// Subscribe to live signal-processing events.
-    pub fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<crate::types::SignalProcessedEvent> {
+    pub fn subscribe_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<crate::types::SignalProcessedEvent> {
         self.events_tx.subscribe()
     }
 }

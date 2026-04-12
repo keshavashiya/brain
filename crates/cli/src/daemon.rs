@@ -105,7 +105,10 @@ pub(crate) fn is_service_installed() -> bool {
         // Check if launchd plist exists AND is loaded
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
         if let Some(home) = home {
-            let plist = home.join("Library").join("LaunchAgents").join("com.brain.plist");
+            let plist = home
+                .join("Library")
+                .join("LaunchAgents")
+                .join("com.brain.plist");
             if plist.exists() {
                 let out = std::process::Command::new("launchctl")
                     .arg("list")
@@ -123,7 +126,11 @@ pub(crate) fn is_service_installed() -> bool {
     {
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
         if let Some(home) = home {
-            let unit = home.join(".config").join("systemd").join("user").join("brain.service");
+            let unit = home
+                .join(".config")
+                .join("systemd")
+                .join("user")
+                .join("brain.service");
             if unit.exists() {
                 let out = std::process::Command::new("systemctl")
                     .args(["--user", "is-active", "brain.service"])
@@ -185,7 +192,10 @@ pub(crate) fn stop_service() {
     {
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
         if let Some(home) = home {
-            let plist = home.join("Library").join("LaunchAgents").join("com.brain.plist");
+            let plist = home
+                .join("Library")
+                .join("LaunchAgents")
+                .join("com.brain.plist");
             if plist.exists() {
                 if let Some(plist_str) = plist.to_str() {
                     // Unload (not stop) — this prevents launchd from respawning.
@@ -206,7 +216,11 @@ pub(crate) fn stop_service() {
     {
         let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
         if let Some(home) = home {
-            let unit = home.join(".config").join("systemd").join("user").join("brain.service");
+            let unit = home
+                .join(".config")
+                .join("systemd")
+                .join("user")
+                .join("brain.service");
             if unit.exists() {
                 // Disable stops and prevents auto-start; --now also stops if running
                 let _ = std::process::Command::new("systemctl")

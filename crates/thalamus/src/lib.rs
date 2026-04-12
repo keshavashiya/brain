@@ -11,8 +11,8 @@ use cortex::actions::Action;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::LazyLock;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use thiserror::Error;
 
 // ─── Errors ─────────────────────────────────────────────────────────────────
@@ -384,10 +384,8 @@ static SEND_MESSAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("invariant: SEND_MESSAGE_RE must be valid")
 });
 
-static STATUS_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^/status$")
-        .expect("invariant: STATUS_RE must be valid")
-});
+static STATUS_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^/status$").expect("invariant: STATUS_RE must be valid"));
 
 /// All patterns in priority order — first match wins.
 const PATTERNS: &[PatternDef] = &[
