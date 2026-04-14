@@ -890,20 +890,35 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let mut handles = Vec::new();
-        for i in 0..3 {
+        // Use semantically distinct content so embeddings don't trigger the
+        // dedup threshold (distance < 0.1). Using different subjects,
+        // predicates, and domains ensures independent fact storage.
+        let payloads = [
+            r#"{"source":"ws","sender":"client-0","namespace":"work","content":"Remember the project uses Rust 2021 edition"}"#,
+            r#"{"source":"ws","sender":"client-1","namespace":"work","content":"Remember the deployment target is Kubernetes"}"#,
+            r#"{"source":"ws","sender":"client-2","namespace":"work","content":"Remember the CI pipeline takes 5 minutes"}"#,
+        ];
+        for (i, payload) in payloads.iter().enumerate() {
             let url = format!("ws://127.0.0.1:{port}");
             let key = api_key.clone();
+            let payload = (*payload).to_string();
             handles.push(tokio::spawn(async move {
                 let (mut ws, _) = connect_async(url).await.unwrap();
-                ws.send(Message::Text(serde_json::json!({"api_key": key}).to_string().into()))
-                    .await
-                    .unwrap();
+                ws.send(Message::Text(
+                    serde_json::json!({"api_key": key}).to_string().into(),
+                ))
+                .await
+                .unwrap();
                 let _ = ws.next().await;
-                let payload = format!(
-                    r#"{{"source":"ws","sender":"client-{i}","namespace":"work","content":"Remember user{i} role developer{i}"}}"#
-                );
                 ws.send(Message::Text(payload.into())).await.unwrap();
-                let resp = ws.next().await.unwrap().unwrap().into_text().unwrap().to_string();
+                let resp = ws
+                    .next()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .into_text()
+                    .unwrap()
+                    .to_string();
                 assert!(resp.contains("\"status\":\"Ok\""));
             }));
         }

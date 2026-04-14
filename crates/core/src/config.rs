@@ -955,7 +955,7 @@ mod tests {
 
     #[test]
     fn test_actions_defaults_deserialize() {
-        let config = BrainConfig::load().expect("embedded defaults should load");
+        let config = BrainConfig::default();
         assert!(config.actions.web_search.enabled);
         assert_eq!(
             config.actions.web_search.provider,

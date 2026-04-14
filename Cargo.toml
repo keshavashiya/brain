@@ -26,8 +26,8 @@ authors = ["Keshav Ashiya"]
 license = "MIT"
 repository = "https://github.com/keshavashiya/brain"
 homepage = "https://github.com/keshavashiya/brain"
-keywords = ["ai", "memory", "local-first", "mcp", "llm"]
-categories = ["command-line-utilities", "database"]
+keywords = ["ai", "memory", "local", "mcp", "llm"]
+categories = ["cli", "database"]
 
 [workspace.dependencies]
 # Async runtime
