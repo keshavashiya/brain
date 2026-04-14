@@ -63,10 +63,10 @@ async-trait = "0.1"
 futures = "0.3"
 
 # HTTP client
-reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
+reqwest = { version = "0.13", features = ["json", "stream", "blocking", "query"] }
 
 # Database
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 
 # Encryption
 aes-gcm = "0.10"
@@ -80,7 +80,7 @@ subtle = "2"
 
 # CLI
 clap = { version = "4", features = ["derive"] }
-rustyline = "14"
+rustyline = "18"
 rpassword = "7"
 
 # Terminal UI
