@@ -34,13 +34,12 @@ pub use types::HttpAdapterError;
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, num::NonZeroUsize, sync::Arc};
+    use std::{num::NonZeroUsize, sync::Arc};
 
     use axum::{
         body::Body,
-        http::{self, HeaderMap, Request},
-        response::IntoResponse,
-        routing::{delete, get, post},
+        http::{self, Request},
+        routing::{get, post},
         Router,
     };
     use tokio::sync::Mutex;

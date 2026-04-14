@@ -898,7 +898,7 @@ mod tests {
             r#"{"source":"ws","sender":"client-1","namespace":"work","content":"Remember the deployment target is Kubernetes"}"#,
             r#"{"source":"ws","sender":"client-2","namespace":"work","content":"Remember the CI pipeline takes 5 minutes"}"#,
         ];
-        for (i, payload) in payloads.iter().enumerate() {
+        for payload in payloads.iter() {
             let url = format!("ws://127.0.0.1:{port}");
             let key = api_key.clone();
             let payload = (*payload).to_string();
