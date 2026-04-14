@@ -75,7 +75,7 @@ brain/
 │   │                     State persisted in SQLite (habit_state table)
 │   │
 │   ├── storage/        # Storage abstraction layer
-│   │   ├── sqlite      # SqlitePool: 17 migrations, WAL mode, thread-safe Mutex<Connection>
+│   │   ├── sqlite      # SqlitePool: 18 migrations (v1–v18), WAL mode, thread-safe Mutex<Connection>
 │   │   │                 Tables: semantic_facts, episodes, procedures, scheduled_intents,
 │   │   │                 _migrations, FTS5 virtual tables (episodes_fts)
 │   │   ├── ruvector    # RuVectorStore: wraps ruvector-core (external crate, crates.io)
@@ -306,7 +306,7 @@ impl SignalProcessor {
 
 ### SQLite
 
-Migration-based schema (17 migrations). WAL mode enabled. Thread safety via `Mutex<Connection>`.
+Migration-based schema (18 migrations, v1–v18). WAL mode enabled. Thread safety via `Mutex<Connection>`.
 
 <details>
 <summary><strong>Tables</strong></summary>

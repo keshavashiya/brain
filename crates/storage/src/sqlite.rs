@@ -622,11 +622,27 @@ impl SqlitePool {
                 "fix_orphaned_facts",
                 "
                 -- Clear orphaned source_episode_id references
-                UPDATE semantic_facts SET source_episode_id = NULL 
+                UPDATE semantic_facts SET source_episode_id = NULL
                 WHERE source_episode_id NOT IN (SELECT id FROM episodes);
                 -- Clear orphaned superseded_by references
-                UPDATE semantic_facts SET superseded_by = NULL 
+                UPDATE semantic_facts SET superseded_by = NULL
                 WHERE superseded_by NOT IN (SELECT id FROM semantic_facts);
+            ",
+            ),
+            (
+                18,
+                "add_performance_indexes",
+                "
+                -- Composite index for open-loop and habit detection
+                -- (filters by role = 'user' AND timestamp >= ?)
+                CREATE INDEX IF NOT EXISTS idx_episodes_role_timestamp
+                    ON episodes(role, timestamp);
+
+                -- Partial index for active (non-superseded) facts
+                -- (count, list_all, list_by_namespace all filter superseded_by IS NULL)
+                CREATE INDEX IF NOT EXISTS idx_facts_active
+                    ON semantic_facts(superseded_by)
+                    WHERE superseded_by IS NULL;
             ",
             ),
         ]
@@ -701,6 +717,27 @@ impl SqlitePool {
                 [id],
             )?;
             Ok(affected > 0)
+        })
+    }
+
+    /// Mark multiple notifications as delivered in a single UPDATE.
+    /// Returns the count of notifications actually marked delivered.
+    pub fn mark_notifications_delivered(&self, ids: &[String]) -> Result<usize, SqliteError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let sql = format!(
+            "UPDATE notification_outbox SET delivered_at = datetime('now') \
+             WHERE delivered_at IS NULL AND id IN ({placeholders})"
+        );
+        self.with_conn(|conn| {
+            let params: Vec<&dyn rusqlite::types::ToSql> = ids
+                .iter()
+                .map(|id| id as &dyn rusqlite::types::ToSql)
+                .collect();
+            let affected = conn.execute(&sql, params.as_slice())?;
+            Ok(affected)
         })
     }
 
@@ -898,7 +935,7 @@ mod tests {
     fn test_open_memory() {
         let pool = SqlitePool::open_memory().unwrap();
         let version = pool.schema_version().unwrap();
-        assert_eq!(version, 17); // All migrations applied
+        assert_eq!(version, 18); // All migrations applied
     }
 
     #[test]
@@ -906,7 +943,7 @@ mod tests {
         let pool = SqlitePool::open_memory().unwrap();
         // Running migrate again should be a no-op
         pool.migrate().unwrap();
-        assert_eq!(pool.schema_version().unwrap(), 17);
+        assert_eq!(pool.schema_version().unwrap(), 18);
     }
 
     #[test]

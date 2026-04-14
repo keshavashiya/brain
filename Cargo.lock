@@ -660,6 +660,7 @@ dependencies = [
  "brainos-storage",
  "brainos-thalamus",
  "chrono",
+ "futures",
  "rusqlite",
  "serde",
  "serde_json",

@@ -113,9 +113,10 @@ impl NotificationRouter {
     pub fn drain_pending(&self, limit: usize) -> Vec<storage::sqlite::Notification> {
         match self.db.pending_notifications(limit) {
             Ok(notifications) => {
-                for n in &notifications {
-                    if let Err(e) = self.db.mark_notification_delivered(&n.id) {
-                        tracing::warn!(id = %n.id, "Failed to mark notification delivered: {e}");
+                if !notifications.is_empty() {
+                    let ids: Vec<String> = notifications.iter().map(|n| n.id.clone()).collect();
+                    if let Err(e) = self.db.mark_notifications_delivered(&ids) {
+                        tracing::warn!("Failed to mark notifications delivered: {e}");
                     }
                 }
                 notifications

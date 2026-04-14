@@ -6,8 +6,8 @@
 
 use std::collections::HashMap;
 
-use crate::episodic::EpisodicStore;
-use crate::semantic::SemanticStore;
+use crate::episodic::{EpisodicStore, FtsResult};
+use crate::semantic::{SemanticResult, SemanticStore};
 
 /// A unified memory result from the recall engine.
 #[derive(Debug, Clone)]
@@ -173,13 +173,23 @@ impl RecallEngine {
         // 3. RRF fusion
         let fused = rrf_fuse(&[bm25_ranked, ann_ranked], self.config.rrf_k);
 
-        // 4. Build Memory objects and rerank
+        // 4. Build lookup maps to avoid O(n*m) linear scans during reranking
+        let bm25_map: HashMap<&str, &FtsResult> = bm25_results
+            .iter()
+            .map(|r| (r.episode_id.as_str(), r))
+            .collect();
+        let ann_map: HashMap<&str, &SemanticResult> = ann_results
+            .iter()
+            .map(|r| (r.fact.id.as_str(), r))
+            .collect();
+
+        // 5. Build Memory objects and rerank
         let now = chrono::Utc::now();
         let mut memories: Vec<Memory> = Vec::new();
 
         for (id, rrf_score) in &fused {
             // Try episodic first
-            if let Some(fts) = bm25_results.iter().find(|r| &r.episode_id == id) {
+            if let Some(fts) = bm25_map.get(id.as_str()) {
                 let importance = fts.importance;
                 let hours = parse_elapsed_hours(&fts.timestamp, &now);
                 let retention = forgetting_curve(importance, hours, self.config.decay_rate);
@@ -200,7 +210,7 @@ impl RecallEngine {
             }
 
             // Try semantic
-            if let Some(sr) = ann_results.iter().find(|r| &r.fact.id == id) {
+            if let Some(sr) = ann_map.get(id.as_str()) {
                 let importance = sr.fact.confidence;
                 let hours = parse_elapsed_hours(&sr.created_at, &now);
                 let retention = forgetting_curve(importance, hours, self.config.decay_rate);

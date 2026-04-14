@@ -126,13 +126,21 @@ impl ProcedureStore {
     ///
     /// Uses word-boundary matching so "deploy" doesn't match "I deployed yesterday".
     /// Multi-word triggers are matched as contiguous word sequences.
+    ///
+    /// Pre-filters via SQL `LIKE` to avoid loading all procedures from the database.
     pub fn match_trigger(&self, input: &str) -> Result<Vec<Procedure>, CerebellumError> {
+        let input_lower = input.to_lowercase();
+        // SQL pre-filter: only load procedures whose trigger pattern appears as
+        // a substring in the input. This avoids a full table scan when many
+        // procedures are stored.
+        let candidates = self.list_procedures_containing(&input_lower)?;
+
         let input_words: Vec<String> = input
             .split_whitespace()
             .map(brain_core::normalize_keyword)
             .collect();
-        let all = self.list_procedures()?;
-        Ok(all
+
+        Ok(candidates
             .into_iter()
             .filter(|p| {
                 let trigger_words: Vec<String> = p
@@ -177,6 +185,23 @@ impl ProcedureStore {
             )?;
             let rows = stmt
                 .query_map([], row_to_procedure)?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })?)
+    }
+
+    /// List procedures whose trigger pattern appears as a substring in `input`
+    /// (case-insensitive via SQL `LIKE`). Used as a pre-filter before word-boundary matching.
+    fn list_procedures_containing(&self, input: &str) -> Result<Vec<Procedure>, CerebellumError> {
+        Ok(self.db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, trigger_pattern, steps_json, created_at, updated_at, use_count
+                 FROM procedures
+                 WHERE ? LIKE '%' || LOWER(trigger_pattern) || '%'
+                 ORDER BY trigger_pattern ASC",
+            )?;
+            let rows = stmt
+                .query_map([input], row_to_procedure)?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
         })?)

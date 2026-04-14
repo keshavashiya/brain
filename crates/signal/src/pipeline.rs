@@ -116,30 +116,30 @@ impl SignalProcessor {
 
         // ── Store any facts extracted during classification ───────────────────
         if !classification.extracted_facts.is_empty() {
-            for fact in &classification.extracted_facts {
-                match self
-                    .store_fact_direct(
-                        &signal.namespace,
-                        "extracted",
-                        &fact.subject,
-                        &fact.predicate,
-                        &fact.object,
-                        signal.agent.as_deref(),
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        tracing::info!(
-                            "Extracted fact: {} {} {}",
-                            fact.subject,
-                            fact.predicate,
-                            fact.object
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to store extracted fact: {e}");
-                    }
-                }
+            let facts_to_store: Vec<_> = classification
+                .extracted_facts
+                .iter()
+                .map(|f| crate::exchange::FactToStore {
+                    subject: f.subject.clone(),
+                    predicate: f.predicate.clone(),
+                    object: f.object.clone(),
+                })
+                .collect();
+
+            let (stored, errors) = self
+                .store_facts_batch(
+                    &signal.namespace,
+                    "extracted",
+                    &facts_to_store,
+                    signal.agent.as_deref(),
+                )
+                .await;
+
+            for id in &stored {
+                tracing::info!("Extracted fact stored: {id}");
+            }
+            for (text, e) in errors {
+                tracing::warn!("Failed to store extracted fact ({text}): {e}");
             }
         }
 

@@ -4,6 +4,14 @@ use crate::types::ExportedEpisode;
 use crate::types::ExportedFact;
 use crate::SignalError;
 use crate::SignalProcessor;
+use futures::future::join_all;
+
+/// A single fact to be stored (subject-predicate-object triple).
+pub struct FactToStore {
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+}
 
 impl SignalProcessor {
     /// Export all semantic facts.
@@ -39,20 +47,33 @@ impl SignalProcessor {
     }
 
     /// Re-embed facts into the vector index. Returns (embedded_count, failed_count).
+    ///
+    /// Generates embeddings concurrently, then inserts vectors sequentially
+    /// (SQLite is single-writer).
     pub async fn reembed_facts(&self, facts: &[ExportedFact]) -> (usize, usize) {
         let semantic = match &self.semantic {
             Some(s) => s,
             None => return (0, 0),
         };
 
+        // Phase 1: Generate embeddings concurrently
+        let texts: Vec<String> = facts
+            .iter()
+            .map(|f| format!("{} {} {}", f.subject, f.predicate, f.object))
+            .collect();
+
+        let embedding_futures: Vec<_> = texts.iter().map(|t| self.embed_text(t)).collect();
+        let embeddings: Vec<Vec<f32>> = join_all(embedding_futures).await;
+
+        // Phase 2: Insert vectors sequentially (SQLite is single-writer)
         let mut embedded = 0usize;
         let mut failed = 0usize;
 
-        for f in facts {
-            let text = format!("{} {} {}", f.subject, f.predicate, f.object);
-            let vector = self.embed_text(&text).await;
-
-            match semantic.add_vector(&f.id, &text, vector, "semantic").await {
+        for (i, f) in facts.iter().enumerate() {
+            match semantic
+                .add_vector(&f.id, &texts[i], embeddings[i].clone(), "semantic")
+                .await
+            {
                 Ok(()) => embedded += 1,
                 Err(e) => {
                     tracing::warn!("RuVector insert failed for fact {}: {e}", f.id);
@@ -102,5 +123,69 @@ impl SignalProcessor {
                 "Semantic store unavailable".to_string(),
             ))
         }
+    }
+
+    /// Store multiple facts concurrently.
+    ///
+    /// Generates embeddings for all facts in parallel, then stores each
+    /// sequentially (SQLite is single-writer). Returns (stored_ids, errors).
+    pub async fn store_facts_batch(
+        &self,
+        namespace: &str,
+        category: &str,
+        facts: &[FactToStore],
+        agent: Option<&str>,
+    ) -> (Vec<String>, Vec<(String, SignalError)>) {
+        let semantic = match &self.semantic {
+            Some(s) => s,
+            None => {
+                let errors: Vec<_> = facts
+                    .iter()
+                    .map(|f| {
+                        (
+                            format!("{} {} {}", f.subject, f.predicate, f.object),
+                            SignalError::Storage("Semantic store unavailable".to_string()),
+                        )
+                    })
+                    .collect();
+                return (Vec::new(), errors);
+            }
+        };
+
+        // Phase 1: Generate embeddings concurrently
+        let texts: Vec<String> = facts
+            .iter()
+            .map(|f| format!("{} {} {}", f.subject, f.predicate, f.object))
+            .collect();
+
+        let embedding_futures: Vec<_> = texts.iter().map(|t| self.embed_text(t)).collect();
+        let embeddings: Vec<Vec<f32>> = join_all(embedding_futures).await;
+
+        // Phase 2: Store sequentially (SQLite is single-writer)
+        let mut stored = Vec::new();
+        let mut errors = Vec::new();
+
+        for (i, fact) in facts.iter().enumerate() {
+            let importance = self.importance.score(&texts[i]);
+            match semantic
+                .store_fact(
+                    namespace,
+                    category,
+                    &fact.subject,
+                    &fact.predicate,
+                    &fact.object,
+                    importance as f64,
+                    None,
+                    embeddings[i].clone(),
+                    agent,
+                )
+                .await
+            {
+                Ok(id) => stored.push(id),
+                Err(e) => errors.push((texts[i].clone(), SignalError::Storage(e.to_string()))),
+            }
+        }
+
+        (stored, errors)
     }
 }
