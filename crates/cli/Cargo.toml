@@ -53,6 +53,10 @@ futures = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
 reqwest = { workspace = true }
+audit = { workspace = true }
+confirm = { workspace = true }
+budget = { workspace = true }
+sandbox = { workspace = true }
 
 [dev-dependencies]
 tokio-tungstenite = { workspace = true }

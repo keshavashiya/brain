@@ -1,13 +1,17 @@
+mod audit_cmd;
 mod bootstrap;
 #[cfg(feature = "bridge")]
 mod bridge;
+mod budget_cmd;
 mod chat;
+mod confirm_cmd;
 mod daemon;
 mod deps;
 mod encryption;
 mod errors;
 mod export;
 mod proactivity;
+mod sandbox_cmd;
 mod schedules;
 mod serve;
 mod service;
@@ -188,6 +192,52 @@ enum Commands {
     Proactivity {
         #[command(subcommand)]
         action: proactivity::ProactivityAction,
+    },
+
+    /// Manage the audit trail — view, query, and prune the immutable action log.
+    ///
+    /// Examples:
+    ///   brain audit list                  # last 20 entries
+    ///   brain audit list --today          # entries from today
+    ///   brain audit summary               # activity summary
+    ///   brain audit prune --older-than 30d # prune entries older than 30 days
+    Audit {
+        #[command(subcommand)]
+        action: audit_cmd::AuditAction,
+    },
+
+    /// Manage approval requests — view pending, respond to confirmations.
+    ///
+    /// Examples:
+    ///   brain confirm pending               # list pending approvals
+    ///   brain confirm approve <nonce>       # approve a request
+    ///   brain confirm reject <nonce>        # reject a request
+    Confirm {
+        #[command(subcommand)]
+        action: confirm_cmd::ConfirmAction,
+    },
+
+    /// Manage cost budgets — view consumption, check budgets.
+    ///
+    /// Examples:
+    ///   brain budget status                 # current consumption
+    ///   brain budget record openai llm_input_tokens 5000  # record consumption
+    Budget {
+        #[command(subcommand)]
+        action: budget_cmd::BudgetAction,
+    },
+
+    /// Execute commands in the sandbox (Phase 1a: stub, no isolation).
+    ///
+    /// WARNING: Phase 1a sandbox runs with the same privileges as the daemon.
+    /// Do not run untrusted commands.
+    ///
+    /// Examples:
+    ///   brain sandbox run -- "echo hello"
+    ///   brain sandbox run --tier execute -- "cargo test"
+    Sandbox {
+        #[command(subcommand)]
+        action: sandbox_cmd::SandboxAction,
     },
 }
 
@@ -575,6 +625,26 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         // ── proactivity ─────────────────────────────────────────────────────
         Commands::Proactivity { action } => {
             proactivity::cmd_proactivity(&config, action)?;
+        }
+
+        // ── audit ───────────────────────────────────────────────────────────
+        Commands::Audit { action } => {
+            audit_cmd::cmd_audit(&config, action).await?;
+        }
+
+        // ── confirm ─────────────────────────────────────────────────────────
+        Commands::Confirm { action } => {
+            confirm_cmd::cmd_confirm(&config, action).await?;
+        }
+
+        // ── budget ──────────────────────────────────────────────────────────
+        Commands::Budget { action } => {
+            budget_cmd::cmd_budget(&config, action).await?;
+        }
+
+        // ── sandbox ─────────────────────────────────────────────────────────
+        Commands::Sandbox { action } => {
+            sandbox_cmd::cmd_sandbox(&config, action).await?;
         }
     }
 

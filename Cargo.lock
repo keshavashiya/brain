@@ -413,8 +413,11 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "brainos-audit",
  "brainos-backends",
  "brainos-bridge",
+ "brainos-budget",
+ "brainos-confirm",
  "brainos-core",
  "brainos-cortex",
  "brainos-ganglia",
@@ -422,6 +425,7 @@ dependencies = [
  "brainos-hippocampus",
  "brainos-httpadapter",
  "brainos-mcp",
+ "brainos-sandbox",
  "brainos-signal",
  "brainos-storage",
  "brainos-thalamus",
@@ -464,6 +468,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "brainos-audit"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "brainos-core",
+ "brainos-storage",
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "brainos-backends"
 version = "0.2.0"
 dependencies = [
@@ -500,6 +522,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "brainos-budget"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "brainos-audit",
+ "brainos-core",
+ "brainos-storage",
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "brainos-cerebellum"
 version = "0.2.0"
 dependencies = [
@@ -511,6 +553,24 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "brainos-confirm"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "brainos-core",
+ "brainos-storage",
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "uuid",
 ]
@@ -653,6 +713,22 @@ dependencies = [
  "tower-http 0.5.2",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "brainos-sandbox"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "brainos-core",
+ "chrono",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

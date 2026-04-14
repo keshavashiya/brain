@@ -17,6 +17,10 @@ members = [
     "crates/bridge",
     "crates/backends",
     "crates/cli",
+    "crates/audit",
+    "crates/confirm",
+    "crates/budget",
+    "crates/sandbox",
 ]
 
 [workspace.package]
@@ -114,6 +118,10 @@ cerebellum = { package = "brainos-cerebellum", path = "crates/cerebellum", versi
 ganglia = { package = "brainos-ganglia", path = "crates/ganglia", version = "0.2.0" }
 bridge = { package = "brainos-bridge", path = "crates/bridge", version = "0.2.0" }
 backends = { package = "brainos-backends", path = "crates/backends", version = "0.2.0" }
+audit = { package = "brainos-audit", path = "crates/audit", version = "0.2.0" }
+confirm = { package = "brainos-confirm", path = "crates/confirm", version = "0.2.0" }
+budget = { package = "brainos-budget", path = "crates/budget", version = "0.2.0" }
+sandbox = { package = "brainos-sandbox", path = "crates/sandbox", version = "0.2.0" }
 
 # Benchmarks
 criterion = { version = "0.5", features = ["html_reports"] }
