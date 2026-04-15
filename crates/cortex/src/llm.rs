@@ -655,33 +655,48 @@ impl Default for ProviderConfig {
 }
 
 /// Create an LLM provider from configuration.
+///
+/// Resolution order:
+/// 1. `ollama` → `OllamaProvider`.
+/// 2. Built-in preset (openai, openrouter, groq, deepseek, together,
+///    gemini-compat) → OpenAI-compatible provider at the preset's base URL.
+///    An explicit non-empty `base_url` overrides the preset.
+/// 3. Unknown provider → fall back to default Ollama with a warning.
 pub fn create_provider(config: &ProviderConfig) -> Result<Box<dyn LlmProvider>, LlmError> {
-    match config.provider.as_str() {
-        "ollama" => {
-            let provider = OllamaProvider::new(
-                &config.base_url,
-                &config.model,
-                config.temperature,
-                config.max_tokens,
-            )
-            .or_else(|e| {
-                tracing::error!(error = %e, "Failed to create Ollama provider, falling back to default");
-                OllamaProvider::default_config()
-            })?;
-            Ok(Box::new(provider))
-        }
-        "openai" => Ok(Box::new(OpenAiProvider::new(
+    if config.provider == "ollama" {
+        let provider = OllamaProvider::new(
             &config.base_url,
+            &config.model,
+            config.temperature,
+            config.max_tokens,
+        )
+        .or_else(|e| {
+            tracing::error!(error = %e, "Failed to create Ollama provider, falling back to default");
+            OllamaProvider::default_config()
+        })?;
+        return Ok(Box::new(provider));
+    }
+
+    if let Some(preset) = crate::presets::resolve(&config.provider) {
+        let base_url = if config.base_url.is_empty() {
+            preset.base_url
+        } else {
+            config.base_url.as_str()
+        };
+        return Ok(Box::new(OpenAiProvider::new(
+            base_url,
             config.api_key.as_deref(),
             &config.model,
             config.temperature,
             Some(config.max_tokens),
-        )?)),
-        other => {
-            tracing::warn!(provider = %other, "Unknown LLM provider, falling back to default Ollama");
-            Ok(Box::new(OllamaProvider::default_config()?))
-        }
+        )?));
     }
+
+    tracing::warn!(
+        provider = %config.provider,
+        "Unknown LLM provider, falling back to default Ollama"
+    );
+    Ok(Box::new(OllamaProvider::default_config()?))
 }
 
 /// Extract a JSON object from an LLM response string.
