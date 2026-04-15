@@ -1,0 +1,37 @@
+[package]
+name = "brainos-vault"
+description = "Credential vault with OS keychain and encrypted-file fallback"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+audit = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+chrono = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+aes-gcm = { workspace = true }
+argon2 = { workspace = true }
+rand = "0.8"
+zeroize = { version = "1", features = ["derive"] }
+rpassword = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+storage = { workspace = true }

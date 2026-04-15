@@ -1,21 +1,22 @@
-mod audit_cmd;
+mod audit;
 mod bootstrap;
 #[cfg(feature = "bridge")]
 mod bridge;
-mod budget_cmd;
+mod budget;
 mod chat;
-mod confirm_cmd;
+mod confirm;
 mod daemon;
 mod deps;
 mod encryption;
 mod errors;
 mod export;
 mod proactivity;
-mod sandbox_cmd;
+mod sandbox;
 mod schedules;
 mod serve;
 mod service;
 mod status;
+mod vault;
 
 use clap::{Parser, Subcommand};
 
@@ -203,7 +204,7 @@ enum Commands {
     ///   brain audit prune --older-than 30d # prune entries older than 30 days
     Audit {
         #[command(subcommand)]
-        action: audit_cmd::AuditAction,
+        action: audit::AuditAction,
     },
 
     /// Manage approval requests — view pending, respond to confirmations.
@@ -214,7 +215,7 @@ enum Commands {
     ///   brain confirm reject <nonce>        # reject a request
     Confirm {
         #[command(subcommand)]
-        action: confirm_cmd::ConfirmAction,
+        action: confirm::ConfirmAction,
     },
 
     /// Manage cost budgets — view consumption, check budgets.
@@ -224,7 +225,7 @@ enum Commands {
     ///   brain budget record openai llm_input_tokens 5000  # record consumption
     Budget {
         #[command(subcommand)]
-        action: budget_cmd::BudgetAction,
+        action: budget::BudgetAction,
     },
 
     /// Execute commands in the sandbox (Phase 1a: stub, no isolation).
@@ -237,7 +238,24 @@ enum Commands {
     ///   brain sandbox run --tier execute -- "cargo test"
     Sandbox {
         #[command(subcommand)]
-        action: sandbox_cmd::SandboxAction,
+        action: sandbox::SandboxAction,
+    },
+
+    /// Manage the credential vault — store, retrieve, list, delete secrets.
+    ///
+    /// Raw values are never passed on argv or logged. `set` reads from stdin;
+    /// `get` hides the value unless `--reveal` is passed.
+    ///
+    /// Examples:
+    ///   brain vault init                        # picks backend; sets verifier if file
+    ///   echo -n "$TOKEN" | brain vault set github token --shape env:GITHUB_TOKEN
+    ///   brain vault get github token            # metadata only
+    ///   brain vault get github token --reveal   # prints the value
+    ///   brain vault list --tool github
+    ///   brain vault status
+    Vault {
+        #[command(subcommand)]
+        action: vault::VaultAction,
     },
 }
 
@@ -629,22 +647,27 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
         // ── audit ───────────────────────────────────────────────────────────
         Commands::Audit { action } => {
-            audit_cmd::cmd_audit(&config, action).await?;
+            audit::cmd_audit(&config, action).await?;
         }
 
         // ── confirm ─────────────────────────────────────────────────────────
         Commands::Confirm { action } => {
-            confirm_cmd::cmd_confirm(&config, action).await?;
+            confirm::cmd_confirm(&config, action).await?;
         }
 
         // ── budget ──────────────────────────────────────────────────────────
         Commands::Budget { action } => {
-            budget_cmd::cmd_budget(&config, action).await?;
+            budget::cmd_budget(&config, action).await?;
         }
 
         // ── sandbox ─────────────────────────────────────────────────────────
         Commands::Sandbox { action } => {
-            sandbox_cmd::cmd_sandbox(&config, action).await?;
+            sandbox::cmd_sandbox(&config, action).await?;
+        }
+
+        // ── vault ───────────────────────────────────────────────────────────
+        Commands::Vault { action } => {
+            vault::cmd_vault(&config, action).await?;
         }
     }
 
