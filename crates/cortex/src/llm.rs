@@ -658,11 +658,33 @@ impl Default for ProviderConfig {
 ///
 /// Resolution order:
 /// 1. `ollama` → `OllamaProvider`.
-/// 2. Built-in preset (openai, openrouter, groq, deepseek, together,
+/// 2. `qwen-oauth` → `QwenOAuthProvider` (requires vault).
+/// 3. Built-in preset (openai, openrouter, groq, deepseek, together,
 ///    gemini-compat) → OpenAI-compatible provider at the preset's base URL.
 ///    An explicit non-empty `base_url` overrides the preset.
-/// 3. Unknown provider → fall back to default Ollama with a warning.
+/// 4. Unknown provider → fall back to default Ollama with a warning.
 pub fn create_provider(config: &ProviderConfig) -> Result<Box<dyn LlmProvider>, LlmError> {
+    create_provider_with_vault(config, None)
+}
+
+pub fn create_provider_with_vault(
+    config: &ProviderConfig,
+    vault: Option<std::sync::Arc<dyn vault::CredentialVault>>,
+) -> Result<Box<dyn LlmProvider>, LlmError> {
+    if config.provider == "qwen-oauth" {
+        let vault = vault.ok_or_else(|| {
+            LlmError::ProviderUnavailable(
+                "qwen-oauth requires a vault — run `brain vault init` first".into(),
+            )
+        })?;
+        return Ok(Box::new(crate::qwen::QwenOAuthProvider::new(
+            vault,
+            &config.model,
+            config.temperature,
+            Some(config.max_tokens),
+        )?));
+    }
+
     if config.provider == "ollama" {
         let provider = OllamaProvider::new(
             &config.base_url,

@@ -68,7 +68,7 @@ async-trait = "0.1"
 futures = "0.3"
 
 # HTTP client
-reqwest = { version = "0.13", features = ["json", "stream", "blocking", "query"] }
+reqwest = { version = "0.13", features = ["json", "stream", "blocking", "query", "form"] }
 
 # Database
 rusqlite = { version = "0.39", features = ["bundled"] }
@@ -77,8 +77,11 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 aes-gcm = "0.10"
 argon2 = "0.5"
 
-# Hashing (audit log)
+# Hashing (audit log, PKCE)
 sha2 = "0.10"
+
+# Random (PKCE code verifier, vault salt)
+rand = "0.8"
 
 # Constant-time comparison
 subtle = "2"
