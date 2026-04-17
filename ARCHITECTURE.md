@@ -32,10 +32,11 @@ brain/
 │   │                     SignalAdapter trait
 │   │                     SignalProcessor — the single shared engine that wires all subsystems
 │   │
-│   ├── thalamus/       # Intent classification
+│   ├── thalamus/       # Intent classification — the primary user-facing surface
 │   │                     Regex fast-path (compiled at startup) + async LLM fallback with timeout
-│   │                     9 intent types: StoreFact, Recall, Forget, Chat, SystemStatus,
-│   │                     WebSearch, Schedule, SendMessage, ExecuteCommand
+│   │                     10 intent types: StoreFact, Recall, Forget, Chat, SystemStatus,
+│   │                     WebSearch, Schedule, SendMessage, ExecuteCommand, DecomposeTask
+│   │                     (New user-facing features add intents here, not CLI subcommands.)
 │   │
 │   ├── amygdala/       # Importance scoring with per-process novelty detection → [0.0, 1.0]
 │   │                     Delegates keyword heuristics to hippocampus::ImportanceScorer,
@@ -74,6 +75,35 @@ brain/
 │   │                     Rate limits: max_per_day, min_interval_minutes, quiet_hours
 │   │                     State persisted in SQLite (habit_state table)
 │   │
+│   ├── audit/          # Append-only audit trail for every action
+│   │                     AuditTrail trait + SqliteAuditTrail, ActionTier taxonomy
+│   │                     (Read / Write / Execute / Destructive / External)
+│   │
+│   ├── confirm/        # Nonce-backed confirmation engine for destructive/external actions
+│   │                     ConfirmationEngine trait, pending-approval store, TTL expiry
+│   │
+│   ├── budget/         # Cost/token budget enforcement with circuit breaker
+│   │                     CostBudget trait, daily/monthly/per-task limits, breach events
+│   │
+│   ├── sandbox/        # Command execution sandbox
+│   │                     SandboxExecutor trait, allowlist + cwd/env isolation + timeouts
+│   │
+│   ├── vault/          # Credential vault
+│   │                     CredentialVault trait, OS-native backends
+│   │                     (macOS Keychain, Linux secret-service, encrypted-file fallback)
+│   │
+│   ├── orchestrate/    # Task decomposition + execution orchestrator
+│   │                     TaskOrchestrator, TaskGraph (DAG), StepState, TaskPhase,
+│   │                     LlmDecomposer — turns a natural-language request into an
+│   │                     approved plan of tiered steps, then drives execution.
+│   │                     Surfaced via the DecomposeTask intent.
+│   │
+│   ├── channel/        # Channel routing + learned preferences
+│   │                     ChannelRouter (DefaultChannelRouter), ChannelPreferenceStore
+│   │                     (EMA-smoothed weights), ConfirmationCorrelator (inbound nonce
+│   │                     parsing), RelayAdapter (Slack/Telegram/Discord via bridge).
+│   │                     Composes with existing NotificationRouter webhook tiers.
+│   │
 │   ├── storage/        # Storage abstraction layer
 │   │   ├── sqlite      # SqlitePool: 18 migrations (v1–v18), WAL mode, thread-safe Mutex<Connection>
 │   │   │                 Tables: semantic_facts, episodes, procedures, scheduled_intents,
@@ -100,10 +130,16 @@ brain/
 │                         memory_episodes, user_profile, memory_procedures
 │                         JSON-RPC 2.0, meta-key auth
 │
-├── crates/cli/         # `brain` binary — all CLI commands:
-│                         init, chat, status, start, stop, serve, mcp,
-│                         export, import, service install/uninstall, deps up/down/status
-│                         CLI commands delegate to the running daemon via HTTP/WS.
+├── crates/cli/         # `brain` binary — deliberately minimal surface.
+│                         Two legitimate purposes only:
+│                           1. Bootstrap / lifecycle (must run before the daemon):
+│                              init, start, stop, status, serve, mcp, bridge,
+│                              service install/uninstall, deps up/down/status,
+│                              export, import
+│                           2. Security-sensitive stdin (cannot route through NL):
+│                              vault init/set/delete, auth login
+│                         All other user-facing operations go through Thalamus
+│                         as natural-language intents — `brain chat "..."`.
 │
 ├── crates/backends/    # Action backends and resilience primitives
 │                         (SearxngSearchBackend, TavilySearchBackend, CustomSearchBackend,
@@ -123,10 +159,15 @@ brain/
 
 ### Workspace Members
 
+23 crates total:
+
 ```
 core  storage  hippocampus  cortex  thalamus  amygdala  signal
 adapters/http  adapters/ws  adapters/grpc  adapters/mcp
-cerebellum  ganglia  bridge  cli
+cerebellum  ganglia  bridge  backends
+audit  confirm  budget  sandbox  vault
+orchestrate  channel
+cli
 ```
 
 ### Dependency Graph
@@ -282,6 +323,21 @@ impl SignalProcessor {
     // Builder methods — attach optional subsystems before wrapping in Arc
     pub fn with_notification_router(self, router: NotificationRouter) -> Self;
     pub fn with_action_dispatcher(self, dispatcher: ActionDispatcher) -> Self;
+
+    // Safety infrastructure (all optional, composable)
+    pub fn with_audit_trail(self, trail: Arc<dyn audit::AuditTrail>) -> Self;
+    pub fn with_confirmation_engine(self, eng: Arc<dyn confirm::ConfirmationEngine>) -> Self;
+    pub fn with_cost_budget(self, budget: Arc<dyn budget::CostBudget>) -> Self;
+    pub fn with_sandbox_executor(self, exec: Arc<dyn sandbox::SandboxExecutor>) -> Self;
+    pub fn with_credential_vault(self, vault: Arc<dyn vault::CredentialVault>) -> Self;
+
+    // Task orchestration
+    pub fn with_orchestrator(self, orch: Arc<orchestrate::TaskOrchestrator>) -> Self;
+
+    pub fn audit_trail(&self) -> Option<&Arc<dyn audit::AuditTrail>>;
+    pub fn confirmation_engine(&self) -> Option<&Arc<dyn confirm::ConfirmationEngine>>;
+    pub fn sandbox_executor(&self) -> Option<&Arc<dyn sandbox::SandboxExecutor>>;
+    pub fn orchestrator(&self) -> Option<&Arc<orchestrate::TaskOrchestrator>>;
 
     // Inspector accessors used by adapter route handlers
     pub fn list_facts(&self, namespace: Option<&str>) -> Vec<Fact>;

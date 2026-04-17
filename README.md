@@ -109,6 +109,8 @@ brain service uninstall  # Remove
 
 ## Usage
 
+> **The CLI is the boot sequence, not the interface.** Brain is a second brain — the point is muscle memory, not subcommand memorization. The commands below are deliberately minimal: lifecycle (`init`, `start`, `stop`, `status`, `serve`, `mcp`, `service`, `deps`, `export`, `import`) and security-sensitive input (`vault`, `auth`) stay as commands. Everything else — recall, storing facts, approvals, schedules, budgets, audit queries, task decomposition — is a natural-language intent routed through Thalamus: `brain chat "what's my budget status?"`, `brain chat "approve deploy-123"`, `brain chat "decompose: ship the landing page"`.
+
 ### Lifecycle commands
 
 ```bash
@@ -597,7 +599,7 @@ cargo run -p brainos -- serve --http --mcp
 <details>
 <summary><strong>Workspace Structure</strong></summary>
 
-The project is a Cargo workspace with 16 crates. All internal dependencies use both `path` (for local development) and `version` (for crates.io), so no Cargo.toml changes are needed to switch between local and published builds.
+The project is a Cargo workspace with 23 crates. All internal dependencies use both `path` (for local development) and `version` (for crates.io), so no Cargo.toml changes are needed to switch between local and published builds.
 
 ```
 crates/
@@ -605,13 +607,20 @@ crates/
 ├── storage/        # brainos-storage     — SQLite + HNSW vector index
 ├── hippocampus/    # brainos-hippocampus — Episodic + semantic memory
 ├── cortex/         # brainos-cortex      — LLM providers + context assembly
-├── thalamus/       # brainos-thalamus    — Intent classification
+├── thalamus/       # brainos-thalamus    — Intent classification (primary UI)
 ├── amygdala/       # brainos-amygdala    — Importance scoring
 ├── signal/         # brainos-signal      — Central signal processor
 ├── cerebellum/     # brainos-cerebellum  — Procedural memory
 ├── ganglia/        # brainos-ganglia     — Proactivity engine
 ├── backends/       # brainos-backends    — Resilience, search & messaging backends
 ├── bridge/         # brainos-bridge      — WebSocket relay client
+├── audit/          # brainos-audit       — Append-only action audit trail
+├── confirm/        # brainos-confirm     — Nonce-backed confirmations
+├── budget/         # brainos-budget      — Cost/token budgets + circuit breaker
+├── sandbox/        # brainos-sandbox     — Command execution sandbox
+├── vault/          # brainos-vault       — OS-native credential vault
+├── orchestrate/    # brainos-orchestrate — Task decomposition + execution DAG
+├── channel/        # brainos-channel     — Channel routing + learned preferences
 ├── adapters/
 │   ├── http/       # brainos-httpadapter — Axum REST API
 │   ├── ws/         # brainos-wsadapter   — WebSocket adapter
@@ -628,7 +637,10 @@ crates/
 Crates must be published in dependency order (leaves first). Run `cargo publish` in this order:
 
 ```
-core → storage → hippocampus → amygdala → cortex → thalamus → cerebellum → ganglia → signal → backends → bridge → adapters/* → cli
+core → storage → hippocampus → amygdala → cortex → thalamus → cerebellum → ganglia
+     → audit → confirm → budget → sandbox → vault
+     → orchestrate → channel
+     → signal → backends → bridge → adapters/* → cli
 ```
 
 </details>
