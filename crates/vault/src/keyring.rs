@@ -88,7 +88,7 @@ impl SecretServiceBackend {
         let item = items
             .unlocked
             .into_iter()
-            .chain(items.locked.into_iter())
+            .chain(items.locked)
             .next()
             .ok_or_else(|| VaultError::NotFound {
                 tool: tool.to_string(),
@@ -133,7 +133,7 @@ impl SecretServiceBackend {
         let item = items
             .unlocked
             .into_iter()
-            .chain(items.locked.into_iter())
+            .chain(items.locked)
             .next()
             .ok_or_else(|| VaultError::NotFound {
                 tool: tool.to_string(),
@@ -159,7 +159,7 @@ impl SecretServiceBackend {
             .map_err(|e| VaultError::Backend(format!("search: {e}")))?;
 
         let mut out = Vec::new();
-        for item in items.unlocked.into_iter().chain(items.locked.into_iter()) {
+        for item in items.unlocked.into_iter().chain(items.locked) {
             let item_attrs = match item.get_attributes().await {
                 Ok(m) => m,
                 Err(err) => {

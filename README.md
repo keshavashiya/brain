@@ -109,7 +109,7 @@ brain service uninstall  # Remove
 
 ## Usage
 
-> **The CLI is the boot sequence, not the interface.** Brain is a second brain — the point is muscle memory, not subcommand memorization. The commands below are deliberately minimal: lifecycle (`init`, `start`, `stop`, `status`, `serve`, `mcp`, `service`, `deps`, `export`, `import`) and security-sensitive input (`vault`, `auth`) stay as commands. Everything else — recall, storing facts, approvals, schedules, budgets, audit queries, task decomposition — is a natural-language intent routed through Thalamus: `brain chat "what's my budget status?"`, `brain chat "approve deploy-123"`, `brain chat "decompose: ship the landing page"`.
+The CLI covers lifecycle (`init`, `start`, `stop`, `status`, `serve`, `mcp`, `service`, `deps`, `export`, `import`) and security-sensitive input (`vault`, `auth`). Everything else — recall, approvals, budgets, schedules, audit queries, task decomposition — goes through `brain chat`.
 
 ### Lifecycle commands
 
