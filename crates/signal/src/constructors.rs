@@ -157,6 +157,13 @@ impl SignalProcessor {
             notification_router: None,
             action_dispatcher: None,
             metrics: Arc::new(brain_core::metrics::SubsystemMetrics::new()),
+            // Phase 1: Safety infrastructure — all opt-in
+            audit_trail: None,
+            confirmation_engine: None,
+            cost_budget: None,
+            sandbox_executor: None,
+            credential_vault: None,
+            orchestrator: None,
         };
 
         // Warm up the LLM model in the background to avoid first-call timeout

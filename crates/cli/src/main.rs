@@ -17,6 +17,7 @@ mod schedules;
 mod serve;
 mod service;
 mod status;
+mod task;
 mod vault;
 
 use clap::{Parser, Subcommand};
@@ -268,6 +269,23 @@ enum Commands {
     Vault {
         #[command(subcommand)]
         action: vault::VaultAction,
+    },
+
+    /// Manage task orchestration — plan, execute, track multi-step tasks.
+    ///
+    /// The orchestrator decomposes natural-language requests into DAG-based
+    /// task plans, then executes them step by step with confirmation gates
+    /// for destructive or external actions.
+    ///
+    /// Examples:
+    ///   brain task plan "add a health endpoint"
+    ///   brain task execute <task_id>
+    ///   brain task list
+    ///   brain task status <task_id>
+    ///   brain task cancel <task_id>
+    Task {
+        #[command(subcommand)]
+        action: task::TaskAction,
     },
 }
 
@@ -685,6 +703,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         // ── vault ───────────────────────────────────────────────────────────
         Commands::Vault { action } => {
             vault::cmd_vault(&config, action).await?;
+        }
+
+        // ── task orchestration ──────────────────────────────────────────────
+        Commands::Task { action } => {
+            task::cmd_task(&config, action).await?;
         }
     }
 

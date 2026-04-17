@@ -225,6 +225,10 @@ impl SignalProcessor {
                     .await
             }
             thalamus::Intent::SystemStatus => self.handle_system_status(signal_id, &prepend_nudges),
+            thalamus::Intent::DecomposeTask { ref request } => {
+                self.handle_decompose_task(signal_id, request.clone(), &prepend_nudges)
+                    .await
+            }
             ref intent @ (thalamus::Intent::WebSearch { .. }
             | thalamus::Intent::Schedule { .. }
             | thalamus::Intent::SendMessage { .. }
@@ -510,6 +514,42 @@ impl SignalProcessor {
             format!("Brain status: {semantic_count} facts, {episode_count} episodes"),
         ));
         Ok(PipelineResult::Complete(resp))
+    }
+
+    pub(super) async fn handle_decompose_task(
+        &self,
+        signal_id: Uuid,
+        request: String,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let orchestrator = match &self.orchestrator {
+            Some(orch) => orch,
+            None => {
+                let message = format!(
+                    "Task decomposition recognized for: \"{request}\"\n\
+                     Task orchestration is not yet active — the orchestrator \
+                     has not been wired into this instance."
+                );
+                let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+                return Ok(PipelineResult::Complete(resp));
+            }
+        };
+
+        // Build decomposition context from memory
+        let context = orchestrate::DecompositionContext::default();
+
+        match orchestrator.plan(&request, context).await {
+            Ok((task_id, plan_text)) => {
+                let message = format!("Task plan created (ID: {task_id}):\n\n{plan_text}");
+                let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+                Ok(PipelineResult::Complete(resp))
+            }
+            Err(e) => {
+                let message = format!("Failed to decompose task: {e}");
+                let resp = prepend_nudges(SignalResponse::error(signal_id, message));
+                Ok(PipelineResult::Complete(resp))
+            }
+        }
     }
 
     pub(super) async fn handle_action(

@@ -91,6 +91,77 @@ impl SignalProcessor {
         &self.procedures
     }
 
+    // ── Phase 1: Safety infrastructure builder methods ──────────────────
+
+    /// Attach an audit trail (builder pattern).
+    pub fn with_audit_trail(mut self, trail: Arc<dyn audit::AuditTrail>) -> Self {
+        self.audit_trail = Some(trail);
+        self
+    }
+
+    /// Expose the audit trail.
+    pub fn audit_trail(&self) -> Option<&Arc<dyn audit::AuditTrail>> {
+        self.audit_trail.as_ref()
+    }
+
+    /// Attach a confirmation engine (builder pattern).
+    pub fn with_confirmation_engine(
+        mut self,
+        engine: Arc<dyn confirm::ConfirmationEngine>,
+    ) -> Self {
+        self.confirmation_engine = Some(engine);
+        self
+    }
+
+    /// Expose the confirmation engine.
+    pub fn confirmation_engine(&self) -> Option<&Arc<dyn confirm::ConfirmationEngine>> {
+        self.confirmation_engine.as_ref()
+    }
+
+    /// Attach a cost budget (builder pattern).
+    pub fn with_cost_budget(mut self, budget: Arc<dyn budget::CostBudget>) -> Self {
+        self.cost_budget = Some(budget);
+        self
+    }
+
+    /// Expose the cost budget.
+    pub fn cost_budget(&self) -> Option<&Arc<dyn budget::CostBudget>> {
+        self.cost_budget.as_ref()
+    }
+
+    /// Attach a sandbox executor (builder pattern).
+    pub fn with_sandbox_executor(mut self, executor: Arc<dyn sandbox::SandboxExecutor>) -> Self {
+        self.sandbox_executor = Some(executor);
+        self
+    }
+
+    /// Expose the sandbox executor.
+    pub fn sandbox_executor(&self) -> Option<&Arc<dyn sandbox::SandboxExecutor>> {
+        self.sandbox_executor.as_ref()
+    }
+
+    /// Attach a credential vault (builder pattern).
+    pub fn with_credential_vault(mut self, vault: Arc<dyn vault::CredentialVault>) -> Self {
+        self.credential_vault = Some(vault);
+        self
+    }
+
+    /// Expose the credential vault.
+    pub fn credential_vault(&self) -> Option<&Arc<dyn vault::CredentialVault>> {
+        self.credential_vault.as_ref()
+    }
+
+    /// Attach a task orchestrator (builder pattern).
+    pub fn with_orchestrator(mut self, orch: Arc<orchestrate::TaskOrchestrator>) -> Self {
+        self.orchestrator = Some(orch);
+        self
+    }
+
+    /// Expose the task orchestrator.
+    pub fn orchestrator(&self) -> Option<&Arc<orchestrate::TaskOrchestrator>> {
+        self.orchestrator.as_ref()
+    }
+
     // ── Scheduled intent management ───────────────────────────────────────────
 
     /// List scheduled intents, optionally filtered by namespace.

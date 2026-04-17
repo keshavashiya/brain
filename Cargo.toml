@@ -22,6 +22,8 @@ members = [
     "crates/budget",
     "crates/sandbox",
     "crates/vault",
+    "crates/orchestrate",
+    "crates/channel",
 ]
 
 [workspace.package]
@@ -127,6 +129,8 @@ confirm = { package = "brainos-confirm", path = "crates/confirm", version = "0.2
 budget = { package = "brainos-budget", path = "crates/budget", version = "0.2.0" }
 sandbox = { package = "brainos-sandbox", path = "crates/sandbox", version = "0.2.0" }
 vault = { package = "brainos-vault", path = "crates/vault", version = "0.2.0" }
+orchestrate = { package = "brainos-orchestrate", path = "crates/orchestrate", version = "0.2.0" }
+channel = { package = "brainos-channel", path = "crates/channel", version = "0.2.0" }
 
 # Benchmarks
 criterion = { version = "0.5", features = ["html_reports"] }

@@ -58,6 +58,7 @@ confirm = { workspace = true }
 budget = { workspace = true }
 sandbox = { workspace = true }
 vault = { workspace = true }
+orchestrate = { workspace = true }
 
 [dev-dependencies]
 tokio-tungstenite = { workspace = true }

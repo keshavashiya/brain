@@ -197,7 +197,7 @@ impl RuVectorStore {
             .ok_or_else(|| RuVectorError::TableNotFound(table_name.to_string()))?;
 
         let count = ids.len();
-        for (id, vector) in ids.into_iter().zip(vectors.into_iter()) {
+        for (id, vector) in ids.into_iter().zip(vectors) {
             let safe_vector = sanitize_vector_for_insert(vector, self.dimensions, &id);
             let entry = VectorEntry {
                 id: Some(id),

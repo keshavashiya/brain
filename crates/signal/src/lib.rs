@@ -49,6 +49,20 @@ pub struct SignalProcessor {
     action_dispatcher: Option<cortex::actions::ActionDispatcher>,
     /// Cross-subsystem metrics (embedding, consolidation, circuit breaker, intent).
     metrics: std::sync::Arc<brain_core::metrics::SubsystemMetrics>,
+
+    // ── Phase 1: Safety infrastructure (opt-in via builder) ──────────────
+    /// Immutable audit trail — records every consequential action.
+    audit_trail: Option<std::sync::Arc<dyn audit::AuditTrail>>,
+    /// Confirmation engine — human approval gates for destructive/external actions.
+    confirmation_engine: Option<std::sync::Arc<dyn confirm::ConfirmationEngine>>,
+    /// Cost budget — per-action and rolling ceilings on LLM tokens, API calls, sandbox time.
+    cost_budget: Option<std::sync::Arc<dyn budget::CostBudget>>,
+    /// Sandbox executor — isolated command execution with resource limits.
+    sandbox_executor: Option<std::sync::Arc<dyn sandbox::SandboxExecutor>>,
+    /// Credential vault — secure credential storage and injection.
+    credential_vault: Option<std::sync::Arc<dyn vault::CredentialVault>>,
+    /// Task orchestrator — decomposes requests into executable plans (Phase 2).
+    orchestrator: Option<std::sync::Arc<orchestrate::TaskOrchestrator>>,
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

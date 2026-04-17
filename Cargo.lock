@@ -553,6 +553,7 @@ dependencies = [
  "brainos-hippocampus",
  "brainos-httpadapter",
  "brainos-mcp",
+ "brainos-orchestrate",
  "brainos-sandbox",
  "brainos-signal",
  "brainos-storage",
@@ -682,6 +683,27 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "brainos-channel"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "brainos-bridge",
+ "brainos-confirm",
+ "brainos-core",
+ "brainos-storage",
+ "chrono",
+ "chrono-tz",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "uuid",
 ]
@@ -848,6 +870,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "brainos-orchestrate"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "brainos-audit",
+ "brainos-budget",
+ "brainos-cerebellum",
+ "brainos-confirm",
+ "brainos-core",
+ "brainos-cortex",
+ "brainos-hippocampus",
+ "brainos-sandbox",
+ "brainos-storage",
+ "chrono",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "brainos-sandbox"
 version = "0.2.0"
 dependencies = [
@@ -870,13 +917,19 @@ dependencies = [
  "anyhow",
  "async-trait",
  "brainos-amygdala",
+ "brainos-audit",
+ "brainos-budget",
  "brainos-cerebellum",
+ "brainos-confirm",
  "brainos-core",
  "brainos-cortex",
  "brainos-ganglia",
  "brainos-hippocampus",
+ "brainos-orchestrate",
+ "brainos-sandbox",
  "brainos-storage",
  "brainos-thalamus",
+ "brainos-vault",
  "chrono",
  "futures",
  "rusqlite",
@@ -3632,9 +3685,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.10"
+version = "0.103.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df33b2b81ac578cabaf06b89b0631153a3f416b0a886e8a7a1707fb51abbd1ef"
+checksum = "8279bb85272c9f10811ae6a6c547ff594d6a7f3c6c6b02ee9726d1d0dcfcdd06"
 dependencies = [
  "aws-lc-rs",
  "ring",

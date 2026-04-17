@@ -21,10 +21,12 @@ use backends::*;
 /// - Web search backend (searxng / tavily / custom)
 /// - Scheduling backend
 /// - Messaging backend (webhooks)
+/// - Phase 1 safety infrastructure (audit, confirm, budget, sandbox)
 ///
 /// What is NOT wired here (caller-specific):
 /// - Notification router (only needed for `brain serve`)
 /// - Background tasks (consolidation, proactivity — only `brain serve`)
+/// - Credential vault (wired separately via `wire_vault`)
 pub async fn build_processor(
     config: &brain_core::BrainConfig,
 ) -> anyhow::Result<signal::SignalProcessor> {
@@ -38,6 +40,74 @@ pub async fn build_processor(
 
     let action_dispatcher = build_action_dispatcher(config, &processor)?;
     processor = processor.with_action_dispatcher(action_dispatcher);
+
+    // ── Phase 1: Safety infrastructure ──────────────────────────────────
+    processor = wire_safety_infrastructure(processor, config)?;
+
+    Ok(processor)
+}
+
+/// Wire Phase 1 safety infrastructure into the processor.
+///
+/// Components: audit trail, confirmation engine, cost budget, sandbox executor.
+/// All share the same SQLite pool as the episodic store for simplicity.
+/// The credential vault is NOT wired here — it requires passphrase input
+/// and is wired on demand (e.g. `brain vault` / `brain auth` commands).
+fn wire_safety_infrastructure(
+    processor: signal::SignalProcessor,
+    config: &brain_core::BrainConfig,
+) -> anyhow::Result<signal::SignalProcessor> {
+    let db = processor.episodic().pool().clone();
+
+    // Audit trail — always wired (foundation for all other Phase 1 components)
+    let audit_trail = audit::SqliteAuditTrail::new(db.clone());
+    audit_trail
+        .ensure_tables()
+        .map_err(|e| anyhow::anyhow!("Audit trail table init failed: {e}"))?;
+    let audit_trail: Arc<dyn audit::AuditTrail> = Arc::new(audit_trail);
+    tracing::info!("Audit trail wired");
+
+    // Confirmation engine — always wired
+    let confirm_engine = confirm::SqliteConfirmationEngine::new(db.clone());
+    confirm_engine
+        .ensure_tables()
+        .map_err(|e| anyhow::anyhow!("Confirmation engine table init failed: {e}"))?;
+    let confirm_engine: Arc<dyn confirm::ConfirmationEngine> = Arc::new(confirm_engine);
+    tracing::info!("Confirmation engine wired");
+
+    // Cost budget — always wired, with audit coupling
+    let budget_policy = budget::BudgetPolicy::default();
+    let sqlite_budget = budget::SqliteBudget::new(db.clone(), budget_policy);
+    sqlite_budget
+        .ensure_tables()
+        .map_err(|e| anyhow::anyhow!("Cost budget table init failed: {e}"))?;
+    let sqlite_budget = sqlite_budget.with_audit(audit_trail.clone());
+    let cost_budget: Arc<dyn budget::CostBudget> = Arc::new(sqlite_budget);
+    tracing::info!("Cost budget wired (with audit coupling)");
+
+    // Sandbox executor — stub for Phase 1a, real isolation in Phase 1b
+    let sandbox = sandbox::StubSandbox::new().with_allowed_paths(vec![
+        std::path::PathBuf::from(&config.brain.data_dir),
+        std::env::current_dir().unwrap_or_default(),
+    ]);
+    let sandbox_executor: Arc<dyn sandbox::SandboxExecutor> = Arc::new(sandbox);
+    tracing::info!("Sandbox executor wired (stub — no isolation)");
+
+    let processor = processor
+        .with_audit_trail(audit_trail.clone())
+        .with_confirmation_engine(confirm_engine.clone())
+        .with_cost_budget(cost_budget)
+        .with_sandbox_executor(sandbox_executor.clone());
+
+    // Task orchestrator — wired with the LLM provider for decomposition
+    let decomposer: Arc<dyn orchestrate::TaskDecomposer> =
+        Arc::new(orchestrate::LlmDecomposer::new(processor.llm_arc()));
+    let orchestrator = orchestrate::TaskOrchestrator::new(decomposer)
+        .with_audit(audit_trail)
+        .with_confirmation(confirm_engine)
+        .with_sandbox(sandbox_executor);
+    let processor = processor.with_orchestrator(Arc::new(orchestrator));
+    tracing::info!("Task orchestrator wired");
 
     Ok(processor)
 }

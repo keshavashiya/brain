@@ -59,6 +59,8 @@ pub enum Intent {
     },
     /// Get system status.
     SystemStatus,
+    /// Decompose a complex request into an executable task plan.
+    DecomposeTask { request: String },
     /// Regular chat/conversation.
     Chat { content: String },
 }
@@ -152,13 +154,14 @@ impl LlmIntentFallback {
 }
 
 const CLASSIFIER_SYSTEM_PROMPT: &str = r#"You classify user input into exactly one intent for Brain OS.
-Valid intents: store_fact, recall, forget, execute_command, web_search, schedule, send_message, system_status, chat.
+Valid intents: store_fact, recall, forget, execute_command, web_search, schedule, send_message, system_status, decompose_task, chat.
 Rules:
 - recall is for memory queries: "what do you know about...", "what did we discuss", "what do you remember about...", "tell me about...", "what is my...", "do you remember...", "tell me everything about...". These ask about the user's stored memories.
 - Questions that are NOT about stored memories (general knowledge, opinions, how-to questions) are chat.
 - Questions should NEVER be execute_command.
 - store_fact is ONLY for explicit memory requests: "remember that ...", "note that ...", "keep in mind ...".
 - execute_command is ONLY for explicit requests like "run ls", "execute cargo build". The command field must be a real shell command (ls, git, cargo, etc.).
+- decompose_task is for multi-step requests that need planning and execution: "build a CSV export feature", "set up CI/CD pipeline", "refactor the auth module and add tests", "deploy to production". The request must involve multiple steps or coordination. Simple single-step requests are NOT decompose_task.
 - Conversational statements ("I've done X", "I completed X", "I like X") are chat but ALSO extract any personal facts (see below).
 - Prefer web_search for explicit search requests about internet/google/latest/current external info.
 - For web_search, set 'query' to the exact optimal search terms, stripping conversational fluff.
@@ -294,6 +297,12 @@ impl IntentFallback for LlmIntentFallback {
                 }
             }
             "system_status" => Intent::SystemStatus,
+            "decompose_task" => Intent::DecomposeTask {
+                request: payload
+                    .content
+                    .or(payload.description)
+                    .unwrap_or_else(|| input.to_string()),
+            },
             _ => Intent::Chat {
                 content: input.to_string(),
             },
