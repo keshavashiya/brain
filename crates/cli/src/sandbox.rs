@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use clap::Subcommand;
-use sandbox::{SandboxCommand, SandboxExecutor, StubSandbox};
+use sandbox::{IsolatedSandbox, SandboxCommand, SandboxExecutor};
 
 #[derive(Subcommand)]
 pub(crate) enum SandboxAction {
@@ -24,7 +24,7 @@ pub(crate) enum SandboxAction {
 }
 
 pub(crate) async fn cmd_sandbox(
-    _config: &brain_core::BrainConfig,
+    config: &brain_core::BrainConfig,
     action: SandboxAction,
 ) -> Result<()> {
     match action {
@@ -62,10 +62,17 @@ pub(crate) async fn cmd_sandbox(
                 cmd = cmd.with_timeout(std::time::Duration::from_secs(secs));
             }
 
-            eprintln!("WARNING: Phase 1a sandbox has NO ISOLATION (same privileges as daemon).");
-            eprintln!();
-
-            let sandbox = StubSandbox::new();
+            let default_timeout = std::time::Duration::from_secs(
+                config.security.exec_timeout_seconds as u64,
+            );
+            let sandbox = IsolatedSandbox::new(
+                config.security.exec_allowlist.clone(),
+                default_timeout,
+            )
+            .with_allowed_paths(vec![
+                std::path::PathBuf::from(&config.brain.data_dir),
+                std::env::current_dir().unwrap_or_default(),
+            ]);
             let outcome = sandbox.run(cmd).await?;
 
             if !outcome.stdout.is_empty() {

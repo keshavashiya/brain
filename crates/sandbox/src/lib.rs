@@ -3,14 +3,19 @@
 //! Isolated command execution with resource limits, filesystem allowlists,
 //! network denial, and timeout enforcement.
 //!
-//! Phase 1a ships a stub executor (direct-exec, same privileges as daemon).
-//! Phase 1b adds real isolation (setrlimit, cgroups, sandbox-exec).
+//! Production code should use [`IsolatedSandbox`] — it applies `setrlimit`
+//! via a pre-exec hook, enforces the binary allowlist, kills the process
+//! group on timeout, and layers platform isolation (macOS `sandbox-exec`,
+//! Linux namespaces). [`StubSandbox`] is retained for tests and scripted
+//! demos where isolation is intentionally skipped.
 
 pub mod allowlist;
+pub mod isolated;
 pub mod tier;
 
 pub use allowlist::{
     CredentialRef, ResourceUsage, SandboxCommand, SandboxError, SandboxExecutor, SandboxOutcome,
     StubSandbox,
 };
+pub use isolated::{IsolatedSandbox, SandboxLimits};
 pub use tier::ActionTier;

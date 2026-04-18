@@ -86,7 +86,9 @@ brain/
 │   │                     CostBudget trait, daily/monthly/per-task limits, breach events
 │   │
 │   ├── sandbox/        # Command execution sandbox
-│   │                     SandboxExecutor trait, allowlist + cwd/env isolation + timeouts
+│   │                     IsolatedSandbox: setrlimit (CPU/AS/NOFILE/FSIZE) pre-exec,
+│   │                     binary allowlist, process-group SIGKILL on timeout,
+│   │                     macOS sandbox-exec network-deny, Linux unshare(NET/IPC/UTS)
 │   │
 │   ├── vault/          # Credential vault
 │   │                     CredentialVault trait, OS-native backends

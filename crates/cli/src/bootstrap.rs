@@ -85,13 +85,23 @@ fn wire_safety_infrastructure(
     let cost_budget: Arc<dyn budget::CostBudget> = Arc::new(sqlite_budget);
     tracing::info!("Cost budget wired (with audit coupling)");
 
-    // Sandbox executor — stub for Phase 1a, real isolation in Phase 1b
-    let sandbox = sandbox::StubSandbox::new().with_allowed_paths(vec![
+    // Sandbox executor — isolated invocation with rlimits, allowlist, and
+    // platform layers (macOS sandbox-exec / Linux namespaces).
+    let exec_timeout = std::time::Duration::from_secs(config.security.exec_timeout_seconds as u64);
+    let sandbox = sandbox::IsolatedSandbox::new(
+        config.security.exec_allowlist.clone(),
+        exec_timeout,
+    )
+    .with_allowed_paths(vec![
         std::path::PathBuf::from(&config.brain.data_dir),
         std::env::current_dir().unwrap_or_default(),
     ]);
     let sandbox_executor: Arc<dyn sandbox::SandboxExecutor> = Arc::new(sandbox);
-    tracing::info!("Sandbox executor wired (stub — no isolation)");
+    tracing::info!(
+        allowlist_size = config.security.exec_allowlist.len(),
+        timeout_s = config.security.exec_timeout_seconds,
+        "Sandbox executor wired (isolated: rlimits + allowlist)"
+    );
 
     let processor = processor
         .with_audit_trail(audit_trail.clone())
