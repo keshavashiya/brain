@@ -18,6 +18,7 @@ bridge = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { workspace = true }
@@ -25,6 +26,13 @@ chrono-tz = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true }
+reqwest = { workspace = true }
+hmac = "0.12"
+sha2 = { workspace = true }
+hex = "0.4"
+ed25519-dalek = { version = "2", default-features = false, features = ["pkcs8", "alloc"] }
 
 [dev-dependencies]
 tempfile = "3"
+wiremock = "0.6"
+rand = "0.8"

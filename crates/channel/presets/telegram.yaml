@@ -1,0 +1,26 @@
+id: telegram
+kind: http_polled
+label: Telegram
+
+poll:
+  url_template: "https://api.telegram.org/bot{credential}/getUpdates?offset={cursor}&timeout=30"
+  method: GET
+  cursor_initial: "0"
+  cursor_field: "$.result[-1].update_id"
+  cursor_transform: plus_one
+  messages_path: "$.result[*]"
+  extract:
+    id: "$.update_id"
+    text: "$.message.text"
+    user_ref: "$.message.from.id"
+    reply_to: "$.message.chat.id"
+    extra:
+      username: "$.message.from.username"
+  timeout_secs: 35
+  idle_ms: 500
+
+send:
+  url_template: "https://api.telegram.org/bot{credential}/sendMessage"
+  method: POST
+  content_type: "application/json"
+  body_template: '{"chat_id":"{reply_to}","text":"{content}","parse_mode":"Markdown"}'

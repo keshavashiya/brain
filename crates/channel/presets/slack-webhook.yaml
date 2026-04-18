@@ -1,0 +1,11 @@
+id: slack-webhook
+kind: webhook_outbound
+label: Slack Incoming Webhook
+
+# Slack incoming webhooks carry the secret in the URL path. The full
+# webhook URL is provided via `credential`.
+send:
+  url_template: "{credential}"
+  method: POST
+  content_type: "application/json"
+  body_template: '{"text":"{content}"}'

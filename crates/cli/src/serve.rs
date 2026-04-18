@@ -433,6 +433,35 @@ pub(crate) async fn cmd_serve(
         }
     }
 
+    // ── Preset-driven transports ──────────────────────────────────────
+    // Hold shutdown senders alive for the lifetime of cmd_serve so the
+    // per-transport run loops don't see an immediate shutdown on drop.
+    let _transport_shutdown_guards: Vec<tokio::sync::oneshot::Sender<()>> =
+        if config.channel.transports.is_empty() {
+            Vec::new()
+        } else {
+            let router = processor.channel_router().cloned();
+            let correlator = processor.confirmation_correlator().cloned();
+            match (router, correlator) {
+                (Some(router), Some(correlator)) => {
+                    wire_preset_transports(
+                        &config.channel.transports,
+                        processor.clone(),
+                        router,
+                        correlator,
+                        &mut set,
+                    )
+                    .await
+                }
+                _ => {
+                    tracing::warn!(
+                    "channel.transports configured but channel intelligence is not wired — skipping"
+                );
+                    Vec::new()
+                }
+            }
+        };
+
     println!("\nBrain is conscious. Press Ctrl+C to sleep.\n");
 
     // ── Graceful shutdown ─────────────────────────────────────────────
@@ -548,6 +577,176 @@ pub(crate) async fn promote_candidates(
     }
 
     promoted_now
+}
+
+/// Pipe an inbound transport message into the main signal pipeline with the
+/// same shape the relay handler uses.
+async fn forward_inbound_to_signal(
+    msg: channel::InboundMessage,
+    processor: Arc<signal::SignalProcessor>,
+    channel_id: String,
+    namespace: String,
+) {
+    let sender = msg.user_ref.clone().unwrap_or_else(|| "transport".into());
+    let sig = signal::Signal::new(
+        signal::SignalSource::WebSocket,
+        &channel_id,
+        sender,
+        &msg.content,
+    )
+    .with_namespace(&namespace);
+    if let Err(e) = processor.process(sig).await {
+        tracing::warn!(channel = %channel_id, error = %e, "Transport inbound pipeline error");
+    }
+}
+
+/// Build preset-driven transports, register each with the router, spawn
+/// polling loops for HttpPolled kinds, and feed inbound messages into the
+/// signal pipeline (after the correlator has had a chance to claim them).
+async fn wire_preset_transports(
+    entries: &[brain_core::config::TransportEntry],
+    processor: Arc<signal::SignalProcessor>,
+    router: Arc<dyn channel::ChannelRouter>,
+    correlator: Arc<channel::ConfirmationCorrelator>,
+    set: &mut tokio::task::JoinSet<anyhow::Result<()>>,
+) -> Vec<tokio::sync::oneshot::Sender<()>> {
+    use channel::transport::http_polled::{HttpPolledConfig, HttpPolledTransport};
+    use channel::transport::preset::PresetKind;
+    use channel::transport::preset_loader;
+    use channel::transport::webhook_inbound::{WebhookInboundConfig, WebhookInboundTransport};
+    use channel::transport::webhook_outbound::{WebhookOutboundConfig, WebhookOutboundTransport};
+    use channel::ChannelTransport;
+
+    let mut shutdown_guards = Vec::new();
+
+    for entry in entries {
+        let preset = match preset_loader::load(&entry.preset) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    transport = %entry.id,
+                    preset = %entry.preset,
+                    error = %e,
+                    "Preset load failed — skipping transport"
+                );
+                continue;
+            }
+        };
+
+        match preset.kind {
+            PresetKind::HttpPolled => {
+                let cfg = HttpPolledConfig::new(
+                    &entry.id,
+                    &entry.label,
+                    preset.clone(),
+                    &entry.credential,
+                );
+                let transport = match HttpPolledTransport::new(cfg) {
+                    Ok(t) => Arc::new(t),
+                    Err(e) => {
+                        tracing::warn!(
+                            transport = %entry.id, error = %e, "HttpPolled init failed"
+                        );
+                        continue;
+                    }
+                };
+                if let Err(e) = router.register(transport.descriptor()).await {
+                    tracing::warn!(transport = %entry.id, error = %e, "router register failed");
+                }
+                println!(
+                    "  Transport    → {} (preset: {}, polled)",
+                    entry.label, entry.preset
+                );
+
+                let rx = transport.inbound();
+                let proc_clone = processor.clone();
+                let chan_id = entry.id.clone();
+                let ns = entry.namespace.clone();
+                let corr = correlator.clone();
+                set.spawn(async move {
+                    let mut rx = rx;
+                    while let Ok(msg) = rx.recv().await {
+                        match corr.process(&msg.content).await {
+                            Ok(channel::CorrelationOutcome::NoMatch) => {}
+                            Ok(_) => continue,
+                            Err(e) => {
+                                tracing::debug!(error = %e, "correlator error — forwarding raw");
+                            }
+                        }
+                        forward_inbound_to_signal(
+                            msg,
+                            proc_clone.clone(),
+                            chan_id.clone(),
+                            ns.clone(),
+                        )
+                        .await;
+                    }
+                    Ok(())
+                });
+
+                let run_transport = transport.clone();
+                let (sd_tx, sd_rx) = tokio::sync::oneshot::channel::<()>();
+                shutdown_guards.push(sd_tx);
+                set.spawn(async move {
+                    run_transport.run(sd_rx).await;
+                    Ok(())
+                });
+            }
+            PresetKind::WebhookOutbound => {
+                let cfg = WebhookOutboundConfig::new(&entry.id, &entry.label, preset.clone())
+                    .with_credential(&entry.credential);
+                let transport = match WebhookOutboundTransport::new(cfg) {
+                    Ok(t) => Arc::new(t),
+                    Err(e) => {
+                        tracing::warn!(
+                            transport = %entry.id, error = %e, "WebhookOutbound init failed"
+                        );
+                        continue;
+                    }
+                };
+                if let Err(e) = router.register(transport.descriptor()).await {
+                    tracing::warn!(transport = %entry.id, error = %e, "router register failed");
+                }
+                println!(
+                    "  Transport    → {} (preset: {}, outbound-only)",
+                    entry.label, entry.preset
+                );
+            }
+            PresetKind::WebhookInbound => {
+                let mut cfg = WebhookInboundConfig::new(&entry.id, &entry.label, preset.clone());
+                if !entry.credential.is_empty() {
+                    cfg = cfg.with_credential(&entry.credential);
+                }
+                if let Some(secret) = &entry.signing_secret {
+                    cfg = cfg.with_signing_secret(secret);
+                }
+                let transport = match WebhookInboundTransport::new(cfg) {
+                    Ok(t) => Arc::new(t),
+                    Err(e) => {
+                        tracing::warn!(
+                            transport = %entry.id, error = %e, "WebhookInbound init failed"
+                        );
+                        continue;
+                    }
+                };
+                if let Err(e) = router.register(transport.descriptor()).await {
+                    tracing::warn!(transport = %entry.id, error = %e, "router register failed");
+                }
+                // NOTE: the HTTP route that calls
+                // `transport.handle_request()` must be added to the HTTP
+                // adapter. Until then the transport is registered with the
+                // router for outbound sends but will not receive inbound
+                // traffic. Tracked as a follow-up.
+                println!(
+                    "  Transport    → {} (preset: {}, webhook-in [route pending])",
+                    entry.label, entry.preset
+                );
+                let _ = transport; // keep alive by moving into discard
+            }
+        }
+    }
+
+    shutdown_guards
 }
 
 #[cfg(test)]

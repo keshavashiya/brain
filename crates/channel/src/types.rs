@@ -13,8 +13,12 @@ use serde::{Deserialize, Serialize};
 ///
 /// `Local` covers CLI / native desktop notifications. `Http` covers the
 /// outbox polled by web clients. `WebSocket` covers live sessions bound
-/// directly to the daemon. `Relay` covers outbound gateways (Slack/Telegram/
-/// Discord bridges, custom HTTP webhooks) reached via `bridge::BridgeClient`.
+/// directly to the daemon. `Relay` covers gateways reached via
+/// `bridge::BridgeClient` — a user-run WS bridge that translates to any
+/// platform. `HttpPolled` covers platforms exposing an HTTP long-poll API
+/// (e.g. Telegram `getUpdates`) via a declarative preset. `WebhookInbound`
+/// covers platforms that POST into Brain's HTTP adapter (Discord
+/// Interactions, Slack Events, GitHub) with signature verification.
 /// `Webhook` covers non-interactive push (one-way notification to a URL).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -23,16 +27,23 @@ pub enum ChannelKind {
     Http,
     WebSocket,
     Relay,
+    HttpPolled,
+    WebhookInbound,
     Webhook,
 }
 
 impl ChannelKind {
     /// Whether this transport can carry a user response back to Brain.
-    /// Webhook-only channels are one-way and cannot surface an approval reply.
+    /// One-way push channels (`Webhook`) cannot surface an approval reply.
     pub fn supports_response(&self) -> bool {
         matches!(
             self,
-            Self::Local | Self::Http | Self::WebSocket | Self::Relay
+            Self::Local
+                | Self::Http
+                | Self::WebSocket
+                | Self::Relay
+                | Self::HttpPolled
+                | Self::WebhookInbound
         )
     }
 }
@@ -44,6 +55,8 @@ impl std::fmt::Display for ChannelKind {
             Self::Http => "http",
             Self::WebSocket => "websocket",
             Self::Relay => "relay",
+            Self::HttpPolled => "http_polled",
+            Self::WebhookInbound => "webhook_inbound",
             Self::Webhook => "webhook",
         };
         write!(f, "{s}")

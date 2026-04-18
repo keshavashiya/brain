@@ -304,6 +304,38 @@ where
 pub struct ChannelIntelligenceConfig {
     #[serde(default)]
     pub relays: Vec<RelayEntry>,
+    /// Generic preset-driven transports (Telegram long-poll, Discord
+    /// Interactions webhook, Slack incoming webhook, ...). Each entry
+    /// names a preset id that ships embedded under `crates/channel/presets/`
+    /// or lives at `~/.brain/presets/<id>.yaml`.
+    #[serde(default)]
+    pub transports: Vec<TransportEntry>,
+}
+
+/// A single preset-driven transport — what platform, what id, what
+/// secrets to plug into the preset templates.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransportEntry {
+    /// Stable id registered with the channel router (e.g. "telegram",
+    /// "discord-main").
+    pub id: String,
+    /// Human-readable label.
+    pub label: String,
+    /// Preset id — resolved via the channel crate's preset loader.
+    pub preset: String,
+    /// Memory namespace attributed to inbound messages on this transport.
+    #[serde(default = "default_relay_namespace")]
+    pub namespace: String,
+    /// Credential substituted into `{credential}` in url/body templates.
+    /// Bot token (Telegram), full webhook URL (Slack incoming), bot
+    /// application id (Discord followup endpoint), etc. May be empty.
+    #[serde(default)]
+    pub credential: String,
+    /// Optional signing secret — HMAC shared key (Slack/GitHub) or
+    /// Ed25519 pubkey hex (Discord). Only consumed by webhook_inbound
+    /// transports whose preset declares a `verifier`.
+    #[serde(default)]
+    pub signing_secret: Option<String>,
 }
 
 /// One relay gateway entry.

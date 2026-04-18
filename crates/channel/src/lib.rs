@@ -21,6 +21,7 @@ pub mod error;
 pub mod preference;
 pub mod relay;
 pub mod router;
+pub mod transport;
 pub mod types;
 
 pub use correlate::{ConfirmationCorrelator, CorrelatedCommand, CorrelationOutcome};
@@ -30,6 +31,7 @@ pub use preference::{
 };
 pub use relay::{RelayAdapter, RelayConfig};
 pub use router::{ChannelRouter, DefaultChannelRouter, RoutingContext, RoutingDecision};
+pub use transport::{ChannelTransport, InboundMessage, MessageHandle, TransportHealth};
 pub use types::{
     ChannelDescriptor, ChannelKind, DeliveryCategory, DeliveryIntent, DeliveryOutcome, UrgencyLevel,
 };

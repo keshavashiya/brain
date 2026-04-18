@@ -35,6 +35,7 @@ use crate::correlate::{ConfirmationCorrelator, CorrelationOutcome};
 use crate::error::ChannelError;
 use crate::preference::{ChannelPreferenceStore, RecordedInteraction};
 use crate::router::ChannelRouter;
+use crate::transport::{ChannelTransport, InboundMessage, MessageHandle, TransportHealth};
 use crate::types::{
     ChannelDescriptor, ChannelKind, DeliveryCategory, DeliveryIntent, DeliveryOutcome,
 };
@@ -125,6 +126,11 @@ pub struct RelayAdapter {
     preferences: Arc<dyn ChannelPreferenceStore>,
     fallback: Arc<dyn SignalHandler>,
     outbound_tx: broadcast::Sender<BridgeMessage>,
+    /// Raw inbound fan-out for `ChannelTransport::inbound()` subscribers.
+    /// Published to before the built-in correlator/fallback path runs, so
+    /// new code using the generic transport trait can observe the same
+    /// stream without disturbing legacy behaviour.
+    inbound_tx: broadcast::Sender<InboundMessage>,
 }
 
 impl RelayAdapter {
@@ -139,6 +145,7 @@ impl RelayAdapter {
         fallback: Arc<dyn SignalHandler>,
     ) -> Self {
         let (tx, _rx) = broadcast::channel(DEFAULT_OUTBOUND_CAPACITY);
+        let (inbound_tx, _) = broadcast::channel(DEFAULT_OUTBOUND_CAPACITY);
         Self {
             config,
             router,
@@ -146,6 +153,7 @@ impl RelayAdapter {
             preferences,
             fallback,
             outbound_tx: tx,
+            inbound_tx,
         }
     }
 
@@ -195,6 +203,14 @@ impl RelayAdapter {
     /// without a WebSocket and for direct invocation by non-bridge callers.
     pub async fn handle_inbound(&self, msg: BridgeMessage) -> BridgeMessage {
         let now = Utc::now();
+
+        // Fan out the raw inbound to any `ChannelTransport::inbound()`
+        // subscriber before we touch correlator/fallback. Send-errors here
+        // mean no subscriber — fine, legacy path still runs below.
+        let _ = self
+            .inbound_tx
+            .send(bridge_to_inbound(&msg, &self.config.channel_id));
+
         let outcome = self.correlator.process(&msg.content).await;
 
         let reply_text = match &outcome {
@@ -308,6 +324,60 @@ impl RelayAdapter {
                     format!("no active bridge subscriber: {e}"),
                 )
             }
+        }
+    }
+}
+
+fn bridge_to_inbound(msg: &BridgeMessage, channel_id: &str) -> InboundMessage {
+    let mut inbound = InboundMessage::new(msg.id.clone(), msg.content.clone(), channel_id);
+    if let Some(meta) = &msg.metadata {
+        inbound.user_ref = meta.get("user_id").cloned();
+        inbound.reply_to = meta.get("reply_to").cloned();
+        for (k, v) in meta {
+            if k != "user_id" && k != "reply_to" {
+                inbound.extra.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    inbound
+}
+
+#[async_trait]
+impl ChannelTransport for RelayAdapter {
+    fn descriptor(&self) -> ChannelDescriptor {
+        ChannelDescriptor::new(
+            &self.config.channel_id,
+            ChannelKind::Relay,
+            &self.config.label,
+        )
+    }
+
+    async fn send(&self, intent: &DeliveryIntent) -> Result<MessageHandle, ChannelError> {
+        let outcome = self.deliver(intent).await;
+        if outcome.success {
+            Ok(MessageHandle::new(outcome.delivery_id))
+        } else {
+            Err(ChannelError::Relay(
+                outcome
+                    .error
+                    .unwrap_or_else(|| "relay deliver failed".into()),
+            ))
+        }
+    }
+
+    fn inbound(&self) -> broadcast::Receiver<InboundMessage> {
+        self.inbound_tx.subscribe()
+    }
+
+    async fn health(&self) -> TransportHealth {
+        // Best-effort: if the outbound broadcast has no subscribers the
+        // bridge loop isn't connected.
+        if self.outbound_tx.receiver_count() == 0 {
+            TransportHealth::Down {
+                reason: "bridge not connected".into(),
+            }
+        } else {
+            TransportHealth::Healthy
         }
     }
 }

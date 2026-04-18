@@ -1,0 +1,34 @@
+id: discord-interactions
+kind: webhook_inbound
+label: Discord Interactions
+
+# Ed25519-signed request body contains a single Interaction object.
+# We only surface slash-command text (type 2, data.name + data.options)
+# as an inbound message. PING (type 1) handshakes short-circuit.
+webhook:
+  messages_path: "$"
+  extract:
+    id: "$.id"
+    text: "$.data.name"
+    user_ref: "$.member.user.id"
+    reply_to: "$.channel_id"
+    extra:
+      interaction_token: "$.token"
+      application_id: "$.application_id"
+      interaction_type: "$.type"
+  ack_only_when: '$.type == 1'
+  ack_body: '{"type": 1}'
+  ack_content_type: "application/json"
+
+verifier:
+  kind: discord_ed25519
+  signature_header: "X-Signature-Ed25519"
+  timestamp_header: "X-Signature-Timestamp"
+
+# Interaction followup endpoint — expects application_id and
+# interaction_token in metadata.
+send:
+  url_template: "https://discord.com/api/v10/webhooks/{application_id}/{interaction_token}"
+  method: POST
+  content_type: "application/json"
+  body_template: '{"content":"{content}"}'
