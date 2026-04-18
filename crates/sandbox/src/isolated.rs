@@ -62,6 +62,7 @@ impl IsolatedSandbox {
     pub fn new(command_allowlist: Vec<String>, default_timeout: Duration) -> Self {
         let allowlist: HashSet<String> = command_allowlist.into_iter().collect();
 
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
         let mut sb = Self {
             command_allowlist: allowlist,
             allowed_paths: HashSet::new(),
