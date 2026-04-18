@@ -1,6 +1,6 @@
-id: discord-interactions
+id: discord
 kind: webhook_inbound
-label: Discord Interactions
+label: Discord
 
 # Ed25519-signed request body contains a single Interaction object.
 # We only surface slash-command text (type 2, data.name + data.options)

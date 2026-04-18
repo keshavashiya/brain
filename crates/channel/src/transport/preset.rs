@@ -12,8 +12,15 @@
 //! which take precedence over the embedded copy.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+
+use crate::error::ChannelError;
+
+const EMBEDDED_TELEGRAM: &str = include_str!("../../presets/telegram.yaml");
+const EMBEDDED_DISCORD: &str = include_str!("../../presets/discord.yaml");
+const EMBEDDED_SLACK: &str = include_str!("../../presets/slack.yaml");
 
 /// Supported preset shapes. Each maps to one transport engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -222,7 +229,7 @@ fn default_discord_ts_header() -> String {
 /// Full preset definition loaded from YAML.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PresetDefinition {
-    /// Preset id (file stem: `telegram`, `discord-interactions`, …).
+    /// Preset id (file stem: `telegram`, `discord`, `slack`, …).
     pub id: String,
     pub kind: PresetKind,
     /// Human-readable label the UI can show.
@@ -242,6 +249,47 @@ impl PresetDefinition {
     pub fn from_yaml(raw: &str) -> Result<Self, serde_yaml::Error> {
         serde_yaml::from_str(raw)
     }
+}
+
+/// Look up the YAML source for a preset id — user override at
+/// `~/.brain/presets/<id>.yaml` first, then embedded fallback. Returns
+/// `None` if no preset is known by that id.
+pub fn load_yaml(id: &str) -> Option<String> {
+    if let Some(path) = user_override_path(id) {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            tracing::debug!(preset = %id, path = %path.display(), "loaded user preset override");
+            return Some(text);
+        }
+    }
+    embedded_yaml(id).map(String::from)
+}
+
+/// Parse a preset by id — same lookup order as [`load_yaml`].
+pub fn load(id: &str) -> Result<PresetDefinition, ChannelError> {
+    let yaml =
+        load_yaml(id).ok_or_else(|| ChannelError::Relay(format!("unknown preset id: {id}")))?;
+    PresetDefinition::from_yaml(&yaml)
+        .map_err(|e| ChannelError::Relay(format!("preset '{id}' parse: {e}")))
+}
+
+/// Embedded preset source (no filesystem access) — useful for tests and
+/// when the user override path is unavailable.
+pub fn embedded_yaml(id: &str) -> Option<&'static str> {
+    match id {
+        "telegram" => Some(EMBEDDED_TELEGRAM),
+        "discord" => Some(EMBEDDED_DISCORD),
+        "slack" => Some(EMBEDDED_SLACK),
+        _ => None,
+    }
+}
+
+fn user_override_path(id: &str) -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let mut path = PathBuf::from(home);
+    path.push(".brain");
+    path.push("presets");
+    path.push(format!("{id}.yaml"));
+    Some(path)
 }
 
 /// Substitute `{var}` tokens in a template. Unknown variables are left in
@@ -282,6 +330,38 @@ mod tests {
     fn render_leaves_unknown_alone() {
         let vars = HashMap::new();
         assert_eq!(render_template("{unknown}", &vars), "{unknown}");
+    }
+
+    #[test]
+    fn telegram_preset_parses() {
+        let p = load("telegram").unwrap();
+        assert_eq!(p.id, "telegram");
+        assert_eq!(p.kind, PresetKind::HttpPolled);
+        assert!(p.poll.is_some());
+        assert!(p.send.is_some());
+    }
+
+    #[test]
+    fn discord_preset_parses() {
+        let p = load("discord").unwrap();
+        assert_eq!(p.id, "discord");
+        assert_eq!(p.kind, PresetKind::WebhookInbound);
+        assert!(p.webhook.is_some());
+        assert!(p.verifier.is_some());
+        assert!(p.send.is_some());
+    }
+
+    #[test]
+    fn slack_preset_parses() {
+        let p = load("slack").unwrap();
+        assert_eq!(p.id, "slack");
+        assert_eq!(p.kind, PresetKind::WebhookOutbound);
+        assert!(p.send.is_some());
+    }
+
+    #[test]
+    fn unknown_preset_errors() {
+        assert!(load("nope-no-preset").is_err());
     }
 
     #[test]

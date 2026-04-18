@@ -610,17 +610,16 @@ async fn wire_preset_transports(
     correlator: Arc<channel::ConfirmationCorrelator>,
     set: &mut tokio::task::JoinSet<anyhow::Result<()>>,
 ) -> Vec<tokio::sync::oneshot::Sender<()>> {
-    use channel::transport::http_polled::{HttpPolledConfig, HttpPolledTransport};
-    use channel::transport::preset::PresetKind;
-    use channel::transport::preset_loader;
-    use channel::transport::webhook_inbound::{WebhookInboundConfig, WebhookInboundTransport};
-    use channel::transport::webhook_outbound::{WebhookOutboundConfig, WebhookOutboundTransport};
+    use channel::transport::inbound::{WebhookInboundConfig, WebhookInboundTransport};
+    use channel::transport::outbound::{WebhookOutboundConfig, WebhookOutboundTransport};
+    use channel::transport::polled::{HttpPolledConfig, HttpPolledTransport};
+    use channel::transport::preset::{self, PresetKind};
     use channel::ChannelTransport;
 
     let mut shutdown_guards = Vec::new();
 
     for entry in entries {
-        let preset = match preset_loader::load(&entry.preset) {
+        let preset = match preset::load(&entry.preset) {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(

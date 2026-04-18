@@ -19,8 +19,8 @@ use tokio::sync::{broadcast, RwLock};
 
 use crate::error::ChannelError;
 use crate::transport::jsonpath::JsonPath;
-use crate::transport::outbound::http_send;
 use crate::transport::preset::{render_template, FieldExtractors, PollSpec, PresetDefinition};
+use crate::transport::send::http_send;
 use crate::transport::{ChannelTransport, InboundMessage, MessageHandle, TransportHealth};
 use crate::types::{ChannelDescriptor, ChannelKind, DeliveryIntent};
 

@@ -6,21 +6,20 @@
 //! HTTP callbacks), and `WebhookOutboundTransport` (one-way push) all
 //! implement this trait so bootstrap code can treat them uniformly.
 
-pub mod http_polled;
+pub mod inbound;
 pub mod jsonpath;
 pub mod outbound;
+pub mod polled;
 pub mod preset;
-pub mod preset_loader;
-pub mod webhook_inbound;
-pub mod webhook_outbound;
+pub mod send;
 
-pub use http_polled::{HttpPolledConfig, HttpPolledTransport};
+pub use inbound::{WebhookInboundConfig, WebhookInboundTransport, WebhookResponse};
+pub use outbound::{WebhookOutboundConfig, WebhookOutboundTransport};
+pub use polled::{HttpPolledConfig, HttpPolledTransport};
 pub use preset::{
     CursorTransform, FieldExtractors, HttpMethod, PollSpec, PresetDefinition, PresetKind, SendSpec,
     VerifierSpec, WebhookInboundSpec,
 };
-pub use webhook_inbound::{WebhookInboundConfig, WebhookInboundTransport, WebhookResponse};
-pub use webhook_outbound::{WebhookOutboundConfig, WebhookOutboundTransport};
 
 use std::collections::HashMap;
 

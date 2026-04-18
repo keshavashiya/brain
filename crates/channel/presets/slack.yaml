@@ -1,6 +1,6 @@
-id: slack-webhook
+id: slack
 kind: webhook_outbound
-label: Slack Incoming Webhook
+label: Slack
 
 # Slack incoming webhooks carry the secret in the URL path. The full
 # webhook URL is provided via `credential`.
