@@ -163,6 +163,7 @@ impl SignalProcessor {
             channel_router: None,
             channel_preferences: None,
             confirmation_correlator: None,
+            agent_registry: None,
         };
 
         // Warm up the LLM model in the background to avoid first-call timeout

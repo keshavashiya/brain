@@ -99,14 +99,38 @@ fn wire_safety_infrastructure(
         .with_cost_budget(cost_budget)
         .with_sandbox_executor(sandbox_executor.clone());
 
+    // ── Agent registry (Phase 3) ────────────────────────────────────────
+    // Built before the orchestrator so `Implement` steps can dispatch to
+    // registered specialist agents. When `agents.delegates` is empty,
+    // `StepAction::Implement` will fail with a clear error — that's the
+    // desired behaviour until an agent is configured.
+    let agent_registry = build_agent_registry(config)?;
+    let agent_registry_arc = Arc::new(agent_registry);
+    if !agent_registry_arc.is_empty() {
+        tracing::info!(
+            agents = ?agent_registry_arc.list(),
+            "Agent delegation registry wired"
+        );
+    } else {
+        tracing::info!("Agent delegation registry empty — Implement steps will require config");
+    }
+
     // Task orchestrator — wired with the LLM provider for decomposition
     let decomposer: Arc<dyn orchestrate::TaskDecomposer> =
         Arc::new(orchestrate::LlmDecomposer::new(processor.llm_arc()));
+    let escalation_policy = delegate::EscalationPolicy {
+        fallbacks: config.agents.fallbacks.clone(),
+        retry_on_timeout: config.agents.retry_on_timeout,
+    };
     let orchestrator = orchestrate::TaskOrchestrator::new(decomposer)
         .with_audit(audit_trail)
         .with_confirmation(confirm_engine.clone())
-        .with_sandbox(sandbox_executor);
-    let processor = processor.with_orchestrator(Arc::new(orchestrator));
+        .with_sandbox(sandbox_executor)
+        .with_agents(agent_registry_arc.clone())
+        .with_delegation_policy(escalation_policy);
+    let processor = processor
+        .with_orchestrator(Arc::new(orchestrator))
+        .with_agent_registry(agent_registry_arc);
     tracing::info!("Task orchestrator wired");
 
     // ── Channel intelligence — always wired ─────────────────────────────
@@ -125,6 +149,82 @@ fn wire_safety_infrastructure(
     tracing::info!("Channel intelligence wired (router + preferences + correlator)");
 
     Ok(processor)
+}
+
+/// Build the agent delegation registry from `config.agents.delegates`.
+///
+/// Every entry maps to a concrete [`delegate::AgentDelegate`] implementation
+/// based on `kind`. Unknown kinds are warned about and skipped — missing
+/// required fields (e.g. `binary` for a `subprocess` entry) are fatal so
+/// bad config surfaces at boot instead of mid-delegation.
+fn build_agent_registry(
+    config: &brain_core::BrainConfig,
+) -> anyhow::Result<delegate::AgentRegistry> {
+    let mut registry = delegate::AgentRegistry::new();
+
+    for entry in &config.agents.delegates {
+        let capabilities = delegate::AgentCapabilities {
+            tags: entry.tags.clone(),
+            languages: Vec::new(),
+            max_concurrency: 1,
+            needs_network: true,
+        };
+
+        let workdir = entry.workdir.as_ref().map(std::path::PathBuf::from);
+
+        match entry.kind.as_str() {
+            "claude_code" => {
+                let binary = if entry.binary.is_empty() {
+                    "claude".to_string()
+                } else {
+                    entry.binary.clone()
+                };
+                let cfg = delegate::ClaudeCodeConfig {
+                    name: entry.name.clone(),
+                    binary,
+                    extra_args: entry.args.clone(),
+                    workdir,
+                    capabilities,
+                };
+                let d: Arc<dyn delegate::AgentDelegate> =
+                    Arc::new(delegate::ClaudeCodeDelegate::new(cfg));
+                registry.register(d);
+            }
+            "subprocess" => {
+                if entry.binary.is_empty() {
+                    anyhow::bail!(
+                        "agents.delegates[{}]: `subprocess` kind requires a non-empty `binary`",
+                        entry.name
+                    );
+                }
+                let mut sub_cfg =
+                    delegate::SubprocessAgentConfig::new(&entry.name, &entry.binary)
+                        .with_args(entry.args.clone())
+                        .with_capabilities(capabilities)
+                        .with_prompt_via_stdin(entry.prompt_via_stdin);
+                if let Some(dir) = workdir {
+                    sub_cfg = sub_cfg.with_workdir(dir);
+                }
+                let d: Arc<dyn delegate::AgentDelegate> =
+                    Arc::new(delegate::SubprocessAgentDelegate::new(sub_cfg));
+                registry.register(d);
+            }
+            other => {
+                tracing::warn!(
+                    kind = %other,
+                    name = %entry.name,
+                    "Unknown agent kind — skipping"
+                );
+                continue;
+            }
+        }
+
+        if let Some(alias) = &entry.alias {
+            registry.alias(alias.clone(), entry.name.clone());
+        }
+    }
+
+    Ok(registry)
 }
 
 /// Build the action dispatcher with all configured backends.

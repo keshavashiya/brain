@@ -17,6 +17,7 @@ audit = { workspace = true }
 confirm = { workspace = true }
 budget = { workspace = true }
 sandbox = { workspace = true }
+delegate = { workspace = true }
 cortex = { workspace = true }
 cerebellum = { workspace = true }
 hippocampus = { workspace = true }

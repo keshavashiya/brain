@@ -15,7 +15,8 @@ pub mod metrics;
 
 pub use auth::{check_auth, AuthResult};
 pub use config::{
-    AccessConfig, ApiKeyConfig, BrainConfig, DeliveryConfig, LlmConfig, ProviderEntry,
+    AccessConfig, AgentEntry, AgentsConfig, ApiKeyConfig, BrainConfig, DeliveryConfig, LlmConfig,
+    ProviderEntry,
 };
 
 /// Standard timeout constants for HTTP clients across Brain OS.

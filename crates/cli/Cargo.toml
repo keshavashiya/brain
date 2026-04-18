@@ -63,6 +63,7 @@ sandbox = { workspace = true }
 vault = { workspace = true }
 orchestrate = { workspace = true }
 channel = { workspace = true }
+delegate = { workspace = true }
 
 [dev-dependencies]
 tokio-tungstenite = { workspace = true }

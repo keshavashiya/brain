@@ -200,6 +200,33 @@ channel:
   #       initial_backoff_ms: 1000
   #       max_backoff_ms: 60000
 
+agents:
+  # Specialist agents that orchestrator `Implement` steps hand off to.
+  # Each entry registers a delegate under `name`. When empty, any task
+  # plan containing an `Implement` step will fail with a clear error
+  # until an agent is configured.
+  delegates: []
+  # Ordered fallback chain applied when a delegation fails on a
+  # retryable error (timeout, launch failure, non-zero exit).
+  fallbacks: []
+  # Whether timeout failures trigger fallback attempts.
+  retry_on_timeout: true
+  # Example:
+  #   delegates:
+  #     - name: "claude-code"
+  #       kind: "claude_code"
+  #       alias: "claude"
+  #       # binary: "claude"            # default; override for absolute path
+  #       args: ["--model", "claude-sonnet-4-6"]
+  #       tags: ["code-edit", "plan"]
+  #     - name: "local-script"
+  #       kind: "subprocess"
+  #       binary: "/usr/local/bin/my-agent"
+  #       args: ["--task", "{task_id}"]
+  #       prompt_via_stdin: true
+  #       tags: ["custom"]
+  #   fallbacks: ["local-script"]
+
 access:
   api_keys: []
   # A random API key is generated on `brain init` and printed to stdout.

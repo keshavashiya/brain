@@ -71,6 +71,10 @@ pub struct SignalProcessor {
     channel_preferences: Option<std::sync::Arc<dyn channel::ChannelPreferenceStore>>,
     /// Confirmation correlator — resolves approve/reject messages from any channel.
     confirmation_correlator: Option<std::sync::Arc<channel::ConfirmationCorrelator>>,
+
+    // ── Agent delegation (Phase 3) ───────────────────────────────────────
+    /// Registry of specialist agent delegates (Claude Code, custom subprocess, etc.).
+    agent_registry: Option<std::sync::Arc<delegate::AgentRegistry>>,
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

@@ -36,6 +36,8 @@ pub struct BrainConfig {
     pub access: AccessConfig,
     #[serde(default)]
     pub channel: ChannelIntelligenceConfig,
+    #[serde(default)]
+    pub agents: AgentsConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -335,6 +337,72 @@ fn default_relay_initial_backoff_ms() -> u64 {
 }
 fn default_relay_max_backoff_ms() -> u64 {
     60_000
+}
+
+/// Agent delegation configuration — specialist agents (Claude Code,
+/// custom subprocess/HTTP) that orchestrator-level `Implement` steps
+/// can hand off to.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentsConfig {
+    /// Registered delegates. Empty list means no delegation is wired —
+    /// `Implement` steps will fail with "agent unavailable" until an
+    /// entry is added. Order doesn't matter; fallback chains are
+    /// resolved via `fallbacks` below.
+    #[serde(default)]
+    pub delegates: Vec<AgentEntry>,
+    /// Ordered fallback agent names applied when a delegation fails on
+    /// a retryable error. Each name must match an entry in `delegates`.
+    #[serde(default)]
+    pub fallbacks: Vec<String>,
+    /// Whether timeout failures should trigger fallback retries
+    /// (default: true). Set to false for tasks where retry cost is
+    /// prohibitive.
+    #[serde(default = "default_retry_on_timeout")]
+    pub retry_on_timeout: bool,
+}
+
+fn default_retry_on_timeout() -> bool {
+    true
+}
+
+/// One registered delegate. `kind` selects the adapter:
+/// * `claude_code` — Anthropic `claude` CLI (spawns `claude -p -`)
+/// * `subprocess` — arbitrary binary; requires `binary`/`args`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentEntry {
+    /// Registered name — this is what appears in `StepAction::Implement`.
+    pub name: String,
+    /// Adapter kind (`"claude_code"` or `"subprocess"`).
+    pub kind: String,
+    /// Optional alias registered alongside `name`. Handy for routing
+    /// `"claude"` → `"claude-code"` without changing the entry name.
+    #[serde(default)]
+    pub alias: Option<String>,
+    /// Binary to launch. Defaults by `kind`: `"claude"` for
+    /// `claude_code`, required otherwise.
+    #[serde(default)]
+    pub binary: String,
+    /// Args passed to the binary. For `subprocess`, supports
+    /// `{prompt}` and `{task_id}` substitution. For `claude_code`,
+    /// these are appended after `-p -`.
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Default working directory for the delegate. Task-level workdir
+    /// (set by the orchestrator) wins when present.
+    #[serde(default)]
+    pub workdir: Option<String>,
+    /// Whether the prompt is written to the child's stdin rather than
+    /// templated into `args`. Defaults to `true`. Ignored for
+    /// `claude_code`, which always uses stdin.
+    #[serde(default = "default_prompt_via_stdin")]
+    pub prompt_via_stdin: bool,
+    /// Declared capability tags (e.g. `["code-edit","rust"]`).
+    #[serde(default)]
+    pub tags: Vec<String>,
+}
+
+fn default_prompt_via_stdin() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -871,6 +939,7 @@ impl Default for BrainConfig {
                 }],
             },
             channel: ChannelIntelligenceConfig::default(),
+            agents: AgentsConfig::default(),
         }
     }
 }

@@ -549,6 +549,7 @@ dependencies = [
  "brainos-confirm",
  "brainos-core",
  "brainos-cortex",
+ "brainos-delegate",
  "brainos-ganglia",
  "brainos-grpcadapter",
  "brainos-hippocampus",
@@ -761,6 +762,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "brainos-delegate"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "brainos-ganglia"
 version = "0.2.0"
 dependencies = [
@@ -878,6 +894,7 @@ dependencies = [
  "brainos-confirm",
  "brainos-core",
  "brainos-cortex",
+ "brainos-delegate",
  "brainos-hippocampus",
  "brainos-sandbox",
  "brainos-storage",
@@ -922,6 +939,7 @@ dependencies = [
  "brainos-confirm",
  "brainos-core",
  "brainos-cortex",
+ "brainos-delegate",
  "brainos-ganglia",
  "brainos-hippocampus",
  "brainos-orchestrate",

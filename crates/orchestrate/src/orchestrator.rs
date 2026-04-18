@@ -42,6 +42,10 @@ pub struct TaskOrchestrator {
     confirm: Option<Arc<dyn confirm::ConfirmationEngine>>,
     budget: Option<Arc<dyn budget::CostBudget>>,
     sandbox: Option<Arc<dyn sandbox::SandboxExecutor>>,
+    agents: Option<Arc<delegate::AgentRegistry>>,
+    /// Default fallback chain applied to every delegation. Individual
+    /// step failures follow this chain unless overridden in the future.
+    delegation_policy: delegate::EscalationPolicy,
     /// Active tasks indexed by task ID.
     tasks: RwLock<HashMap<String, TaskState>>,
 }
@@ -54,6 +58,8 @@ impl TaskOrchestrator {
             confirm: None,
             budget: None,
             sandbox: None,
+            agents: None,
+            delegation_policy: delegate::EscalationPolicy::default(),
             tasks: RwLock::new(HashMap::new()),
         }
     }
@@ -75,6 +81,19 @@ impl TaskOrchestrator {
 
     pub fn with_sandbox(mut self, sandbox: Arc<dyn sandbox::SandboxExecutor>) -> Self {
         self.sandbox = Some(sandbox);
+        self
+    }
+
+    /// Attach the agent registry — enables `StepAction::Implement`
+    /// dispatch to specialist delegates.
+    pub fn with_agents(mut self, agents: Arc<delegate::AgentRegistry>) -> Self {
+        self.agents = Some(agents);
+        self
+    }
+
+    /// Override the default delegation escalation policy.
+    pub fn with_delegation_policy(mut self, policy: delegate::EscalationPolicy) -> Self {
+        self.delegation_policy = policy;
         self
     }
 
@@ -258,13 +277,9 @@ impl TaskOrchestrator {
                 artifacts: vec![],
                 summary: "Plan produced".to_string(),
             }),
-            StepAction::Implement { spec, agent } => Ok(StepOutcome {
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_code: None,
-                artifacts: vec![],
-                summary: format!("Implementation delegated to {agent}: {spec}"),
-            }),
+            StepAction::Implement { spec, agent } => {
+                self.delegate_implement_step(spec, agent).await
+            }
             StepAction::Review { artifact } => Ok(StepOutcome {
                 stdout: String::new(),
                 stderr: String::new(),
@@ -374,6 +389,57 @@ impl TaskOrchestrator {
                 },
             }),
             Err(e) => Err(format!("Sandbox execution failed: {e}")),
+        }
+    }
+
+    /// Hand the step off to a registered [`AgentDelegate`]. Failures are
+    /// run through the configured escalation policy — a primary hang or
+    /// launch failure transparently falls over to the declared fallback
+    /// chain; anything the chain can't recover becomes a human escalation
+    /// recorded as a failed step outcome.
+    async fn delegate_implement_step(
+        &self,
+        spec: &str,
+        agent: &str,
+    ) -> Result<StepOutcome, String> {
+        let registry = self
+            .agents
+            .as_ref()
+            .ok_or_else(|| "Agent registry not attached to orchestrator".to_string())?;
+
+        let primary = registry
+            .get(agent)
+            .map_err(|e| format!("Delegate '{agent}' unavailable: {e}"))?;
+
+        let task = delegate::AgentTask::new(spec);
+        let outcome =
+            delegate::run_with_escalation(primary, registry.as_ref(), task, &self.delegation_policy)
+                .await;
+
+        match outcome {
+            delegate::EscalationOutcome::Succeeded(result) => Ok(StepOutcome {
+                stdout: result.stdout,
+                stderr: result.stderr,
+                exit_code: result.exit_code,
+                artifacts: result
+                    .artifacts
+                    .iter()
+                    .map(|a| a.reference.clone())
+                    .collect(),
+                summary: format!("{agent}: {}", result.summary),
+            }),
+            delegate::EscalationOutcome::Recovered { via, result } => Ok(StepOutcome {
+                stdout: result.stdout,
+                stderr: result.stderr,
+                exit_code: result.exit_code,
+                artifacts: result
+                    .artifacts
+                    .iter()
+                    .map(|a| a.reference.clone())
+                    .collect(),
+                summary: format!("{agent} failed; recovered via {via}: {}", result.summary),
+            }),
+            delegate::EscalationOutcome::EscalateToHuman { reason } => Err(reason),
         }
     }
 
@@ -526,6 +592,112 @@ mod tests {
         let task = orchestrator.get_task(&task_id).await.unwrap();
         assert_eq!(task.phase, TaskPhase::Completed);
         assert!(task.all_succeeded());
+    }
+
+    #[tokio::test]
+    async fn test_implement_step_dispatches_through_registry() {
+        use async_trait::async_trait;
+        use chrono::Utc;
+        use delegate::{
+            AgentCapabilities, AgentDelegate, AgentError, AgentRegistry, AgentResult, AgentTask,
+            AgentTaskStatus,
+        };
+
+        struct StubAgent;
+
+        #[async_trait]
+        impl AgentDelegate for StubAgent {
+            fn name(&self) -> &str {
+                "stub"
+            }
+            fn capabilities(&self) -> AgentCapabilities {
+                AgentCapabilities::default()
+            }
+            async fn delegate(&self, task: AgentTask) -> Result<AgentResult, AgentError> {
+                let now = Utc::now();
+                Ok(AgentResult {
+                    task_id: task.id,
+                    status: AgentTaskStatus::Succeeded,
+                    summary: format!("stubbed: {}", task.description),
+                    artifacts: vec![],
+                    stdout: "ok".to_string(),
+                    stderr: String::new(),
+                    exit_code: Some(0),
+                    started_at: now,
+                    completed_at: now,
+                })
+            }
+        }
+
+        let mut registry = AgentRegistry::new();
+        registry.register(Arc::new(StubAgent));
+        let registry = Arc::new(registry);
+
+        let implement_step = TaskStep {
+            id: "impl".to_string(),
+            description: "Implement feature".to_string(),
+            action: StepAction::Implement {
+                spec: "write a README".to_string(),
+                agent: "stub".to_string(),
+            },
+            depends_on: vec![],
+            tier: audit::ActionTier::Write,
+            estimated_tokens: 0,
+        };
+        let decomposer = Arc::new(MockDecomposer {
+            steps: vec![implement_step],
+        });
+        let orchestrator = TaskOrchestrator::new(decomposer).with_agents(registry);
+
+        let (task_id, _) = orchestrator
+            .plan("build it", DecompositionContext::default())
+            .await
+            .unwrap();
+        let summary = orchestrator.execute(&task_id).await.unwrap();
+        assert!(summary.contains("Completed"));
+
+        let task = orchestrator.get_task(&task_id).await.unwrap();
+        assert!(task.all_succeeded());
+        let step = task.step_states.get("impl").unwrap();
+        match step {
+            StepState::Completed { outcome, .. } => {
+                assert!(outcome.summary.contains("stub"));
+                assert!(outcome.summary.contains("write a README"));
+            }
+            other => panic!("expected Completed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_implement_step_without_registry_fails() {
+        let implement_step = TaskStep {
+            id: "impl".to_string(),
+            description: "Implement feature".to_string(),
+            action: StepAction::Implement {
+                spec: "do the thing".to_string(),
+                agent: "ghost".to_string(),
+            },
+            depends_on: vec![],
+            tier: audit::ActionTier::Write,
+            estimated_tokens: 0,
+        };
+        let decomposer = Arc::new(MockDecomposer {
+            steps: vec![implement_step],
+        });
+        let orchestrator = TaskOrchestrator::new(decomposer);
+
+        let (task_id, _) = orchestrator
+            .plan("build it", DecompositionContext::default())
+            .await
+            .unwrap();
+        orchestrator.execute(&task_id).await.unwrap();
+
+        let task = orchestrator.get_task(&task_id).await.unwrap();
+        let step = task.step_states.get("impl").unwrap();
+        assert!(
+            matches!(step, StepState::Failed { .. }),
+            "expected Failed without registry, got {step:?}"
+        );
     }
 
     #[tokio::test]

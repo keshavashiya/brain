@@ -203,6 +203,20 @@ impl SignalProcessor {
         self.confirmation_correlator.as_ref()
     }
 
+    // ── Agent delegation (Phase 3) ────────────────────────────────────────
+
+    /// Attach an agent registry (builder pattern). Orchestrator-managed
+    /// `StepAction::Implement` steps dispatch through this registry.
+    pub fn with_agent_registry(mut self, registry: Arc<delegate::AgentRegistry>) -> Self {
+        self.agent_registry = Some(registry);
+        self
+    }
+
+    /// Expose the agent registry.
+    pub fn agent_registry(&self) -> Option<&Arc<delegate::AgentRegistry>> {
+        self.agent_registry.as_ref()
+    }
+
     // ── Scheduled intent management ───────────────────────────────────────────
 
     /// List scheduled intents, optionally filtered by namespace.

@@ -41,10 +41,7 @@ impl StepState {
         matches!(
             self,
             StepState::Completed { .. }
-                | StepState::Failed {
-                    retryable: false,
-                    ..
-                }
+                | StepState::Failed { .. }
                 | StepState::Skipped { .. }
                 | StepState::Cancelled
         )
