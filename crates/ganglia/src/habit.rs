@@ -150,7 +150,7 @@ impl HabitEngine {
             })
             .collect();
 
-        patterns.sort_by(|a, b| b.occurrences.cmp(&a.occurrences));
+        patterns.sort_by_key(|p| std::cmp::Reverse(p.occurrences));
         Ok(patterns)
     }
 
