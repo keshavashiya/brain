@@ -412,9 +412,13 @@ impl TaskOrchestrator {
             .map_err(|e| format!("Delegate '{agent}' unavailable: {e}"))?;
 
         let task = delegate::AgentTask::new(spec);
-        let outcome =
-            delegate::run_with_escalation(primary, registry.as_ref(), task, &self.delegation_policy)
-                .await;
+        let outcome = delegate::run_with_escalation(
+            primary,
+            registry.as_ref(),
+            task,
+            &self.delegation_policy,
+        )
+        .await;
 
         match outcome {
             delegate::EscalationOutcome::Succeeded(result) => Ok(StepOutcome {

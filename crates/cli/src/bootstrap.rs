@@ -88,14 +88,12 @@ fn wire_safety_infrastructure(
     // Sandbox executor — isolated invocation with rlimits, allowlist, and
     // platform layers (macOS sandbox-exec / Linux namespaces).
     let exec_timeout = std::time::Duration::from_secs(config.security.exec_timeout_seconds as u64);
-    let sandbox = sandbox::IsolatedSandbox::new(
-        config.security.exec_allowlist.clone(),
-        exec_timeout,
-    )
-    .with_allowed_paths(vec![
-        std::path::PathBuf::from(&config.brain.data_dir),
-        std::env::current_dir().unwrap_or_default(),
-    ]);
+    let sandbox =
+        sandbox::IsolatedSandbox::new(config.security.exec_allowlist.clone(), exec_timeout)
+            .with_allowed_paths(vec![
+                std::path::PathBuf::from(&config.brain.data_dir),
+                std::env::current_dir().unwrap_or_default(),
+            ]);
     let sandbox_executor: Arc<dyn sandbox::SandboxExecutor> = Arc::new(sandbox);
     tracing::info!(
         allowlist_size = config.security.exec_allowlist.len(),
@@ -207,11 +205,10 @@ fn build_agent_registry(
                         entry.name
                     );
                 }
-                let mut sub_cfg =
-                    delegate::SubprocessAgentConfig::new(&entry.name, &entry.binary)
-                        .with_args(entry.args.clone())
-                        .with_capabilities(capabilities)
-                        .with_prompt_via_stdin(entry.prompt_via_stdin);
+                let mut sub_cfg = delegate::SubprocessAgentConfig::new(&entry.name, &entry.binary)
+                    .with_args(entry.args.clone())
+                    .with_capabilities(capabilities)
+                    .with_prompt_via_stdin(entry.prompt_via_stdin);
                 if let Some(dir) = workdir {
                     sub_cfg = sub_cfg.with_workdir(dir);
                 }

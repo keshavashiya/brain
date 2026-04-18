@@ -124,10 +124,7 @@ impl SubprocessAgentDelegate {
         self.config
             .args
             .iter()
-            .map(|a| {
-                a.replace("{prompt}", prompt)
-                    .replace("{task_id}", &task.id)
-            })
+            .map(|a| a.replace("{prompt}", prompt).replace("{task_id}", &task.id))
             .collect()
     }
 }
@@ -190,12 +187,10 @@ impl AgentDelegate for SubprocessAgentDelegate {
         }
 
         let wait = async {
-            child.wait_with_output().await.map_err(|e| {
-                AgentError::Io(format!(
-                    "waiting on {}: {e}",
-                    self.config.name
-                ))
-            })
+            child
+                .wait_with_output()
+                .await
+                .map_err(|e| AgentError::Io(format!("waiting on {}: {e}", self.config.name)))
         };
 
         let output = match timeout(Duration::from_secs(task.timeout_secs), wait).await {

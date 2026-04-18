@@ -62,17 +62,14 @@ pub(crate) async fn cmd_sandbox(
                 cmd = cmd.with_timeout(std::time::Duration::from_secs(secs));
             }
 
-            let default_timeout = std::time::Duration::from_secs(
-                config.security.exec_timeout_seconds as u64,
-            );
-            let sandbox = IsolatedSandbox::new(
-                config.security.exec_allowlist.clone(),
-                default_timeout,
-            )
-            .with_allowed_paths(vec![
-                std::path::PathBuf::from(&config.brain.data_dir),
-                std::env::current_dir().unwrap_or_default(),
-            ]);
+            let default_timeout =
+                std::time::Duration::from_secs(config.security.exec_timeout_seconds as u64);
+            let sandbox =
+                IsolatedSandbox::new(config.security.exec_allowlist.clone(), default_timeout)
+                    .with_allowed_paths(vec![
+                        std::path::PathBuf::from(&config.brain.data_dir),
+                        std::env::current_dir().unwrap_or_default(),
+                    ]);
             let outcome = sandbox.run(cmd).await?;
 
             if !outcome.stdout.is_empty() {

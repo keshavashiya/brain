@@ -138,9 +138,7 @@ impl IsolatedSandbox {
 
         for arg in &command.args {
             if arg.contains("169.254.169.254") {
-                return Err(SandboxError::Forbidden(
-                    "cloud metadata IP blocked".into(),
-                ));
+                return Err(SandboxError::Forbidden("cloud metadata IP blocked".into()));
             }
         }
 
@@ -191,10 +189,7 @@ impl IsolatedSandbox {
 (allow network-outbound (local ip))
 (allow network-outbound (remote unix-socket))
 "#;
-        let path = std::env::temp_dir().join(format!(
-            "brain-sandbox-{}.sb",
-            std::process::id()
-        ));
+        let path = std::env::temp_dir().join(format!("brain-sandbox-{}.sb", std::process::id()));
         std::fs::write(&path, profile)?;
         Ok(path)
     }
@@ -448,10 +443,7 @@ mod tests {
 
     #[tokio::test]
     async fn cloud_metadata_ip_blocked() {
-        let sandbox = IsolatedSandbox::new(
-            vec!["curl".into()],
-            Duration::from_secs(5),
-        );
+        let sandbox = IsolatedSandbox::new(vec!["curl".into()], Duration::from_secs(5));
         let cmd = SandboxCommand::new("curl", vec!["http://169.254.169.254/meta".into()]);
         let err = sandbox.run(cmd).await.unwrap_err();
         assert!(matches!(err, SandboxError::Forbidden(_)));
@@ -464,8 +456,8 @@ mod tests {
             nofile: 16,
             ..SandboxLimits::default()
         };
-        let sandbox = IsolatedSandbox::new(default_allowlist(), Duration::from_secs(5))
-            .with_limits(limits);
+        let sandbox =
+            IsolatedSandbox::new(default_allowlist(), Duration::from_secs(5)).with_limits(limits);
         // `sh -c 'ulimit -n'` prints the current soft nofile limit.
         let cmd = SandboxCommand::new("sh", vec!["-c".into(), "ulimit -n".into()]);
         let outcome = sandbox.run(cmd).await.unwrap();
