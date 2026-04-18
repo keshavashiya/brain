@@ -177,10 +177,21 @@ impl AgentDelegate for SubprocessAgentDelegate {
 
         if self.config.prompt_via_stdin {
             if let Some(stdin) = child.stdin.as_mut() {
-                stdin
-                    .write_all(prompt.as_bytes())
-                    .await
-                    .map_err(|e| AgentError::Io(format!("writing stdin: {e}")))?;
+                match stdin.write_all(prompt.as_bytes()).await {
+                    Ok(()) => {}
+                    // A child that exits before reading stdin (e.g. `false`,
+                    // or a CLI that rejects the prompt) closes the pipe and
+                    // our write lands on EPIPE. That's not our error to
+                    // surface — the exit status below is the real signal.
+                    Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                        tracing::debug!(
+                            agent = %self.config.name,
+                            task_id = %task.id,
+                            "child closed stdin before prompt was fully written"
+                        );
+                    }
+                    Err(e) => return Err(AgentError::Io(format!("writing stdin: {e}"))),
+                }
             }
             // Drop stdin so the child gets EOF and can finish.
             drop(child.stdin.take());
