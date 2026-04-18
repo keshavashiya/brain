@@ -162,6 +162,47 @@ impl SignalProcessor {
         self.orchestrator.as_ref()
     }
 
+    // ── Channel intelligence (Phase 4) ───────────────────────────────────
+
+    /// Attach a channel router (builder pattern).
+    pub fn with_channel_router(mut self, router: Arc<dyn channel::ChannelRouter>) -> Self {
+        self.channel_router = Some(router);
+        self
+    }
+
+    /// Expose the channel router.
+    pub fn channel_router(&self) -> Option<&Arc<dyn channel::ChannelRouter>> {
+        self.channel_router.as_ref()
+    }
+
+    /// Attach a channel preference store (builder pattern).
+    pub fn with_channel_preferences(
+        mut self,
+        preferences: Arc<dyn channel::ChannelPreferenceStore>,
+    ) -> Self {
+        self.channel_preferences = Some(preferences);
+        self
+    }
+
+    /// Expose the channel preference store.
+    pub fn channel_preferences(&self) -> Option<&Arc<dyn channel::ChannelPreferenceStore>> {
+        self.channel_preferences.as_ref()
+    }
+
+    /// Attach a confirmation correlator (builder pattern).
+    pub fn with_confirmation_correlator(
+        mut self,
+        correlator: Arc<channel::ConfirmationCorrelator>,
+    ) -> Self {
+        self.confirmation_correlator = Some(correlator);
+        self
+    }
+
+    /// Expose the confirmation correlator.
+    pub fn confirmation_correlator(&self) -> Option<&Arc<channel::ConfirmationCorrelator>> {
+        self.confirmation_correlator.as_ref()
+    }
+
     // ── Scheduled intent management ───────────────────────────────────────────
 
     /// List scheduled intents, optionally filtered by namespace.

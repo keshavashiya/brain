@@ -96,6 +96,10 @@ pub trait LlmProvider: Send + Sync {
 
     /// Get the provider name.
     fn name(&self) -> &str;
+
+    /// List models available from this provider. Used by `select_provider`
+    /// to probe reachability and match `preferred_models` during startup.
+    async fn list_models(&self) -> Result<Vec<String>, LlmError>;
 }
 
 // ─── Ollama Provider ────────────────────────────────────────────────────────
@@ -336,6 +340,30 @@ impl LlmProvider for OllamaProvider {
 
     fn name(&self) -> &str {
         "ollama"
+    }
+
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        #[derive(Deserialize)]
+        struct Tag {
+            name: String,
+        }
+        #[derive(Deserialize)]
+        struct Tags {
+            models: Vec<Tag>,
+        }
+
+        let url = format!("{}/api/tags", self.base_url);
+        let resp = self.client.get(&url).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(LlmError::Api {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+        let data: Tags = resp.json().await?;
+        Ok(data.models.into_iter().map(|m| m.name).collect())
     }
 }
 
@@ -626,6 +654,30 @@ impl LlmProvider for OpenAiProvider {
     fn name(&self) -> &str {
         "openai"
     }
+
+    async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+        #[derive(Deserialize)]
+        struct ModelEntry {
+            id: String,
+        }
+        #[derive(Deserialize)]
+        struct Models {
+            data: Vec<ModelEntry>,
+        }
+
+        let url = format!("{}/models", self.base_url);
+        let resp = self.build_request(self.client.get(&url)).send().await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(LlmError::Api {
+                status: status.as_u16(),
+                message: body,
+            });
+        }
+        let data: Models = resp.json().await?;
+        Ok(data.data.into_iter().map(|m| m.id).collect())
+    }
 }
 
 // ─── Provider Factory ───────────────────────────────────────────────────────
@@ -658,33 +710,11 @@ impl Default for ProviderConfig {
 ///
 /// Resolution order:
 /// 1. `ollama` → `OllamaProvider`.
-/// 2. `qwen-oauth` → `QwenOAuthProvider` (requires vault).
-/// 3. Built-in preset (openai, openrouter, groq, deepseek, together,
-///    gemini-compat) → OpenAI-compatible provider at the preset's base URL.
-///    An explicit non-empty `base_url` overrides the preset.
-/// 4. Unknown provider → fall back to default Ollama with a warning.
+/// 2. `openai_compat` (or a built-in preset: openai, openrouter, groq,
+///    deepseek, together, gemini-compat) → OpenAI-compatible provider.
+///    An explicit non-empty `base_url` overrides the preset default.
+/// 3. Unknown provider → fall back to default Ollama with a warning.
 pub fn create_provider(config: &ProviderConfig) -> Result<Box<dyn LlmProvider>, LlmError> {
-    create_provider_with_vault(config, None)
-}
-
-pub fn create_provider_with_vault(
-    config: &ProviderConfig,
-    vault: Option<std::sync::Arc<dyn vault::CredentialVault>>,
-) -> Result<Box<dyn LlmProvider>, LlmError> {
-    if config.provider == "qwen-oauth" {
-        let vault = vault.ok_or_else(|| {
-            LlmError::ProviderUnavailable(
-                "qwen-oauth requires a vault — run `brain vault init` first".into(),
-            )
-        })?;
-        return Ok(Box::new(crate::qwen::QwenOAuthProvider::new(
-            vault,
-            &config.model,
-            config.temperature,
-            Some(config.max_tokens),
-        )?));
-    }
-
     if config.provider == "ollama" {
         let provider = OllamaProvider::new(
             &config.base_url,
@@ -699,11 +729,18 @@ pub fn create_provider_with_vault(
         return Ok(Box::new(provider));
     }
 
-    if let Some(preset) = crate::presets::resolve(&config.provider) {
-        let base_url = if config.base_url.is_empty() {
-            preset.base_url
-        } else {
+    let preset_base = crate::presets::resolve(&config.provider).map(|p| p.base_url);
+
+    if config.provider == "openai_compat" || preset_base.is_some() {
+        let base_url = if !config.base_url.is_empty() {
             config.base_url.as_str()
+        } else if let Some(b) = preset_base {
+            b
+        } else {
+            return Err(LlmError::ProviderUnavailable(format!(
+                "provider `{}` has no base_url configured",
+                config.provider
+            )));
         };
         return Ok(Box::new(OpenAiProvider::new(
             base_url,
@@ -719,6 +756,121 @@ pub fn create_provider_with_vault(
         "Unknown LLM provider, falling back to default Ollama"
     );
     Ok(Box::new(OllamaProvider::default_config()?))
+}
+
+// ─── Multi-provider selection ───────────────────────────────────────────────
+
+/// Build a `ProviderConfig` from a `brain_core::ProviderEntry` and shared
+/// temperature/max_tokens. `model_override` lets `select_provider` swap in
+/// a preferred model discovered via `list_models`.
+fn provider_config_from_entry(
+    entry: &brain_core::ProviderEntry,
+    temperature: f64,
+    max_tokens: i32,
+    model_override: Option<&str>,
+) -> ProviderConfig {
+    let api_key = entry.api_key.trim();
+    ProviderConfig {
+        provider: entry.kind.clone(),
+        base_url: entry.base_url.clone(),
+        api_key: if api_key.is_empty() {
+            None
+        } else {
+            Some(api_key.to_string())
+        },
+        model: model_override.unwrap_or(&entry.model).to_string(),
+        temperature,
+        max_tokens,
+    }
+}
+
+/// Probe every configured provider, pick the first reachable one whose
+/// `preferred_models` intersects the live model list, and return it.
+///
+/// When `llm.providers` is empty we synthesise a single entry from the
+/// legacy `llm.provider`/`model`/`base_url`/`api_key` fields — so existing
+/// configs keep working unchanged.
+///
+/// Fail-safe: if no provider answers `list_models`, we still return the
+/// first entry as a best effort rather than erroring out (the underlying
+/// generate call will surface the real problem when used).
+pub async fn select_provider(
+    llm: &brain_core::LlmConfig,
+) -> Result<Box<dyn LlmProvider>, LlmError> {
+    let entries = synthesise_entries(llm);
+    let max_tokens = llm.max_tokens as i32;
+
+    if entries.is_empty() {
+        return Err(LlmError::ProviderUnavailable(
+            "no LLM providers configured".into(),
+        ));
+    }
+
+    for entry in &entries {
+        let cfg = provider_config_from_entry(entry, llm.temperature, max_tokens, None);
+        let probe = match create_provider(&cfg) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(name = %entry.name, error = %e, "skipping provider — construction failed");
+                continue;
+            }
+        };
+
+        match probe.list_models().await {
+            Ok(models) => {
+                let chosen = pick_model(&entry.preferred_models, &models, &entry.model);
+                tracing::info!(
+                    name = %entry.name,
+                    kind = %entry.kind,
+                    model = %chosen,
+                    "LLM provider selected"
+                );
+                let cfg =
+                    provider_config_from_entry(entry, llm.temperature, max_tokens, Some(&chosen));
+                return create_provider(&cfg);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    name = %entry.name,
+                    error = %e,
+                    "provider unreachable — trying next"
+                );
+            }
+        }
+    }
+
+    // All probes failed — fall back to the first entry so startup continues
+    // and the caller surfaces the real failure on first generate().
+    let first = &entries[0];
+    tracing::warn!(
+        name = %first.name,
+        "no provider answered list_models — falling back to first entry"
+    );
+    let cfg = provider_config_from_entry(first, llm.temperature, max_tokens, None);
+    create_provider(&cfg)
+}
+
+fn synthesise_entries(llm: &brain_core::LlmConfig) -> Vec<brain_core::ProviderEntry> {
+    if !llm.providers.is_empty() {
+        return llm.providers.clone();
+    }
+    vec![brain_core::ProviderEntry {
+        name: "default".to_string(),
+        kind: llm.provider.clone(),
+        base_url: llm.base_url.clone(),
+        api_key: llm.api_key.clone(),
+        model: llm.model.clone(),
+        preferred_models: Vec::new(),
+    }]
+}
+
+fn pick_model(preferred: &[String], available: &[String], fallback: &str) -> String {
+    for want in preferred {
+        if available.iter().any(|m| m == want) {
+            return want.clone();
+        }
+    }
+    fallback.to_string()
 }
 
 /// Extract a JSON object from an LLM response string.

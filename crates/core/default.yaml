@@ -20,6 +20,29 @@ llm:
   api_key: ""                 # Required for openai provider; also settable via BRAIN_LLM__API_KEY env var
   temperature: 0.7
   max_tokens: 4096
+  # Optional multi-provider pool. When set, Brain probes each entry's
+  # /models endpoint at startup and picks the first reachable one whose
+  # `preferred_models` are live. Falls back to the single-provider fields
+  # above when empty. `kind` accepts `ollama`, `openai_compat`, or any
+  # preset name (openai, openrouter, groq, deepseek, together, gemini-compat).
+  providers: []
+  # Example:
+  #   providers:
+  #     - name: "local"
+  #       kind: "ollama"
+  #       base_url: "http://localhost:11434"
+  #       model: "qwen2.5-coder:7b"
+  #       preferred_models: ["qwen2.5-coder:7b", "llama3.1:8b"]
+  #     - name: "groq-free"
+  #       kind: "groq"
+  #       api_key: "gsk_..."
+  #       model: "llama-3.3-70b-versatile"
+  #       preferred_models: ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+  #     - name: "openrouter-free"
+  #       kind: "openrouter"
+  #       api_key: "sk-or-..."
+  #       model: "meta-llama/llama-3.1-8b-instruct:free"
+  #       preferred_models: ["meta-llama/llama-3.1-8b-instruct:free"]
 
 embedding:
   model: "nomic-embed-text"    # must be pulled: `ollama pull nomic-embed-text`
@@ -161,6 +184,21 @@ adapters:
   grpc:
     enabled: true
     port: 19792
+
+channel:
+  # Bidirectional relay gateways (long-lived WebSocket, not one-way webhooks).
+  # Each relay registers with the channel router and participates in
+  # cross-channel approval correlation — a user can approve on any relay.
+  relays: []
+  # Example:
+  #   relays:
+  #     - id: "telegram"
+  #       label: "Telegram"
+  #       url: "ws://127.0.0.1:7000/brain"
+  #       namespace: "personal"
+  #       api_key: ""
+  #       initial_backoff_ms: 1000
+  #       max_backoff_ms: 60000
 
 access:
   api_keys: []

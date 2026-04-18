@@ -15,11 +15,14 @@ name = "brain"
 path = "src/main.rs"
 
 [features]
-default = ["grpc", "bridge", "encryption", "ganglia"]
+default = ["grpc", "encryption", "ganglia"]
 grpc = ["dep:grpcadapter"]
-bridge = ["dep:bridge"]
 encryption = ["storage/encryption", "signal/encryption"]
 ganglia = ["dep:ganglia"]
+# `bridge` is now a required dep (pulled transitively via `channel`);
+# keep this feature as a no-op so CI's `--features bridge` invocations
+# continue to work without churn.
+bridge = []
 
 [dependencies]
 brain_core = { workspace = true }
@@ -34,7 +37,7 @@ httpadapter = { workspace = true }
 wsadapter = { workspace = true }
 grpcadapter = { workspace = true, optional = true }
 mcp = { workspace = true }
-bridge = { workspace = true, optional = true }
+bridge = { workspace = true }
 backends = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures-util = "0.3"
@@ -59,6 +62,7 @@ budget = { workspace = true }
 sandbox = { workspace = true }
 vault = { workspace = true }
 orchestrate = { workspace = true }
+channel = { workspace = true }
 
 [dev-dependencies]
 tokio-tungstenite = { workspace = true }

@@ -500,10 +500,8 @@ fn validate_args(command: &str, args: &[String]) -> Result<(), String> {
                 }
             }
         }
-        "find" => {
-            if args.iter().any(|a| a == "-delete") {
-                return Err("find -delete is blocked".to_string());
-            }
+        "find" if args.iter().any(|a| a == "-delete") => {
+            return Err("find -delete is blocked".to_string());
         }
         "cargo" => {
             let cargo_allowed = [

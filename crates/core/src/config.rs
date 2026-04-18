@@ -34,6 +34,8 @@ pub struct BrainConfig {
     pub proactivity: ProactivityConfig,
     pub adapters: AdaptersConfig,
     pub access: AccessConfig,
+    #[serde(default)]
+    pub channel: ChannelIntelligenceConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +69,39 @@ pub struct LlmConfig {
     /// Can also be set via `BRAIN_LLM__API_KEY` environment variable.
     #[serde(default)]
     pub api_key: String,
+    /// Optional multi-provider entries. When non-empty, startup probes each
+    /// entry's `/models` endpoint and selects the first reachable one whose
+    /// `preferred_models` are live. When empty, the legacy single-provider
+    /// fields above are used as-is.
+    #[serde(default)]
+    pub providers: Vec<ProviderEntry>,
+}
+
+/// One entry in `llm.providers` — a named destination that the cortex
+/// will probe at startup. Only two transport kinds are recognised:
+/// `ollama` (local) and `openai_compat` (any OpenAI-compatible endpoint).
+/// A preset name (`groq`, `openrouter`, `deepseek`, `together`,
+/// `gemini-compat`, `openai`) is also accepted as shorthand for
+/// `openai_compat` with a prefilled `base_url`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderEntry {
+    /// Human-readable identifier (`"primary"`, `"groq-free"`, …).
+    pub name: String,
+    /// Transport kind or preset name.
+    pub kind: String,
+    /// Override the preset's base_url; required when `kind` is
+    /// `openai_compat` without a preset.
+    #[serde(default)]
+    pub base_url: String,
+    /// Bearer token for OpenAI-compatible providers.
+    #[serde(default)]
+    pub api_key: String,
+    /// Fallback model used when no `preferred_models` entry is live.
+    pub model: String,
+    /// Priority-ordered models. The first one present in the live
+    /// `list_models` response wins.
+    #[serde(default)]
+    pub preferred_models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,6 +289,52 @@ where
             (k, config)
         })
         .collect())
+}
+
+/// Channel intelligence configuration — bidirectional relay gateways
+/// (Slack bot, Telegram bridge, custom WS agents) that integrate with the
+/// channel router + confirmation correlator.
+///
+/// Distinct from `actions.messaging.channels`, which configures one-way
+/// webhook pushes. Entries here open a long-lived WebSocket and can
+/// carry user responses back into Brain.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChannelIntelligenceConfig {
+    #[serde(default)]
+    pub relays: Vec<RelayEntry>,
+}
+
+/// One relay gateway entry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayEntry {
+    /// Stable id registered with the channel router (e.g. "slack", "telegram").
+    pub id: String,
+    /// Human-readable label used in CLI and audit entries.
+    pub label: String,
+    /// WebSocket URL of the gateway.
+    pub url: String,
+    /// Memory namespace attributed to messages arriving on this relay.
+    #[serde(default = "default_relay_namespace")]
+    pub namespace: String,
+    /// Optional bearer token forwarded to the gateway (if supported).
+    #[serde(default)]
+    pub api_key: String,
+    /// Reconnection tuning — initial backoff in milliseconds.
+    #[serde(default = "default_relay_initial_backoff_ms")]
+    pub initial_backoff_ms: u64,
+    /// Reconnection tuning — max backoff in milliseconds.
+    #[serde(default = "default_relay_max_backoff_ms")]
+    pub max_backoff_ms: u64,
+}
+
+fn default_relay_namespace() -> String {
+    "personal".to_string()
+}
+fn default_relay_initial_backoff_ms() -> u64 {
+    1_000
+}
+fn default_relay_max_backoff_ms() -> u64 {
+    60_000
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -687,6 +768,7 @@ impl Default for BrainConfig {
                 temperature: 0.7,
                 max_tokens: 4096,
                 api_key: String::new(),
+                providers: Vec::new(),
             },
             embedding: EmbeddingConfig {
                 model: "nomic-embed-text".to_string(),
@@ -788,6 +870,7 @@ impl Default for BrainConfig {
                     permissions: vec!["read".to_string(), "write".to_string()],
                 }],
             },
+            channel: ChannelIntelligenceConfig::default(),
         }
     }
 }

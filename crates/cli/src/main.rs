@@ -1,5 +1,4 @@
 mod audit;
-mod auth;
 mod bootstrap;
 #[cfg(feature = "bridge")]
 mod bridge;
@@ -241,17 +240,6 @@ enum Commands {
     Sandbox {
         #[command(subcommand)]
         action: sandbox::SandboxAction,
-    },
-
-    /// Authenticate with an OAuth LLM provider (Qwen, Gemini, etc.).
-    ///
-    /// Examples:
-    ///   brain auth login qwen             # device-code flow, stores tokens in vault
-    ///   brain auth status qwen            # show token expiry and endpoint
-    ///   brain auth logout qwen            # clear stored tokens
-    Auth {
-        #[command(subcommand)]
-        action: auth::AuthAction,
     },
 
     /// Manage the credential vault — store, retrieve, list, delete secrets.
@@ -693,11 +681,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         // ── sandbox ─────────────────────────────────────────────────────────
         Commands::Sandbox { action } => {
             sandbox::cmd_sandbox(&config, action).await?;
-        }
-
-        // ── auth ────────────────────────────────────────────────────────────
-        Commands::Auth { action } => {
-            auth::cmd_auth(&config, action).await?;
         }
 
         // ── vault ───────────────────────────────────────────────────────────

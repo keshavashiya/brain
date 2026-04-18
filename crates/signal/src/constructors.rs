@@ -60,21 +60,17 @@ impl SignalProcessor {
             tracing::warn!("ProcedureStore table init failed (non-fatal): {e}");
         }
 
-        // Create LLM provider
+        // Probe configured providers (multi-entry if `llm.providers` is set;
+        // otherwise synthesised from the legacy single-provider fields) and
+        // select the first reachable one. Env-var API key stays backfilled
+        // onto the legacy field for single-provider configs.
         let llm_api_key = resolve_llm_api_key(&config);
-        let llm_config = cortex::llm::ProviderConfig {
-            provider: config.llm.provider.clone(),
-            base_url: config.llm.base_url.clone(),
-            api_key: if llm_api_key.is_empty() {
-                None
-            } else {
-                Some(llm_api_key.clone())
-            },
-            model: config.llm.model.clone(),
-            temperature: config.llm.temperature,
-            max_tokens: config.llm.max_tokens as i32,
-        };
-        let llm: Arc<dyn cortex::LlmProvider> = cortex::llm::create_provider(&llm_config)
+        let mut llm_cfg = config.llm.clone();
+        if llm_cfg.providers.is_empty() {
+            llm_cfg.api_key = llm_api_key.clone();
+        }
+        let llm: Arc<dyn cortex::LlmProvider> = cortex::llm::select_provider(&llm_cfg)
+            .await
             .map_err(|e| SignalError::Init(format!("Failed to create LLM provider: {e}")))?
             .into();
 
@@ -164,6 +160,9 @@ impl SignalProcessor {
             sandbox_executor: None,
             credential_vault: None,
             orchestrator: None,
+            channel_router: None,
+            channel_preferences: None,
+            confirmation_correlator: None,
         };
 
         // Warm up the LLM model in the background to avoid first-call timeout

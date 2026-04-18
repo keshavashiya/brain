@@ -14,7 +14,9 @@ pub mod cors;
 pub mod metrics;
 
 pub use auth::{check_auth, AuthResult};
-pub use config::{AccessConfig, ApiKeyConfig, BrainConfig, DeliveryConfig};
+pub use config::{
+    AccessConfig, ApiKeyConfig, BrainConfig, DeliveryConfig, LlmConfig, ProviderEntry,
+};
 
 /// Standard timeout constants for HTTP clients across Brain OS.
 pub mod timeouts {

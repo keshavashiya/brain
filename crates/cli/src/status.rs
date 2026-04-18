@@ -79,21 +79,14 @@ pub(crate) async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Res
         if g.enabled { "active" } else { "dormant" }
     );
 
-    // LLM health
+    // LLM health — `select_provider` handles multi-entry probing and the
+    // legacy single-entry fallback, so `status` mirrors daemon boot exactly.
     let llm_api_key = resolve_llm_api_key(config);
-    let llm_cfg = cortex::llm::ProviderConfig {
-        provider: config.llm.provider.clone(),
-        base_url: config.llm.base_url.clone(),
-        api_key: if llm_api_key.is_empty() {
-            None
-        } else {
-            Some(llm_api_key)
-        },
-        model: config.llm.model.clone(),
-        temperature: config.llm.temperature,
-        max_tokens: config.llm.max_tokens as i32,
-    };
-    let llm_healthy = match cortex::llm::create_provider(&llm_cfg) {
+    let mut llm_cfg = config.llm.clone();
+    if llm_cfg.providers.is_empty() {
+        llm_cfg.api_key = llm_api_key;
+    }
+    let llm_healthy = match cortex::llm::select_provider(&llm_cfg).await {
         Ok(provider) => provider.health_check().await,
         Err(e) => {
             tracing::warn!("Failed to create LLM provider for health check: {e}");

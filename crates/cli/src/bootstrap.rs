@@ -104,10 +104,25 @@ fn wire_safety_infrastructure(
         Arc::new(orchestrate::LlmDecomposer::new(processor.llm_arc()));
     let orchestrator = orchestrate::TaskOrchestrator::new(decomposer)
         .with_audit(audit_trail)
-        .with_confirmation(confirm_engine)
+        .with_confirmation(confirm_engine.clone())
         .with_sandbox(sandbox_executor);
     let processor = processor.with_orchestrator(Arc::new(orchestrator));
     tracing::info!("Task orchestrator wired");
+
+    // ── Channel intelligence — always wired ─────────────────────────────
+    let pref_store = channel::SqlitePreferenceStore::new(db.clone());
+    pref_store
+        .ensure_tables()
+        .map_err(|e| anyhow::anyhow!("Channel preference table init failed: {e}"))?;
+    let preferences: Arc<dyn channel::ChannelPreferenceStore> = Arc::new(pref_store);
+    let router: Arc<dyn channel::ChannelRouter> =
+        Arc::new(channel::DefaultChannelRouter::new(preferences.clone()));
+    let correlator = Arc::new(channel::ConfirmationCorrelator::new(confirm_engine));
+    let processor = processor
+        .with_channel_preferences(preferences)
+        .with_channel_router(router)
+        .with_confirmation_correlator(correlator);
+    tracing::info!("Channel intelligence wired (router + preferences + correlator)");
 
     Ok(processor)
 }

@@ -2,7 +2,37 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use backends::*;
+use bridge::BridgeMessage;
+use channel::relay::SignalHandler;
+
+/// Bridge-facing handler that forwards non-correlation messages into the
+/// main signal pipeline. Used by each configured relay adapter so replies
+/// on Telegram/Slack/etc. hit the same pipeline as HTTP/WS traffic.
+struct RelayPipelineHandler {
+    processor: Arc<signal::SignalProcessor>,
+    channel_id: String,
+    namespace: String,
+}
+
+#[async_trait]
+impl SignalHandler for RelayPipelineHandler {
+    async fn handle(&self, msg: &BridgeMessage) -> String {
+        let sender = msg.source.clone().unwrap_or_else(|| "relay".to_string());
+        let sig = signal::Signal::new(
+            signal::SignalSource::WebSocket,
+            &self.channel_id,
+            sender,
+            &msg.content,
+        )
+        .with_namespace(&self.namespace);
+        match self.processor.process(sig).await {
+            Ok(resp) => signal::response_to_text(&resp.response),
+            Err(e) => format!("error: {e}"),
+        }
+    }
+}
 
 pub(crate) async fn cmd_serve(
     config: &brain_core::BrainConfig,
@@ -344,6 +374,63 @@ pub(crate) async fn cmd_serve(
             }
         });
         tracing::info!(interval_hours, "Memory consolidation scheduled");
+    }
+
+    // ── Channel relay adapters ────────────────────────────────────────
+    if !config.channel.relays.is_empty() {
+        let router = processor.channel_router().cloned();
+        let correlator = processor.confirmation_correlator().cloned();
+        let prefs = processor.channel_preferences().cloned();
+        match (router, correlator, prefs) {
+            (Some(router), Some(correlator), Some(prefs)) => {
+                for entry in &config.channel.relays {
+                    let bridge_cfg = bridge::BridgeConfig {
+                        initial_backoff_ms: entry.initial_backoff_ms,
+                        max_backoff_ms: entry.max_backoff_ms,
+                        max_reconnect_attempts: None,
+                    };
+                    let mut relay_cfg =
+                        channel::RelayConfig::new(&entry.id, &entry.label, &entry.url)
+                            .with_namespace(&entry.namespace)
+                            .with_bridge(bridge_cfg);
+                    if !entry.api_key.is_empty() {
+                        relay_cfg = relay_cfg.with_api_key(&entry.api_key);
+                    }
+                    let fallback: Arc<dyn SignalHandler> = Arc::new(RelayPipelineHandler {
+                        processor: processor.clone(),
+                        channel_id: entry.id.clone(),
+                        namespace: entry.namespace.clone(),
+                    });
+                    let adapter = Arc::new(channel::RelayAdapter::new(
+                        relay_cfg,
+                        router.clone(),
+                        correlator.clone(),
+                        prefs.clone(),
+                        fallback,
+                    ));
+                    if let Err(e) = adapter.register_channel().await {
+                        tracing::warn!(
+                            channel = %entry.id,
+                            "Relay channel registration failed (non-fatal): {e}"
+                        );
+                    } else {
+                        println!("  Relay        → {} ({})", entry.label, entry.url);
+                    }
+                    let a = adapter.clone();
+                    set.spawn(async move {
+                        if let Err(e) = a.run().await {
+                            tracing::warn!("Relay adapter exited: {e}");
+                        }
+                        Ok(())
+                    });
+                }
+            }
+            _ => {
+                tracing::warn!(
+                    "channel.relays configured but channel intelligence is not wired — skipping"
+                );
+            }
+        }
     }
 
     println!("\nBrain is conscious. Press Ctrl+C to sleep.\n");

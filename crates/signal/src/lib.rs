@@ -63,6 +63,14 @@ pub struct SignalProcessor {
     credential_vault: Option<std::sync::Arc<dyn vault::CredentialVault>>,
     /// Task orchestrator — decomposes requests into executable plans (Phase 2).
     orchestrator: Option<std::sync::Arc<orchestrate::TaskOrchestrator>>,
+
+    // ── Channel intelligence (opt-in via builder) ────────────────────────
+    /// Channel router — selects best-available surface for proactive delivery.
+    channel_router: Option<std::sync::Arc<dyn channel::ChannelRouter>>,
+    /// Channel preference store — learned weights per (namespace, category).
+    channel_preferences: Option<std::sync::Arc<dyn channel::ChannelPreferenceStore>>,
+    /// Confirmation correlator — resolves approve/reject messages from any channel.
+    confirmation_correlator: Option<std::sync::Arc<channel::ConfirmationCorrelator>>,
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
