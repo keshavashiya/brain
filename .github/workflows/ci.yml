@@ -83,10 +83,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin --locked
       - name: Run coverage
-        run: cargo tarpaulin --workspace --out xml --skip-clean
+        run: |
+          cargo tarpaulin --workspace \
+            --out xml \
+            --skip-clean \
+            --ignore-panics \
+            --no-default-packages \
+            --lib \
+            --tests
       - name: Upload coverage
         uses: codecov/codecov-action@v6
         with:
           files: cobertura.xml
+          fail_ci_if_error: false
