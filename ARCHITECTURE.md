@@ -1,6 +1,6 @@
 # Brain OS — Architecture
 
-This document covers the internal design of Brain OS: key abstractions, data flow, storage layer, background loops, the bridge relay pattern for external integrations, and step-by-step guides for building new protocol adapters.
+This document covers the internal design of Brain OS: key abstractions, data flow, storage layer, background loops, delegation and channel transport architecture, and step-by-step guides for building new protocol adapters.
 
 ---
 
@@ -14,7 +14,7 @@ This document covers the internal design of Brain OS: key abstractions, data flo
 - [Action Backends](#action-dispatcher-backends-internal)
 - [Memory Namespaces](#memory-namespaces)
 - [Security Model](#security-model)
-- [Bridge Pattern](#bridge-pattern-external-gateway-relay)
+- [Channel Integration Pattern](#channel-integration-pattern)
 
 ---
 
@@ -34,8 +34,9 @@ brain/
 │   │
 │   ├── thalamus/       # Intent classification — the primary user-facing surface
 │   │                     Regex fast-path (compiled at startup) + async LLM fallback with timeout
-│   │                     10 intent types: StoreFact, Recall, Forget, Chat, SystemStatus,
-│   │                     WebSearch, Schedule, SendMessage, ExecuteCommand, DecomposeTask
+│   │                     11 intent types: StoreFact, Recall, Forget, Chat, SystemStatus,
+│   │                     WebSearch, Schedule, SendMessage, ExecuteCommand, DecomposeTask,
+│   │                     QueryAgents
 │   │                     (New user-facing features add intents here, not CLI subcommands.)
 │   │
 │   ├── amygdala/       # Importance scoring with per-process novelty detection → [0.0, 1.0]
@@ -100,11 +101,20 @@ brain/
 │   │                     approved plan of tiered steps, then drives execution.
 │   │                     Surfaced via the DecomposeTask intent.
 │   │
+│   ├── delegate/       # External agent delegation
+│   │                     AgentDelegate trait, AgentRegistry, DelegateDiscovery,
+│   │                     SubprocessDelegate, ClaudeCodeDelegate, EscalationHandler
+│   │                     Config supports auto-discovery, discovery overrides,
+│   │                     manual delegates, and ordered fallback escalation
+│   │
 │   ├── channel/        # Channel routing + learned preferences
 │   │                     ChannelRouter (DefaultChannelRouter), ChannelPreferenceStore
 │   │                     (EMA-smoothed weights), ConfirmationCorrelator (inbound nonce
-│   │                     parsing), RelayAdapter (Slack/Telegram/Discord via bridge).
-│   │                     Composes with existing NotificationRouter webhook tiers.
+│   │                     parsing), RelayAdapter (external WebSocket gateways), and
+│   │                     ChannelTransport engines: polled, webhook-inbound,
+│   │                     webhook-outbound, preset/jsonpath/send helpers.
+│   │                     `channel.transports[]` is first-class; webhook-inbound
+│   │                     route wiring is still pending in the HTTP adapter.
 │   │
 │   ├── storage/        # Storage abstraction layer
 │   │   ├── sqlite      # SqlitePool: 18 migrations (v1–v18), WAL mode, thread-safe Mutex<Connection>
@@ -161,14 +171,14 @@ brain/
 
 ### Workspace Members
 
-23 crates total:
+24 crates total:
 
 ```
 core  storage  hippocampus  cortex  thalamus  amygdala  signal
 adapters/http  adapters/ws  adapters/grpc  adapters/mcp
 cerebellum  ganglia  bridge  backends
 audit  confirm  budget  sandbox  vault
-orchestrate  channel
+orchestrate  delegate  channel
 cli
 ```
 
@@ -183,7 +193,10 @@ cli ──► signal::SignalProcessor (Arc<SignalProcessor>)
             │       └── storage (SQLite + ruvector-core HNSW + AES-GCM encryption)
             ├── cortex          (LLM providers + context assembly + action dispatch)
             ├── cerebellum      (procedure store + trigger matching)
-            └── ganglia         (proactivity / habit engine)
+            ├── ganglia         (proactivity / habit engine)
+            ├── orchestrate     (task planning / execution)
+            ├── delegate        (external agent discovery / delegation / escalation)
+            └── channel         (routing / preferences / transports / correlator)
 
 adapters/http  ──► Arc<SignalProcessor>
 adapters/ws    ──► Arc<SignalProcessor>
@@ -608,21 +621,28 @@ The default namespace is `"personal"`. Namespaces are a first-class schema conce
 
 ---
 
-## Bridge Pattern (External Gateway Relay)
+## Channel Integration Pattern
 
-Brain is local and protocol-agnostic. It does not reach outward to any external platform. External applications that live on messaging platforms (Slack, Telegram, Discord, custom agents) connect **inward** to Brain via its standard protocols.
+Brain is local and protocol-agnostic, but it now has two outward integration paths:
+
+1. Built-in preset-driven channel transports via `channel.transports[]` for long-poll and webhook-style platforms.
+2. External WebSocket gateways via `channel.relays[]` or the standalone `brain bridge` flow for custom bots and bridge processes.
 
 <details>
 <summary><strong>Design principle</strong></summary>
 
 ```
-External Platform          Bridge (external repo)              Brain OS
-──────────────────         ───────────────────────             ─────────────────
-  Slack bot           ──►  thin relay process           ──►   ws://localhost:19790
-  Telegram bot              uses crates/bridge library         SignalProcessor
-  Custom chat agent         translates platform format         memory + LLM
-  Any WebSocket bot         reconnects automatically
+External Platform          Integration Layer                   Brain OS
+──────────────────         ─────────────────                  ──────────────────────
+  Telegram bot        ──►  channel.transports[] preset   ──►  SignalProcessor
+  Discord webhook           polled / inbound / outbound        channel router
+  Slack incoming hook       generic HTTP engines               memory + LLM
+  Custom WS gateway    ──►  channel.relays[] / brain bridge ─► ws://localhost:19790
 ```
+
+Preset-driven transports are built into BrainOS and configured in YAML. They cover long-poll, webhook-inbound, and webhook-outbound flows without platform-specific Rust crates.
+
+External bridges are still valuable when the platform speaks a custom WebSocket protocol or when you want a separate process/repository to own the platform-specific bot logic.
 
 The bridge is **not** inside Brain. It is a separate process (and typically a separate repository) that:
 
@@ -630,6 +650,8 @@ The bridge is **not** inside Brain. It is a separate process (and typically a se
 2. Receives inbound messages from the external platform
 3. Wraps them as `{"content": "...", "sender": "...", "namespace": "..."}` and sends to Brain
 4. Receives `SignalResponse` from Brain and relays the response back to the platform
+
+Current gap: `WebhookInboundTransport` is registered and health-checked, but the HTTP route that should call `WebhookInboundTransport::handle_request()` is still pending in [`crates/cli/src/serve.rs`](crates/cli/src/serve.rs).
 
 </details>
 

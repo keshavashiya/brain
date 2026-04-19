@@ -46,15 +46,16 @@ The memory engine combines vector search (HNSW) with full-text search (BM25 FTS5
 - [HTTP API](#http-api)
 - [Services & Ports](#services--ports)
 - [Memory Namespaces](#memory-namespaces)
+- [Agent Delegation](#agent-delegation)
 - [Background Intelligence](#background-intelligence)
   - [Memory Consolidation](#memory-consolidation)
   - [Proactivity Engine](#proactivity-engine)
-  - [Messaging & Webhooks](#messaging-webhooks)
+  - [Messaging, Webhooks & Transports](#messaging-webhooks--transports)
 - [Action Backends](#action-backends-internal)
 - [Authentication](#authentication)
 - [Configuration](#configuration)
 - [Export & Import](#export--import)
-- [External Gateway Relay](#external-gateway-relay-brain-bridge)
+- [Channel Integrations](#channel-integrations)
 - [Development](#development)
 
 ---
@@ -337,14 +338,30 @@ curl -X POST http://localhost:19789/v1/signals \
 
 ---
 
-## Messaging & Webhooks
+## Agent Delegation
 
-Brain sends messages via configurable webhook URLs. Any service that accepts HTTP POST works — Slack, Discord, Telegram, ntfy.sh, or a custom endpoint.
+Brain can delegate subtasks to external agents without embedding those runtimes into the daemon. The delegation layer is external-first and config-driven:
+
+- `agents.auto_discovery`: scans `$PATH` for known agent CLIs and probes capabilities.
+- `agents.discovery_overrides`: merges local overrides onto discovered agents.
+- `agents.delegates[]`: registers manual subprocess-backed delegates.
+- `agents.fallbacks[]`: defines ordered escalation targets when a delegate fails.
+
+Use natural language through `brain chat` or MCP/HTTP/WS clients. Thalamus now includes both `DecomposeTask` and `QueryAgents`, so prompts like "break this task down" and "what agents do I have?" route through the same intent layer as the rest of Brain.
+
+---
+
+## Messaging, Webhooks & Transports
+
+Brain has two messaging layers:
+
+- `actions.messaging.channels`: simple outbound HTTP POST templates used by the internal `SendMessage` backend and proactive webhook pushes.
+- `channel.transports[]`: preset-driven channel runtimes for long-poll and webhook-style platforms (Telegram, Discord interactions, Slack webhooks, and user-defined presets).
 
 <details>
-<summary><strong>Setting Up Channels</strong></summary>
+<summary><strong>Setting Up Outbound Webhook Channels</strong></summary>
 
-Each channel key under `channels` becomes a webhook destination for both **proactive notifications** and **explicit SendMessage** intents ("send via discord to alice saying hello").
+Each channel key under `actions.messaging.channels` becomes a simple outbound destination for **proactive notifications** and **explicit SendMessage** intents ("send via discord to alice saying hello").
 
 **Discord** — Channel Settings → Integrations → Webhooks → Create Webhook:
 ```yaml
@@ -399,6 +416,40 @@ proactivity:
   delivery:
     webhook_channels: ["discord", "telegram"]
 ```
+
+</details>
+
+<details>
+<summary><strong>Preset-Driven Channel Transports</strong></summary>
+
+Use `channel.transports[]` when the platform needs more than a one-way POST: long polling, signed inbound webhooks, response extraction, cursor tracking, or preset-specific URL/body templates.
+
+```yaml
+channel:
+  transports:
+    - id: "telegram-main"
+      label: "Telegram"
+      preset: "telegram"
+      namespace: "personal"
+      credential: "<BOT_TOKEN>"
+
+    - id: "discord-main"
+      label: "Discord Interactions"
+      preset: "discord-interactions"
+      namespace: "personal"
+      credential: "<APPLICATION_ID>"
+      signing_secret: "<ED25519_PUBLIC_KEY>"
+
+    - id: "slack-main"
+      label: "Slack Webhook"
+      preset: "slack-webhook"
+      namespace: "work"
+      credential: "https://hooks.slack.com/services/T00/B00/xxx"
+```
+
+These transports are generic engines backed by presets in `crates/channel/presets/` or `~/.brain/presets/<id>.yaml`.
+
+Current limitation: webhook-inbound transports are registered, but the HTTP route that should feed `WebhookInboundTransport::handle_request()` is still pending in `crates/cli/src/serve.rs`, so inbound webhook presets are not fully wired yet.
 
 </details>
 
@@ -530,12 +581,15 @@ Import is idempotent — re-importing the same backup is safe.
 
 ---
 
-## External Gateway Relay (Brain Bridge)
+## Channel Integrations
 
-Brain is a local service — it does not reach outward to external messaging platforms. Instead, a thin external **bridge** connects a platform-specific bot or gateway to Brain's WebSocket API and translates messages in both directions.
+Brain can integrate with external channels in two ways:
+
+1. Built-in preset-driven transports via `channel.transports[]`.
+2. External WebSocket bridges via `channel.relays[]` or `brain bridge`.
 
 <details>
-<summary><strong>Bridge library & CLI</strong></summary>
+<summary><strong>Bridge Library & CLI</strong></summary>
 
 ```
 External Platform           Bridge (your code / external repo)        Brain OS
@@ -545,9 +599,11 @@ External Platform           Bridge (your code / external repo)        Brain OS
   Any WebSocket bot          thin message translation                  memory + LLM
 ```
 
-The `crates/bridge/` library provides a `BridgeClient` for building relays. It handles reconnection with exponential backoff, ping/pong keep-alive, and JSON message serialization.
+The `crates/bridge/` library provides a `BridgeClient` for custom relays. It handles reconnection with exponential backoff, ping/pong keep-alive, and JSON message serialization.
 
-**Bridge CLI command:**
+Use this path when the platform speaks a custom WebSocket protocol or when you want the platform-specific bot logic to live outside the daemon. For HTTP/webhook-style platforms, prefer `channel.transports[]`.
+
+**Bridge CLI command (optional compatibility path):**
 ```bash
 brain bridge ws://localhost:8080/gateway --api-key YOUR_KEY
 ```
@@ -599,7 +655,7 @@ cargo run -p brainos -- serve --http --mcp
 <details>
 <summary><strong>Workspace Structure</strong></summary>
 
-The project is a Cargo workspace with 23 crates. All internal dependencies use both `path` (for local development) and `version` (for crates.io), so no Cargo.toml changes are needed to switch between local and published builds.
+The project is a Cargo workspace with 24 crates. All internal dependencies use both `path` (for local development) and `version` (for crates.io), so no Cargo.toml changes are needed to switch between local and published builds.
 
 ```
 crates/
@@ -620,6 +676,7 @@ crates/
 ├── sandbox/        # brainos-sandbox     — Command execution sandbox
 ├── vault/          # brainos-vault       — OS-native credential vault
 ├── orchestrate/    # brainos-orchestrate — Task decomposition + execution DAG
+├── delegate/       # brainos-delegate    — Agent discovery, registry, delegation, escalation
 ├── channel/        # brainos-channel     — Channel routing + learned preferences
 ├── adapters/
 │   ├── http/       # brainos-httpadapter — Axum REST API
@@ -639,7 +696,7 @@ Crates must be published in dependency order (leaves first). Run `cargo publish`
 ```
 core → storage → hippocampus → amygdala → cortex → thalamus → cerebellum → ganglia
      → audit → confirm → budget → sandbox → vault
-     → orchestrate → channel
+     → orchestrate → delegate → channel
      → signal → backends → bridge → adapters/* → cli
 ```
 

@@ -37,16 +37,17 @@
 
 use std::sync::Arc;
 
-use axum::{
-    extract::State,
-    http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Json as AxumJson},
-    routing::post,
-    Router,
-};
 use brain_core::ApiKeyConfig;
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+mod protocol;
+mod transport;
+
+pub use protocol::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
+pub use transport::{serve_http, serve_stdio};
+
+#[cfg(test)]
+pub(crate) use transport::{extract_meta_key, http_handler, HttpState};
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -58,78 +59,6 @@ pub enum McpError {
     Json(#[from] serde_json::Error),
     #[error("Server error: {0}")]
     Server(String),
-}
-
-// ─── JSON-RPC 2.0 Types ───────────────────────────────────────────────────────
-
-/// Incoming JSON-RPC request (or notification when `id` is absent).
-#[derive(Debug, Deserialize)]
-pub struct JsonRpcRequest {
-    pub jsonrpc: String,
-    #[serde(default)]
-    pub id: Option<Value>,
-    pub method: String,
-    #[serde(default)]
-    pub params: Option<Value>,
-}
-
-impl JsonRpcRequest {
-    /// A JSON-RPC message is a notification (no response expected).
-    ///
-    /// True when:
-    /// - Method starts with `notifications/` (MCP convention, always a notification)
-    /// - Method is `initialized` (MCP lifecycle notification)
-    /// - `id` is absent or explicitly `null` (JSON-RPC spec: no id → notification)
-    ///
-    /// Note: serde_json deserializes `"id": null` as `Some(Value::Null)`, not `None`,
-    /// so we must check both.
-    pub fn is_notification(&self) -> bool {
-        if self.method.starts_with("notifications/") || self.method == "initialized" {
-            return true;
-        }
-        matches!(&self.id, None | Some(Value::Null))
-    }
-}
-
-/// Outgoing JSON-RPC response.
-#[derive(Debug, Serialize)]
-pub struct JsonRpcResponse {
-    pub jsonrpc: String,
-    pub id: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<JsonRpcError>,
-}
-
-/// JSON-RPC error object.
-#[derive(Debug, Serialize)]
-pub struct JsonRpcError {
-    pub code: i32,
-    pub message: String,
-}
-
-impl JsonRpcResponse {
-    pub fn ok(id: Value, result: Value) -> Self {
-        Self {
-            jsonrpc: "2.0".to_string(),
-            id,
-            result: Some(result),
-            error: None,
-        }
-    }
-
-    pub fn err(id: Value, code: i32, message: impl Into<String>) -> Self {
-        Self {
-            jsonrpc: "2.0".to_string(),
-            id,
-            result: None,
-            error: Some(JsonRpcError {
-                code,
-                message: message.into(),
-            }),
-        }
-    }
 }
 
 // ─── MCP Server ───────────────────────────────────────────────────────────────
@@ -459,203 +388,12 @@ fn tool_result_text(text: impl Into<String>) -> Value {
     })
 }
 
-// ─── Auth helpers ─────────────────────────────────────────────────────────────
-
-/// Extract `x-api-key` from `params._meta` of a JSON-RPC request.
-fn extract_meta_key(req: &JsonRpcRequest) -> Option<&str> {
-    req.params
-        .as_ref()
-        .and_then(|p| p.get("_meta"))
-        .and_then(|m| m.get("x-api-key"))
-        .and_then(Value::as_str)
-}
-
-// ─── Stdio Transport ──────────────────────────────────────────────────────────
-
-/// Run the MCP server over stdio (line-delimited JSON-RPC).
-///
-/// ## Authentication
-///
-/// Stdio clients authenticate in one of two ways:
-///
-/// 1. **Per-request** — include `params._meta["x-api-key"]` in each JSON-RPC
-///    request (same as HTTP header auth).
-/// 2. **Session-level** — set the `BRAIN_API_KEY` env var to a valid API key.
-///    The entire stdio session is then pre-authenticated; per-request `_meta`
-///    is not required.  This is the recommended approach for MCP clients
-///    (e.g. Claude Code) that cannot inject custom `_meta` fields.
-pub async fn serve_stdio(processor: signal::SignalProcessor) -> anyhow::Result<()> {
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-    let api_keys = processor.config().access.api_keys.clone();
-
-    // If BRAIN_API_KEY is set and matches a configured key, treat the entire
-    // stdio session as pre-authenticated (skip per-request _meta checks).
-    let session_authed = match std::env::var("BRAIN_API_KEY") {
-        Ok(env_key) if !env_key.is_empty() => {
-            let valid = api_keys.is_empty() || api_keys.iter().any(|k| k.key == env_key);
-            if !valid {
-                anyhow::bail!(
-                    "BRAIN_API_KEY does not match any configured API key. \
-                     Check your ~/.brain/config.yaml access.api_keys."
-                );
-            }
-            true
-        }
-        _ => false,
-    };
-
-    let server = Arc::new(McpServer::new(Arc::new(processor), api_keys));
-    let stdin = tokio::io::stdin();
-    let mut stdout = tokio::io::stdout();
-    let mut reader = BufReader::new(stdin);
-    let mut line = String::new();
-
-    loop {
-        line.clear();
-        let n = reader.read_line(&mut line).await?;
-        if n == 0 {
-            break; // EOF
-        }
-
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        tracing::debug!(line = %trimmed.get(..120).unwrap_or(trimmed), "MCP stdio ← request");
-
-        let req: JsonRpcRequest = match serde_json::from_str(trimmed) {
-            Ok(r) => r,
-            Err(e) => {
-                let resp = JsonRpcResponse::err(Value::Null, -32700, format!("Parse error: {e}"));
-                let json = serde_json::to_string(&resp)?;
-                stdout.write_all(json.as_bytes()).await?;
-                stdout.write_all(b"\n").await?;
-                stdout.flush().await?;
-                continue;
-            }
-        };
-
-        // Auth check for requests (not notifications).
-        // Skipped when the session is pre-authenticated via BRAIN_API_KEY.
-        //
-        // SAFETY: Notifications (is_notification() == true) bypass auth intentionally.
-        // handle() returns None for all notification methods — no state changes occur.
-        // If handle() ever processes notification methods with side effects, auth
-        // must be checked here regardless of is_notification().
-        if !session_authed && !server.api_keys.is_empty() && !req.is_notification() {
-            let meta_key = extract_meta_key(&req);
-            let key_ok = meta_key.is_some_and(|k| server.validate_key(k));
-            if !key_ok {
-                let id = req.id.clone().unwrap_or(Value::Null);
-                let resp = JsonRpcResponse::err(
-                    id,
-                    -32600,
-                    "Unauthorized: provide valid x-api-key in params._meta \
-                     or set BRAIN_API_KEY env var",
-                );
-                let json = serde_json::to_string(&resp)?;
-                stdout.write_all(json.as_bytes()).await?;
-                stdout.write_all(b"\n").await?;
-                stdout.flush().await?;
-                continue;
-            }
-        }
-
-        if let Some(resp) = server.handle(req).await {
-            let json = serde_json::to_string(&resp)?;
-            tracing::debug!(len = json.len(), "MCP stdio → response");
-            stdout.write_all(json.as_bytes()).await?;
-            stdout.write_all(b"\n").await?;
-            stdout.flush().await?;
-        } else {
-            tracing::debug!(method = %trimmed.get(..80).unwrap_or(trimmed), "MCP stdio → notification (no response)");
-        }
-    }
-
-    Ok(())
-}
-
-// ─── HTTP Transport ───────────────────────────────────────────────────────────
-
-/// Shared state for the HTTP MCP server.
-struct HttpState {
-    server: Arc<McpServer>,
-}
-
-/// Run the MCP server over HTTP (JSON-RPC POST endpoint).
-///
-/// Auth: `x-api-key: <key>` HTTP header required on every request when API keys
-/// are configured.
-pub async fn serve_http(
-    processor: Arc<signal::SignalProcessor>,
-    host: &str,
-    port: u16,
-) -> anyhow::Result<()> {
-    let api_keys = processor.config().access.api_keys.clone();
-    let state = Arc::new(HttpState {
-        server: Arc::new(McpServer::new(processor, api_keys)),
-    });
-
-    let router = Router::new()
-        .route("/", post(http_handler))
-        .route("/mcp", post(http_handler))
-        .with_state(state)
-        .layer(brain_core::cors::localhost_cors())
-        .layer(axum::extract::DefaultBodyLimit::max(1_048_576))
-        .layer(tower::limit::ConcurrencyLimitLayer::new(100));
-
-    let addr: std::net::SocketAddr = format!("{host}:{port}").parse()?;
-    tracing::info!("Synapse MCP online at http://{addr}");
-    let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router).await?;
-    Ok(())
-}
-
-/// POST / or POST /mcp — JSON-RPC over HTTP handler.
-///
-/// Validates `x-api-key` HTTP header before dispatching to the MCP server.
-async fn http_handler(
-    State(state): State<Arc<HttpState>>,
-    headers: HeaderMap,
-    AxumJson(req): AxumJson<JsonRpcRequest>,
-) -> Result<axum::response::Response, (StatusCode, String)> {
-    // Auth via x-api-key HTTP header
-    if !state.server.api_keys.is_empty() {
-        let key = headers
-            .get("x-api-key")
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    "Missing x-api-key header".to_string(),
-                )
-            })?;
-        if !state.server.validate_key(key) {
-            return Err((StatusCode::UNAUTHORIZED, "Invalid API key".to_string()));
-        }
-    }
-
-    match state.server.handle(req).await {
-        Some(resp) => {
-            let val = serde_json::to_value(&resp)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-            Ok(AxumJson(val).into_response())
-        }
-        None => {
-            // Notification — JSON-RPC spec says no response. Return 204 so
-            // the proxy_mcp_stdio relay knows to skip forwarding.
-            Ok(StatusCode::NO_CONTENT.into_response())
-        }
-    }
-}
-
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{http::StatusCode, routing::post, Router};
 
     /// Create a test server with no API keys (auth disabled).
     async fn make_server() -> (McpServer, tempfile::TempDir) {
