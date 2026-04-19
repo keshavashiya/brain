@@ -90,9 +90,9 @@ jobs:
             --out xml \
             --skip-clean \
             --ignore-panics \
-            --no-default-packages \
             --lib \
-            --tests
+            --tests \
+            --fail-under 50
       - name: Upload coverage
         uses: codecov/codecov-action@v6
         with:
