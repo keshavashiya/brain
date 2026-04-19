@@ -3,8 +3,9 @@
 use std::{collections::HashMap, sync::atomic::Ordering, sync::Arc, time::Instant};
 
 use axum::{
+    body::Bytes,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, Response, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Json,
@@ -461,4 +462,37 @@ pub async fn sse_events_handler(
     };
 
     Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+}
+
+// ─── Webhook handlers ────────────────────────────────────────────────────────
+
+/// POST /v1/webhooks/:id — ingest inbound messages from external platforms.
+///
+/// This endpoint finds the registered `WebhookInboundTransport` for the given
+/// ID and delegates signature verification and message extraction to it.
+pub async fn post_webhook_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let transport = match state.webhook_handlers.get(&id) {
+        Some(t) => t,
+        None => {
+            return Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(format!("Unknown transport ID: {id}"))
+                .unwrap()
+                .into_response();
+        }
+    };
+
+    let resp = transport.handle_request(&headers, &body).await;
+
+    Response::builder()
+        .status(StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK))
+        .header("content-type", resp.content_type)
+        .body(resp.body)
+        .unwrap()
+        .into_response()
 }

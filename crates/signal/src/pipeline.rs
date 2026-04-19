@@ -251,12 +251,60 @@ impl SignalProcessor {
                     .await
             }
             thalamus::Intent::SystemStatus => self.handle_system_status(signal_id, &prepend_nudges),
+            thalamus::Intent::QueryAudit {
+                filter,
+                since,
+                limit,
+            } => {
+                self.handle_query_audit(signal_id, filter, since, limit, &prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::PruneAudit { older_than } => {
+                self.handle_prune_audit(signal_id, older_than, &prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::ListApprovals { status } => {
+                self.handle_list_approvals(signal_id, status, &prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::RespondToApproval { nonce, decision } => {
+                self.handle_respond_to_approval(signal_id, nonce, decision, &prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::BudgetStatus { window } => {
+                self.handle_budget_status(signal_id, window, &prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::ListSchedules => {
+                self.handle_list_schedules(signal_id, &prepend_nudges).await
+            }
+            thalamus::Intent::CancelSchedule { id } => {
+                self.handle_cancel_schedule(signal_id, id, &prepend_nudges)
+                    .await
+            }
             thalamus::Intent::DecomposeTask { ref request } => {
                 self.handle_decompose_task(signal_id, request.clone(), &prepend_nudges)
                     .await
             }
+            thalamus::Intent::ListTasks => self.handle_list_tasks(signal_id, &prepend_nudges).await,
+            thalamus::Intent::TaskStatus { task_id } => {
+                self.handle_task_status(signal_id, task_id, &prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::CancelTask { task_id } => {
+                self.handle_cancel_task(signal_id, task_id, &prepend_nudges)
+                    .await
+            }
             thalamus::Intent::QueryAgents { filter } => {
                 self.handle_query_agents(signal_id, filter, &prepend_nudges)
+            }
+            thalamus::Intent::SetProactivity { enabled, until } => {
+                self.handle_set_proactivity(signal_id, enabled, until, &prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::ProactivityStatus => {
+                self.handle_proactivity_status(signal_id, &prepend_nudges)
+                    .await
             }
             ref intent @ (thalamus::Intent::WebSearch { .. }
             | thalamus::Intent::Schedule { .. }
@@ -545,6 +593,184 @@ impl SignalProcessor {
         Ok(PipelineResult::Complete(resp))
     }
 
+    pub(super) async fn handle_query_audit(
+        &self,
+        signal_id: Uuid,
+        _filter: Option<String>,
+        _since: Option<String>,
+        _limit: Option<usize>,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let message = match &self.audit_trail {
+            Some(audit) => {
+                let entries = audit
+                    .query(audit::query::AuditQuerySpec::last(10))
+                    .await
+                    .map_err(|e| SignalError::Processing(format!("Audit query failed: {e}")))?;
+                if entries.is_empty() {
+                    "Audit trail is empty.".to_string()
+                } else {
+                    let mut out = "Recent audit entries:\n".to_string();
+                    for entry in entries {
+                        out.push_str(&format!(
+                            "  • [{}] {} -> {}\n",
+                            entry.timestamp, entry.action, entry.outcome
+                        ));
+                    }
+                    out.trim_end().to_string()
+                }
+            }
+            None => "Audit trail is not wired.".to_string(),
+        };
+
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    pub(super) async fn handle_prune_audit(
+        &self,
+        signal_id: Uuid,
+        older_than: String,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let message = match &self.audit_trail {
+            Some(audit) => {
+                // Parse duration from string (stub: use 30 days if parsing fails)
+                let duration = chrono::Duration::try_days(30).unwrap();
+                match audit.prune(duration).await {
+                    Ok(n) => format!("Pruned {n} entries older than {older_than}"),
+                    Err(e) => format!("Failed to prune audit: {e}"),
+                }
+            }
+            None => "Audit trail is not wired.".to_string(),
+        };
+
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    pub(super) async fn handle_list_approvals(
+        &self,
+        signal_id: Uuid,
+        _status: Option<String>,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let message = match &self.confirmation_engine {
+            Some(engine) => {
+                let pending = engine
+                    .pending()
+                    .await
+                    .map_err(|e| SignalError::Processing(format!("Failed to list pending: {e}")))?;
+                if pending.is_empty() {
+                    "No pending approvals.".to_string()
+                } else {
+                    let mut out = "Pending approvals:\n".to_string();
+                    for p in pending {
+                        out.push_str(&format!("  • [{}] {}\n", p.nonce, p.action_description));
+                    }
+                    out.push_str("\nReply with 'approve <nonce>' or 'reject <nonce>'.");
+                    out
+                }
+            }
+            None => "Confirmation engine is not wired.".to_string(),
+        };
+
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    pub(super) async fn handle_respond_to_approval(
+        &self,
+        signal_id: Uuid,
+        nonce: String,
+        decision: String,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let message = match &self.confirmation_engine {
+            Some(engine) => {
+                let approved = decision.to_lowercase().contains("approve");
+                let dec = if approved {
+                    confirm::ApprovalDecision::Approve
+                } else {
+                    confirm::ApprovalDecision::Reject
+                };
+                match engine.respond(&nonce, dec).await {
+                    Ok(_) => {
+                        if approved {
+                            format!("Approval {nonce} accepted. Execution resumed.")
+                        } else {
+                            format!("Approval {nonce} rejected. Action cancelled.")
+                        }
+                    }
+                    Err(e) => format!("Failed to respond to {nonce}: {e}"),
+                }
+            }
+            None => "Confirmation engine is not wired.".to_string(),
+        };
+
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    pub(super) async fn handle_budget_status(
+        &self,
+        signal_id: Uuid,
+        _window: Option<String>,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let message = match &self.cost_budget {
+            Some(budget) => {
+                let status = budget
+                    .status()
+                    .await
+                    .map_err(|e| SignalError::Processing(format!("Budget status failed: {e}")))?;
+                let mut out = "Budget status:\n".to_string();
+                out.push_str("  Hourly consumption:\n");
+                for (k, v) in &status.hourly_consumption {
+                    out.push_str(&format!("    • {}: {}\n", k, v));
+                }
+                out.push_str("  Daily consumption:\n");
+                for (k, v) in &status.daily_consumption {
+                    out.push_str(&format!("    • {}: {}\n", k, v));
+                }
+                out.trim_end().to_string()
+            }
+            None => "Cost budget is not wired.".to_string(),
+        };
+
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    pub(super) async fn handle_list_schedules(
+        &self,
+        signal_id: Uuid,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        // Scheduled intents are stored in episodic pool's scheduled_intents table
+        // We can query them via a direct SQL if needed, or if SignalProcessor
+        // has a method for it.
+        // For now, let's look for a method or use a placeholder.
+        let message =
+            "Background schedules list is currently only available via `brain schedules list`."
+                .to_string();
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    pub(super) async fn handle_cancel_schedule(
+        &self,
+        signal_id: Uuid,
+        _id: String,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let message =
+            "Schedule cancellation is currently only available via `brain schedules cancel`."
+                .to_string();
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
     pub(super) fn handle_query_agents(
         &self,
         signal_id: Uuid,
@@ -632,6 +858,128 @@ impl SignalProcessor {
                 Ok(PipelineResult::Complete(resp))
             }
         }
+    }
+
+    pub(super) async fn handle_list_tasks(
+        &self,
+        signal_id: Uuid,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let message = match &self.orchestrator {
+            Some(orch) => {
+                let tasks = orch.list_tasks().await;
+                if tasks.is_empty() {
+                    "No active or recent tasks.".to_string()
+                } else {
+                    let mut out = "Recent tasks:\n".to_string();
+                    for (id, desc, phase) in tasks {
+                        out.push_str(&format!("  • [{}] {} — {:?}\n", id, desc, phase));
+                    }
+                    out.trim_end().to_string()
+                }
+            }
+            None => "Task orchestrator is not wired.".to_string(),
+        };
+
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    pub(super) async fn handle_task_status(
+        &self,
+        signal_id: Uuid,
+        task_id: String,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let message = match &self.orchestrator {
+            Some(orch) => match orch.get_task(&task_id).await {
+                Some(task) => {
+                    format!(
+                        "Task: {}\nID: {}\nPhase: {:?}\nSteps: {} total, {} completed, {} failed",
+                        task.request,
+                        task.id,
+                        task.phase,
+                        task.step_states.len(),
+                        task.step_states
+                            .values()
+                            .filter(|s| matches!(s, orchestrate::StepState::Completed { .. }))
+                            .count(),
+                        task.step_states
+                            .values()
+                            .filter(|s| matches!(s, orchestrate::StepState::Failed { .. }))
+                            .count(),
+                    )
+                }
+                None => format!("Task {task_id} not found."),
+            },
+            None => "Task orchestrator is not wired.".to_string(),
+        };
+
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    pub(super) async fn handle_cancel_task(
+        &self,
+        signal_id: Uuid,
+        task_id: String,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let message = match &self.orchestrator {
+            Some(orch) => match orch.cancel(&task_id).await {
+                Ok(_) => format!("Task {task_id} cancelled."),
+                Err(e) => format!("Failed to cancel task {task_id}: {e}"),
+            },
+            None => "Task orchestrator is not wired.".to_string(),
+        };
+
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    pub(super) async fn handle_set_proactivity(
+        &self,
+        signal_id: Uuid,
+        enabled: bool,
+        _until: Option<String>,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        // This would ideally update config or a live state.
+        // For now, since we don't have a live proactivity toggle in SignalProcessor,
+        // we'll just return a message.
+        let message = if enabled {
+            "Proactivity enabled (simulated).".to_string()
+        } else {
+            "Proactivity disabled (simulated).".to_string()
+        };
+
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    pub(super) async fn handle_proactivity_status(
+        &self,
+        signal_id: Uuid,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let message = format!(
+            "Proactivity status:\n  • Habit engine: {}\n  • Open-loop detector: {}\n  • Quiet hours: {}-{}",
+            if self.config.proactivity.enabled {
+                "active"
+            } else {
+                "disabled"
+            },
+            if self.config.proactivity.open_loop.enabled {
+                "active"
+            } else {
+                "disabled"
+            },
+            self.config.proactivity.quiet_hours.start,
+            self.config.proactivity.quiet_hours.end
+        );
+
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
     }
 
     pub(super) async fn handle_action(

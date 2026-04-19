@@ -59,7 +59,12 @@ mod tests {
         let api_key = config.access.api_keys.first().unwrap().key.clone();
         let api_keys = config.access.api_keys.clone();
         let processor = signal::SignalProcessor::new(config).await.unwrap();
-        let router = crate::create_router(Arc::new(processor), api_keys, true);
+        let router = crate::create_router(
+            Arc::new(processor),
+            std::collections::HashMap::new(),
+            api_keys,
+            true,
+        );
         (router, temp, api_key)
     }
 
@@ -374,7 +379,12 @@ mod tests {
         });
         let api_keys = config.access.api_keys.clone();
         let processor = signal::SignalProcessor::new(config).await.unwrap();
-        let router = crate::create_router(Arc::new(processor), api_keys, true);
+        let router = crate::create_router(
+            Arc::new(processor),
+            std::collections::HashMap::new(),
+            api_keys,
+            true,
+        );
 
         let payload = serde_json::json!({"query": "Rust", "top_k": 5});
         let request = Request::builder()
@@ -402,7 +412,12 @@ mod tests {
         });
         let api_keys = config.access.api_keys.clone();
         let processor = signal::SignalProcessor::new(config).await.unwrap();
-        let router = crate::create_router(Arc::new(processor), api_keys, true);
+        let router = crate::create_router(
+            Arc::new(processor),
+            std::collections::HashMap::new(),
+            api_keys,
+            true,
+        );
 
         let payload = serde_json::json!({"content": "Remember something"});
         let request = Request::builder()
@@ -428,6 +443,7 @@ mod tests {
         let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
         let state = Arc::new(AppState {
             processor,
+            webhook_handlers: std::collections::HashMap::new(),
             cache: Mutex::new(lru::LruCache::new(
                 NonZeroUsize::new(CACHE_CAPACITY).unwrap(),
             )),
@@ -497,6 +513,7 @@ mod tests {
 
         let state = Arc::new(AppState {
             processor,
+            webhook_handlers: std::collections::HashMap::new(),
             cache: Mutex::new(lru::LruCache::new(
                 NonZeroUsize::new(CACHE_CAPACITY).unwrap(),
             )),
@@ -538,6 +555,7 @@ mod tests {
         let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
         let state = Arc::new(AppState {
             processor,
+            webhook_handlers: std::collections::HashMap::new(),
             cache: Mutex::new(lru::LruCache::new(
                 NonZeroUsize::new(CACHE_CAPACITY).unwrap(),
             )),

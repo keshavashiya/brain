@@ -39,13 +39,48 @@ static WEB_SEARCH_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static WEB_SEARCH_FIND_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(?:(?:can you|could you|please|will you|would you)\s+)?find\s+(?:information\s+)?(?:about|for)\s+(.+?)(?:\?)?$")
+    Regex::new(r"(?i)^(?:(?:Can you|Could you|please|will you|would you)\s+)?find\s+(?:information\s+)?(?:about|for)\s+(.+?)(?:\?)?$")
         .expect("invariant: WEB_SEARCH_FIND_RE must be valid")
+});
+
+static QUERY_AUDIT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:what did I (?:run|do|approve)|show (?:my )?audit|list audit)(?:\s+(?:today|yesterday|since\s+(.+)))?\??$")
+        .expect("invariant: QUERY_AUDIT_RE must be valid")
+});
+
+static PRUNE_AUDIT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^prune\s+audit\s+(?:logs?\s+)?(?:older\s+than\s+)?(.+?)$")
+        .expect("invariant: PRUNE_AUDIT_RE must be valid")
+});
+
+static LIST_APPROVALS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:what am I waiting to approve|show pending approvals|list approvals|pending approvals)\??$")
+        .expect("invariant: LIST_APPROVALS_RE must be valid")
+});
+
+static RESPOND_TO_APPROVAL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(approve|reject)\s+([a-zA-Z0-9]+)$")
+        .expect("invariant: RESPOND_TO_APPROVAL_RE must be valid")
+});
+
+static BUDGET_STATUS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:how much have I spent|what'?s my (?:token )?budget|budget status)\??$")
+        .expect("invariant: BUDGET_STATUS_RE must be valid")
 });
 
 static SCHEDULE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(?:remind me|schedule|set reminder)\s+(?:to\s+)?(.+?)$")
         .expect("invariant: SCHEDULE_RE must be valid")
+});
+
+static LIST_SCHEDULES_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:what'?s scheduled|list schedules|show schedules)\??$")
+        .expect("invariant: LIST_SCHEDULES_RE must be valid")
+});
+
+static CANCEL_SCHEDULE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^cancel\s+schedule\s+(.+?)$")
+        .expect("invariant: CANCEL_SCHEDULE_RE must be valid")
 });
 
 static SEND_MESSAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -66,6 +101,35 @@ static QUERY_AGENTS_RE: LazyLock<Regex> = LazyLock::new(|| {
 static QUERY_AGENTS_WHY_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^why\s+(?:aren'?t|isn'?t|can'?t)\s+you\s+(?:using|use|offering)\s+(.+?)\??$")
         .expect("invariant: QUERY_AGENTS_WHY_RE must be valid")
+});
+
+static LIST_TASKS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:what tasks are running|list tasks|show tasks)\??$")
+        .expect("invariant: LIST_TASKS_RE must be valid")
+});
+
+static TASK_STATUS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:status of task|task status)\s+(.+?)\??$")
+        .expect("invariant: TASK_STATUS_RE must be valid")
+});
+
+static CANCEL_TASK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^cancel\s+task\s+(.+?)$").expect("invariant: CANCEL_TASK_RE must be valid")
+});
+
+static SET_PROACTIVITY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(pause|disable|enable|turn (?:on|off))\s+(?:nudges|proactivity|reminders)(?:\s+(?:for\s+)?(.+))?$")
+        .expect("invariant: SET_PROACTIVITY_RE must be valid")
+});
+
+static PROACTIVITY_STATUS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:check proactivity status|proactivity status)\??$")
+        .expect("invariant: PROACTIVITY_STATUS_RE must be valid")
+});
+
+static DECOMPOSE_TASK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:decompose|plan|orchestrate)\s+(?:task\s+)?(.+?)$")
+        .expect("invariant: DECOMPOSE_TASK_RE must be valid")
 });
 
 /// All patterns in priority order — first match wins.
@@ -116,12 +180,56 @@ pub(crate) const PATTERNS: &[PatternDef] = &[
         extractors: &[("query", 1)],
     },
     PatternDef {
+        regex: &QUERY_AUDIT_RE,
+        base_intent: Intent::QueryAudit {
+            filter: None,
+            since: None,
+            limit: None,
+        },
+        extractors: &[("since", 1)],
+    },
+    PatternDef {
+        regex: &PRUNE_AUDIT_RE,
+        base_intent: Intent::PruneAudit {
+            older_than: String::new(),
+        },
+        extractors: &[("older_than", 1)],
+    },
+    PatternDef {
+        regex: &LIST_APPROVALS_RE,
+        base_intent: Intent::ListApprovals { status: None },
+        extractors: &[],
+    },
+    PatternDef {
+        regex: &RESPOND_TO_APPROVAL_RE,
+        base_intent: Intent::RespondToApproval {
+            nonce: String::new(),
+            decision: String::new(),
+        },
+        extractors: &[("decision", 1), ("nonce", 2)],
+    },
+    PatternDef {
+        regex: &BUDGET_STATUS_RE,
+        base_intent: Intent::BudgetStatus { window: None },
+        extractors: &[],
+    },
+    PatternDef {
         regex: &SCHEDULE_RE,
         base_intent: Intent::Schedule {
             description: String::new(),
             cron: None,
         },
         extractors: &[("description", 1)],
+    },
+    PatternDef {
+        regex: &LIST_SCHEDULES_RE,
+        base_intent: Intent::ListSchedules,
+        extractors: &[],
+    },
+    PatternDef {
+        regex: &CANCEL_SCHEDULE_RE,
+        base_intent: Intent::CancelSchedule { id: String::new() },
+        extractors: &[("id", 1)],
     },
     PatternDef {
         regex: &SEND_MESSAGE_RE,
@@ -150,6 +258,45 @@ pub(crate) const PATTERNS: &[PatternDef] = &[
             filter: String::new(),
         },
         extractors: &[("filter", 1)],
+    },
+    PatternDef {
+        regex: &LIST_TASKS_RE,
+        base_intent: Intent::ListTasks,
+        extractors: &[],
+    },
+    PatternDef {
+        regex: &TASK_STATUS_RE,
+        base_intent: Intent::TaskStatus {
+            task_id: String::new(),
+        },
+        extractors: &[("task_id", 1)],
+    },
+    PatternDef {
+        regex: &CANCEL_TASK_RE,
+        base_intent: Intent::CancelTask {
+            task_id: String::new(),
+        },
+        extractors: &[("task_id", 1)],
+    },
+    PatternDef {
+        regex: &SET_PROACTIVITY_RE,
+        base_intent: Intent::SetProactivity {
+            enabled: true,
+            until: None,
+        },
+        extractors: &[("mode", 1), ("until", 2)],
+    },
+    PatternDef {
+        regex: &PROACTIVITY_STATUS_RE,
+        base_intent: Intent::ProactivityStatus,
+        extractors: &[],
+    },
+    PatternDef {
+        regex: &DECOMPOSE_TASK_RE,
+        base_intent: Intent::DecomposeTask {
+            request: String::new(),
+        },
+        extractors: &[("request", 1)],
     },
 ];
 

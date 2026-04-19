@@ -854,6 +854,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "axum 0.7.9",
+ "brainos-channel",
  "brainos-core",
  "brainos-hippocampus",
  "brainos-signal",

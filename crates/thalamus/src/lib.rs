@@ -51,11 +51,29 @@ pub enum Intent {
     ExecuteCommand { command: String, args: Vec<String> },
     /// Search the web.
     WebSearch { query: String },
+    /// Query the audit trail.
+    QueryAudit {
+        filter: Option<String>,
+        since: Option<String>,
+        limit: Option<usize>,
+    },
+    /// Prune the audit trail.
+    PruneAudit { older_than: String },
+    /// List pending approvals.
+    ListApprovals { status: Option<String> },
+    /// Respond to a pending approval.
+    RespondToApproval { nonce: String, decision: String },
+    /// Check LLM budget and usage status.
+    BudgetStatus { window: Option<String> },
     /// Schedule something.
     Schedule {
         description: String,
         cron: Option<String>,
     },
+    /// List active background schedules.
+    ListSchedules,
+    /// Cancel a scheduled intent.
+    CancelSchedule { id: String },
     /// Send via a channel.
     SendMessage {
         channel: String,
@@ -66,9 +84,22 @@ pub enum Intent {
     SystemStatus,
     /// Decompose a complex request into an executable task plan.
     DecomposeTask { request: String },
+    /// List active or recent tasks.
+    ListTasks,
+    /// Get the status of a specific task.
+    TaskStatus { task_id: String },
+    /// Cancel a running task.
+    CancelTask { task_id: String },
     /// Ask about available specialist agents (delegates). Optional
     /// `filter` narrows the answer: e.g. "rust", "aider", or "".
     QueryAgents { filter: String },
+    /// Configure proactivity / nudges.
+    SetProactivity {
+        enabled: bool,
+        until: Option<String>,
+    },
+    /// Get proactivity status and configuration.
+    ProactivityStatus,
     /// Regular chat/conversation.
     Chat { content: String },
 }
@@ -117,6 +148,18 @@ struct LlmIntentPayload {
     predicate: Option<String>,
     object: Option<String>,
     query: Option<String>,
+    filter: Option<String>,
+    since: Option<String>,
+    limit: Option<usize>,
+    older_than: Option<String>,
+    status: Option<String>,
+    nonce: Option<String>,
+    decision: Option<String>,
+    window: Option<String>,
+    id: Option<String>,
+    task_id: Option<String>,
+    enabled: Option<bool>,
+    until: Option<String>,
     target: Option<String>,
     command: Option<String>,
     args: Option<Vec<String>>,
@@ -162,8 +205,17 @@ impl LlmIntentFallback {
 }
 
 const CLASSIFIER_SYSTEM_PROMPT: &str = r#"You classify user input into exactly one intent for Brain OS.
-Valid intents: store_fact, recall, forget, execute_command, web_search, schedule, send_message, system_status, decompose_task, query_agents, chat.
+Valid intents: store_fact, recall, forget, execute_command, web_search, query_audit, prune_audit, list_approvals, respond_to_approval, budget_status, schedule, list_schedules, cancel_schedule, send_message, system_status, decompose_task, list_tasks, task_status, cancel_task, query_agents, set_proactivity, proactivity_status, chat.
 Rules:
+- query_audit is for checking past actions: "what did I run today", "show my audit entries", "what did I approve yesterday".
+- prune_audit is for deleting old audit entries: "prune audit logs older than 30 days".
+- list_approvals is for showing pending confirmations: "what am I waiting to approve", "show pending approvals".
+- respond_to_approval is for approving or rejecting a nonce: "approve 1234", "reject 5678".
+- budget_status is for checking usage: "how much have I spent", "what's my token budget".
+- schedule is for new future tasks: "remind me in 5 minutes to...", "schedule a search every day for...".
+- list_schedules/cancel_schedule are for managing background schedules: "what's scheduled", "cancel schedule 123".
+- list_tasks/task_status/cancel_task are for managing complex multi-step tasks from decompose_task: "what tasks are running", "status of task 42", "cancel task 10".
+- set_proactivity/proactivity_status are for managing nudges/habit engine: "pause nudges for 2h", "disable proactivity", "check proactivity status".
 - recall is for memory queries: "what do you know about...", "what did we discuss", "what do you remember about...", "tell me about...", "what is my...", "do you remember...", "tell me everything about...". These ask about the user's stored memories.
 - Questions that are NOT about stored memories (general knowledge, opinions, how-to questions) are chat.
 - Questions should NEVER be execute_command.
@@ -181,7 +233,7 @@ FACT EXTRACTION: Regardless of intent, if the input contains personal facts abou
 Predicates: name_is, role_is, works_at, works_on, title_is, interested_in, lives_in, skill_is, goal_is, preference_is, likes, etc.
 Only extract clear factual statements. If no facts, set facts to [].
 
-Return only JSON with keys: intent, subject, predicate, object, query, target, command, args, description, cron, channel, recipient, content, facts.
+Return only JSON with keys: intent, subject, predicate, object, query, filter, since, limit, older_than, status, nonce, decision, window, id, task_id, enabled, until, target, command, args, description, cron, channel, recipient, content, facts.
 Missing keys must be null. facts must be [] if none."#;
 
 #[async_trait::async_trait]
@@ -279,6 +331,24 @@ impl IntentFallback for LlmIntentFallback {
             "web_search" => Intent::WebSearch {
                 query: payload.query.unwrap_or_else(|| input.to_string()),
             },
+            "query_audit" => Intent::QueryAudit {
+                filter: payload.filter,
+                since: payload.since,
+                limit: payload.limit,
+            },
+            "prune_audit" => Intent::PruneAudit {
+                older_than: payload.older_than.unwrap_or_else(|| "30d".to_string()),
+            },
+            "list_approvals" => Intent::ListApprovals {
+                status: payload.status,
+            },
+            "respond_to_approval" => Intent::RespondToApproval {
+                nonce: payload.nonce.unwrap_or_default(),
+                decision: payload.decision.unwrap_or_else(|| "approve".to_string()),
+            },
+            "budget_status" => Intent::BudgetStatus {
+                window: payload.window,
+            },
             "schedule" => {
                 let description = payload
                     .description
@@ -289,6 +359,10 @@ impl IntentFallback for LlmIntentFallback {
                     cron: payload.cron,
                 }
             }
+            "list_schedules" => Intent::ListSchedules,
+            "cancel_schedule" => Intent::CancelSchedule {
+                id: payload.id.unwrap_or_default(),
+            },
             "send_message" => {
                 let channel = payload.channel.unwrap_or_default();
                 let recipient = payload.recipient.unwrap_or_default();
@@ -312,9 +386,21 @@ impl IntentFallback for LlmIntentFallback {
                     .or(payload.description)
                     .unwrap_or_else(|| input.to_string()),
             },
+            "list_tasks" => Intent::ListTasks,
+            "task_status" => Intent::TaskStatus {
+                task_id: payload.task_id.unwrap_or_default(),
+            },
+            "cancel_task" => Intent::CancelTask {
+                task_id: payload.task_id.unwrap_or_default(),
+            },
             "query_agents" => Intent::QueryAgents {
                 filter: payload.query.unwrap_or_default(),
             },
+            "set_proactivity" => Intent::SetProactivity {
+                enabled: payload.enabled.unwrap_or(true),
+                until: payload.until,
+            },
+            "proactivity_status" => Intent::ProactivityStatus,
             _ => Intent::Chat {
                 content: input.to_string(),
             },

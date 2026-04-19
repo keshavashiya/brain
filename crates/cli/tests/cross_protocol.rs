@@ -36,6 +36,7 @@ async fn test_cross_protocol_memory_parity() {
 
     let http_task = tokio::spawn(httpadapter::serve(
         processor.clone(),
+        std::collections::HashMap::new(),
         "127.0.0.1",
         http_port,
     ));

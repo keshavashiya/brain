@@ -1,8 +1,10 @@
 //! HTTP server construction and lifecycle.
 
+use std::collections::HashMap;
 use std::{net::SocketAddr, sync::Arc};
 
 use axum::{routing::delete, Router};
+use channel::transport::inbound::WebhookInboundTransport;
 use tokio::sync::Mutex;
 
 use crate::handlers::*;
@@ -16,11 +18,13 @@ use crate::state::{AppState, CACHE_CAPACITY};
 /// When false, no CORS layer is applied (useful for reverse-proxy setups that handle CORS externally).
 pub fn create_router(
     processor: Arc<signal::SignalProcessor>,
+    webhook_handlers: HashMap<String, Arc<WebhookInboundTransport>>,
     api_keys: Vec<brain_core::ApiKeyConfig>,
     cors_enabled: bool,
 ) -> Router {
     let state = Arc::new(AppState {
         processor,
+        webhook_handlers,
         cache: Mutex::new(lru::LruCache::new(
             std::num::NonZeroUsize::new(CACHE_CAPACITY).unwrap(),
         )),
@@ -41,6 +45,7 @@ pub fn create_router(
         .route("/v1/schedules", get(list_schedules_handler))
         .route("/v1/schedules/:id", delete(cancel_schedule_handler))
         .route("/v1/events", get(sse_events_handler))
+        .route("/v1/webhooks/:id", post(post_webhook_handler))
         .layer(axum::extract::DefaultBodyLimit::max(1_048_576))
         .layer(tower::limit::ConcurrencyLimitLayer::new(100));
 
@@ -67,12 +72,13 @@ use axum::routing::{get, post};
 /// Blocks until the server shuts down.
 pub async fn serve(
     processor: Arc<signal::SignalProcessor>,
+    webhook_handlers: HashMap<String, Arc<WebhookInboundTransport>>,
     host: &str,
     port: u16,
 ) -> anyhow::Result<()> {
     let cors_enabled = processor.config().adapters.http.cors;
     let api_keys = processor.config().access.api_keys.clone();
-    let router = create_router(processor, api_keys, cors_enabled);
+    let router = create_router(processor, webhook_handlers, api_keys, cors_enabled);
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
     tracing::info!("Synapse HTTP online at http://{addr}");
     let listener = tokio::net::TcpListener::bind(addr).await?;

@@ -1,8 +1,10 @@
 //! Shared application state for HTTP handlers.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::extract::State as AxumState;
+use channel::transport::inbound::WebhookInboundTransport;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
@@ -14,6 +16,8 @@ pub const CACHE_CAPACITY: usize = 1000;
 /// Shared state for all HTTP handlers.
 pub struct AppState {
     pub processor: Arc<signal::SignalProcessor>,
+    /// Registry of active webhook transports (transport_id → transport).
+    pub webhook_handlers: HashMap<String, Arc<WebhookInboundTransport>>,
     /// LRU cache: signal_id → SignalResponse. Bounded to `CACHE_CAPACITY` entries.
     pub cache: Mutex<lru::LruCache<Uuid, signal::SignalResponse>>,
     /// Configured API keys (loaded from BrainConfig).

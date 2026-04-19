@@ -93,18 +93,47 @@ pub(crate) async fn cmd_serve(
     let mut bound_adapters = Vec::new();
     let mut failed_adapters = Vec::new();
 
+    // ── Preset-driven transports ──────────────────────────────────────
+    // Hold shutdown senders alive for the lifetime of cmd_serve so the
+    // per-transport run loops don't see an immediate shutdown on drop.
+    let (_transport_shutdown_guards, webhook_handlers) = if config.channel.transports.is_empty() {
+        (Vec::new(), std::collections::HashMap::new())
+    } else {
+        let router = processor.channel_router().cloned();
+        let correlator = processor.confirmation_correlator().cloned();
+        match (router, correlator) {
+            (Some(router), Some(correlator)) => {
+                wire_preset_transports(
+                    &config.channel.transports,
+                    processor.clone(),
+                    router,
+                    correlator,
+                    &mut set,
+                )
+                .await
+            }
+            _ => {
+                tracing::warn!(
+                    "channel.transports configured but channel intelligence is not wired — skipping"
+                );
+                (Vec::new(), std::collections::HashMap::new())
+            }
+        }
+    };
+
     // Bind adapters sequentially — HTTP is critical (health check endpoint).
     // If HTTP fails, abort entirely. Other adapters fail gracefully.
     if run_all || http {
         let p = processor.clone();
         let h = host.clone();
         let port = config.adapters.http.port;
+        let handlers = webhook_handlers.clone();
         match tokio::net::TcpListener::bind(format!("{h}:{port}")).await {
             Ok(_listener) => {
                 println!("  Synapse HTTP  → http://{}:{}", h, port);
                 let p = p.clone();
                 let h = h.clone();
-                set.spawn(async move { httpadapter::serve(p, &h, port).await });
+                set.spawn(async move { httpadapter::serve(p, handlers, &h, port).await });
                 bound_adapters.push("HTTP");
             }
             Err(e) => {
@@ -433,35 +462,6 @@ pub(crate) async fn cmd_serve(
         }
     }
 
-    // ── Preset-driven transports ──────────────────────────────────────
-    // Hold shutdown senders alive for the lifetime of cmd_serve so the
-    // per-transport run loops don't see an immediate shutdown on drop.
-    let _transport_shutdown_guards: Vec<tokio::sync::oneshot::Sender<()>> =
-        if config.channel.transports.is_empty() {
-            Vec::new()
-        } else {
-            let router = processor.channel_router().cloned();
-            let correlator = processor.confirmation_correlator().cloned();
-            match (router, correlator) {
-                (Some(router), Some(correlator)) => {
-                    wire_preset_transports(
-                        &config.channel.transports,
-                        processor.clone(),
-                        router,
-                        correlator,
-                        &mut set,
-                    )
-                    .await
-                }
-                _ => {
-                    tracing::warn!(
-                    "channel.transports configured but channel intelligence is not wired — skipping"
-                );
-                    Vec::new()
-                }
-            }
-        };
-
     println!("\nBrain is conscious. Press Ctrl+C to sleep.\n");
 
     // ── Graceful shutdown ─────────────────────────────────────────────
@@ -609,7 +609,10 @@ async fn wire_preset_transports(
     router: Arc<dyn channel::ChannelRouter>,
     correlator: Arc<channel::ConfirmationCorrelator>,
     set: &mut tokio::task::JoinSet<anyhow::Result<()>>,
-) -> Vec<tokio::sync::oneshot::Sender<()>> {
+) -> (
+    Vec<tokio::sync::oneshot::Sender<()>>,
+    std::collections::HashMap<String, Arc<channel::transport::inbound::WebhookInboundTransport>>,
+) {
     use channel::transport::inbound::{WebhookInboundConfig, WebhookInboundTransport};
     use channel::transport::outbound::{WebhookOutboundConfig, WebhookOutboundTransport};
     use channel::transport::polled::{HttpPolledConfig, HttpPolledTransport};
@@ -617,6 +620,7 @@ async fn wire_preset_transports(
     use channel::ChannelTransport;
 
     let mut shutdown_guards = Vec::new();
+    let mut webhook_handlers = std::collections::HashMap::new();
 
     for entry in entries {
         let preset = match preset::load(&entry.preset) {
@@ -731,21 +735,16 @@ async fn wire_preset_transports(
                 if let Err(e) = router.register(transport.descriptor()).await {
                     tracing::warn!(transport = %entry.id, error = %e, "router register failed");
                 }
-                // NOTE: the HTTP route that calls
-                // `transport.handle_request()` must be added to the HTTP
-                // adapter. Until then the transport is registered with the
-                // router for outbound sends but will not receive inbound
-                // traffic. Tracked as a follow-up.
                 println!(
-                    "  Transport    → {} (preset: {}, webhook-in [route pending])",
+                    "  Transport    → {} (preset: {}, webhook-inbound)",
                     entry.label, entry.preset
                 );
-                let _ = transport; // keep alive by moving into discard
+                webhook_handlers.insert(entry.id.clone(), transport);
             }
         }
     }
 
-    shutdown_guards
+    (shutdown_guards, webhook_handlers)
 }
 
 #[cfg(test)]
