@@ -376,14 +376,13 @@ fn default_relay_max_backoff_ms() -> u64 {
 /// can hand off to.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentsConfig {
-    /// Registered delegates. Empty list means no delegation is wired —
-    /// `Implement` steps will fail with "agent unavailable" until an
-    /// entry is added. Order doesn't matter; fallback chains are
-    /// resolved via `fallbacks` below.
+    /// Manually-registered delegates. Kept for advanced setups and
+    /// backward compatibility; most users rely on `auto_discovery`.
     #[serde(default)]
     pub delegates: Vec<AgentEntry>,
     /// Ordered fallback agent names applied when a delegation fails on
-    /// a retryable error. Each name must match an entry in `delegates`.
+    /// a retryable error. Names must match discovered ids or `delegates`
+    /// entries (e.g. `"claude-code"`, `"aider"`).
     #[serde(default)]
     pub fallbacks: Vec<String>,
     /// Whether timeout failures should trigger fallback retries
@@ -391,10 +390,41 @@ pub struct AgentsConfig {
     /// prohibitive.
     #[serde(default = "default_retry_on_timeout")]
     pub retry_on_timeout: bool,
+    /// Scan `$PATH` on startup and auto-register known CLI agents
+    /// (claude, aider, codex, qwen, gemini, opencode). Default: true.
+    /// Set to `false` to go fully manual via `delegates[]`.
+    #[serde(default = "default_auto_discovery")]
+    pub auto_discovery: bool,
+    /// Per-agent overrides merged on top of discovery defaults. Keyed
+    /// by the canonical agent id (e.g. `"claude-code"`).
+    #[serde(default)]
+    pub discovery_overrides: std::collections::HashMap<String, AgentDiscoveryOverride>,
 }
 
 fn default_retry_on_timeout() -> bool {
     true
+}
+
+fn default_auto_discovery() -> bool {
+    true
+}
+
+/// Tweak a single auto-discovered agent. All fields are optional —
+/// unset ones keep the fingerprint default.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentDiscoveryOverride {
+    /// Force a specific binary path instead of the `$PATH` hit.
+    #[serde(default)]
+    pub binary: Option<String>,
+    /// Exclude from the registry entirely.
+    #[serde(default)]
+    pub disabled: bool,
+    /// Override the invocation args (supports `{prompt}` / `{task_id}`).
+    #[serde(default)]
+    pub args: Option<Vec<String>>,
+    /// Force stdin vs. argv prompt delivery.
+    #[serde(default)]
+    pub prompt_via_stdin: Option<bool>,
 }
 
 /// One registered delegate. `kind` selects the adapter:

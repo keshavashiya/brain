@@ -5,6 +5,32 @@ use uuid::Uuid;
 use crate::types::*;
 use crate::SignalProcessor;
 
+fn format_agent_status(id: &str, status: &delegate::RegistryAgentStatus) -> String {
+    match status {
+        delegate::RegistryAgentStatus::Registered {
+            binary,
+            version,
+            source,
+        } => {
+            let source = match source {
+                delegate::AgentSource::Discovered => "discovered",
+                delegate::AgentSource::Custom => "custom",
+                delegate::AgentSource::Manual => "manual",
+            };
+            match version {
+                Some(v) => format!("{id} ({source}) — {} [{}]", v, binary.display()),
+                None => format!("{id} ({source}) — {}", binary.display()),
+            }
+        }
+        delegate::RegistryAgentStatus::DisabledByConfig => {
+            format!("{id} — disabled by config")
+        }
+        delegate::RegistryAgentStatus::Unavailable { binary, reason } => {
+            format!("{id} — unavailable ({reason}) [{}]", binary.display())
+        }
+    }
+}
+
 impl SignalProcessor {
     /// Process a signal through the full Brain pipeline.
     ///
@@ -228,6 +254,9 @@ impl SignalProcessor {
             thalamus::Intent::DecomposeTask { ref request } => {
                 self.handle_decompose_task(signal_id, request.clone(), &prepend_nudges)
                     .await
+            }
+            thalamus::Intent::QueryAgents { filter } => {
+                self.handle_query_agents(signal_id, filter, &prepend_nudges)
             }
             ref intent @ (thalamus::Intent::WebSearch { .. }
             | thalamus::Intent::Schedule { .. }
@@ -513,6 +542,59 @@ impl SignalProcessor {
             signal_id,
             format!("Brain status: {semantic_count} facts, {episode_count} episodes"),
         ));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    pub(super) fn handle_query_agents(
+        &self,
+        signal_id: Uuid,
+        filter: String,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let registry = match self.agent_registry() {
+            Some(r) => r,
+            None => {
+                let resp = prepend_nudges(SignalResponse::ok(
+                    signal_id,
+                    "Agent registry is not wired.".to_string(),
+                ));
+                return Ok(PipelineResult::Complete(resp));
+            }
+        };
+
+        let needle = filter.trim().to_lowercase();
+        let known = registry.known_agents();
+        let mut matches_line: Vec<String> = Vec::new();
+        for (id, status) in &known {
+            if !needle.is_empty() && !id.to_lowercase().contains(&needle) {
+                continue;
+            }
+            matches_line.push(format_agent_status(id, status));
+        }
+
+        let message = if known.is_empty() {
+            "No agents discovered and none configured. Install a CLI agent \
+             (claude-code, aider, codex, qwen, gemini, opencode) on your PATH \
+             — it will be picked up on the next boot."
+                .to_string()
+        } else if matches_line.is_empty() {
+            format!("No known agents match '{filter}'.")
+        } else {
+            let registered: Vec<String> = registry.list();
+            let mut out = String::new();
+            out.push_str("Known agents:\n");
+            for line in &matches_line {
+                out.push_str("  • ");
+                out.push_str(line);
+                out.push('\n');
+            }
+            if needle.is_empty() && !registered.is_empty() {
+                out.push_str(&format!("\nReady to delegate: {}", registered.join(", ")));
+            }
+            out.trim_end().to_string()
+        };
+
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
         Ok(PipelineResult::Complete(resp))
     }
 

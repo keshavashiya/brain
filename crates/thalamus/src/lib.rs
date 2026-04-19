@@ -61,6 +61,9 @@ pub enum Intent {
     SystemStatus,
     /// Decompose a complex request into an executable task plan.
     DecomposeTask { request: String },
+    /// Ask about available specialist agents (delegates). Optional
+    /// `filter` narrows the answer: e.g. "rust", "aider", or "".
+    QueryAgents { filter: String },
     /// Regular chat/conversation.
     Chat { content: String },
 }
@@ -303,6 +306,9 @@ impl IntentFallback for LlmIntentFallback {
                     .or(payload.description)
                     .unwrap_or_else(|| input.to_string()),
             },
+            "query_agents" => Intent::QueryAgents {
+                filter: payload.query.unwrap_or_default(),
+            },
             _ => Intent::Chat {
                 content: input.to_string(),
             },
@@ -396,6 +402,18 @@ static SEND_MESSAGE_RE: LazyLock<Regex> = LazyLock::new(|| {
 static STATUS_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^/status$").expect("invariant: STATUS_RE must be valid"));
 
+static QUERY_AGENTS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)^(?:what|which|list)\s+(?:agents?|delegates?|specialists?)(?:\s+(?:do you have|are available|are there|can you use|can (?:code|write|do)\s+(.+?)))?\??$",
+    )
+    .expect("invariant: QUERY_AGENTS_RE must be valid")
+});
+
+static QUERY_AGENTS_WHY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^why\s+(?:aren'?t|isn'?t|can'?t)\s+you\s+(?:using|use|offering)\s+(.+?)\??$")
+        .expect("invariant: QUERY_AGENTS_WHY_RE must be valid")
+});
+
 /// All patterns in priority order — first match wins.
 const PATTERNS: &[PatternDef] = &[
     PatternDef {
@@ -464,6 +482,22 @@ const PATTERNS: &[PatternDef] = &[
         regex: &STATUS_RE,
         base_intent: Intent::SystemStatus,
         extractors: &[],
+    },
+    PatternDef {
+        regex: &QUERY_AGENTS_RE,
+        base_intent: Intent::QueryAgents {
+            filter: String::new(),
+        },
+        // Optional capture — "can code X" supplies a filter; the
+        // generic "what agents do you have" form leaves it empty.
+        extractors: &[("filter", 1)],
+    },
+    PatternDef {
+        regex: &QUERY_AGENTS_WHY_RE,
+        base_intent: Intent::QueryAgents {
+            filter: String::new(),
+        },
+        extractors: &[("filter", 1)],
     },
 ];
 
@@ -587,6 +621,9 @@ impl IntentClassifier {
                 channel: get_group("channel").to_lowercase(),
                 recipient: get_group("recipient"),
                 content: get_group("content"),
+            },
+            Intent::QueryAgents { .. } => Intent::QueryAgents {
+                filter: get_group("filter").trim().to_string(),
             },
             _ => base.clone(),
         }
@@ -889,6 +926,36 @@ mod tests {
             "Expected ExecuteCommand, got {:?}",
             result.intent
         );
+    }
+
+    #[tokio::test]
+    async fn test_classify_query_agents_unfiltered() {
+        let classifier = IntentClassifier::new();
+        let result = classifier.classify("what agents do you have").await;
+        match result.intent {
+            Intent::QueryAgents { filter } => assert!(filter.is_empty()),
+            other => panic!("Expected QueryAgents, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_classify_query_agents_filtered() {
+        let classifier = IntentClassifier::new();
+        let result = classifier.classify("which agents can code rust").await;
+        match result.intent {
+            Intent::QueryAgents { filter } => assert_eq!(filter.to_lowercase(), "rust"),
+            other => panic!("Expected QueryAgents, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_classify_query_agents_why_not() {
+        let classifier = IntentClassifier::new();
+        let result = classifier.classify("why aren't you using aider").await;
+        match result.intent {
+            Intent::QueryAgents { filter } => assert_eq!(filter.to_lowercase(), "aider"),
+            other => panic!("Expected QueryAgents, got {other:?}"),
+        }
     }
 
     #[tokio::test]

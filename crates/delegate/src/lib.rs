@@ -11,14 +11,22 @@
 //! - [`ClaudeCodeDelegate`] — subprocess adapter for the `claude` CLI
 
 pub mod claude_code;
+pub mod discovery;
 pub mod escalate;
 pub mod registry;
 pub mod subprocess;
 pub mod traits;
 
 pub use claude_code::{ClaudeCodeConfig, ClaudeCodeDelegate};
+pub use discovery::{
+    default_fingerprints, AgentFingerprint, DelegateDiscovery, DiscoveredBinary, DiscoveryStatus,
+    PathScanner, DEFAULT_PROBE_TIMEOUT,
+};
 pub use escalate::{run_with_escalation, EscalationOutcome, EscalationPolicy};
-pub use registry::AgentRegistry;
+pub use registry::{
+    AgentOverride, AgentRegistry, AgentSource, CustomAgentSpec, DelegateOverrides,
+    RegistryAgentStatus,
+};
 pub use subprocess::{SubprocessAgentConfig, SubprocessAgentDelegate};
 pub use traits::{
     AgentCapabilities, AgentContext, AgentDelegate, AgentError, AgentResult, AgentTask,

@@ -42,7 +42,7 @@ pub async fn build_processor(
     processor = processor.with_action_dispatcher(action_dispatcher);
 
     // ── Phase 1: Safety infrastructure ──────────────────────────────────
-    processor = wire_safety_infrastructure(processor, config)?;
+    processor = wire_safety_infrastructure(processor, config).await?;
 
     Ok(processor)
 }
@@ -53,7 +53,7 @@ pub async fn build_processor(
 /// All share the same SQLite pool as the episodic store for simplicity.
 /// The credential vault is NOT wired here — it requires passphrase input
 /// and is wired on demand (e.g. `brain vault` / `brain auth` commands).
-fn wire_safety_infrastructure(
+async fn wire_safety_infrastructure(
     processor: signal::SignalProcessor,
     config: &brain_core::BrainConfig,
 ) -> anyhow::Result<signal::SignalProcessor> {
@@ -109,10 +109,10 @@ fn wire_safety_infrastructure(
 
     // ── Agent registry (Phase 3) ────────────────────────────────────────
     // Built before the orchestrator so `Implement` steps can dispatch to
-    // registered specialist agents. When `agents.delegates` is empty,
-    // `StepAction::Implement` will fail with a clear error — that's the
-    // desired behaviour until an agent is configured.
-    let agent_registry = build_agent_registry(config)?;
+    // registered specialist agents. Discovery scans `$PATH` for known
+    // CLI agents at boot; manual `agents.delegates[]` entries still
+    // work alongside (last-write-wins on name collisions).
+    let agent_registry = build_agent_registry(config).await?;
     let agent_registry_arc = Arc::new(agent_registry);
     if !agent_registry_arc.is_empty() {
         tracing::info!(
@@ -159,16 +159,59 @@ fn wire_safety_infrastructure(
     Ok(processor)
 }
 
-/// Build the agent delegation registry from `config.agents.delegates`.
+/// Build the agent delegation registry.
 ///
-/// Every entry maps to a concrete [`delegate::AgentDelegate`] implementation
-/// based on `kind`. Unknown kinds are warned about and skipped — missing
-/// required fields (e.g. `binary` for a `subprocess` entry) are fatal so
-/// bad config surfaces at boot instead of mid-delegation.
-fn build_agent_registry(
+/// Two population paths compose:
+/// 1. **Auto-discovery** — `$PATH` scan + version probe for known CLI
+///    agents (claude-code, aider, codex, qwen-code, gemini-cli, opencode).
+///    Skipped when `agents.auto_discovery = false`.
+/// 2. **Manual `agents.delegates[]` entries** — advanced/custom agents
+///    that aren't fingerprinted. These always run and overwrite any
+///    auto-discovered entry on name collision.
+async fn build_agent_registry(
     config: &brain_core::BrainConfig,
 ) -> anyhow::Result<delegate::AgentRegistry> {
     let mut registry = delegate::AgentRegistry::new();
+
+    let overrides = delegate::DelegateOverrides {
+        auto_discovery: config.agents.auto_discovery,
+        overrides: config
+            .agents
+            .discovery_overrides
+            .iter()
+            .map(|(id, ov)| {
+                (
+                    id.clone(),
+                    delegate::AgentOverride {
+                        binary: ov.binary.as_ref().map(std::path::PathBuf::from),
+                        disabled: ov.disabled,
+                        capabilities: None,
+                        args: ov.args.clone(),
+                        prompt_via_stdin: ov.prompt_via_stdin,
+                    },
+                )
+            })
+            .collect(),
+        custom: Vec::new(),
+    };
+
+    if overrides.auto_discovery {
+        let discovery = delegate::DelegateDiscovery::new();
+        let discovered = discovery.discover().await;
+        tracing::info!(found = discovered.len(), "Agent discovery scan complete");
+        for d in &discovered {
+            tracing::debug!(
+                agent = %d.agent_id,
+                path = %d.path.display(),
+                version = ?d.version,
+                status = ?d.status,
+                "Discovered candidate"
+            );
+        }
+        registry.populate_from_discovery(discovered, &overrides);
+    } else {
+        tracing::info!("Agent auto-discovery disabled by config");
+    }
 
     for entry in &config.agents.delegates {
         let capabilities = delegate::AgentCapabilities {
@@ -194,9 +237,10 @@ fn build_agent_registry(
                     workdir,
                     capabilities,
                 };
+                let binary_path = std::path::PathBuf::from(&cfg.binary);
                 let d: Arc<dyn delegate::AgentDelegate> =
                     Arc::new(delegate::ClaudeCodeDelegate::new(cfg));
-                registry.register(d);
+                registry.register_manual(d, binary_path, None);
             }
             "subprocess" => {
                 if entry.binary.is_empty() {
@@ -212,9 +256,10 @@ fn build_agent_registry(
                 if let Some(dir) = workdir {
                     sub_cfg = sub_cfg.with_workdir(dir);
                 }
+                let binary_path = std::path::PathBuf::from(&entry.binary);
                 let d: Arc<dyn delegate::AgentDelegate> =
                     Arc::new(delegate::SubprocessAgentDelegate::new(sub_cfg));
-                registry.register(d);
+                registry.register_manual(d, binary_path, None);
             }
             other => {
                 tracing::warn!(
@@ -228,6 +273,17 @@ fn build_agent_registry(
 
         if let Some(alias) = &entry.alias {
             registry.alias(alias.clone(), entry.name.clone());
+        }
+    }
+
+    // Surface misconfigured fallbacks at boot so the first delegation
+    // failure doesn't become the discovery event.
+    for fb in &config.agents.fallbacks {
+        if !registry.contains(fb) {
+            tracing::warn!(
+                fallback = %fb,
+                "agents.fallbacks references an unknown agent — nothing will catch a retryable failure for this name"
+            );
         }
     }
 
@@ -518,4 +574,53 @@ pub async fn proxy_mcp_stdio(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Minimal config producer that disables auto-discovery and provides
+    // one manual subprocess delegate — keeps the test offline and tight.
+    fn cfg_with_manual_delegate() -> brain_core::BrainConfig {
+        let mut c = brain_core::BrainConfig::default();
+        c.agents.auto_discovery = false;
+        c.agents.delegates = vec![brain_core::config::AgentEntry {
+            name: "hand-wired".to_string(),
+            kind: "subprocess".to_string(),
+            alias: None,
+            binary: "/usr/bin/true".to_string(),
+            args: vec![],
+            workdir: None,
+            prompt_via_stdin: true,
+            tags: vec!["test".to_string()],
+        }];
+        c.agents.fallbacks = vec!["hand-wired".to_string(), "ghost".to_string()];
+        c
+    }
+
+    #[tokio::test]
+    async fn build_agent_registry_records_manual_entry_in_status() {
+        let cfg = cfg_with_manual_delegate();
+        let reg = build_agent_registry(&cfg).await.expect("registry builds");
+        assert!(reg.contains("hand-wired"), "manual delegate not registered");
+        match reg.agent_status("hand-wired") {
+            Some(delegate::RegistryAgentStatus::Registered { source, .. }) => {
+                assert_eq!(*source, delegate::AgentSource::Manual);
+            }
+            other => panic!("expected Manual Registered, got {other:?}"),
+        }
+        // Fallback "ghost" is bogus — known_agents should not gain a phantom
+        // entry from the validator pass (validator only warns).
+        assert!(reg.agent_status("ghost").is_none());
+    }
+
+    #[tokio::test]
+    async fn build_agent_registry_empty_when_fully_disabled() {
+        let mut cfg = brain_core::BrainConfig::default();
+        cfg.agents.auto_discovery = false;
+        let reg = build_agent_registry(&cfg).await.expect("registry builds");
+        assert!(reg.is_empty());
+        assert!(reg.known_agents().is_empty());
+    }
 }
