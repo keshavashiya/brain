@@ -31,7 +31,8 @@ pub struct Episode {
     pub decay_rate: f64,
     pub reinforcement_count: i32,
     pub last_accessed: Option<String>,
-    /// Originating AI agent (e.g. "claude-code", "opencode"). None for direct user input.
+    /// Originating AI agent — opaque id set by the caller. `None` for
+    /// direct user input.
     pub agent: Option<String>,
 }
 

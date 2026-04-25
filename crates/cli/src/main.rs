@@ -149,17 +149,17 @@ enum Commands {
 
     /// Bridge to an external gateway for bidirectional messaging.
     ///
-    /// Connects to an external WebSocket gateway (e.g., Slack, Telegram, Discord bot)
-    /// and relays messages to/from Brain's WebSocket synapse. This enables proactive
-    /// notifications to be delivered to external platforms.
+    /// Connects to an external WebSocket gateway and relays messages
+    /// to/from Brain's WebSocket synapse. This enables proactive
+    /// notifications to be delivered to external transports.
     ///
-    /// The bridge also receives proactive notifications from Brain and pushes them
-    /// to the connected gateway in real-time.
+    /// The bridge also receives proactive notifications from Brain and
+    /// pushes them to the connected gateway in real-time.
     ///
     /// Examples:
-    ///   brain bridge ws://localhost:8080/bot          # connect to gateway
-    ///   brain bridge wss://slack.bot.com/ws           # connect to Slack (with TLS)
-    ///   brain bridge ws://localhost:8080 --api-key YOUR_KEY  # with auth
+    ///   brain bridge ws://localhost:8080/bot                  # connect to gateway
+    ///   brain bridge wss://gateway.example.com/ws             # over TLS
+    ///   brain bridge ws://localhost:8080 --api-key YOUR_KEY   # with auth
     #[cfg(feature = "bridge")]
     Bridge {
         /// WebSocket URL of the external gateway to connect to

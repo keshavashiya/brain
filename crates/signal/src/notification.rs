@@ -265,7 +265,7 @@ mod tests {
         let config = brain_core::DeliveryConfig {
             outbox: false,
             broadcast: false,
-            webhook_channels: vec!["slack".into(), "discord".into()],
+            webhook_channels: vec!["chat-main".into(), "ops".into()],
             max_outbox_age_days: 7,
         };
         let sender = Arc::new(MockWebhookSender::new());
@@ -282,10 +282,10 @@ mod tests {
 
         let calls = sender.calls.lock().unwrap();
         assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].0, "slack");
+        assert_eq!(calls[0].0, "chat-main");
         assert_eq!(calls[0].1, "Time to hydrate");
         assert_eq!(calls[0].2, "personal");
-        assert_eq!(calls[1].0, "discord");
+        assert_eq!(calls[1].0, "ops");
     }
 
     /// Wrapper to bridge Arc<MockWebhookSender> into Box<dyn WebhookSender>.

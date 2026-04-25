@@ -117,7 +117,10 @@ pub fn format_plan_for_approval(state: &TaskState) -> String {
     }
 
     lines.push(String::new());
-    lines.push("Approve this plan? [brain confirm approve <nonce>]".to_string());
+    lines.push(format!(
+        "Approve this plan? Reply 'approve {id}' or 'reject {id}'.",
+        id = state.id
+    ));
 
     lines.join("\n")
 }
@@ -172,5 +175,22 @@ mod tests {
         assert!(plan.contains("Research"));
         assert!(plan.contains("Implement"));
         assert!(plan.contains("[exec]"));
+    }
+
+    #[test]
+    fn test_format_plan_embeds_task_id() {
+        let state = test_state();
+        let plan = format_plan_for_approval(&state);
+        // The prompt must literally include the task ID so the user can copy
+        // it back as `approve <id>` / `reject <id>`.
+        assert!(
+            plan.contains("approve t1") && plan.contains("reject t1"),
+            "approval prompt missing literal task id, got:\n{plan}"
+        );
+        // The old `<nonce>` placeholder must be gone — it was the bug.
+        assert!(
+            !plan.contains("<nonce>"),
+            "literal `<nonce>` placeholder still present"
+        );
     }
 }

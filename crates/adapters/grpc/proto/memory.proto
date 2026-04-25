@@ -72,7 +72,7 @@ message SignalRequest {
   map<string, string> metadata = 5;
   // Optional namespace (default: "personal").
   string namespace = 6;
-  // Originating agent identity (e.g. "claude-code", "open-code").
+  // Originating agent identity — opaque id chosen by the caller.
   string agent = 7;
   // Optional session ID for conversation continuity.
   string session_id = 8;

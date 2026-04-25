@@ -69,10 +69,11 @@ impl SignalProcessor {
         if llm_cfg.providers.is_empty() {
             llm_cfg.api_key = llm_api_key.clone();
         }
-        let llm: Arc<dyn cortex::LlmProvider> = cortex::llm::select_provider(&llm_cfg)
-            .await
-            .map_err(|e| SignalError::Init(format!("Failed to create LLM provider: {e}")))?
-            .into();
+        let llm: Arc<dyn cortex::LlmProvider> = Arc::new(
+            cortex::llm::build_failover_chain(&llm_cfg)
+                .await
+                .map_err(|e| SignalError::Init(format!("Failed to create LLM provider: {e}")))?,
+        );
 
         // Create embedder — provider is selected from llm.provider config.
         // The model and dimension come from the embedding config section.

@@ -58,11 +58,19 @@ brain/
 │   │
 │   ├── cortex/         # Reasoning core
 │   │   ├── llm         # LlmProvider trait: OllamaProvider + OpenAiProvider
-│   │   │                 Streaming and non-streaming generate; health_check
+│   │   │                 Streaming and non-streaming generate; health_check; model()
+│   │   │                 FalloverProvider: ordered retry chain — tries next provider on
+│   │   │                 any retriable error (429/5xx/timeout/unavailable); non-retriable
+│   │   │                 errors (4xx auth, InvalidFormat) propagate immediately.
+│   │   │                 build_failover_chain(): probes providers at startup, builds chain
+│   │   │                 with probed winner first and remaining entries as fallbacks.
 │   │   ├── context     # ContextAssembler: token-budgeted prompt builder
 │   │   │                 Budget: system(500) + user_model(300) + history(2000) +
 │   │   │                 response_buffer(400) + memories(remainder of 8192)
 │   │   │                 Agent-attributed memories rendered as [source, agent: X]
+│   │   │                 assemble_with_addendum(): appends an addendum to the system
+│   │   │                 prompt for per-turn mode switching (e.g. onboarding) without
+│   │   │                 mutating the shared assembler
 │   │   └── actions     # ActionDispatcher: pluggable backend traits
 │   │                     MemoryBackend, WebSearchBackend, SchedulingBackend, MessageBackend
 │   │                     Deterministic dispatch contract (disabled / not-configured / real)
@@ -103,7 +111,7 @@ brain/
 │   │
 │   ├── delegate/       # External agent delegation
 │   │                     AgentDelegate trait, AgentRegistry, DelegateDiscovery,
-│   │                     SubprocessDelegate, ClaudeCodeDelegate, EscalationHandler
+│   │                     SubprocessAgentDelegate, EscalationHandler
 │   │                     Config supports auto-discovery, discovery overrides,
 │   │                     manual delegates, and ordered fallback escalation
 │   │
@@ -133,6 +141,9 @@ brain/
 │       │                 built-in diagnostic Web UI, Prometheus metrics, signal cache
 │       ├── ws/         # WebSocket adapter (port 19790, tokio-tungstenite)
 │       │                 Auth via first frame {"api_key":"..."}, namespace per message
+│       │                 Streaming progress frames: sends {"type":"status","stage":"routing"},
+│       │                 {"type":"status","stage":"thinking"} etc. via mpsc channel while
+│       │                 prepare() runs, so clients see activity before the first LLM token
 │       ├── grpc/       # gRPC adapter (port 19792, tonic)
 │       │                 MemoryService (Search, Store, GetFacts, StreamSignals)
 │       │                 AgentService (Connect, SendSignal, ReceiveSignals fan-out)
@@ -280,7 +291,7 @@ pub struct Signal {
     pub metadata: HashMap<String, String>,
     pub timestamp: DateTime<Utc>,
     pub namespace: String,       // default: "personal"
-    pub agent: Option<String>,   // originating AI agent (e.g. "claude-code")
+    pub agent: Option<String>,   // originating AI agent id, when known
 }
 ```
 
@@ -348,6 +359,14 @@ impl SignalProcessor {
 
     // Task orchestration
     pub fn with_orchestrator(self, orch: Arc<orchestrate::TaskOrchestrator>) -> Self;
+
+    // Agent delegation
+    pub fn with_agent_registry(self, registry: Arc<delegate::AgentRegistry>) -> Self;
+
+    // Channel intelligence
+    pub fn with_channel_router(self, router: Arc<dyn channel::ChannelRouter>) -> Self;
+    pub fn with_channel_preferences(self, preferences: Arc<dyn channel::ChannelPreferenceStore>) -> Self;
+    pub fn with_confirmation_correlator(self, correlator: Arc<channel::ConfirmationCorrelator>) -> Self;
 
     pub fn audit_trail(&self) -> Option<&Arc<dyn audit::AuditTrail>>;
     pub fn confirmation_engine(&self) -> Option<&Arc<dyn confirm::ConfirmationEngine>>;

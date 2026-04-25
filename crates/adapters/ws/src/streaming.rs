@@ -167,20 +167,45 @@ pub(crate) async fn handle_streaming_request(
 
     let signal_id = signal.id;
 
-    let prepared = match processor.prepare(&signal, None).await {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!(conn_id = %conn_id, "Signal prepare error: {e}");
-            let _ = send_json_frame_to_sink(
-                ws_tx,
-                &serde_json::json!({
-                    "type": "error",
-                    "message": e.to_string()
-                }),
-                conn_id,
-            )
-            .await;
-            return;
+    // Surface progress while the pipeline runs — otherwise the client just
+    // sees nothing until the first LLM token. These frames are advisory.
+    let _ = send_json_frame_to_sink(
+        ws_tx,
+        &serde_json::json!({"type": "status", "stage": "routing", "message": "routing…"}),
+        conn_id,
+    )
+    .await;
+
+    // Channel for pipeline → streaming handler progress updates ("searching…" etc).
+    // The pipeline sends stage names; we forward them as status frames while prepare() runs.
+    let (prog_tx, mut prog_rx) = tokio::sync::mpsc::channel::<&'static str>(8);
+    let mut prepare_fut = Box::pin(processor.prepare(&signal, None, Some(prog_tx)));
+
+    let prepared = loop {
+        tokio::select! {
+            result = &mut prepare_fut => {
+                match result {
+                    Ok(p) => break p,
+                    Err(e) => {
+                        tracing::warn!(conn_id = %conn_id, "Signal prepare error: {e}");
+                        let _ = send_json_frame_to_sink(
+                            ws_tx,
+                            &serde_json::json!({"type": "error", "message": e.to_string()}),
+                            conn_id,
+                        )
+                        .await;
+                        return;
+                    }
+                }
+            }
+            Some(stage) = prog_rx.recv() => {
+                let _ = send_json_frame_to_sink(
+                    ws_tx,
+                    &serde_json::json!({"type": "status", "stage": stage, "message": stage}),
+                    conn_id,
+                )
+                .await;
+            }
         }
     };
 
@@ -197,6 +222,25 @@ pub(crate) async fn handle_streaming_request(
             agent,
             ..
         } => {
+            let status_msg = if memory_context.facts_used == 0 && memory_context.episodes_used == 0
+            {
+                "thinking…"
+            } else {
+                "recalling memories…"
+            };
+            let _ = send_json_frame_to_sink(
+                ws_tx,
+                &serde_json::json!({
+                    "type": "status",
+                    "stage": "thinking",
+                    "message": status_msg,
+                    "facts_used": memory_context.facts_used,
+                    "episodes_used": memory_context.episodes_used,
+                }),
+                conn_id,
+            )
+            .await;
+
             let llm_stream = match processor.llm().generate_stream(&messages).await {
                 Ok(s) => s,
                 Err(e) => {

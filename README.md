@@ -110,7 +110,7 @@ brain service uninstall  # Remove
 
 ## Usage
 
-The CLI covers lifecycle (`init`, `start`, `stop`, `status`, `serve`, `mcp`, `service`, `deps`, `export`, `import`) and security-sensitive input (`vault`, `auth`). Everything else — recall, approvals, budgets, schedules, audit queries, task decomposition — goes through `brain chat`.
+The CLI covers lifecycle (`init`, `start`, `stop`, `status`, `serve`, `mcp`, `service`, `deps`) and security-sensitive input (`vault`). Everything else — recall, approvals, budgets, schedules, audit queries, task decomposition, export/import — goes through `brain chat`.
 
 ### Lifecycle commands
 
@@ -211,7 +211,12 @@ Default port: `19789`. All `/v1/*` routes require `Authorization: Bearer <key>`.
 | `POST` | `/v1/memory/search` | Hybrid semantic search |
 | `GET` | `/v1/memory/facts` | List all facts |
 | `GET` | `/v1/memory/namespaces` | Namespace stats |
+| `GET` | `/v1/memory/export` | Export all memory to JSON |
+| `POST` | `/v1/memory/import` | Import memory from JSON backup |
+| `GET` | `/v1/schedules` | List scheduled intents |
+| `DELETE` | `/v1/schedules/:id` | Cancel a scheduled intent |
 | `GET` | `/v1/events` | SSE stream of proactive notifications |
+| `POST` | `/v1/webhooks/:id` | Inbound webhook (channel transport) |
 
 **Example:**
 ```bash
@@ -449,8 +454,6 @@ channel:
 
 These transports are generic engines backed by presets in `crates/channel/presets/` or `~/.brain/presets/<id>.yaml`.
 
-Current limitation: webhook-inbound transports are registered, but the HTTP route that should feed `WebhookInboundTransport::handle_request()` is still pending in `crates/cli/src/serve.rs`, so inbound webhook presets are not fully wired yet.
-
 </details>
 
 ---
@@ -586,7 +589,7 @@ Import is idempotent — re-importing the same backup is safe.
 Brain can integrate with external channels in two ways:
 
 1. Built-in preset-driven transports via `channel.transports[]`.
-2. External WebSocket bridges via `channel.relays[]` or `brain bridge`.
+2. External WebSocket bridges via `channel.relays[]`.
 
 <details>
 <summary><strong>Bridge Library & CLI</strong></summary>

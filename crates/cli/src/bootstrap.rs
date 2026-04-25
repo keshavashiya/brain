@@ -163,7 +163,7 @@ async fn wire_safety_infrastructure(
 ///
 /// Two population paths compose:
 /// 1. **Auto-discovery** — `$PATH` scan + version probe for known CLI
-///    agents (claude-code, aider, codex, qwen-code, gemini-cli, opencode).
+///    agents using the fingerprints in `delegate::default_fingerprints`.
 ///    Skipped when `agents.auto_discovery = false`.
 /// 2. **Manual `agents.delegates[]` entries** — advanced/custom agents
 ///    that aren't fingerprinted. These always run and overwrite any
@@ -224,24 +224,6 @@ async fn build_agent_registry(
         let workdir = entry.workdir.as_ref().map(std::path::PathBuf::from);
 
         match entry.kind.as_str() {
-            "claude_code" => {
-                let binary = if entry.binary.is_empty() {
-                    "claude".to_string()
-                } else {
-                    entry.binary.clone()
-                };
-                let cfg = delegate::ClaudeCodeConfig {
-                    name: entry.name.clone(),
-                    binary,
-                    extra_args: entry.args.clone(),
-                    workdir,
-                    capabilities,
-                };
-                let binary_path = std::path::PathBuf::from(&cfg.binary);
-                let d: Arc<dyn delegate::AgentDelegate> =
-                    Arc::new(delegate::ClaudeCodeDelegate::new(cfg));
-                registry.register_manual(d, binary_path, None);
-            }
             "subprocess" => {
                 if entry.binary.is_empty() {
                     anyhow::bail!(
@@ -265,7 +247,7 @@ async fn build_agent_registry(
                 tracing::warn!(
                     kind = %other,
                     name = %entry.name,
-                    "Unknown agent kind — skipping"
+                    "Unknown agent kind — skipping (use `subprocess` or rely on auto-discovery)"
                 );
                 continue;
             }

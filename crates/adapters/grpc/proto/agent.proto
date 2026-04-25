@@ -2,8 +2,8 @@ syntax = "proto3";
 
 package brain.agent;
 
-// AgentService allows AI agents (Claude Code, OpenCode, etc.) to connect
-// to Brain and exchange signals over a persistent gRPC connection.
+// AgentService allows AI agents to connect to Brain and exchange
+// signals over a persistent gRPC connection.
 service AgentService {
   // Establish an agent session and receive a session ID.
   rpc Connect(ConnectRequest) returns (ConnectResponse);
@@ -38,7 +38,7 @@ message SignalRequest {
   map<string, string> metadata = 5;
   // Optional namespace (default: "personal").
   string namespace = 6;
-  // Originating agent identity (e.g. "claude-code", "open-code").
+  // Originating agent identity — opaque id chosen by the caller.
   string agent = 7;
   // Optional session ID for conversation continuity.
   string session_id = 8;

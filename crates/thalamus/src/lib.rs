@@ -100,6 +100,8 @@ pub enum Intent {
     },
     /// Get proactivity status and configuration.
     ProactivityStatus,
+    /// Dump and summarise everything stored in memory.
+    MemorySummary,
     /// Regular chat/conversation.
     Chat { content: String },
 }
@@ -205,7 +207,7 @@ impl LlmIntentFallback {
 }
 
 const CLASSIFIER_SYSTEM_PROMPT: &str = r#"You classify user input into exactly one intent for Brain OS.
-Valid intents: store_fact, recall, forget, execute_command, web_search, query_audit, prune_audit, list_approvals, respond_to_approval, budget_status, schedule, list_schedules, cancel_schedule, send_message, system_status, decompose_task, list_tasks, task_status, cancel_task, query_agents, set_proactivity, proactivity_status, chat.
+Valid intents: store_fact, recall, forget, execute_command, web_search, query_audit, prune_audit, list_approvals, respond_to_approval, budget_status, schedule, list_schedules, cancel_schedule, send_message, system_status, decompose_task, list_tasks, task_status, cancel_task, query_agents, set_proactivity, proactivity_status, memory_summary, chat.
 Rules:
 - query_audit is for checking past actions: "what did I run today", "show my audit entries", "what did I approve yesterday".
 - prune_audit is for deleting old audit entries: "prune audit logs older than 30 days".
@@ -216,7 +218,9 @@ Rules:
 - list_schedules/cancel_schedule are for managing background schedules: "what's scheduled", "cancel schedule 123".
 - list_tasks/task_status/cancel_task are for managing complex multi-step tasks from decompose_task: "what tasks are running", "status of task 42", "cancel task 10".
 - set_proactivity/proactivity_status are for managing nudges/habit engine: "pause nudges for 2h", "disable proactivity", "check proactivity status".
-- recall is for memory queries: "what do you know about...", "what did we discuss", "what do you remember about...", "tell me about...", "what is my...", "do you remember...", "tell me everything about...". These ask about the user's stored memories.
+- memory_summary is for broad "dump everything you know about me" requests: "summarise my memory", "what do you know", "what have you stored", "show me my memories", "tell me what you remember about me". No query parameter needed.
+- recall is for specific memory queries that name a concrete topic: "what do you know about my project", "what did we discuss about Rust", "what do you remember about my goals". The query MUST identify a topic.
+- Conversational meta-questions about the current chat ("what did we discuss?", "what did I just say?", "summarize our conversation", "what did we talk about earlier today") are chat — the assistant answers from the live conversation history, not from memory lookup.
 - Questions that are NOT about stored memories (general knowledge, opinions, how-to questions) are chat.
 - Questions should NEVER be execute_command.
 - store_fact is ONLY for explicit memory requests: "remember that ...", "note that ...", "keep in mind ...".
@@ -401,6 +405,7 @@ impl IntentFallback for LlmIntentFallback {
                 until: payload.until,
             },
             "proactivity_status" => Intent::ProactivityStatus,
+            "memory_summary" => Intent::MemorySummary,
             _ => Intent::Chat {
                 content: input.to_string(),
             },

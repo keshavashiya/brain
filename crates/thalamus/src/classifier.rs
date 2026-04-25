@@ -19,8 +19,27 @@ static STORE_FACT_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static RECALL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(?:what did|recall|remember)\s+(.+?)\??$")
-        .expect("invariant: RECALL_RE must be valid")
+    // Recall = "look up something in long-term memory by topic".
+    // Conversational meta-questions like "what did we discuss?" must NOT match
+    // here — they belong to Chat so the LLM can use the session's own history.
+    // Triggers require an explicit recall verb followed by a topic.
+    Regex::new(
+        r"(?i)^(?:recall|what do you know about|what.*\bknow about|tell me about)\s+(.+?)\??$",
+    )
+    .expect("invariant: RECALL_RE must be valid")
+});
+
+static MEMORY_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?ix)
+        ^(?:
+            (?:summarise|summarize|sum\s+up|give\s+me\s+a\s+summary\s+of)\s+(?:my\s+)?(?:memory|memories|what\s+you\s+know)|
+            what\s+(?:do\s+you\s+know|have\s+you\s+(?:learned|stored|remembered))\??|
+            what\s+(?:are\s+)?(?:you\s+)?(?:in\s+my\s+memory|stored\s+about\s+me|you\s+remember(?:\s+about\s+me)?)\??|
+            show\s+(?:me\s+)?(?:my\s+)?(?:memory|memories|what\s+you\s+know)|
+            tell\s+me\s+what\s+you\s+(?:know|remember)(?:\s+about\s+me)?\??|
+            (?:dump|list|display)\s+(?:my\s+)?(?:memory|memories|all\s+facts)
+        )$
+    ").expect("invariant: MEMORY_SUMMARY_RE must be valid")
 });
 
 static FORGET_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -59,7 +78,9 @@ static LIST_APPROVALS_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static RESPOND_TO_APPROVAL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(approve|reject)\s+([a-zA-Z0-9]+)$")
+    // Accept hyphens so UUID-style IDs (both confirm-engine nonces and
+    // orchestrator task IDs) match the fast path.
+    Regex::new(r"(?i)^(approve|reject)\s+([a-zA-Z0-9-]+)$")
         .expect("invariant: RESPOND_TO_APPROVAL_RE must be valid")
 });
 
@@ -142,6 +163,11 @@ pub(crate) const PATTERNS: &[PatternDef] = &[
             object: String::new(),
         },
         extractors: &[("content", 1)],
+    },
+    PatternDef {
+        regex: &MEMORY_SUMMARY_RE,
+        base_intent: Intent::MemorySummary,
+        extractors: &[],
     },
     PatternDef {
         regex: &RECALL_RE,
@@ -413,6 +439,10 @@ impl IntentClassifier {
             },
             Intent::QueryAgents { .. } => Intent::QueryAgents {
                 filter: get_group("filter").trim().to_string(),
+            },
+            Intent::RespondToApproval { .. } => Intent::RespondToApproval {
+                decision: get_group("decision").to_lowercase(),
+                nonce: get_group("nonce"),
             },
             _ => base.clone(),
         }

@@ -209,7 +209,7 @@ pub enum AgentError {
 /// The trait every specialist agent implements.
 #[async_trait]
 pub trait AgentDelegate: Send + Sync {
-    /// Stable identifier (`"claude-code"`, `"qwen-code"`).
+    /// Stable identifier registered with the registry.
     fn name(&self) -> &str;
 
     /// Declared capabilities — used by the orchestrator to pick a delegate.

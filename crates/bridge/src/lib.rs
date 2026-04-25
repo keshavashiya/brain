@@ -1,8 +1,8 @@
 //! # Brain Bridge
 //!
-//! External service relay — WebSocket client that connects Brain to remote
-//! messaging gateways (Slack bots, Telegram bridges, custom agents, etc.)
-//! and relays inbound messages through Brain's signal processing pipeline.
+//! External service relay — WebSocket client that connects Brain to a
+//! remote messaging gateway and relays inbound messages through Brain's
+//! signal processing pipeline.
 //!
 //! ## Protocol
 //! 1. `BridgeClient` connects to the configured `url` via WebSocket.
@@ -70,7 +70,8 @@ pub struct BridgeMessage {
     pub id: String,
     /// Text content of the message.
     pub content: String,
-    /// Optional source label (e.g. `"slack"`, `"telegram"`).
+    /// Optional source label set by the gateway (transport id, channel
+    /// name, sender id — whatever the gateway forwards).
     pub source: Option<String>,
     /// Arbitrary key-value metadata forwarded from the gateway.
     pub metadata: Option<HashMap<String, String>>,
@@ -353,7 +354,7 @@ mod tests {
         let original = BridgeMessage {
             id: "test-id-123".to_string(),
             content: "Deploy to prod?".to_string(),
-            source: Some("slack".to_string()),
+            source: Some("chat-main".to_string()),
             metadata: Some(meta),
         };
         let json = serde_json::to_string(&original).unwrap();

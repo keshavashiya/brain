@@ -9,7 +9,8 @@ use channel::relay::SignalHandler;
 
 /// Bridge-facing handler that forwards non-correlation messages into the
 /// main signal pipeline. Used by each configured relay adapter so replies
-/// on Telegram/Slack/etc. hit the same pipeline as HTTP/WS traffic.
+/// arriving on any external transport hit the same pipeline as HTTP/WS
+/// traffic.
 struct RelayPipelineHandler {
     processor: Arc<signal::SignalProcessor>,
     channel_id: String,

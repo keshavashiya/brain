@@ -27,16 +27,13 @@ pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 /// Defaults here are best-effort from public CLI conventions — users
 /// with unusual flags can override args/stdin through config.
 #[derive(Debug, Clone)]
-pub enum InvocationTemplate {
-    /// Dedicated `ClaudeCodeDelegate` wrapper (`-p -` stdin prompt).
-    ClaudeCode,
-    /// Generic subprocess invocation. `{prompt}` and `{task_id}` in
-    /// `args` are substituted at spawn time; `prompt_via_stdin` controls
-    /// whether the rendered prompt is also written to the child's stdin.
-    Subprocess {
-        args: &'static [&'static str],
-        prompt_via_stdin: bool,
-    },
+pub struct InvocationTemplate {
+    /// Args passed to the binary. `{prompt}` and `{task_id}` are
+    /// substituted at spawn time.
+    pub args: &'static [&'static str],
+    /// Whether the rendered prompt is written to the child's stdin
+    /// instead of being templated into `args`.
+    pub prompt_via_stdin: bool,
 }
 
 /// A static description of one known agent family. The discovery pass
@@ -44,11 +41,12 @@ pub enum InvocationTemplate {
 /// and the result becomes a [`DiscoveredBinary`].
 #[derive(Debug, Clone)]
 pub struct AgentFingerprint {
-    /// Canonical id used by the registry (`"claude-code"`, `"aider"`).
+    /// Canonical id used by the registry (e.g. `"aider"`).
     pub id: &'static str,
     /// Candidate binary names, in priority order.
     pub binary_names: &'static [&'static str],
-    /// Args passed to the binary to extract a version banner.
+    /// Args passed to the binary to extract a version banner. Reused as
+    /// the default `version_args` on the resulting delegate.
     pub version_args: &'static [&'static str],
     /// Default capabilities attached to a discovered agent. The
     /// registry is free to override these from config.
@@ -72,8 +70,8 @@ pub enum DiscoveryStatus {
 #[derive(Debug, Clone)]
 pub struct DiscoveredBinary {
     pub agent_id: String,
-    /// The name actually found on `$PATH` (e.g. `"claude"` when the
-    /// fingerprint listed both `"claude"` and `"claude-code"`).
+    /// The name actually found on `$PATH` (e.g. when the fingerprint
+    /// listed several aliases for the same binary, the one that matched).
     pub binary_name: String,
     pub path: PathBuf,
     /// First non-empty line of the version probe's stdout, trimmed.
@@ -81,6 +79,9 @@ pub struct DiscoveredBinary {
     pub status: DiscoveryStatus,
     pub capabilities: AgentCapabilities,
     pub invocation: InvocationTemplate,
+    /// Args used to probe the binary's version. Reused as the default
+    /// `version_args` on the resulting delegate's health probe.
+    pub version_args: Vec<String>,
 }
 
 impl DiscoveredBinary {
@@ -220,6 +221,7 @@ impl DelegateDiscovery {
                     status,
                     capabilities: fp.capabilities,
                     invocation: fp.invocation,
+                    version_args,
                 }
             });
         }
@@ -301,7 +303,11 @@ pub fn default_fingerprints() -> Vec<AgentFingerprint> {
                 max_concurrency: 1,
                 needs_network: true,
             },
-            invocation: InvocationTemplate::ClaudeCode,
+            // `-p -` reads the prompt from stdin.
+            invocation: InvocationTemplate {
+                args: &["-p", "-"],
+                prompt_via_stdin: true,
+            },
         },
         AgentFingerprint {
             id: "codex",
@@ -314,7 +320,7 @@ pub fn default_fingerprints() -> Vec<AgentFingerprint> {
                 needs_network: true,
             },
             // `codex exec` reads the prompt from stdin.
-            invocation: InvocationTemplate::Subprocess {
+            invocation: InvocationTemplate {
                 args: &["exec", "-"],
                 prompt_via_stdin: true,
             },
@@ -330,7 +336,7 @@ pub fn default_fingerprints() -> Vec<AgentFingerprint> {
                 needs_network: true,
             },
             // aider takes its prompt via `--message`, runs non-interactive with `--yes`.
-            invocation: InvocationTemplate::Subprocess {
+            invocation: InvocationTemplate {
                 args: &["--yes", "--no-stream", "--message", "{prompt}"],
                 prompt_via_stdin: false,
             },
@@ -346,7 +352,7 @@ pub fn default_fingerprints() -> Vec<AgentFingerprint> {
                 needs_network: true,
             },
             // qwen-code follows the `-p -` convention for piped prompts.
-            invocation: InvocationTemplate::Subprocess {
+            invocation: InvocationTemplate {
                 args: &["-p", "-"],
                 prompt_via_stdin: true,
             },
@@ -361,7 +367,7 @@ pub fn default_fingerprints() -> Vec<AgentFingerprint> {
                 max_concurrency: 1,
                 needs_network: true,
             },
-            invocation: InvocationTemplate::Subprocess {
+            invocation: InvocationTemplate {
                 args: &["-p", "-"],
                 prompt_via_stdin: true,
             },
@@ -376,7 +382,7 @@ pub fn default_fingerprints() -> Vec<AgentFingerprint> {
                 max_concurrency: 1,
                 needs_network: true,
             },
-            invocation: InvocationTemplate::Subprocess {
+            invocation: InvocationTemplate {
                 args: &["run", "-"],
                 prompt_via_stdin: true,
             },
@@ -445,7 +451,7 @@ mod tests {
             binary_names: &["faux-claude"],
             version_args: &["--version"],
             capabilities: AgentCapabilities::default(),
-            invocation: InvocationTemplate::Subprocess {
+            invocation: InvocationTemplate {
                 args: &[],
                 prompt_via_stdin: true,
             },
@@ -477,7 +483,7 @@ mod tests {
             binary_names: &["broken-agent"],
             version_args: &["--version"],
             capabilities: AgentCapabilities::default(),
-            invocation: InvocationTemplate::Subprocess {
+            invocation: InvocationTemplate {
                 args: &[],
                 prompt_via_stdin: true,
             },
@@ -513,7 +519,7 @@ mod tests {
             binary_names: &["hang-agent"],
             version_args: &["--version"],
             capabilities: AgentCapabilities::default(),
-            invocation: InvocationTemplate::Subprocess {
+            invocation: InvocationTemplate {
                 args: &[],
                 prompt_via_stdin: true,
             },
@@ -550,7 +556,7 @@ mod tests {
             binary_names: &["shared"],
             version_args: &["--version"],
             capabilities: AgentCapabilities::default(),
-            invocation: InvocationTemplate::Subprocess {
+            invocation: InvocationTemplate {
                 args: &[],
                 prompt_via_stdin: true,
             },
@@ -560,7 +566,7 @@ mod tests {
             binary_names: &["shared"],
             version_args: &["--version"],
             capabilities: AgentCapabilities::default(),
-            invocation: InvocationTemplate::Subprocess {
+            invocation: InvocationTemplate {
                 args: &[],
                 prompt_via_stdin: true,
             },

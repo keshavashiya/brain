@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::claude_code::{ClaudeCodeConfig, ClaudeCodeDelegate};
 use crate::discovery::{DiscoveredBinary, DiscoveryStatus, InvocationTemplate};
 use crate::subprocess::{SubprocessAgentConfig, SubprocessAgentDelegate};
 use crate::traits::{AgentCapabilities, AgentDelegate, AgentError};
@@ -98,8 +97,7 @@ pub enum AgentSource {
 }
 
 /// Holds every known delegate keyed by `name()`. Additional aliases can
-/// be registered to route requests like `"claude"` to the canonical
-/// `"claude-code"` entry.
+/// be registered to route shorthand request names to canonical entries.
 #[derive(Default)]
 pub struct AgentRegistry {
     delegates: HashMap<String, Arc<dyn AgentDelegate>>,
@@ -219,8 +217,14 @@ impl AgentRegistry {
                             .capabilities
                             .clone()
                             .unwrap_or_else(|| d.capabilities.clone());
-                        let delegate =
-                            build_from_template(&d.agent_id, &binary, &d.invocation, &ov, caps);
+                        let delegate = build_from_template(
+                            &d.agent_id,
+                            &binary,
+                            &d.invocation,
+                            &d.version_args,
+                            &ov,
+                            caps,
+                        );
                         self.agent_status.insert(
                             d.agent_id.clone(),
                             RegistryAgentStatus::Registered {
@@ -253,6 +257,7 @@ impl AgentRegistry {
                 workdir: None,
                 capabilities: caps,
                 prompt_via_stdin: spec.prompt_via_stdin,
+                version_args: vec!["--version".to_string()],
             };
             let delegate: Arc<dyn AgentDelegate> = Arc::new(SubprocessAgentDelegate::new(cfg));
             self.agent_status.insert(
@@ -272,40 +277,30 @@ fn build_from_template(
     agent_id: &str,
     binary: &Path,
     default_invocation: &InvocationTemplate,
+    version_args: &[String],
     ov: &AgentOverride,
     capabilities: AgentCapabilities,
 ) -> Arc<dyn AgentDelegate> {
-    match default_invocation {
-        InvocationTemplate::ClaudeCode => {
-            let cfg = ClaudeCodeConfig {
-                name: agent_id.to_string(),
-                binary: binary.to_string_lossy().into_owned(),
-                extra_args: Vec::new(),
-                workdir: None,
-                capabilities,
-            };
-            Arc::new(ClaudeCodeDelegate::new(cfg))
-        }
-        InvocationTemplate::Subprocess {
-            args,
-            prompt_via_stdin,
-        } => {
-            let args = ov
-                .args
-                .clone()
-                .unwrap_or_else(|| args.iter().map(|s| (*s).to_string()).collect::<Vec<_>>());
-            let prompt_via_stdin = ov.prompt_via_stdin.unwrap_or(*prompt_via_stdin);
-            let cfg = SubprocessAgentConfig {
-                name: agent_id.to_string(),
-                binary: binary.to_string_lossy().into_owned(),
-                args,
-                workdir: None,
-                capabilities,
-                prompt_via_stdin,
-            };
-            Arc::new(SubprocessAgentDelegate::new(cfg))
-        }
-    }
+    let args = ov.args.clone().unwrap_or_else(|| {
+        default_invocation
+            .args
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect::<Vec<_>>()
+    });
+    let prompt_via_stdin = ov
+        .prompt_via_stdin
+        .unwrap_or(default_invocation.prompt_via_stdin);
+    let cfg = SubprocessAgentConfig {
+        name: agent_id.to_string(),
+        binary: binary.to_string_lossy().into_owned(),
+        args,
+        workdir: None,
+        capabilities,
+        prompt_via_stdin,
+        version_args: version_args.to_vec(),
+    };
+    Arc::new(SubprocessAgentDelegate::new(cfg))
 }
 
 #[cfg(test)]
@@ -390,10 +385,11 @@ mod tests {
             version: Some(format!("{agent_id} 1.0")),
             status,
             capabilities: AgentCapabilities::default(),
-            invocation: InvocationTemplate::Subprocess {
+            invocation: InvocationTemplate {
                 args: &[],
                 prompt_via_stdin: true,
             },
+            version_args: vec!["--version".to_string()],
         }
     }
 

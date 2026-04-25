@@ -187,4 +187,35 @@ impl SignalProcessor {
     ) -> Vec<hippocampus::Episode> {
         self.episodic.recent(limit, namespace).unwrap_or_default()
     }
+
+    /// Load the last `limit` episodes for a session as LLM messages, in
+    /// chronological order. Used to give the LLM continuity across turns.
+    pub(crate) fn load_session_messages(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Vec<cortex::llm::Message> {
+        let episodes = match self.episodic.get_session_history(session_id, limit) {
+            Ok(eps) => eps,
+            Err(e) => {
+                tracing::debug!(session_id, "session history unavailable: {e}");
+                return Vec::new();
+            }
+        };
+        episodes
+            .into_iter()
+            .filter_map(|ep| {
+                let role = match ep.role.as_str() {
+                    "user" => cortex::llm::Role::User,
+                    "assistant" => cortex::llm::Role::Assistant,
+                    "system" => cortex::llm::Role::System,
+                    _ => return None,
+                };
+                Some(cortex::llm::Message {
+                    role,
+                    content: ep.content,
+                })
+            })
+            .collect()
+    }
 }

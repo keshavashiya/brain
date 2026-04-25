@@ -136,7 +136,7 @@ impl std::fmt::Display for DeliveryCategory {
 /// A concrete channel registered with the router.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelDescriptor {
-    /// Stable identifier used for routing (e.g. `"telegram"`, `"slack-alerts"`).
+    /// Stable identifier used for routing (e.g. `"chat-main"`, `"alerts"`).
     pub id: String,
     /// Transport kind.
     pub kind: ChannelKind,

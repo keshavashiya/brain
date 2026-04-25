@@ -212,7 +212,12 @@ fn test_notification_outbox_lifecycle() {
         .insert_notification("Low priority nudge", 1, "habit:morning_review", None)
         .unwrap();
     let id2 = pool
-        .insert_notification("High priority reminder", 3, "open_loop:todo", Some("slack"))
+        .insert_notification(
+            "High priority reminder",
+            3,
+            "open_loop:todo",
+            Some("chat-main"),
+        )
         .unwrap();
 
     let pending = pool.pending_notifications(10).unwrap();
@@ -221,7 +226,7 @@ fn test_notification_outbox_lifecycle() {
     assert_eq!(pending[1].id, id1);
     assert!(pending[0].delivered_at.is_none());
     assert_eq!(pending[1].channel, None);
-    assert_eq!(pending[0].channel.as_deref(), Some("slack"));
+    assert_eq!(pending[0].channel.as_deref(), Some("chat-main"));
 
     assert!(pool.mark_notification_delivered(&id2).unwrap());
     let pending = pool.pending_notifications(10).unwrap();

@@ -19,6 +19,8 @@ mod tests;
 pub use ollama::OllamaProvider;
 pub use openai::OpenAiProvider;
 
+mod failover;
+
 // ─── Errors ─────────────────────────────────────────────────────────────────
 
 /// Errors from the LLM layer.
@@ -105,6 +107,9 @@ pub trait LlmProvider: Send + Sync {
 
     /// Get the provider name.
     fn name(&self) -> &str;
+
+    /// Get the active model name.
+    fn model(&self) -> &str;
 
     /// List models available from this provider. Used by `select_provider`
     /// to probe reachability and match `preferred_models` during startup.
@@ -279,6 +284,88 @@ pub async fn select_provider(
     );
     let cfg = provider_config_from_entry(first, llm.temperature, max_tokens, None);
     create_provider(&cfg)
+}
+
+/// Build a failover chain from all configured providers.
+///
+/// The chain is ordered: the startup-probed winner goes first; the remaining
+/// entries (built without probing) follow as fallbacks. At request time the
+/// chain tries each in order whenever the current provider returns a retriable
+/// error (429 / 5xx / unavailable / timeout).
+pub async fn build_failover_chain(
+    llm: &brain_core::LlmConfig,
+) -> Result<failover::FalloverProvider, LlmError> {
+    let entries = synthesise_entries(llm);
+    let max_tokens = llm.max_tokens as i32;
+
+    if entries.is_empty() {
+        return Err(LlmError::ProviderUnavailable(
+            "no LLM providers configured".into(),
+        ));
+    }
+
+    // Find the primary via probing (same logic as select_provider).
+    let mut primary_idx = None;
+    for (i, entry) in entries.iter().enumerate() {
+        let cfg = provider_config_from_entry(entry, llm.temperature, max_tokens, None);
+        let probe = match create_provider(&cfg) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(name = %entry.name, error = %e, "skipping provider — construction failed");
+                continue;
+            }
+        };
+        match probe.list_models().await {
+            Ok(models) => {
+                let chosen = pick_model(&entry.preferred_models, &models, &entry.model);
+                tracing::info!(
+                    name = %entry.name,
+                    kind = %entry.kind,
+                    model = %chosen,
+                    "LLM provider selected"
+                );
+                primary_idx = Some((i, chosen));
+                break;
+            }
+            Err(e) => {
+                tracing::warn!(name = %entry.name, error = %e, "provider unreachable — trying next");
+            }
+        }
+    }
+
+    // If no probe succeeded, fall back to index 0 (best-effort).
+    let (primary_i, model_override) = primary_idx.unwrap_or_else(|| {
+        tracing::warn!("no provider answered list_models — using first entry as primary");
+        (0, entries[0].model.clone())
+    });
+
+    // Build all providers: primary first, rest appended in config order.
+    let mut providers: Vec<Box<dyn LlmProvider>> = Vec::with_capacity(entries.len());
+    let primary_cfg = provider_config_from_entry(
+        &entries[primary_i],
+        llm.temperature,
+        max_tokens,
+        Some(&model_override),
+    );
+    providers.push(create_provider(&primary_cfg)?);
+
+    for (i, entry) in entries.iter().enumerate() {
+        if i == primary_i {
+            continue;
+        }
+        let cfg = provider_config_from_entry(entry, llm.temperature, max_tokens, None);
+        match create_provider(&cfg) {
+            Ok(p) => {
+                tracing::info!(name = %entry.name, "registered as fallback provider");
+                providers.push(p);
+            }
+            Err(e) => {
+                tracing::warn!(name = %entry.name, error = %e, "fallback provider construction failed — skipping");
+            }
+        }
+    }
+
+    Ok(failover::FalloverProvider::new(providers))
 }
 
 fn synthesise_entries(llm: &brain_core::LlmConfig) -> Vec<brain_core::ProviderEntry> {

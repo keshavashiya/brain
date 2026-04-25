@@ -54,7 +54,7 @@ impl SignalProcessor {
         )
     )]
     pub async fn process(&self, signal: Signal) -> Result<SignalResponse, SignalError> {
-        match self.prepare(&signal, None).await? {
+        match self.prepare(&signal, None, None).await? {
             PipelineResult::Complete(resp) => {
                 self.publish_event(&signal, &resp);
                 Ok(resp)
@@ -109,8 +109,24 @@ impl SignalProcessor {
         &self,
         signal: &Signal,
         conversation_history: Option<&[cortex::llm::Message]>,
+        progress: Option<tokio::sync::mpsc::Sender<&'static str>>,
     ) -> Result<PipelineResult, SignalError> {
         let signal_id = signal.id;
+
+        // If the caller didn't provide history, hydrate it from the session's
+        // stored episodes so multi-turn conversations don't lose context.
+        // Bounded to keep token budget predictable; fits within `conversation_history` budget.
+        const SESSION_HISTORY_LIMIT: usize = 20;
+        let loaded_history: Option<Vec<cortex::llm::Message>> = match conversation_history {
+            Some(_) => None,
+            None => signal
+                .session_id
+                .as_deref()
+                .map(|sid| self.load_session_messages(sid, SESSION_HISTORY_LIMIT))
+                .filter(|h| !h.is_empty()),
+        };
+        let conversation_history: Option<&[cortex::llm::Message]> =
+            conversation_history.or(loaded_history.as_deref());
 
         // 0. Drain any pending proactive notifications from the outbox
         let pending_notifications = if let Some(router) = &self.notification_router {
@@ -231,6 +247,7 @@ impl SignalProcessor {
                     conversation_history,
                     &procedure_context,
                     &prepend_nudges,
+                    progress.as_ref(),
                 )
                 .await
             }
@@ -243,6 +260,7 @@ impl SignalProcessor {
                     conversation_history,
                     &procedure_context,
                     &prepend_nudges,
+                    progress.as_ref(),
                 )
                 .await
             }
@@ -304,6 +322,10 @@ impl SignalProcessor {
             }
             thalamus::Intent::ProactivityStatus => {
                 self.handle_proactivity_status(signal_id, &prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::MemorySummary => {
+                self.handle_memory_summary(signal_id, signal, conversation_history, &prepend_nudges)
                     .await
             }
             ref intent @ (thalamus::Intent::WebSearch { .. }
@@ -369,6 +391,7 @@ impl SignalProcessor {
         Ok(PipelineResult::Complete(resp))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn handle_recall(
         &self,
         signal_id: Uuid,
@@ -377,8 +400,12 @@ impl SignalProcessor {
         conversation_history: Option<&[cortex::llm::Message]>,
         procedure_context: &[String],
         prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        progress: Option<&tokio::sync::mpsc::Sender<&'static str>>,
     ) -> Result<PipelineResult, SignalError> {
         let top_k = self.config.memory.semantic.max_results as usize;
+        if let Some(tx) = progress {
+            let _ = tx.try_send("searching…");
+        }
         let query_vector = self.embed_text(&query).await;
         let (memories, facts_used, episodes_used) = self
             .do_recall(&query, query_vector, top_k, Some(&signal.namespace))
@@ -416,7 +443,18 @@ impl SignalProcessor {
             })
             .collect();
         let history = conversation_history.unwrap_or(&proc_history);
-        let messages = self.context_assembler.assemble(&query, &memories, history);
+        // Onboarding mode only when the namespace is truly empty — not just when
+        // this query's semantic search returned nothing.
+        let namespace_is_empty = self.list_facts(Some(&signal.namespace)).is_empty()
+            && self.recent_episodes(1, Some(&signal.namespace)).is_empty();
+        let addendum = if namespace_is_empty {
+            Some(cortex::context::ONBOARDING_ADDENDUM)
+        } else {
+            None
+        };
+        let messages = self
+            .context_assembler
+            .assemble_with_addendum(&query, &memories, history, addendum);
 
         Ok(PipelineResult::LlmReady {
             signal_id,
@@ -442,8 +480,12 @@ impl SignalProcessor {
         conversation_history: Option<&[cortex::llm::Message]>,
         procedure_context: &[String],
         prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        progress: Option<&tokio::sync::mpsc::Sender<&'static str>>,
     ) -> Result<PipelineResult, SignalError> {
         let top_k = self.config.memory.semantic.max_results as usize;
+        if let Some(tx) = progress {
+            let _ = tx.try_send("searching…");
+        }
         let query_vector = self.embed_text(&content).await;
         let (memories, facts_used, episodes_used) = self
             .do_recall(&content, query_vector, top_k, Some(&signal.namespace))
@@ -512,9 +554,16 @@ impl SignalProcessor {
             })
             .collect();
         let history = conversation_history.unwrap_or(&proc_history);
+        let namespace_is_empty = self.list_facts(Some(&signal.namespace)).is_empty()
+            && self.recent_episodes(1, Some(&signal.namespace)).is_empty();
+        let addendum = if namespace_is_empty {
+            Some(cortex::context::ONBOARDING_ADDENDUM)
+        } else {
+            None
+        };
         let messages = self
             .context_assembler
-            .assemble(&content, &memories, history);
+            .assemble_with_addendum(&content, &memories, history, addendum);
 
         Ok(PipelineResult::LlmReady {
             signal_id,
@@ -591,6 +640,93 @@ impl SignalProcessor {
             format!("Brain status: {semantic_count} facts, {episode_count} episodes"),
         ));
         Ok(PipelineResult::Complete(resp))
+    }
+
+    /// Fetch every stored fact and recent episodes in the namespace, then ask the
+    /// LLM to summarise them. Never uses semantic search — this is a full listing
+    /// so a generic "what do you know" always returns real content.
+    pub(super) async fn handle_memory_summary(
+        &self,
+        signal_id: Uuid,
+        signal: &Signal,
+        conversation_history: Option<&[cortex::llm::Message]>,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let ns = Some(signal.namespace.as_str());
+        let facts = self.list_facts(ns);
+        let episodes = self.recent_episodes(50, ns);
+
+        // Nothing stored at all → honest empty-memory response, no LLM needed.
+        if facts.is_empty() && episodes.is_empty() {
+            let resp = prepend_nudges(SignalResponse::ok(
+                signal_id,
+                "Your memory is empty — I haven't stored anything yet. \
+                 Tell me about yourself, your projects, or what you'd like me to remember."
+                    .to_string(),
+            ));
+            return Ok(PipelineResult::Complete(resp));
+        }
+
+        // Build a structured context block from everything stored.
+        let mut context_lines: Vec<String> = Vec::new();
+
+        if !facts.is_empty() {
+            context_lines.push(format!("## Stored Facts ({} total)", facts.len()));
+            for f in &facts {
+                context_lines.push(format!("- {} {} {}", f.subject, f.predicate, f.object));
+            }
+        }
+
+        if !episodes.is_empty() {
+            context_lines.push(format!(
+                "\n## Recent Conversation Episodes ({} shown)",
+                episodes.len()
+            ));
+            for ep in &episodes {
+                context_lines.push(format!("[{}] {}", ep.timestamp, ep.content));
+            }
+        }
+
+        let context_block = context_lines.join("\n");
+
+        let system_msg = cortex::llm::Message {
+            role: cortex::llm::Role::System,
+            content: format!(
+                "You are Brain, the user's long-term memory engine. \
+                 The following is EVERYTHING stored in your memory for this user. \
+                 Produce a clear, structured summary grouped by theme \
+                 (projects, habits, goals, preferences, etc.). \
+                 Be specific — list actual values, not vague descriptions. \
+                 If something is sparse, say so honestly.\n\n{}",
+                context_block
+            ),
+        };
+        let user_msg = cortex::llm::Message {
+            role: cortex::llm::Role::User,
+            content: "Please summarise everything you know about me.".to_string(),
+        };
+
+        // Include recent conversation history for continuity.
+        let proc_history = conversation_history.map(|h| h.to_vec()).unwrap_or_default();
+        let mut messages = vec![system_msg];
+        messages.extend_from_slice(&proc_history);
+        messages.push(user_msg);
+
+        let facts_used = facts.len();
+        let episodes_used = episodes.len();
+
+        Ok(PipelineResult::LlmReady {
+            signal_id,
+            messages,
+            memory_context: crate::MemoryContext {
+                facts_used,
+                episodes_used,
+            },
+            session_id: signal.session_id.clone(),
+            user_content: signal.content.clone(),
+            namespace: signal.namespace.clone(),
+            agent: signal.agent.clone(),
+        })
     }
 
     pub(super) async fn handle_query_audit(
@@ -686,9 +822,34 @@ impl SignalProcessor {
         decision: String,
         prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
     ) -> Result<PipelineResult, SignalError> {
+        let approved = decision.to_lowercase().contains("approve");
+
+        // Plan-level approval: an ID matching a task in AwaitingApproval phase
+        // is a phase-transition request, not a confirm-engine nonce. Approving
+        // kicks off execution; rejecting cancels the plan.
+        if let Some(orch) = &self.orchestrator {
+            if let Some(task) = orch.get_task(&nonce).await {
+                if task.phase == orchestrate::TaskPhase::AwaitingApproval {
+                    let message = if approved {
+                        match orch.execute(&nonce).await {
+                            Ok(summary) => format!("Plan {nonce} approved.\n\n{summary}"),
+                            Err(e) => format!("Plan {nonce} approved but execution failed: {e}"),
+                        }
+                    } else {
+                        match orch.cancel(&nonce).await {
+                            Ok(_) => format!("Plan {nonce} rejected and cancelled."),
+                            Err(e) => format!("Failed to cancel plan {nonce}: {e}"),
+                        }
+                    };
+                    let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+                    return Ok(PipelineResult::Complete(resp));
+                }
+            }
+        }
+
+        // Per-step approval: resolve via the confirm engine.
         let message = match &self.confirmation_engine {
             Some(engine) => {
-                let approved = decision.to_lowercase().contains("approve");
                 let dec = if approved {
                     confirm::ApprovalDecision::Approve
                 } else {

@@ -1,6 +1,6 @@
 [package]
 name = "brainos-delegate"
-description = "Agent delegation — hand off subtasks to specialist agents (Claude Code, Qwen, custom subprocess/HTTP)"
+description = "Agent delegation — hand off subtasks to specialist CLI/HTTP agents through a single subprocess-backed adapter"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

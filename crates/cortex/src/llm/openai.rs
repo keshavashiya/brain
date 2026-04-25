@@ -278,6 +278,10 @@ impl LlmProvider for OpenAiProvider {
         "openai"
     }
 
+    fn model(&self) -> &str {
+        &self.model
+    }
+
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
         #[derive(Deserialize)]
         struct ModelEntry {

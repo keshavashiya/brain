@@ -2,9 +2,8 @@
 //!
 //! Spawns a configured binary with templated args, streams the task spec
 //! through stdin, captures stdout/stderr, and returns an [`AgentResult`].
-//! [`ClaudeCodeDelegate`] is a thin wrapper over this for the `claude`
-//! CLI; bespoke agents (custom shell scripts, other CLIs) can reuse
-//! `SubprocessAgentDelegate` directly.
+//! Every CLI delegate the orchestrator can hand work to — discovered or
+//! manually configured — runs through this single adapter.
 
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -28,7 +27,7 @@ const CAPTURE_CAP: usize = 64 * 1024;
 /// Configuration for a subprocess delegate.
 #[derive(Debug, Clone)]
 pub struct SubprocessAgentConfig {
-    /// Logical name registered with the registry (`"claude-code"`).
+    /// Logical name registered with the registry.
     pub name: String,
     /// Binary to spawn. Resolved via `$PATH` unless absolute.
     pub binary: String,
@@ -44,6 +43,10 @@ pub struct SubprocessAgentConfig {
     /// If `true`, the rendered prompt is written to the child's stdin
     /// instead of being templated into `args`.
     pub prompt_via_stdin: bool,
+    /// Args used by [`AgentDelegate::health_check`] to probe whether the
+    /// binary is installed and runnable. Empty disables the probe (the
+    /// delegate then optimistically reports healthy).
+    pub version_args: Vec<String>,
 }
 
 impl SubprocessAgentConfig {
@@ -55,6 +58,7 @@ impl SubprocessAgentConfig {
             workdir: None,
             capabilities: AgentCapabilities::default(),
             prompt_via_stdin: true,
+            version_args: vec!["--version".to_string()],
         }
     }
 
@@ -81,6 +85,15 @@ impl SubprocessAgentConfig {
         self.prompt_via_stdin = via_stdin;
         self
     }
+
+    pub fn with_version_args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.version_args = args.into_iter().map(Into::into).collect();
+        self
+    }
 }
 
 pub struct SubprocessAgentDelegate {
@@ -92,14 +105,13 @@ impl SubprocessAgentDelegate {
         Self { config }
     }
 
-    /// Binary path as configured — used by layered delegates (e.g.
-    /// `ClaudeCodeDelegate`) for health probes.
+    /// Binary path as configured.
     pub fn binary(&self) -> &str {
         &self.config.binary
     }
 
-    /// The prompt we'd hand to the underlying binary. Exposed so
-    /// [`ClaudeCodeDelegate`] (and tests) can reuse the format.
+    /// The prompt we'd hand to the underlying binary. Exposed so tests
+    /// (and other crates wiring custom delegates) can reuse the format.
     pub fn render_prompt(task: &AgentTask) -> String {
         let mut out = String::new();
         out.push_str("# Task\n");
@@ -248,6 +260,27 @@ impl AgentDelegate for SubprocessAgentDelegate {
             started_at,
             completed_at,
         })
+    }
+
+    /// Probe by running the configured `version_args` with a short
+    /// timeout. Confirms the binary is installed and runnable without
+    /// consuming task quota. Returns `true` when no `version_args` are
+    /// configured (caller opted out of probing).
+    async fn health_check(&self) -> bool {
+        if self.config.version_args.is_empty() {
+            return true;
+        }
+        let probe = Command::new(&self.config.binary)
+            .args(&self.config.version_args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .output();
+        matches!(
+            timeout(Duration::from_secs(5), probe).await,
+            Ok(Ok(o)) if o.status.success()
+        )
     }
 }
 

@@ -158,11 +158,12 @@ Your Capabilities:
 - Proactivity: You don't just react; you anticipate needs based on established patterns (provided in context).
 
 Operating Principles:
-1. TRUTH OVER HALLUCINATION: Answer based ONLY on the provided memories and general knowledge. If information is missing from memory, state: "I don't have that in my memory yet."
-2. SEAMLESS RECALL: Reference memories naturally ("You mentioned earlier...", "Based on what we discussed...").
-3. COGNITIVE CLARITY: Be concise, direct, and insightful. Avoid corporate fluff.
+1. TRUTH OVER HALLUCINATION: Ground answers in (a) the provided memories, (b) the live conversation history above this message, and (c) general knowledge. If a *fact about the user* is genuinely absent from memory AND not present in the conversation, state: "I don't have that in my memory yet." Do NOT say this when the user is asking about things discussed earlier in the current conversation — answer from the message thread itself.
+2. SEAMLESS RECALL: Reference memories and prior turns naturally ("You mentioned earlier...", "Based on what we discussed...").
+3. COGNITIVE CLARITY: Be concise, direct, and insightful. Avoid corporate fluff. Match response length to the question — simple greetings get one or two sentences, not tables.
 4. CONTEXTUAL AWARENESS: Use the provided User Profile to tailor your tone and relevance.
 5. CURIOSITY: When you lack context about the user, ask one focused follow-up question. Learning about the user is part of your job — don't wait to be told.
+6. FORMATTING: The user's terminal renders markdown. Use it lightly when it helps (lists for multi-item answers, **bold** for emphasis, `code` for identifiers). Skip headings and tables for short replies.
 
 You are the user's partner in thought. Your goal is to make their digital life feel like a continuous, coherent stream of intelligence."#
             .to_string()
@@ -178,18 +179,37 @@ You are the user's partner in thought. Your goal is to make their digital life f
         memories: &[Memory],
         conversation_history: &[Message],
     ) -> Vec<Message> {
+        self.assemble_with_addendum(user_message, memories, conversation_history, None)
+    }
+
+    /// Like [`assemble`], but appends `addendum` to the system prompt if provided.
+    /// Used to switch prompt modes per-turn (e.g. onboarding) without mutating
+    /// the shared assembler.
+    pub fn assemble_with_addendum(
+        &self,
+        user_message: &str,
+        memories: &[Memory],
+        conversation_history: &[Message],
+        addendum: Option<&str>,
+    ) -> Vec<Message> {
         let mut messages = Vec::new();
         let memory_budget = self.budget.memory_budget();
 
-        // 1. System prompt with user profile
+        // 1. System prompt with optional addendum and user profile
+        let base_prompt = match addendum {
+            Some(extra) if !extra.is_empty() => {
+                format!("{}{}", self.system_prompt, extra)
+            }
+            _ => self.system_prompt.clone(),
+        };
         let system_content = if self.user_profile.estimate_tokens() > 0 {
             format!(
                 "{}\n\nUser Profile: {}",
-                self.system_prompt,
+                base_prompt,
                 self.user_profile.to_context_string()
             )
         } else {
-            self.system_prompt.clone()
+            base_prompt
         };
         messages.push(Message {
             role: Role::System,
@@ -295,6 +315,30 @@ mod tests {
     }
 
     #[test]
+    fn test_assemble_with_addendum_injects_into_system_prompt() {
+        let assembler = ContextAssembler::with_defaults();
+        let messages = assembler.assemble_with_addendum("hi", &[], &[], Some(ONBOARDING_ADDENDUM));
+
+        let system = messages
+            .iter()
+            .find(|m| matches!(m.role, Role::System))
+            .expect("system message");
+        assert!(
+            system.content.contains("[ONBOARDING MODE"),
+            "onboarding addendum should be present in system prompt"
+        );
+    }
+
+    #[test]
+    fn test_assemble_without_addendum_matches_plain_assemble() {
+        let assembler = ContextAssembler::with_defaults();
+        let a = assembler.assemble("hi", &[], &[]);
+        let b = assembler.assemble_with_addendum("hi", &[], &[], None);
+        assert_eq!(a.len(), b.len());
+        assert_eq!(a[0].content, b[0].content);
+    }
+
+    #[test]
     fn test_context_assembler_basic() {
         use hippocampus::search::MemorySource;
 
@@ -336,7 +380,7 @@ mod tests {
                 score: 0.9,
                 importance: 0.8,
                 timestamp: "2026-01-01".to_string(),
-                agent: Some("slack-bot".to_string()),
+                agent: Some("chat-bot".to_string()),
             },
             Memory {
                 id: "2".to_string(),
@@ -357,7 +401,7 @@ mod tests {
             .expect("should have memory context message");
 
         assert!(
-            memory_msg.content.contains("agent: slack-bot"),
+            memory_msg.content.contains("agent: chat-bot"),
             "memory with agent should include attribution"
         );
         assert!(

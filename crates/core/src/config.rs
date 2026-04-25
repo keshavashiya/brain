@@ -286,8 +286,8 @@ where
 }
 
 /// Channel intelligence configuration — bidirectional relay gateways
-/// (Slack bot, Telegram bridge, custom WS agents) that integrate with the
-/// channel router + confirmation correlator.
+/// (custom WS agents) that integrate with the channel router and
+/// confirmation correlator.
 ///
 /// Distinct from `actions.messaging.channels`, which configures one-way
 /// webhook pushes. Entries here open a long-lived WebSocket and can
@@ -296,20 +296,19 @@ where
 pub struct ChannelIntelligenceConfig {
     #[serde(default)]
     pub relays: Vec<RelayEntry>,
-    /// Generic preset-driven transports (Telegram long-poll, Discord
-    /// Interactions webhook, Slack incoming webhook, ...). Each entry
-    /// names a preset id that ships embedded under `crates/channel/presets/`
-    /// or lives at `~/.brain/presets/<id>.yaml`.
+    /// Generic preset-driven transports (`http_polled`, `webhook_inbound`,
+    /// `webhook_outbound`). Each entry names a preset id that ships
+    /// embedded under `crates/channel/presets/` or lives at
+    /// `~/.brain/presets/<id>.yaml`.
     #[serde(default)]
     pub transports: Vec<TransportEntry>,
 }
 
-/// A single preset-driven transport — what platform, what id, what
-/// secrets to plug into the preset templates.
+/// A single preset-driven transport — which preset, what id, what
+/// secrets to plug into the preset's templates.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransportEntry {
-    /// Stable id registered with the channel router (e.g. "telegram",
-    /// "discord-main").
+    /// Stable id registered with the channel router (e.g. `"chat-main"`).
     pub id: String,
     /// Human-readable label.
     pub label: String,
@@ -318,14 +317,14 @@ pub struct TransportEntry {
     /// Memory namespace attributed to inbound messages on this transport.
     #[serde(default = "default_relay_namespace")]
     pub namespace: String,
-    /// Credential substituted into `{credential}` in url/body templates.
-    /// Bot token (Telegram), full webhook URL (Slack incoming), bot
-    /// application id (Discord followup endpoint), etc. May be empty.
+    /// Credential substituted into `{credential}` in url/body templates
+    /// (bot token, webhook URL, app id — whatever the preset expects).
+    /// May be empty.
     #[serde(default)]
     pub credential: String,
-    /// Optional signing secret — HMAC shared key (Slack/GitHub) or
-    /// Ed25519 pubkey hex (Discord). Only consumed by webhook_inbound
-    /// transports whose preset declares a `verifier`.
+    /// Optional signing secret used by `webhook_inbound` transports
+    /// whose preset declares a `verifier` (HMAC shared key, Ed25519
+    /// pubkey hex, ...).
     #[serde(default)]
     pub signing_secret: Option<String>,
 }
@@ -333,7 +332,7 @@ pub struct TransportEntry {
 /// One relay gateway entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayEntry {
-    /// Stable id registered with the channel router (e.g. "slack", "telegram").
+    /// Stable id registered with the channel router (e.g. `"chat-main"`).
     pub id: String,
     /// Human-readable label used in CLI and audit entries.
     pub label: String,
@@ -363,9 +362,8 @@ fn default_relay_max_backoff_ms() -> u64 {
     60_000
 }
 
-/// Agent delegation configuration — specialist agents (Claude Code,
-/// custom subprocess/HTTP) that orchestrator-level `Implement` steps
-/// can hand off to.
+/// Agent delegation configuration — specialist CLI/HTTP agents that
+/// orchestrator-level `Implement` steps can hand off to.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentsConfig {
     /// Manually-registered delegates. Kept for advanced setups and
@@ -374,7 +372,7 @@ pub struct AgentsConfig {
     pub delegates: Vec<AgentEntry>,
     /// Ordered fallback agent names applied when a delegation fails on
     /// a retryable error. Names must match discovered ids or `delegates`
-    /// entries (e.g. `"claude-code"`, `"aider"`).
+    /// entries.
     #[serde(default)]
     pub fallbacks: Vec<String>,
     /// Whether timeout failures should trigger fallback retries
@@ -382,13 +380,13 @@ pub struct AgentsConfig {
     /// prohibitive.
     #[serde(default = "default_retry_on_timeout")]
     pub retry_on_timeout: bool,
-    /// Scan `$PATH` on startup and auto-register known CLI agents
-    /// (claude, aider, codex, qwen, gemini, opencode). Default: true.
-    /// Set to `false` to go fully manual via `delegates[]`.
+    /// Scan `$PATH` on startup and auto-register known CLI agents using
+    /// the built-in fingerprint table. Default: true. Set to `false` to
+    /// go fully manual via `delegates[]`.
     #[serde(default = "default_auto_discovery")]
     pub auto_discovery: bool,
     /// Per-agent overrides merged on top of discovery defaults. Keyed
-    /// by the canonical agent id (e.g. `"claude-code"`).
+    /// by the canonical agent id from the fingerprint table.
     #[serde(default)]
     pub discovery_overrides: std::collections::HashMap<String, AgentDiscoveryOverride>,
 }
@@ -419,26 +417,24 @@ pub struct AgentDiscoveryOverride {
     pub prompt_via_stdin: Option<bool>,
 }
 
-/// One registered delegate. `kind` selects the adapter:
-/// * `claude_code` — Anthropic `claude` CLI (spawns `claude -p -`)
-/// * `subprocess` — arbitrary binary; requires `binary`/`args`
+/// One registered delegate. Currently only `kind = "subprocess"` is
+/// supported — any CLI agent the orchestrator can spawn. Auto-discovery
+/// covers most common agents without needing manual entries here.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentEntry {
     /// Registered name — this is what appears in `StepAction::Implement`.
     pub name: String,
-    /// Adapter kind (`"claude_code"` or `"subprocess"`).
+    /// Adapter kind (`"subprocess"`).
     pub kind: String,
     /// Optional alias registered alongside `name`. Handy for routing
-    /// `"claude"` → `"claude-code"` without changing the entry name.
+    /// shorthand request names to the canonical entry.
     #[serde(default)]
     pub alias: Option<String>,
-    /// Binary to launch. Defaults by `kind`: `"claude"` for
-    /// `claude_code`, required otherwise.
+    /// Binary to launch. Required for `subprocess`.
     #[serde(default)]
     pub binary: String,
-    /// Args passed to the binary. For `subprocess`, supports
-    /// `{prompt}` and `{task_id}` substitution. For `claude_code`,
-    /// these are appended after `-p -`.
+    /// Args passed to the binary. Supports `{prompt}` and `{task_id}`
+    /// substitution.
     #[serde(default)]
     pub args: Vec<String>,
     /// Default working directory for the delegate. Task-level workdir
@@ -447,7 +443,7 @@ pub struct AgentEntry {
     pub workdir: Option<String>,
     /// Whether the prompt is written to the child's stdin rather than
     /// templated into `args`. Defaults to `true`. Ignored for
-    /// `claude_code`, which always uses stdin.
+    /// argv-templated entries that don't read stdin.
     #[serde(default = "default_prompt_via_stdin")]
     pub prompt_via_stdin: bool,
     /// Declared capability tags (e.g. `["code-edit","rust"]`).

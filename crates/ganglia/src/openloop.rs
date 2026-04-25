@@ -708,6 +708,10 @@ mod tests {
             "mock"
         }
 
+        fn model(&self) -> &str {
+            "mock"
+        }
+
         async fn list_models(&self) -> Result<Vec<String>, cortex::LlmError> {
             Ok(vec!["mock".to_string()])
         }
@@ -820,6 +824,9 @@ mod tests {
             true
         }
         fn name(&self) -> &str {
+            "slow-mock"
+        }
+        fn model(&self) -> &str {
             "slow-mock"
         }
         async fn list_models(&self) -> Result<Vec<String>, cortex::LlmError> {

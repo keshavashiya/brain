@@ -58,11 +58,25 @@ async fn test_classify_store_fact_regex_fallback() {
 #[tokio::test]
 async fn test_classify_recall_regex_fallback() {
     let classifier = IntentClassifier::new();
-    let result = classifier.classify("What did we discuss yesterday?").await;
+    let result = classifier.classify("Tell me about Project Brain").await;
 
     assert!(
         matches!(result.intent, Intent::Recall { .. }),
         "Expected Recall, got {:?}",
+        result.intent
+    );
+}
+
+#[tokio::test]
+async fn test_conversational_meta_question_is_not_recall() {
+    // "What did we discuss?" is a conversational follow-up — the LLM should
+    // answer from session history, not from a memory lookup of "we discuss".
+    let classifier = IntentClassifier::new();
+    let result = classifier.classify("What did we discuss yesterday?").await;
+
+    assert!(
+        !matches!(result.intent, Intent::Recall { .. }),
+        "Conversational follow-up should not be Recall, got {:?}",
         result.intent
     );
 }
@@ -392,4 +406,35 @@ fn test_extracted_fact_filters_empty_fields() {
 fn test_classifier_prompt_mentions_query_agents() {
     assert!(super::CLASSIFIER_SYSTEM_PROMPT.contains("query_agents"));
     assert!(super::CLASSIFIER_SYSTEM_PROMPT.contains("what agents do you have"));
+}
+
+#[tokio::test]
+async fn test_approve_with_uuid_matches_fast_path() {
+    let classifier = IntentClassifier::new();
+    let result = classifier
+        .classify("approve 9aa1b54e-23fd-4601-9355-fac5a0e386aa")
+        .await;
+    match result.intent {
+        Intent::RespondToApproval { nonce, decision } => {
+            assert_eq!(nonce, "9aa1b54e-23fd-4601-9355-fac5a0e386aa");
+            assert_eq!(decision.to_lowercase(), "approve");
+        }
+        other => panic!("Expected RespondToApproval, got {other:?}"),
+    }
+    assert_eq!(result.method, ClassificationMethod::Regex);
+}
+
+#[tokio::test]
+async fn test_reject_with_uuid_matches_fast_path() {
+    let classifier = IntentClassifier::new();
+    let result = classifier
+        .classify("reject 9aa1b54e-23fd-4601-9355-fac5a0e386aa")
+        .await;
+    match result.intent {
+        Intent::RespondToApproval { nonce, decision } => {
+            assert_eq!(nonce, "9aa1b54e-23fd-4601-9355-fac5a0e386aa");
+            assert_eq!(decision.to_lowercase(), "reject");
+        }
+        other => panic!("Expected RespondToApproval, got {other:?}"),
+    }
 }

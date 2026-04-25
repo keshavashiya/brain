@@ -30,10 +30,19 @@ pub(crate) async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Res
         }
     }
 
-    println!(
-        "  Cortex LLM:   {} ({})",
-        config.llm.model, config.llm.provider
-    );
+    // Resolve the actual provider once (same logic as daemon boot) so both
+    // the display label and the health check reflect the selected entry.
+    let llm_api_key = resolve_llm_api_key(config);
+    let mut llm_cfg = config.llm.clone();
+    if llm_cfg.providers.is_empty() {
+        llm_cfg.api_key = llm_api_key;
+    }
+    let resolved_provider = cortex::llm::select_provider(&llm_cfg).await.ok();
+    let (display_model, display_kind) = resolved_provider
+        .as_ref()
+        .map(|p| (p.model().to_string(), p.name().to_string()))
+        .unwrap_or_else(|| (config.llm.model.clone(), config.llm.provider.clone()));
+    println!("  Cortex LLM:   {} ({})", display_model, display_kind);
     println!(
         "  Sensory:      {} ({}d)",
         config.embedding.model, config.embedding.dimensions
@@ -79,19 +88,9 @@ pub(crate) async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Res
         if g.enabled { "active" } else { "dormant" }
     );
 
-    // LLM health — `select_provider` handles multi-entry probing and the
-    // legacy single-entry fallback, so `status` mirrors daemon boot exactly.
-    let llm_api_key = resolve_llm_api_key(config);
-    let mut llm_cfg = config.llm.clone();
-    if llm_cfg.providers.is_empty() {
-        llm_cfg.api_key = llm_api_key;
-    }
-    let llm_healthy = match cortex::llm::select_provider(&llm_cfg).await {
-        Ok(provider) => provider.health_check().await,
-        Err(e) => {
-            tracing::warn!("Failed to create LLM provider for health check: {e}");
-            false
-        }
+    let llm_healthy = match resolved_provider.as_ref() {
+        Some(provider) => provider.health_check().await,
+        None => false,
     };
     println!(
         "  Cortex:       {}",

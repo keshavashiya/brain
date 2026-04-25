@@ -260,7 +260,7 @@ mod tests {
     }
 
     #[test]
-    fn test_render_message_template_custom_slack() {
+    fn test_render_message_template_custom_template() {
         let template = r#"{"text": "[{{channel}}] {{content}}"}"#;
         let rendered = render_message_template(
             template,

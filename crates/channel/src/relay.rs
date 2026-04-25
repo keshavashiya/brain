@@ -48,7 +48,7 @@ const DEFAULT_OUTBOUND_CAPACITY: usize = 128;
 /// Configuration for a single relay gateway.
 #[derive(Debug, Clone)]
 pub struct RelayConfig {
-    /// Stable channel id registered with the router (e.g. `"slack"`, `"telegram"`).
+    /// Stable channel id registered with the router (e.g. `"chat-main"`).
     pub channel_id: String,
     /// Human-readable label used for CLI display and audit entries.
     pub label: String,
