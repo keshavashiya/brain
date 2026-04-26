@@ -164,6 +164,7 @@ impl SignalProcessor {
             channel_router: None,
             channel_preferences: None,
             confirmation_correlator: None,
+            channel_dispatcher: None,
             agent_registry: None,
         };
 

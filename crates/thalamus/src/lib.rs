@@ -102,6 +102,24 @@ pub enum Intent {
     ProactivityStatus,
     /// Dump and summarise everything stored in memory.
     MemorySummary,
+    /// List registered channels (router-known descriptors). Phase 4
+    /// natural-language replacement for inspection CLIs.
+    ListChannels,
+    /// Show learned channel preferences for a (namespace, category).
+    /// `category` is one of: confirm, nudge, report, response, alert.
+    /// `namespace` defaults to "personal".
+    ChannelPreferences {
+        namespace: Option<String>,
+        category: Option<String>,
+    },
+    /// Pin or unpin a channel preference. Pinned weights bypass the
+    /// min-weight threshold during routing.
+    SetChannelPreference {
+        channel: String,
+        category: String,
+        weight: f32,
+        pinned: bool,
+    },
     /// Regular chat/conversation.
     Chat { content: String },
 }

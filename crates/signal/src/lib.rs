@@ -10,6 +10,7 @@
 //! - Cortex (LLM reasoning + context assembly)
 //! - NotificationRouter (proactive delivery)
 
+pub mod approval;
 pub mod notification;
 pub mod types;
 
@@ -19,6 +20,8 @@ mod pipeline;
 mod recall;
 mod streaming;
 mod wiring;
+
+pub use approval::ChannelApprovalNotifier;
 
 // Re-export all public types so `use signal::X;` continues to work.
 pub use types::*;
@@ -71,6 +74,8 @@ pub struct SignalProcessor {
     channel_preferences: Option<std::sync::Arc<dyn channel::ChannelPreferenceStore>>,
     /// Confirmation correlator — resolves approve/reject messages from any channel.
     confirmation_correlator: Option<std::sync::Arc<channel::ConfirmationCorrelator>>,
+    /// Channel dispatcher — owns transport handles and performs actual delivery.
+    channel_dispatcher: Option<std::sync::Arc<channel::ChannelDispatcher>>,
 
     // ── Agent delegation (Phase 3) ───────────────────────────────────────
     /// Registry of specialist agent delegates (Claude Code, custom subprocess, etc.).

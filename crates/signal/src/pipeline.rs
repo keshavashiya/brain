@@ -113,98 +113,14 @@ impl SignalProcessor {
     ) -> Result<PipelineResult, SignalError> {
         let signal_id = signal.id;
 
-        // If the caller didn't provide history, hydrate it from the session's
-        // stored episodes so multi-turn conversations don't lose context.
-        // Bounded to keep token budget predictable; fits within `conversation_history` budget.
-        const SESSION_HISTORY_LIMIT: usize = 20;
-        let loaded_history: Option<Vec<cortex::llm::Message>> = match conversation_history {
-            Some(_) => None,
-            None => signal
-                .session_id
-                .as_deref()
-                .map(|sid| self.load_session_messages(sid, SESSION_HISTORY_LIMIT))
-                .filter(|h| !h.is_empty()),
-        };
+        let loaded_history = self.hydrate_history(signal, conversation_history);
         let conversation_history: Option<&[cortex::llm::Message]> =
             conversation_history.or(loaded_history.as_deref());
 
-        // 0. Drain any pending proactive notifications from the outbox
-        let pending_notifications = if let Some(router) = &self.notification_router {
-            router.drain_pending(10)
-        } else {
-            Vec::new()
-        };
-
-        // 1. Score importance via Amygdala (keyword heuristic — sync so the LLM
-        //    slot stays free for classification which extracts facts)
+        let pending_notifications = self.drain_pending_notifications();
         let importance = self.importance.score(&signal.content);
-
-        // 2. Classify intent via Thalamus
-        let classification = self.classifier.classify(&signal.content).await;
-        self.metrics.inc_intent_classification();
-        if matches!(classification.method, thalamus::ClassificationMethod::Llm) {
-            self.metrics.inc_intent_llm_fallback();
-        }
-
-        tracing::info!(
-            signal_id = %signal_id,
-            source = ?signal.source,
-            intent = ?classification.intent,
-            importance = importance,
-            method = ?classification.method,
-            extracted_facts = classification.extracted_facts.len(),
-            "Signal classified"
-        );
-
-        // ── Store any facts extracted during classification ───────────────────
-        if !classification.extracted_facts.is_empty() {
-            let facts_to_store: Vec<_> = classification
-                .extracted_facts
-                .iter()
-                .map(|f| crate::exchange::FactToStore {
-                    subject: f.subject.clone(),
-                    predicate: f.predicate.clone(),
-                    object: f.object.clone(),
-                })
-                .collect();
-
-            let (stored, errors) = self
-                .store_facts_batch(
-                    &signal.namespace,
-                    "extracted",
-                    &facts_to_store,
-                    signal.agent.as_deref(),
-                )
-                .await;
-
-            for id in &stored {
-                tracing::info!("Extracted fact stored: {id}");
-            }
-            for (text, e) in errors {
-                tracing::warn!("Failed to store extracted fact ({text}): {e}");
-            }
-        }
-
-        // ── Cerebellum: match stored procedures ───────────────────────────────
-        let procedure_context: Vec<String> = match self.procedures.match_trigger(&signal.content) {
-            Ok(procs) if !procs.is_empty() => {
-                tracing::debug!(
-                    count = procs.len(),
-                    "Procedure(s) matched — injecting steps into context"
-                );
-                let mut steps: Vec<String> = Vec::new();
-                for proc in &procs {
-                    let _ = self.procedures.record_execution(&proc.id);
-                    steps.extend(proc.steps.clone());
-                }
-                steps
-            }
-            Ok(_) => Vec::new(),
-            Err(e) => {
-                tracing::warn!("Procedure match failed (non-fatal): {e}");
-                Vec::new()
-            }
-        };
+        let classification = self.classify_and_store_facts(signal).await;
+        let procedure_context = self.match_procedures(&signal.content);
 
         // Helper: prepend notification nudges to a response
         let prepend_nudges = |mut resp: SignalResponse| -> SignalResponse {
@@ -328,12 +244,144 @@ impl SignalProcessor {
                 self.handle_memory_summary(signal_id, signal, conversation_history, &prepend_nudges)
                     .await
             }
+            thalamus::Intent::ListChannels => {
+                self.handle_list_channels(signal_id, &prepend_nudges).await
+            }
+            thalamus::Intent::ChannelPreferences {
+                namespace: ns,
+                category,
+            } => {
+                self.handle_channel_preferences(signal_id, ns, category, &prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::SetChannelPreference {
+                channel,
+                category,
+                weight,
+                pinned,
+            } => {
+                self.handle_set_channel_preference(
+                    signal_id,
+                    channel,
+                    category,
+                    weight,
+                    pinned,
+                    &prepend_nudges,
+                )
+                .await
+            }
             ref intent @ (thalamus::Intent::WebSearch { .. }
             | thalamus::Intent::Schedule { .. }
             | thalamus::Intent::SendMessage { .. }
             | thalamus::Intent::ExecuteCommand { .. }) => {
                 self.handle_action(signal_id, signal, intent, &prepend_nudges)
                     .await
+            }
+        }
+    }
+
+    // ── prepare() helpers ───────────────────────────────────────────────────
+
+    /// Hydrate conversation history from session episodes when the caller
+    /// didn't pass any. Returns `None` if the caller supplied history or
+    /// no session lookup is possible. Bounded so the token budget stays
+    /// predictable.
+    fn hydrate_history(
+        &self,
+        signal: &Signal,
+        caller_history: Option<&[cortex::llm::Message]>,
+    ) -> Option<Vec<cortex::llm::Message>> {
+        const SESSION_HISTORY_LIMIT: usize = 20;
+        match caller_history {
+            Some(_) => None,
+            None => signal
+                .session_id
+                .as_deref()
+                .map(|sid| self.load_session_messages(sid, SESSION_HISTORY_LIMIT))
+                .filter(|h| !h.is_empty()),
+        }
+    }
+
+    /// Drain up to 10 pending proactive notifications from the outbox so
+    /// the response can prepend them as nudges.
+    fn drain_pending_notifications(&self) -> Vec<storage::sqlite::Notification> {
+        match &self.notification_router {
+            Some(router) => router.drain_pending(10),
+            None => Vec::new(),
+        }
+    }
+
+    /// Run intent classification, log the outcome, and persist any facts
+    /// the classifier extracted on the side. Returns the classification.
+    async fn classify_and_store_facts(&self, signal: &Signal) -> thalamus::Classification {
+        let classification = self.classifier.classify(&signal.content).await;
+        self.metrics.inc_intent_classification();
+        if matches!(classification.method, thalamus::ClassificationMethod::Llm) {
+            self.metrics.inc_intent_llm_fallback();
+        }
+
+        tracing::info!(
+            signal_id = %signal.id,
+            source = ?signal.source,
+            intent = ?classification.intent,
+            importance = self.importance.score(&signal.content),
+            method = ?classification.method,
+            extracted_facts = classification.extracted_facts.len(),
+            "Signal classified"
+        );
+
+        if !classification.extracted_facts.is_empty() {
+            let facts_to_store: Vec<_> = classification
+                .extracted_facts
+                .iter()
+                .map(|f| crate::exchange::FactToStore {
+                    subject: f.subject.clone(),
+                    predicate: f.predicate.clone(),
+                    object: f.object.clone(),
+                })
+                .collect();
+
+            let (stored, errors) = self
+                .store_facts_batch(
+                    &signal.namespace,
+                    "extracted",
+                    &facts_to_store,
+                    signal.agent.as_deref(),
+                )
+                .await;
+
+            for id in &stored {
+                tracing::info!("Extracted fact stored: {id}");
+            }
+            for (text, e) in errors {
+                tracing::warn!("Failed to store extracted fact ({text}): {e}");
+            }
+        }
+
+        classification
+    }
+
+    /// Match user content against stored procedures and surface the
+    /// concatenated step list as additional context. Procedure-matcher
+    /// errors are non-fatal — we log and degrade to no procedures.
+    fn match_procedures(&self, content: &str) -> Vec<String> {
+        match self.procedures.match_trigger(content) {
+            Ok(procs) if !procs.is_empty() => {
+                tracing::debug!(
+                    count = procs.len(),
+                    "Procedure(s) matched — injecting steps into context"
+                );
+                let mut steps: Vec<String> = Vec::new();
+                for proc in &procs {
+                    let _ = self.procedures.record_execution(&proc.id);
+                    steps.extend(proc.steps.clone());
+                }
+                steps
+            }
+            Ok(_) => Vec::new(),
+            Err(e) => {
+                tracing::warn!("Procedure match failed (non-fatal): {e}");
+                Vec::new()
             }
         }
     }
@@ -1143,6 +1191,131 @@ impl SignalProcessor {
         Ok(PipelineResult::Complete(resp))
     }
 
+    pub(super) async fn handle_list_channels(
+        &self,
+        signal_id: Uuid,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let message = match &self.channel_router {
+            Some(router) => match router.list_channels().await {
+                Ok(channels) if channels.is_empty() => {
+                    "No channels registered yet. Configure transports in `channel.transports[]` \
+                     or `channel.relays[]`."
+                        .to_string()
+                }
+                Ok(channels) => {
+                    let mut lines = vec!["Registered channels:".to_string()];
+                    for c in channels {
+                        let health = if c.healthy { "healthy" } else { "down" };
+                        lines.push(format!("  • {} ({}, {}) — {health}", c.id, c.label, c.kind));
+                    }
+                    lines.join("\n")
+                }
+                Err(e) => format!("Channel listing failed: {e}"),
+            },
+            None => "Channel router not wired in this build.".to_string(),
+        };
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    pub(super) async fn handle_channel_preferences(
+        &self,
+        signal_id: Uuid,
+        namespace: Option<String>,
+        category: Option<String>,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let ns = namespace.as_deref().unwrap_or("personal");
+        let message = match &self.channel_preferences {
+            None => "Channel preferences not wired in this build.".to_string(),
+            Some(store) => {
+                let cat = category.as_deref().map(channel::DeliveryCategory::parse);
+                let categories: Vec<channel::DeliveryCategory> = match cat {
+                    Some(Some(c)) => vec![c],
+                    Some(None) => {
+                        return Ok(PipelineResult::Complete(prepend_nudges(
+                            SignalResponse::ok(
+                                signal_id,
+                                format!(
+                                    "Unknown delivery category: {:?}. \
+                                     Try: confirm, nudge, report, response, alert.",
+                                    category,
+                                ),
+                            ),
+                        )));
+                    }
+                    None => vec![
+                        channel::DeliveryCategory::Confirm,
+                        channel::DeliveryCategory::Nudge,
+                        channel::DeliveryCategory::Report,
+                        channel::DeliveryCategory::Response,
+                        channel::DeliveryCategory::Alert,
+                    ],
+                };
+
+                let mut lines = vec![format!("Channel preferences (namespace = {ns}):")];
+                for c in categories {
+                    match store.get_preferences(ns, c, 0.0).await {
+                        Ok(prefs) if prefs.is_empty() => {
+                            lines.push(format!("  • {c:?}: (none learned)"));
+                        }
+                        Ok(prefs) => {
+                            let formatted: Vec<String> = prefs
+                                .iter()
+                                .map(|p| {
+                                    let pin = if p.pinned { " 📌" } else { "" };
+                                    format!("{}={:.2}{}", p.channel_id, p.weight, pin)
+                                })
+                                .collect();
+                            lines.push(format!("  • {c:?}: {}", formatted.join(", ")));
+                        }
+                        Err(e) => lines.push(format!("  • {c:?}: error: {e}")),
+                    }
+                }
+                lines.join("\n")
+            }
+        };
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    pub(super) async fn handle_set_channel_preference(
+        &self,
+        signal_id: Uuid,
+        channel_id: String,
+        category: String,
+        weight: f32,
+        pinned: bool,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let message = match (channel::DeliveryCategory::parse(&category), &self.channel_preferences) {
+            (None, _) => format!(
+                "Unknown delivery category: {category}. Try: confirm, nudge, report, response, alert.",
+            ),
+            (_, None) => "Channel preference store not wired in this build.".to_string(),
+            (Some(cat), Some(store)) => match store
+                .upsert_preference("personal", cat, &channel_id, weight, pinned)
+                .await
+            {
+                Ok(_) => {
+                    if weight <= 0.0 && !pinned {
+                        format!("Cleared preference for {channel_id} on {category}.")
+                    } else {
+                        format!(
+                            "Set preference: {channel_id} for {category} → weight {:.2}{}.",
+                            weight,
+                            if pinned { " (pinned)" } else { "" }
+                        )
+                    }
+                }
+                Err(e) => format!("Failed to update preference: {e}"),
+            },
+        };
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
     pub(super) async fn handle_action(
         &self,
         signal_id: Uuid,
@@ -1216,3 +1389,6 @@ impl SignalProcessor {
         let _ = self.events_tx.send(event);
     }
 }
+
+// `DeliveryCategory::parse` (and `FromStr`) live in the channel crate —
+// no local normalizer needed here.

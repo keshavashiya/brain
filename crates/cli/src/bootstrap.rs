@@ -67,13 +67,30 @@ async fn wire_safety_infrastructure(
     let audit_trail: Arc<dyn audit::AuditTrail> = Arc::new(audit_trail);
     tracing::info!("Audit trail wired");
 
-    // Confirmation engine — always wired
-    let confirm_engine = confirm::SqliteConfirmationEngine::new(db.clone());
+    // Channel preference store + router + dispatcher — built before the
+    // confirmation engine so the engine can attach the notifier hook that
+    // pushes approval prompts out to the user. Transports register with
+    // the dispatcher later (in `serve.rs::wire_preset_transports`).
+    let pref_store = channel::SqlitePreferenceStore::new(db.clone());
+    pref_store
+        .ensure_tables()
+        .map_err(|e| anyhow::anyhow!("Channel preference table init failed: {e}"))?;
+    let preferences: Arc<dyn channel::ChannelPreferenceStore> = Arc::new(pref_store);
+    let router: Arc<dyn channel::ChannelRouter> =
+        Arc::new(channel::DefaultChannelRouter::new(preferences.clone()));
+    let dispatcher = Arc::new(channel::ChannelDispatcher::new(router.clone()));
+
+    // Confirmation engine — always wired, with notifier hook so approval
+    // prompts actually reach the user instead of deadlocking on timeout.
+    let approval_notifier: Arc<dyn confirm::ApprovalNotifier> =
+        Arc::new(signal::ChannelApprovalNotifier::new(dispatcher.clone()));
+    let confirm_engine =
+        confirm::SqliteConfirmationEngine::new(db.clone()).with_notifier(approval_notifier);
     confirm_engine
         .ensure_tables()
         .map_err(|e| anyhow::anyhow!("Confirmation engine table init failed: {e}"))?;
     let confirm_engine: Arc<dyn confirm::ConfirmationEngine> = Arc::new(confirm_engine);
-    tracing::info!("Confirmation engine wired");
+    tracing::info!("Confirmation engine wired (with channel-backed approval notifier)");
 
     // Cost budget — always wired, with audit coupling
     let budget_policy = budget::BudgetPolicy::default();
@@ -135,26 +152,23 @@ async fn wire_safety_infrastructure(
         .with_confirmation(confirm_engine.clone())
         .with_sandbox(sandbox_executor)
         .with_agents(agent_registry_arc.clone())
+        .with_channel_dispatcher(dispatcher.clone())
+        .with_llm(processor.llm_arc())
+        .with_episodic(Arc::new(hippocampus::EpisodicStore::new(db.clone())))
         .with_delegation_policy(escalation_policy);
     let processor = processor
         .with_orchestrator(Arc::new(orchestrator))
         .with_agent_registry(agent_registry_arc);
     tracing::info!("Task orchestrator wired");
 
-    // ── Channel intelligence — always wired ─────────────────────────────
-    let pref_store = channel::SqlitePreferenceStore::new(db.clone());
-    pref_store
-        .ensure_tables()
-        .map_err(|e| anyhow::anyhow!("Channel preference table init failed: {e}"))?;
-    let preferences: Arc<dyn channel::ChannelPreferenceStore> = Arc::new(pref_store);
-    let router: Arc<dyn channel::ChannelRouter> =
-        Arc::new(channel::DefaultChannelRouter::new(preferences.clone()));
+    // ── Channel intelligence — bind the pieces we built above ──────────
     let correlator = Arc::new(channel::ConfirmationCorrelator::new(confirm_engine));
     let processor = processor
         .with_channel_preferences(preferences)
         .with_channel_router(router)
-        .with_confirmation_correlator(correlator);
-    tracing::info!("Channel intelligence wired (router + preferences + correlator)");
+        .with_confirmation_correlator(correlator)
+        .with_channel_dispatcher(dispatcher);
+    tracing::info!("Channel intelligence wired (router + dispatcher + preferences + correlator)");
 
     Ok(processor)
 }

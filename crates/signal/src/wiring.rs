@@ -203,6 +203,20 @@ impl SignalProcessor {
         self.confirmation_correlator.as_ref()
     }
 
+    /// Attach a channel dispatcher (builder pattern). The dispatcher owns
+    /// transport handles and performs delivery — both the orchestrator's
+    /// `Notify` step and the confirm engine's approval prompts route
+    /// through it.
+    pub fn with_channel_dispatcher(mut self, dispatcher: Arc<channel::ChannelDispatcher>) -> Self {
+        self.channel_dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Expose the channel dispatcher.
+    pub fn channel_dispatcher(&self) -> Option<&Arc<channel::ChannelDispatcher>> {
+        self.channel_dispatcher.as_ref()
+    }
+
     // ── Agent delegation (Phase 3) ────────────────────────────────────────
 
     /// Attach an agent registry (builder pattern). Orchestrator-managed

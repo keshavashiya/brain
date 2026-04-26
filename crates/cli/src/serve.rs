@@ -100,14 +100,14 @@ pub(crate) async fn cmd_serve(
     let (_transport_shutdown_guards, webhook_handlers) = if config.channel.transports.is_empty() {
         (Vec::new(), std::collections::HashMap::new())
     } else {
-        let router = processor.channel_router().cloned();
+        let dispatcher = processor.channel_dispatcher().cloned();
         let correlator = processor.confirmation_correlator().cloned();
-        match (router, correlator) {
-            (Some(router), Some(correlator)) => {
+        match (dispatcher, correlator) {
+            (Some(dispatcher), Some(correlator)) => {
                 wire_preset_transports(
                     &config.channel.transports,
                     processor.clone(),
-                    router,
+                    dispatcher,
                     correlator,
                     &mut set,
                 )
@@ -601,13 +601,14 @@ async fn forward_inbound_to_signal(
     }
 }
 
-/// Build preset-driven transports, register each with the router, spawn
-/// polling loops for HttpPolled kinds, and feed inbound messages into the
-/// signal pipeline (after the correlator has had a chance to claim them).
+/// Build preset-driven transports, register each with the dispatcher (so
+/// it can actually deliver), spawn polling loops for HttpPolled kinds,
+/// and feed inbound messages into the signal pipeline (after the
+/// correlator has had a chance to claim them).
 async fn wire_preset_transports(
     entries: &[brain_core::config::TransportEntry],
     processor: Arc<signal::SignalProcessor>,
-    router: Arc<dyn channel::ChannelRouter>,
+    dispatcher: Arc<channel::ChannelDispatcher>,
     correlator: Arc<channel::ConfirmationCorrelator>,
     set: &mut tokio::task::JoinSet<anyhow::Result<()>>,
 ) -> (
@@ -654,8 +655,14 @@ async fn wire_preset_transports(
                         continue;
                     }
                 };
-                if let Err(e) = router.register(transport.descriptor()).await {
-                    tracing::warn!(transport = %entry.id, error = %e, "router register failed");
+                if let Err(e) = dispatcher
+                    .register_transport(transport.clone() as Arc<dyn ChannelTransport>)
+                    .await
+                {
+                    tracing::warn!(
+                        transport = %entry.id, error = %e,
+                        "dispatcher register failed",
+                    );
                 }
                 println!(
                     "  Transport    → {} (preset: {}, polled)",
@@ -708,8 +715,14 @@ async fn wire_preset_transports(
                         continue;
                     }
                 };
-                if let Err(e) = router.register(transport.descriptor()).await {
-                    tracing::warn!(transport = %entry.id, error = %e, "router register failed");
+                if let Err(e) = dispatcher
+                    .register_transport(transport.clone() as Arc<dyn ChannelTransport>)
+                    .await
+                {
+                    tracing::warn!(
+                        transport = %entry.id, error = %e,
+                        "dispatcher register failed",
+                    );
                 }
                 println!(
                     "  Transport    → {} (preset: {}, outbound-only)",
@@ -733,8 +746,14 @@ async fn wire_preset_transports(
                         continue;
                     }
                 };
-                if let Err(e) = router.register(transport.descriptor()).await {
-                    tracing::warn!(transport = %entry.id, error = %e, "router register failed");
+                if let Err(e) = dispatcher
+                    .register_transport(transport.clone() as Arc<dyn ChannelTransport>)
+                    .await
+                {
+                    tracing::warn!(
+                        transport = %entry.id, error = %e,
+                        "dispatcher register failed",
+                    );
                 }
                 println!(
                     "  Transport    → {} (preset: {}, webhook-inbound)",

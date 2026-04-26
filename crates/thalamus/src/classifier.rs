@@ -153,6 +153,21 @@ static DECOMPOSE_TASK_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("invariant: DECOMPOSE_TASK_RE must be valid")
 });
 
+static LIST_CHANNELS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:list channels|show channels|what channels(?:\s+are\s+available)?)\??$")
+        .expect("invariant: LIST_CHANNELS_RE must be valid")
+});
+
+static CHANNEL_PREFS_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:show |list )?channel\s+(?:preferences|prefs)(?:\s+for\s+(\w+))?\??$")
+        .expect("invariant: CHANNEL_PREFS_RE must be valid")
+});
+
+static PIN_CHANNEL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(pin|unpin|prefer)\s+(\S+)\s+for\s+(confirm|confirms|nudge|nudges|report|reports|response|responses|alert|alerts)$")
+        .expect("invariant: PIN_CHANNEL_RE must be valid")
+});
+
 /// All patterns in priority order — first match wins.
 pub(crate) const PATTERNS: &[PatternDef] = &[
     PatternDef {
@@ -324,6 +339,29 @@ pub(crate) const PATTERNS: &[PatternDef] = &[
         },
         extractors: &[("request", 1)],
     },
+    PatternDef {
+        regex: &LIST_CHANNELS_RE,
+        base_intent: Intent::ListChannels,
+        extractors: &[],
+    },
+    PatternDef {
+        regex: &CHANNEL_PREFS_RE,
+        base_intent: Intent::ChannelPreferences {
+            namespace: None,
+            category: None,
+        },
+        extractors: &[("category", 1)],
+    },
+    PatternDef {
+        regex: &PIN_CHANNEL_RE,
+        base_intent: Intent::SetChannelPreference {
+            channel: String::new(),
+            category: String::new(),
+            weight: 0.0,
+            pinned: false,
+        },
+        extractors: &[("verb", 1), ("channel", 2), ("category", 3)],
+    },
 ];
 
 /// Intent classifier using two-tier approach.
@@ -444,6 +482,34 @@ impl IntentClassifier {
                 decision: get_group("decision").to_lowercase(),
                 nonce: get_group("nonce"),
             },
+            Intent::ChannelPreferences { .. } => {
+                let cat = get_group("category");
+                let category = if cat.is_empty() {
+                    None
+                } else {
+                    Some(normalize_delivery_category(&cat))
+                };
+                Intent::ChannelPreferences {
+                    namespace: None,
+                    category,
+                }
+            }
+            Intent::SetChannelPreference { .. } => {
+                let verb = get_group("verb").to_lowercase();
+                let channel = get_group("channel");
+                let category = normalize_delivery_category(&get_group("category"));
+                let (weight, pinned) = match verb.as_str() {
+                    "pin" => (1.0, true),
+                    "unpin" => (0.0, false),
+                    _ => (0.7, false), // "prefer"
+                };
+                Intent::SetChannelPreference {
+                    channel,
+                    category,
+                    weight,
+                    pinned,
+                }
+            }
             _ => base.clone(),
         }
     }
@@ -553,6 +619,14 @@ impl IntentClassifier {
 
         None
     }
+}
+
+/// Lower-case + trim a user-typed category token. Plural and unknown
+/// forms are passed through; downstream `channel::DeliveryCategory::parse`
+/// is lenient and handles both singular and plural, so this only needs
+/// to normalize whitespace and case.
+fn normalize_delivery_category(raw: &str) -> String {
+    raw.trim().to_lowercase()
 }
 
 impl Default for IntentClassifier {
