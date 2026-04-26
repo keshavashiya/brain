@@ -88,7 +88,9 @@ impl TaskGraph {
         while let Some(node) = queue.pop_front() {
             visited += 1;
             for &next in adjacency.get(node).unwrap_or(&vec![]) {
-                let deg = in_degree.get_mut(next).unwrap();
+                let deg = in_degree
+                    .get_mut(next)
+                    .expect("invariant: every step id seeded into in_degree map at start");
                 *deg -= 1;
                 if *deg == 0 {
                     queue.push_back(next);
@@ -142,7 +144,9 @@ impl TaskGraph {
         while let Some(node) = queue.pop_front() {
             order.push(node.to_string());
             for &next in adjacency.get(node).unwrap_or(&vec![]) {
-                let deg = in_degree.get_mut(next).unwrap();
+                let deg = in_degree
+                    .get_mut(next)
+                    .expect("invariant: every step id seeded into in_degree map at start");
                 *deg -= 1;
                 if *deg == 0 {
                     queue.push_back(next);

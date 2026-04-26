@@ -21,6 +21,7 @@ delegate = { workspace = true }
 cortex = { workspace = true }
 cerebellum = { workspace = true }
 hippocampus = { workspace = true }
+channel = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -33,3 +34,4 @@ tokio = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+futures = { workspace = true }

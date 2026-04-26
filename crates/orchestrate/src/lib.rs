@@ -8,6 +8,8 @@
 //! coordination layer that turns "build a feature" into a sequence of
 //! researched, planned, implemented, tested, and delivered steps.
 
+mod actions;
+mod aggregation;
 pub mod decompose;
 pub mod graph;
 pub mod orchestrator;

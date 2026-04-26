@@ -102,12 +102,23 @@ Output a JSON array of step objects with these fields:
 - "tier": action tier — "read", "write", "execute", "destructive", "external"
 - "estimated_tokens": estimated LLM tokens needed (0 for non-LLM steps)
 
-Constraints:
-- Prefer reversible actions where possible
-- Do not suggest destructive commands without marking tier as "destructive"
-- Steps that modify files or run commands should use "execute" tier
-- Steps that deploy, send messages, or call external APIs should use "external" tier
-- Keep the plan practical and minimal — no unnecessary steps
+Dependency rules:
+- Default to sequential dependencies — step N depends on step N-1 unless you can clearly justify true parallelism (e.g., two independent research queries).
+- A plan that reads as a chain ("scan → write → run → verify → review → notify") MUST be encoded as a chain in `depends_on`. Do not produce a flat list of independent steps for inherently sequential work.
+
+Tier rules:
+- "read": queries memory, reads files, surfaces information
+- "write": stores facts, edits files, modifies local state
+- "execute": runs sandboxed commands, builds/tests code
+- "destructive": deletes data, force-pushes, drops tables, irrevocable file deletion
+- "external": calls third-party APIs, deploys to remote services, posts to public platforms (NOT internal user notifications — those are "read")
+- Prefer reversible actions where possible.
+
+Notify rules:
+- Internal notifications to the user (telling the user a task is done, surfacing results) are "read" tier — they are output, not external API calls.
+- Reserve "external" for genuine third-party calls (Slack webhook to a public channel, email send via an SMTP API, etc.).
+
+Keep the plan practical and minimal — no unnecessary steps.
 
 Return ONLY valid JSON (an array of objects). No markdown, no explanations."#;
 
@@ -149,10 +160,21 @@ impl TaskDecomposer for LlmDecomposer {
         ];
 
         let response = self.llm.generate(&messages).await?;
-        let raw_steps = parse_steps(&response.content)?;
+        let mut raw_steps = parse_steps(&response.content)?;
 
         if raw_steps.is_empty() {
             return Err(DecompositionError::EmptyPlan);
+        }
+
+        // Sequential-default fallback: if the LLM left every step's
+        // depends_on empty across a multi-step plan, link them as a chain
+        // so they don't all fire in parallel. The prompt asks for this
+        // explicitly, but model output isn't always reliable.
+        let none_have_deps = raw_steps.iter().all(|s| s.depends_on.is_empty());
+        if raw_steps.len() > 1 && none_have_deps {
+            for (i, step) in raw_steps.iter_mut().enumerate().skip(1) {
+                step.depends_on = vec![i - 1];
+            }
         }
 
         // Assign UUIDs and convert raw steps to TaskSteps.
@@ -281,5 +303,61 @@ mod tests {
 
         let steps = parse_steps(json).unwrap();
         assert_eq!(steps.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_sequential_fallback_links_dependencyless_plans() {
+        use cortex::llm::{LlmError, LlmProvider, Message, Response, ResponseChunk};
+        use futures::Stream;
+        use std::pin::Pin;
+
+        struct FlatPlanLlm;
+        #[async_trait]
+        impl LlmProvider for FlatPlanLlm {
+            async fn generate(&self, _messages: &[Message]) -> Result<Response, LlmError> {
+                Ok(Response {
+                    content: r#"[
+                        {"description": "scan dir", "action_type": "research", "depends_on": []},
+                        {"description": "write script", "action_type": "implement", "depends_on": []},
+                        {"description": "run script", "action_type": "execute", "command": "echo hi", "depends_on": []},
+                        {"description": "notify user", "action_type": "notify", "depends_on": []}
+                    ]"#.to_string(),
+                    usage: None,
+                })
+            }
+            async fn generate_stream(
+                &self,
+                _messages: &[Message],
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<ResponseChunk, LlmError>> + Send>>, LlmError>
+            {
+                unimplemented!()
+            }
+            async fn health_check(&self) -> bool {
+                true
+            }
+            fn name(&self) -> &str {
+                "test"
+            }
+            fn model(&self) -> &str {
+                "test-model"
+            }
+            async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+                Ok(vec!["test-model".into()])
+            }
+        }
+
+        let llm = std::sync::Arc::new(FlatPlanLlm);
+        let decomposer = LlmDecomposer::new(llm);
+        let steps = decomposer
+            .decompose("do something", DecompositionContext::default())
+            .await
+            .unwrap();
+
+        assert_eq!(steps.len(), 4);
+        // First step has no deps; rest are linked to predecessor.
+        assert!(steps[0].depends_on.is_empty());
+        assert_eq!(steps[1].depends_on, vec![steps[0].id.clone()]);
+        assert_eq!(steps[2].depends_on, vec![steps[1].id.clone()]);
+        assert_eq!(steps[3].depends_on, vec![steps[2].id.clone()]);
     }
 }

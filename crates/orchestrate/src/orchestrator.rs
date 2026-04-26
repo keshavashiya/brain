@@ -36,18 +36,30 @@ pub enum OrchestrateError {
 }
 
 /// The task orchestrator — manages the full lifecycle of task plans.
+///
+/// Fields are `pub(crate)` so per-action handlers (`crate::actions`) and
+/// aggregation helpers (`crate::aggregation`) can split `impl` across
+/// sibling modules. Outside the `orchestrate` crate the struct's surface
+/// is the public methods only.
 pub struct TaskOrchestrator {
-    decomposer: Arc<dyn TaskDecomposer>,
-    audit: Option<Arc<dyn audit::AuditTrail>>,
-    confirm: Option<Arc<dyn confirm::ConfirmationEngine>>,
-    budget: Option<Arc<dyn budget::CostBudget>>,
-    sandbox: Option<Arc<dyn sandbox::SandboxExecutor>>,
-    agents: Option<Arc<delegate::AgentRegistry>>,
+    pub(crate) decomposer: Arc<dyn TaskDecomposer>,
+    pub(crate) audit: Option<Arc<dyn audit::AuditTrail>>,
+    pub(crate) confirm: Option<Arc<dyn confirm::ConfirmationEngine>>,
+    pub(crate) budget: Option<Arc<dyn budget::CostBudget>>,
+    pub(crate) sandbox: Option<Arc<dyn sandbox::SandboxExecutor>>,
+    pub(crate) agents: Option<Arc<delegate::AgentRegistry>>,
+    /// LLM provider for `Research` / `Review` step types.
+    pub(crate) llm: Option<Arc<dyn cortex::LlmProvider>>,
+    /// Channel dispatcher for `Notify` step types.
+    pub(crate) dispatcher: Option<Arc<channel::ChannelDispatcher>>,
+    /// Episodic memory store — captures delegation outcomes so future
+    /// runs can recall them. Phase 3 result aggregation.
+    pub(crate) episodic: Option<Arc<hippocampus::EpisodicStore>>,
     /// Default fallback chain applied to every delegation. Individual
     /// step failures follow this chain unless overridden in the future.
-    delegation_policy: delegate::EscalationPolicy,
+    pub(crate) delegation_policy: delegate::EscalationPolicy,
     /// Active tasks indexed by task ID.
-    tasks: RwLock<HashMap<String, TaskState>>,
+    pub(crate) tasks: RwLock<HashMap<String, TaskState>>,
 }
 
 impl TaskOrchestrator {
@@ -59,6 +71,9 @@ impl TaskOrchestrator {
             budget: None,
             sandbox: None,
             agents: None,
+            llm: None,
+            dispatcher: None,
+            episodic: None,
             delegation_policy: delegate::EscalationPolicy::default(),
             tasks: RwLock::new(HashMap::new()),
         }
@@ -88,6 +103,27 @@ impl TaskOrchestrator {
     /// dispatch to specialist delegates.
     pub fn with_agents(mut self, agents: Arc<delegate::AgentRegistry>) -> Self {
         self.agents = Some(agents);
+        self
+    }
+
+    /// Attach an LLM provider so `Research` and `Review` steps actually
+    /// run a model call instead of returning a no-op string.
+    pub fn with_llm(mut self, llm: Arc<dyn cortex::LlmProvider>) -> Self {
+        self.llm = Some(llm);
+        self
+    }
+
+    /// Attach a channel dispatcher so `Notify` steps actually deliver
+    /// the message to the user's preferred channel.
+    pub fn with_channel_dispatcher(mut self, dispatcher: Arc<channel::ChannelDispatcher>) -> Self {
+        self.dispatcher = Some(dispatcher);
+        self
+    }
+
+    /// Attach an episodic memory store — delegate outcomes are recorded
+    /// so they're searchable in future sessions.
+    pub fn with_episodic(mut self, store: Arc<hippocampus::EpisodicStore>) -> Self {
+        self.episodic = Some(store);
         self
     }
 
@@ -152,7 +188,9 @@ impl TaskOrchestrator {
         loop {
             let ready_steps = {
                 let tasks = self.tasks.read().await;
-                let task = tasks.get(task_id).unwrap();
+                let task = tasks
+                    .get(task_id)
+                    .expect("invariant: task inserted by plan(); only state changes after");
 
                 if task.is_complete() {
                     break;
@@ -181,7 +219,9 @@ impl TaskOrchestrator {
 
         // Generate summary
         let tasks = self.tasks.read().await;
-        let task = tasks.get(task_id).unwrap();
+        let task = tasks
+            .get(task_id)
+            .expect("invariant: task inserted by plan() and never removed");
         let summary = synthesize::summarize_task(task);
 
         Ok(summary)
@@ -191,15 +231,23 @@ impl TaskOrchestrator {
     async fn execute_step(&self, task_id: &str, step_id: &str) -> Result<(), OrchestrateError> {
         let (action, tier, description) = {
             let tasks = self.tasks.read().await;
-            let task = tasks.get(task_id).unwrap();
-            let step = task.graph.steps.get(step_id).unwrap();
+            let task = tasks
+                .get(task_id)
+                .expect("invariant: task_id always corresponds to a planned task");
+            let step = task
+                .graph
+                .steps
+                .get(step_id)
+                .expect("invariant: step_id sourced from task.graph.ready_steps()");
             (step.action.clone(), step.tier, step.description.clone())
         };
 
         // Mark as running
         {
             let mut tasks = self.tasks.write().await;
-            let task = tasks.get_mut(task_id).unwrap();
+            let task = tasks
+                .get_mut(task_id)
+                .expect("invariant: task_id always corresponds to a planned task");
             task.set_step_state(
                 step_id,
                 StepState::Running {
@@ -213,13 +261,15 @@ impl TaskOrchestrator {
         // Check confirmation for destructive/external tiers
         if tier.requires_confirmation() {
             if let Some(confirm) = &self.confirm {
-                let spec = confirm::ApprovalSpec::new(&description, convert_tier(tier));
+                let spec = confirm::ApprovalSpec::new(&description, tier);
                 let nonce = spec.nonce.clone();
 
                 // Mark as awaiting confirmation
                 {
                     let mut tasks = self.tasks.write().await;
-                    let task = tasks.get_mut(task_id).unwrap();
+                    let task = tasks
+                        .get_mut(task_id)
+                        .expect("invariant: task_id always corresponds to a planned task");
                     task.set_step_state(
                         step_id,
                         StepState::AwaitingConfirmation {
@@ -236,14 +286,18 @@ impl TaskOrchestrator {
                     Ok(outcome) => {
                         let reason = format!("Approval denied: {outcome:?}");
                         let mut tasks = self.tasks.write().await;
-                        let task = tasks.get_mut(task_id).unwrap();
+                        let task = tasks
+                            .get_mut(task_id)
+                            .expect("invariant: task_id always corresponds to a planned task");
                         task.set_step_state(step_id, StepState::Cancelled);
                         tracing::info!(step = %description, reason = %reason, "Step cancelled");
                         return Ok(());
                     }
                     Err(e) => {
                         let mut tasks = self.tasks.write().await;
-                        let task = tasks.get_mut(task_id).unwrap();
+                        let task = tasks
+                            .get_mut(task_id)
+                            .expect("invariant: task_id always corresponds to a planned task");
                         task.set_step_state(
                             step_id,
                             StepState::Failed {
@@ -263,13 +317,7 @@ impl TaskOrchestrator {
             StepAction::Execute { command, workdir } | StepAction::Test { command, workdir } => {
                 self.execute_sandbox_step(command, workdir).await
             }
-            StepAction::Research { query } => Ok(StepOutcome {
-                stdout: format!("Research query: {query}"),
-                stderr: String::new(),
-                exit_code: None,
-                artifacts: vec![],
-                summary: format!("Researched: {query}"),
-            }),
+            StepAction::Research { query } => self.execute_research_step(query).await,
             StepAction::Plan { output } => Ok(StepOutcome {
                 stdout: output.clone(),
                 stderr: String::new(),
@@ -280,25 +328,17 @@ impl TaskOrchestrator {
             StepAction::Implement { spec, agent } => {
                 self.delegate_implement_step(spec, agent).await
             }
-            StepAction::Review { artifact } => Ok(StepOutcome {
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_code: None,
-                artifacts: vec![artifact.clone()],
-                summary: format!("Review requested: {artifact}"),
-            }),
-            StepAction::Notify { channel, message } => Ok(StepOutcome {
-                stdout: String::new(),
-                stderr: String::new(),
-                exit_code: None,
-                artifacts: vec![],
-                summary: format!("Notified {channel}: {message}"),
-            }),
+            StepAction::Review { artifact } => self.execute_review_step(artifact).await,
+            StepAction::Notify { channel, message } => {
+                self.execute_notify_step(channel, message).await
+            }
         };
 
         // Update step state
         let mut tasks = self.tasks.write().await;
-        let task = tasks.get_mut(task_id).unwrap();
+        let task = tasks
+            .get_mut(task_id)
+            .expect("invariant: task_id always corresponds to a planned task");
 
         match result {
             Ok(outcome) => {
@@ -308,7 +348,7 @@ impl TaskOrchestrator {
                         &description,
                         "step executed",
                         &outcome.summary,
-                        convert_audit_tier(tier),
+                        tier,
                     )
                     .with_source("orchestrator")
                     .with_execution(
@@ -352,101 +392,6 @@ impl TaskOrchestrator {
         Ok(())
     }
 
-    /// Execute a command in the sandbox.
-    async fn execute_sandbox_step(
-        &self,
-        command: &str,
-        workdir: &std::path::Path,
-    ) -> Result<StepOutcome, String> {
-        let sandbox = match &self.sandbox {
-            Some(s) => s,
-            None => {
-                return Err("Sandbox not available".to_string());
-            }
-        };
-
-        let parts: Vec<&str> = command.split_whitespace().collect();
-        if parts.is_empty() {
-            return Err("Empty command".to_string());
-        }
-
-        let cmd = sandbox::SandboxCommand::new(
-            parts[0],
-            parts[1..].iter().map(|s| s.to_string()).collect(),
-        )
-        .with_workdir(workdir.to_path_buf());
-
-        match sandbox.run(cmd).await {
-            Ok(outcome) => Ok(StepOutcome {
-                stdout: outcome.stdout,
-                stderr: outcome.stderr,
-                exit_code: Some(outcome.exit_code),
-                artifacts: vec![],
-                summary: if outcome.exit_code == 0 {
-                    format!("Command succeeded: {command}")
-                } else {
-                    format!("Command failed (exit {}): {command}", outcome.exit_code)
-                },
-            }),
-            Err(e) => Err(format!("Sandbox execution failed: {e}")),
-        }
-    }
-
-    /// Hand the step off to a registered [`AgentDelegate`]. Failures are
-    /// run through the configured escalation policy — a primary hang or
-    /// launch failure transparently falls over to the declared fallback
-    /// chain; anything the chain can't recover becomes a human escalation
-    /// recorded as a failed step outcome.
-    async fn delegate_implement_step(
-        &self,
-        spec: &str,
-        agent: &str,
-    ) -> Result<StepOutcome, String> {
-        let registry = self
-            .agents
-            .as_ref()
-            .ok_or_else(|| "Agent registry not attached to orchestrator".to_string())?;
-
-        let primary = registry
-            .get(agent)
-            .map_err(|e| format!("Delegate '{agent}' unavailable: {e}"))?;
-
-        let task = delegate::AgentTask::new(spec);
-        let outcome = delegate::run_with_escalation(
-            primary,
-            registry.as_ref(),
-            task,
-            &self.delegation_policy,
-        )
-        .await;
-
-        match outcome {
-            delegate::EscalationOutcome::Succeeded(result) => Ok(StepOutcome {
-                stdout: result.stdout,
-                stderr: result.stderr,
-                exit_code: result.exit_code,
-                artifacts: result
-                    .artifacts
-                    .iter()
-                    .map(|a| a.reference.clone())
-                    .collect(),
-                summary: format!("{agent}: {}", result.summary),
-            }),
-            delegate::EscalationOutcome::Recovered { via, result } => Ok(StepOutcome {
-                stdout: result.stdout,
-                stderr: result.stderr,
-                exit_code: result.exit_code,
-                artifacts: result
-                    .artifacts
-                    .iter()
-                    .map(|a| a.reference.clone())
-                    .collect(),
-                summary: format!("{agent} failed; recovered via {via}: {}", result.summary),
-            }),
-            delegate::EscalationOutcome::EscalateToHuman { reason } => Err(reason),
-        }
-    }
-
     /// Get the current state of a task.
     pub async fn get_task(&self, task_id: &str) -> Option<TaskState> {
         self.tasks.read().await.get(task_id).cloned()
@@ -478,36 +423,12 @@ impl TaskOrchestrator {
     }
 }
 
-/// Convert sandbox ActionTier to confirm ActionTier.
-/// These are the same enum duplicated across crates — convert between them.
-fn convert_tier(tier: audit::ActionTier) -> confirm::ActionTier {
-    match tier {
-        audit::ActionTier::Read => confirm::ActionTier::Read,
-        audit::ActionTier::Write => confirm::ActionTier::Write,
-        audit::ActionTier::Execute => confirm::ActionTier::Execute,
-        audit::ActionTier::Destructive => confirm::ActionTier::Destructive,
-        audit::ActionTier::External => confirm::ActionTier::External,
-    }
-}
-
-/// Convert to audit ActionTier for audit entries.
-fn convert_audit_tier(tier: audit::ActionTier) -> audit::ActionTier {
-    tier
-}
-
-/// Check if the tier requires confirmation (using confirm crate's logic).
-trait RequiresConfirmation {
-    fn requires_confirmation(self) -> bool;
-}
-
-impl RequiresConfirmation for audit::ActionTier {
-    fn requires_confirmation(self) -> bool {
-        matches!(
-            self,
-            audit::ActionTier::Destructive | audit::ActionTier::External
-        )
-    }
-}
+// `audit::ActionTier`, `confirm::ActionTier`, and `sandbox::ActionTier`
+// are now all re-exports of `brain_core::ActionTier`. The previous
+// `convert_tier` / `convert_audit_tier` / local `RequiresConfirmation`
+// trait existed solely to bridge the three former duplicate enums.
+// `requires_confirmation()` is now an inherent method on the canonical
+// type — no shim required.
 
 #[cfg(test)]
 mod tests {
