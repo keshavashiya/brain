@@ -17,6 +17,7 @@
 //! methods and compose with existing `NotificationRouter` webhook tiers.
 
 pub mod correlate;
+pub mod dispatch;
 pub mod error;
 pub mod preference;
 pub mod relay;
@@ -25,6 +26,7 @@ pub mod transport;
 pub mod types;
 
 pub use correlate::{ConfirmationCorrelator, CorrelatedCommand, CorrelationOutcome};
+pub use dispatch::{ChannelDispatcher, DeliveryReceipt};
 pub use error::ChannelError;
 pub use preference::{
     ChannelPreference, ChannelPreferenceStore, RecordedInteraction, SqlitePreferenceStore,
