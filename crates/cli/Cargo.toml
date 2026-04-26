@@ -19,10 +19,6 @@ default = ["grpc", "encryption", "ganglia"]
 grpc = ["dep:grpcadapter"]
 encryption = ["storage/encryption", "signal/encryption"]
 ganglia = ["dep:ganglia"]
-# `bridge` is now a required dep (pulled transitively via `channel`);
-# keep this feature as a no-op so CI's `--features bridge` invocations
-# continue to work without churn.
-bridge = []
 
 [dependencies]
 brain_core = { workspace = true }

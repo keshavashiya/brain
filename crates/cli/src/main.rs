@@ -1,5 +1,4 @@
 mod bootstrap;
-#[cfg(feature = "bridge")]
 mod bridge;
 mod chat;
 mod daemon;
@@ -160,7 +159,6 @@ enum Commands {
     ///   brain bridge ws://localhost:8080/bot                  # connect to gateway
     ///   brain bridge wss://gateway.example.com/ws             # over TLS
     ///   brain bridge ws://localhost:8080 --api-key YOUR_KEY   # with auth
-    #[cfg(feature = "bridge")]
     Bridge {
         /// WebSocket URL of the external gateway to connect to
         url: String,
@@ -559,7 +557,6 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
 
         // ── bridge ─────────────────────────────────────────────────────────
-        #[cfg(feature = "bridge")]
         Commands::Bridge { url, api_key } => {
             bridge::cmd_bridge(&config, &url, api_key.as_deref()).await?;
         }
