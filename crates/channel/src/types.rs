@@ -115,15 +115,27 @@ impl DeliveryCategory {
         }
     }
 
+    /// Parse a textual category, accepting case-insensitive singular and
+    /// common plural forms. Used by Thalamus intent classification and
+    /// the channel-inspection signal handlers — keeping the mapping in
+    /// one place avoids the previous duplicate normalizers.
     pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "confirm" => Some(Self::Confirm),
-            "nudge" => Some(Self::Nudge),
-            "report" => Some(Self::Report),
-            "response" => Some(Self::Response),
-            "alert" => Some(Self::Alert),
+        match s.trim().to_ascii_lowercase().as_str() {
+            "confirm" | "confirms" => Some(Self::Confirm),
+            "nudge" | "nudges" => Some(Self::Nudge),
+            "report" | "reports" => Some(Self::Report),
+            "response" | "responses" => Some(Self::Response),
+            "alert" | "alerts" => Some(Self::Alert),
             _ => None,
         }
+    }
+}
+
+impl std::str::FromStr for DeliveryCategory {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s).ok_or(())
     }
 }
 
