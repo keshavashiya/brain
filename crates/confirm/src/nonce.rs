@@ -141,11 +141,25 @@ struct PendingApproval {
 /// SQLite-backed confirmation engine.
 pub struct SqliteConfirmationEngine {
     db: SqlitePool,
+    notifier: Option<std::sync::Arc<dyn crate::notifier::ApprovalNotifier>>,
 }
 
 impl SqliteConfirmationEngine {
     pub fn new(db: SqlitePool) -> Self {
-        Self { db }
+        Self { db, notifier: None }
+    }
+
+    /// Attach an approval notifier — the engine will fire `notify()` once
+    /// per pending request that requires explicit confirmation, so the
+    /// user actually sees the prompt on their preferred channel. Without
+    /// a notifier, the engine writes to SQLite and blocks until either
+    /// `respond()` is called externally or the timeout expires.
+    pub fn with_notifier(
+        mut self,
+        notifier: std::sync::Arc<dyn crate::notifier::ApprovalNotifier>,
+    ) -> Self {
+        self.notifier = Some(notifier);
+        self
     }
 
     pub fn ensure_tables(&self) -> Result<(), ConfirmError> {
@@ -200,6 +214,30 @@ impl ConfirmationEngine for SqliteConfirmationEngine {
         })?;
 
         tracing::info!(nonce = %nonce, tier = %spec.tier, "approval request created");
+
+        // Push the prompt out through the channel layer (if wired). This
+        // is best-effort — a delivery failure is logged but does not
+        // change request semantics. Without this hook the user has no
+        // way to know an approval is waiting and Destructive/External
+        // requests deadlock until timeout.
+        if spec.tier.requires_confirmation() {
+            if let Some(notifier) = &self.notifier {
+                if let Err(e) = notifier.notify(&spec).await {
+                    tracing::warn!(
+                        nonce = %nonce,
+                        tier = %spec.tier,
+                        error = %e,
+                        "approval prompt delivery failed; user must use CLI/API to respond",
+                    );
+                }
+            } else {
+                tracing::debug!(
+                    nonce = %nonce,
+                    tier = %spec.tier,
+                    "no ApprovalNotifier wired — request will rely on direct CLI/API response",
+                );
+            }
+        }
 
         // Non-confirmatory tiers (Read/Write/Execute) are auto-approved.
         // Destructive/External block here, polling until `respond()` is called
