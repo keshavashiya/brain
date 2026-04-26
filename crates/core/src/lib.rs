@@ -12,12 +12,14 @@ pub mod auth;
 pub mod config;
 pub mod cors;
 pub mod metrics;
+pub mod security;
 
 pub use auth::{check_auth, AuthResult};
 pub use config::{
     AccessConfig, AgentEntry, AgentsConfig, ApiKeyConfig, BrainConfig, DeliveryConfig, LlmConfig,
     ProviderEntry,
 };
+pub use security::ActionTier;
 
 /// Standard timeout constants for HTTP clients across Brain OS.
 pub mod timeouts {
