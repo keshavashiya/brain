@@ -316,12 +316,46 @@ impl Default for BrainConfig {
             encryption: EncryptionConfig { enabled: false },
             security: SecurityConfig {
                 exec_allowlist: vec![
+                    // Read-only inspection
                     "ls".into(),
+                    "cat".into(),
+                    "head".into(),
+                    "tail".into(),
+                    "wc".into(),
+                    "file".into(),
+                    "stat".into(),
+                    // Text processing
                     "grep".into(),
                     "find".into(),
+                    "sort".into(),
+                    "uniq".into(),
+                    "cut".into(),
+                    "awk".into(),
+                    "sed".into(),
+                    // Shell discovery / pathing
+                    "which".into(),
+                    "command".into(),
+                    "type".into(),
+                    "test".into(),
+                    "basename".into(),
+                    "dirname".into(),
+                    "realpath".into(),
+                    // Output
+                    "echo".into(),
+                    "printf".into(),
+                    "true".into(),
+                    "false".into(),
+                    // Toolchain
                     "git".into(),
                     "cargo".into(),
                     "rustc".into(),
+                    "rustup".into(),
+                    // Shell wrapper for the shell-mode execution tier
+                    // (see SandboxCommand::shell). The per-binary
+                    // allowlist is bypassed for commands wrapped by
+                    // `sh -c` — rlimits + Seatbelt + timeout +
+                    // forbidden_commands still apply.
+                    "sh".into(),
                 ],
                 exec_timeout_seconds: 30,
             },

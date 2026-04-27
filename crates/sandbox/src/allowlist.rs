@@ -27,6 +27,19 @@ pub struct CredentialRef {
 }
 
 /// Command to execute in the sandbox.
+///
+/// Two execution modes:
+/// - **Argv** (default, `shell_mode = false`): the binary is looked up via
+///   the per-binary allowlist and exec'd directly with no shell. Safe but
+///   restrictive — no pipes, redirects, or PATH lookups beyond the
+///   sanitised env.
+/// - **Shell** (`shell_mode = true`, set via [`SandboxCommand::shell`]):
+///   the command is wrapped in `sh -c "<command>"` so the system shell
+///   handles pipes, redirects, escaping, and PATH resolution. The
+///   per-binary allowlist is bypassed for the wrapped command — gating
+///   shifts to the daemon's ambient PATH plus the existing rlimits +
+///   Seatbelt + timeout. Use this for any non-trivial command the LLM
+///   produced that argv mode can't run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxCommand {
     pub binary: String,
@@ -35,6 +48,11 @@ pub struct SandboxCommand {
     pub env: std::collections::HashMap<String, String>,
     pub tier: ActionTier,
     pub timeout: Duration,
+    /// `true` when this command should be wrapped in `sh -c` and inherit
+    /// ambient PATH. Set by [`SandboxCommand::shell`]; the per-binary
+    /// allowlist is bypassed in this mode (only `sh` itself is gated).
+    #[serde(default)]
+    pub shell_mode: bool,
 }
 
 impl SandboxCommand {
@@ -46,6 +64,25 @@ impl SandboxCommand {
             env: std::collections::HashMap::new(),
             tier: ActionTier::Execute,
             timeout: Duration::from_secs(300),
+            shell_mode: false,
+        }
+    }
+
+    /// Build a shell-wrapped command. The string is passed verbatim to
+    /// `sh -c`, so it can contain pipes, redirects, $VAR expansion,
+    /// quoted arguments, and any other shell construct. The sandbox
+    /// still applies rlimits, network deny (macOS Seatbelt), and the
+    /// configured timeout — but does NOT enforce a per-binary allowlist
+    /// on what the shell ends up calling.
+    pub fn shell(command: impl Into<String>) -> Self {
+        Self {
+            binary: "sh".to_string(),
+            args: vec!["-c".to_string(), command.into()],
+            workdir: std::env::current_dir().unwrap_or_default(),
+            env: std::collections::HashMap::new(),
+            tier: ActionTier::Execute,
+            timeout: Duration::from_secs(300),
+            shell_mode: true,
         }
     }
 

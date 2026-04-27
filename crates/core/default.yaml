@@ -66,7 +66,22 @@ encryption:
 
 # ── Security ───────────────────────────────────────────────────────────────────
 security:
-  exec_allowlist: [ls, grep, find, git, cargo, rustc]
+  # Binaries the sandbox is allowed to execute. The list is intentionally
+  # narrow — read-only inspection plus the toolchain. To run anything else
+  # (docker, brew, ssh, custom scripts), add it here explicitly.
+  exec_allowlist: [
+    "ls", "cat", "head", "tail", "wc", "file", "stat",
+    "grep", "find", "sort", "uniq", "cut", "awk", "sed",
+    "which", "command", "type", "test", "basename", "dirname", "realpath",
+    "echo", "printf", "true", "false",
+    "git", "cargo", "rustc", "rustup",
+    # `sh` enables the shell-wrapped execution tier for commands the
+    # LLM produces with pipes, redirects, or PATH-dependent binaries.
+    # When invoked via the shell tier the per-binary allowlist is
+    # bypassed for the wrapped command; rlimits, Seatbelt network deny,
+    # timeout, and the explicit forbidden_commands list still apply.
+    "sh",
+  ]
   exec_timeout_seconds: 30
 
 # ── Actions ────────────────────────────────────────────────────────────────────

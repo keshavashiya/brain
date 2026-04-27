@@ -244,6 +244,10 @@ impl SignalProcessor {
                 self.handle_memory_summary(signal_id, signal, conversation_history, &prepend_nudges)
                     .await
             }
+            thalamus::Intent::ProjectInspect { path, focus } => {
+                self.handle_project_inspect(signal_id, signal, path, focus, &prepend_nudges)
+                    .await
+            }
             thalamus::Intent::ListChannels => {
                 self.handle_list_channels(signal_id, &prepend_nudges).await
             }
@@ -715,60 +719,160 @@ impl SignalProcessor {
             return Ok(PipelineResult::Complete(resp));
         }
 
-        // Build a structured context block from everything stored.
-        let mut context_lines: Vec<String> = Vec::new();
+        // Deterministic format — for "what do you know about me" we list
+        // exactly what's stored, not an LLM paraphrase. Earlier versions
+        // sent this through the model and it routinely produced fluffy
+        // categorical summaries that omitted real facts.
+        //
+        // Group facts by subject so a user with many entries about
+        // themselves and their projects sees structure without losing
+        // ground truth.
+        let mut by_subject: std::collections::BTreeMap<String, Vec<&hippocampus::Fact>> =
+            std::collections::BTreeMap::new();
+        for f in &facts {
+            by_subject.entry(f.subject.clone()).or_default().push(f);
+        }
 
-        if !facts.is_empty() {
-            context_lines.push(format!("## Stored Facts ({} total)", facts.len()));
-            for f in &facts {
-                context_lines.push(format!("- {} {} {}", f.subject, f.predicate, f.object));
+        let mut out = String::new();
+        out.push_str(&format!(
+            "Memory snapshot — {} fact{} across {} subject{}, {} recent episode{}.\n",
+            facts.len(),
+            if facts.len() == 1 { "" } else { "s" },
+            by_subject.len(),
+            if by_subject.len() == 1 { "" } else { "s" },
+            episodes.len(),
+            if episodes.len() == 1 { "" } else { "s" },
+        ));
+
+        if !by_subject.is_empty() {
+            out.push_str("\nStored facts:\n");
+            for (subject, subj_facts) in &by_subject {
+                out.push_str(&format!("  {subject}:\n"));
+                let mut seen = std::collections::HashSet::new();
+                for f in subj_facts {
+                    let key = format!("{}|{}", f.predicate, f.object);
+                    if !seen.insert(key) {
+                        continue;
+                    }
+                    out.push_str(&format!("    • {} → {}\n", f.predicate, f.object));
+                }
             }
         }
 
         if !episodes.is_empty() {
-            context_lines.push(format!(
-                "\n## Recent Conversation Episodes ({} shown)",
-                episodes.len()
-            ));
-            for ep in &episodes {
-                context_lines.push(format!("[{}] {}", ep.timestamp, ep.content));
+            out.push_str("\nRecent activity (most recent first):\n");
+            for ep in episodes.iter().take(8) {
+                let one_line = ep.content.lines().next().unwrap_or("").trim();
+                let trimmed = if one_line.chars().count() > 140 {
+                    let mut s: String = one_line.chars().take(137).collect();
+                    s.push('…');
+                    s
+                } else {
+                    one_line.to_string()
+                };
+                let ts_short: String = ep.timestamp.chars().take(16).collect();
+                out.push_str(&format!("  • [{ts_short}] {trimmed}\n"));
             }
         }
 
-        let context_block = context_lines.join("\n");
+        out.push_str(
+            "\nTell me anything else you'd like remembered — projects, goals, \
+             preferences, or context I should keep around.",
+        );
 
-        let system_msg = cortex::llm::Message {
-            role: cortex::llm::Role::System,
-            content: format!(
-                "You are Brain, the user's long-term memory engine. \
-                 The following is EVERYTHING stored in your memory for this user. \
-                 Produce a clear, structured summary grouped by theme \
-                 (projects, habits, goals, preferences, etc.). \
-                 Be specific — list actual values, not vague descriptions. \
-                 If something is sparse, say so honestly.\n\n{}",
-                context_block
-            ),
+        let _ = conversation_history; // history not used in the deterministic path
+        let resp = prepend_nudges(SignalResponse {
+            signal_id,
+            status: ResponseStatus::Ok,
+            response: ResponseContent::Text(out),
+            memory_context: crate::MemoryContext {
+                facts_used: facts.len(),
+                episodes_used: episodes.len(),
+            },
+            session_id: signal.session_id.clone(),
+        });
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    /// Read-only inspection of a local directory or file path. The handler
+    /// builds a structured snapshot of the path (top-level entries, anchor
+    /// files like README/Cargo.toml/package.json), then asks the LLM to
+    /// summarise. No sandbox, no decomposition, no shell scripts — this is
+    /// deliberately bounded and synchronous so the chat answer is fast.
+    pub(super) async fn handle_project_inspect(
+        &self,
+        signal_id: Uuid,
+        signal: &Signal,
+        path: String,
+        focus: Option<String>,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let expanded = expand_user_path(&path);
+        let pb = std::path::PathBuf::from(&expanded);
+
+        let metadata = match std::fs::metadata(&pb) {
+            Ok(m) => m,
+            Err(e) => {
+                let resp = prepend_nudges(SignalResponse::ok(
+                    signal_id,
+                    format!(
+                        "Can't inspect `{}` — {}. Pass an absolute path I can read.",
+                        pb.display(),
+                        friendly_io_error(&e)
+                    ),
+                ));
+                return Ok(PipelineResult::Complete(resp));
+            }
         };
-        let user_msg = cortex::llm::Message {
-            role: cortex::llm::Role::User,
-            content: "Please summarise everything you know about me.".to_string(),
+
+        let snapshot = if metadata.is_dir() {
+            build_directory_snapshot(&pb)
+        } else if metadata.is_file() {
+            build_file_snapshot(&pb)
+        } else {
+            let resp = prepend_nudges(SignalResponse::ok(
+                signal_id,
+                format!("`{}` is not a regular file or directory.", pb.display()),
+            ));
+            return Ok(PipelineResult::Complete(resp));
         };
 
-        // Include recent conversation history for continuity.
-        let proc_history = conversation_history.map(|h| h.to_vec()).unwrap_or_default();
-        let mut messages = vec![system_msg];
-        messages.extend_from_slice(&proc_history);
-        messages.push(user_msg);
+        let focus_line = focus
+            .as_deref()
+            .map(|f| format!("\nThe user specifically wants: {f}\n"))
+            .unwrap_or_default();
 
-        let facts_used = facts.len();
-        let episodes_used = episodes.len();
+        let system_prompt = format!(
+            "You are inspecting a local project for the user. The block between \
+             <PROJECT> tags is the actual content read from disk — file tree and \
+             key file excerpts. Summarise honestly: what kind of project this is, \
+             how it is organised, the most important entry points, and anything \
+             notable about its build/runtime. Use bullets, keep it under 250 \
+             words, do not invent files that aren't shown, and do not run any \
+             commands — you cannot.{focus_line}\n\n<PROJECT path=\"{}\">\n{snapshot}\n</PROJECT>",
+            pb.display()
+        );
+
+        let messages = vec![
+            cortex::llm::Message {
+                role: cortex::llm::Role::System,
+                content: system_prompt,
+            },
+            cortex::llm::Message {
+                role: cortex::llm::Role::User,
+                content: match focus.as_deref() {
+                    Some(f) => format!("Summarise this project, with focus on: {f}"),
+                    None => "Summarise this project.".to_string(),
+                },
+            },
+        ];
 
         Ok(PipelineResult::LlmReady {
             signal_id,
             messages,
             memory_context: crate::MemoryContext {
-                facts_used,
-                episodes_used,
+                facts_used: 0,
+                episodes_used: 0,
             },
             session_id: signal.session_id.clone(),
             user_content: signal.content.clone(),
@@ -872,26 +976,59 @@ impl SignalProcessor {
     ) -> Result<PipelineResult, SignalError> {
         let approved = decision.to_lowercase().contains("approve");
 
-        // Plan-level approval: an ID matching a task in AwaitingApproval phase
-        // is a phase-transition request, not a confirm-engine nonce. Approving
-        // kicks off execution; rejecting cancels the plan.
+        // Plan-level approval: an ID matching a task in AwaitingApproval
+        // phase is a phase-transition request, not a confirm-engine nonce.
+        // Approving kicks off execution; rejecting cancels the plan.
+        //
+        // Resolution order:
+        //   1. If the user typed an explicit nonce, try it first.
+        //   2. Otherwise (or if it doesn't match a pending plan) look at
+        //      `pending_approvals()`. If exactly one plan is pending,
+        //      route the bare yes/no to it. Multiple pending → ask the
+        //      user to disambiguate. Zero pending → fall through to the
+        //      confirm-engine path (per-step approvals).
         if let Some(orch) = &self.orchestrator {
-            if let Some(task) = orch.get_task(&nonce).await {
-                if task.phase == orchestrate::TaskPhase::AwaitingApproval {
-                    let message = if approved {
-                        match orch.execute(&nonce).await {
-                            Ok(summary) => format!("Plan {nonce} approved.\n\n{summary}"),
-                            Err(e) => format!("Plan {nonce} approved but execution failed: {e}"),
-                        }
-                    } else {
-                        match orch.cancel(&nonce).await {
-                            Ok(_) => format!("Plan {nonce} rejected and cancelled."),
-                            Err(e) => format!("Failed to cancel plan {nonce}: {e}"),
-                        }
-                    };
-                    let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
-                    return Ok(PipelineResult::Complete(resp));
+            let mut resolved: Option<String> = None;
+            if !nonce.is_empty() {
+                if let Some(task) = orch.get_task(&nonce).await {
+                    if task.phase == orchestrate::TaskPhase::AwaitingApproval {
+                        resolved = Some(nonce.clone());
+                    }
                 }
+            }
+            if resolved.is_none() {
+                let pending = orch.pending_approvals().await;
+                match pending.len() {
+                    1 => resolved = Some(pending[0].clone()),
+                    n if n > 1 && nonce.is_empty() => {
+                        let message = format!(
+                            "{n} plans are awaiting approval. Reply `approve <id>` or \
+                             `reject <id>` to choose one. Pending: {}",
+                            pending.join(", ")
+                        );
+                        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+                        return Ok(PipelineResult::Complete(resp));
+                    }
+                    _ => {}
+                }
+            }
+
+            if let Some(plan_id) = resolved {
+                let message = if approved {
+                    match orch.execute(&plan_id).await {
+                        Ok(summary) => format!("Plan approved.\n\n{summary}"),
+                        Err(e) => {
+                            format!("Plan approved but execution failed: {e}")
+                        }
+                    }
+                } else {
+                    match orch.cancel(&plan_id).await {
+                        Ok(_) => "Plan rejected and cancelled.".to_string(),
+                        Err(e) => format!("Failed to cancel plan: {e}"),
+                    }
+                };
+                let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+                return Ok(PipelineResult::Complete(resp));
             }
         }
 
@@ -1052,8 +1189,13 @@ impl SignalProcessor {
             }
         };
 
-        // Build decomposition context from memory
-        let context = orchestrate::DecompositionContext::default();
+        // Build decomposition context from config + memory so the
+        // decomposer LLM sees the actual sandbox allowlist and won't
+        // produce plans that try to call binaries the sandbox refuses.
+        let context = orchestrate::DecompositionContext {
+            available_tools: self.config.security.exec_allowlist.clone(),
+            ..Default::default()
+        };
 
         match orchestrator.plan(&request, context).await {
             Ok((task_id, plan_text)) => {
@@ -1392,3 +1534,188 @@ impl SignalProcessor {
 
 // `DeliveryCategory::parse` (and `FromStr`) live in the channel crate —
 // no local normalizer needed here.
+
+// ── ProjectInspect helpers ─────────────────────────────────────────────────
+
+/// Expand a leading `~` to the user's home directory. Anything else is
+/// returned as-is — the caller resolves relative paths against cwd.
+fn expand_user_path(p: &str) -> String {
+    if let Some(rest) = p.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            let mut out = std::path::PathBuf::from(home);
+            out.push(rest);
+            return out.to_string_lossy().into_owned();
+        }
+    }
+    if p == "~" {
+        if let Some(home) = std::env::var_os("HOME") {
+            return home.to_string_lossy().into_owned();
+        }
+    }
+    p.to_string()
+}
+
+/// Map an io::Error to a one-liner the user can act on. Avoids exposing
+/// the bare Rust error format ("No such file or directory (os error 2)").
+fn friendly_io_error(e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => "no such path".to_string(),
+        std::io::ErrorKind::PermissionDenied => "permission denied".to_string(),
+        std::io::ErrorKind::InvalidInput => "invalid path".to_string(),
+        _ => e.to_string(),
+    }
+}
+
+/// Files that materially explain what a project is. Reading the first
+/// ~6 KB of any present anchor lets the LLM produce a faithful summary
+/// without slurping the whole tree.
+const ANCHOR_FILES: &[&str] = &[
+    "README.md",
+    "README",
+    "README.rst",
+    "Cargo.toml",
+    "package.json",
+    "pyproject.toml",
+    "setup.py",
+    "go.mod",
+    "Gemfile",
+    "pom.xml",
+    "build.gradle",
+    "build.gradle.kts",
+    "Makefile",
+    "justfile",
+    "Justfile",
+    "CHANGELOG.md",
+    "ARCHITECTURE.md",
+    "CLAUDE.md",
+    "AGENTS.md",
+];
+
+/// Directories not worth surfacing in the snapshot — they bloat the
+/// listing and rarely help a summary.
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".next",
+    ".svelte-kit",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".cache",
+];
+
+/// Build an inspection snapshot for a directory: top-level entries + the
+/// content of any anchor files present.
+fn build_directory_snapshot(root: &std::path::Path) -> String {
+    let mut out = String::new();
+    out.push_str("Top-level entries:\n");
+
+    let mut entries: Vec<(String, bool)> = match std::fs::read_dir(root) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if SKIP_DIRS.contains(&name.as_str()) {
+                    return None;
+                }
+                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                Some((name, is_dir))
+            })
+            .collect(),
+        Err(e) => {
+            return format!("(failed to read directory: {})", friendly_io_error(&e));
+        }
+    };
+    entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    let max_entries = 40;
+    for (i, (name, is_dir)) in entries.iter().enumerate() {
+        if i == max_entries {
+            out.push_str(&format!(
+                "  … (+{} more entries omitted)\n",
+                entries.len() - max_entries
+            ));
+            break;
+        }
+        out.push_str(&format!("  {}{}\n", name, if *is_dir { "/" } else { "" }));
+    }
+
+    // Surface a couple of source-directory subtrees that are common
+    // landmarks — but only one level deep so we don't blow up on big
+    // monorepos.
+    for landmark in ["src", "crates", "lib", "app", "apps", "packages"] {
+        let p = root.join(landmark);
+        if !p.is_dir() {
+            continue;
+        }
+        if let Ok(rd) = std::fs::read_dir(&p) {
+            let kids: Vec<String> = rd
+                .filter_map(|e| e.ok())
+                .map(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                    format!("{}{}", name, if is_dir { "/" } else { "" })
+                })
+                .filter(|n| !n.starts_with('.'))
+                .take(30)
+                .collect();
+            if !kids.is_empty() {
+                out.push_str(&format!("\n{landmark}/ (one level):\n"));
+                for k in kids {
+                    out.push_str(&format!("  {k}\n"));
+                }
+            }
+        }
+    }
+
+    let mut anchors_found = 0;
+    for anchor in ANCHOR_FILES {
+        let p = root.join(anchor);
+        if !p.is_file() {
+            continue;
+        }
+        anchors_found += 1;
+        out.push_str(&format!("\n--- {anchor} (first 6 KB) ---\n"));
+        out.push_str(&read_truncated(&p, 6 * 1024));
+    }
+
+    if anchors_found == 0 {
+        out.push_str("\n(no anchor files found — README/Cargo.toml/package.json/etc.)\n");
+    }
+
+    out
+}
+
+/// Snapshot of a single file: path + first 12 KB of content. Binary
+/// files are reported as such instead of being fed through.
+fn build_file_snapshot(p: &std::path::Path) -> String {
+    let mut out = format!("File: {}\n\n", p.display());
+    out.push_str(&read_truncated(p, 12 * 1024));
+    out
+}
+
+/// Read the first `cap` bytes of a path, returning a string. If the
+/// content is non-UTF-8 we declare it binary instead of garbling it.
+fn read_truncated(path: &std::path::Path, cap: usize) -> String {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) => return format!("(read failed: {})\n", friendly_io_error(&e)),
+    };
+    let truncated = bytes.len() > cap;
+    let head = &bytes[..bytes.len().min(cap)];
+    match std::str::from_utf8(head) {
+        Ok(s) => {
+            if truncated {
+                format!("{s}\n… (file truncated at {cap} bytes)\n")
+            } else {
+                format!("{s}\n")
+            }
+        }
+        Err(_) => "(binary file — not displayed)\n".to_string(),
+    }
+}

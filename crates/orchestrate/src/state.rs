@@ -95,6 +95,10 @@ pub struct TaskState {
     pub completed_at: Option<DateTime<Utc>>,
     /// Current phase.
     pub phase: TaskPhase,
+    /// How many times the orchestrator has invoked the
+    /// replan-on-failure loop for this task. Capped to bound LLM cost.
+    #[serde(default)]
+    pub replan_attempts: u32,
 }
 
 impl TaskState {
@@ -114,6 +118,7 @@ impl TaskState {
             created_at: Utc::now(),
             completed_at: None,
             phase: TaskPhase::Planning,
+            replan_attempts: 0,
         }
     }
 

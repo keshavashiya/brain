@@ -146,30 +146,130 @@ impl TaskOrchestrator {
             }
         };
 
-        let parts: Vec<&str> = command.split_whitespace().collect();
-        if parts.is_empty() {
-            return Err("Empty command".to_string());
-        }
+        // The sandbox runs argv directly — no shell. Parse with quote
+        // handling and detect a trailing `> path` / `>> path` redirect so
+        // commands like `find … > /tmp/file` actually capture their output
+        // instead of passing `>` as a literal argument to the binary.
+        let parsed = parse_sandbox_command(command)?;
+        let (binary, args) = parsed
+            .argv
+            .split_first()
+            .ok_or_else(|| "Empty command".to_string())?;
 
-        let cmd = sandbox::SandboxCommand::new(
-            parts[0],
-            parts[1..].iter().map(|s| s.to_string()).collect(),
-        )
-        .with_workdir(workdir.to_path_buf());
+        let cmd =
+            sandbox::SandboxCommand::new(binary, args.to_vec()).with_workdir(workdir.to_path_buf());
 
         match sandbox.run(cmd).await {
+            Err(e) => Err(humanize_sandbox_error(binary, &e)),
+            Ok(outcome) if outcome.exit_code != 0 => {
+                // A non-zero exit is a real failure — surface it so the
+                // orchestrator marks the step Failed (and cascade-skips
+                // dependents) instead of recording it as Completed with
+                // a misleading "succeeded" status. The audit trail picks
+                // up the structured failure from the Err path in
+                // `execute_step`.
+                let stderr_tail: String = outcome
+                    .stderr
+                    .lines()
+                    .rev()
+                    .take(5)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let mut msg = format!("Command failed (exit {}): {command}", outcome.exit_code);
+                if !stderr_tail.trim().is_empty() {
+                    msg.push_str("\nstderr: ");
+                    msg.push_str(&stderr_tail);
+                }
+                Err(msg)
+            }
+            Ok(outcome) => {
+                // exit_code == 0 — apply any trailing redirect, then
+                // record the success.
+                let mut artifacts = Vec::new();
+                if let Some((path, append)) = &parsed.redirect {
+                    let write_result = if *append {
+                        use std::io::Write as _;
+                        std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(path)
+                            .and_then(|mut f| f.write_all(outcome.stdout.as_bytes()))
+                    } else {
+                        std::fs::write(path, outcome.stdout.as_bytes())
+                    };
+                    if let Err(e) = write_result {
+                        return Err(format!("Redirect to {} failed: {e}", path.display()));
+                    }
+                    artifacts.push(path.to_string_lossy().into_owned());
+                }
+
+                Ok(StepOutcome {
+                    stdout: outcome.stdout,
+                    stderr: outcome.stderr,
+                    exit_code: Some(outcome.exit_code),
+                    artifacts,
+                    summary: format!("Command succeeded: {command}"),
+                })
+            }
+        }
+    }
+
+    /// Run a shell-wrapped command in the sandbox. Unlike
+    /// [`execute_sandbox_step`], the command is passed verbatim to
+    /// `sh -c` so the system shell handles pipes, redirects, escaping,
+    /// $VAR expansion, and PATH lookup. The per-binary allowlist is
+    /// bypassed for the wrapped command — see [`sandbox::SandboxCommand::shell`]
+    /// for the safety story.
+    pub(super) async fn execute_shell_step(
+        &self,
+        command: &str,
+        workdir: &std::path::Path,
+    ) -> Result<StepOutcome, String> {
+        let sandbox = match self.sandbox.as_ref() {
+            Some(s) => s,
+            None => return Err("Sandbox not available".to_string()),
+        };
+
+        let trimmed = command.trim();
+        if trimmed.is_empty() {
+            return Err("Empty shell command".to_string());
+        }
+
+        let cmd = sandbox::SandboxCommand::shell(trimmed).with_workdir(workdir.to_path_buf());
+
+        match sandbox.run(cmd).await {
+            Err(e) => Err(humanize_sandbox_error("sh", &e)),
+            Ok(outcome) if outcome.exit_code != 0 => {
+                let stderr_tail: String = outcome
+                    .stderr
+                    .lines()
+                    .rev()
+                    .take(5)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let mut msg = format!(
+                    "Shell command failed (exit {}): {trimmed}",
+                    outcome.exit_code
+                );
+                if !stderr_tail.trim().is_empty() {
+                    msg.push_str("\nstderr: ");
+                    msg.push_str(&stderr_tail);
+                }
+                Err(msg)
+            }
             Ok(outcome) => Ok(StepOutcome {
                 stdout: outcome.stdout,
                 stderr: outcome.stderr,
                 exit_code: Some(outcome.exit_code),
                 artifacts: vec![],
-                summary: if outcome.exit_code == 0 {
-                    format!("Command succeeded: {command}")
-                } else {
-                    format!("Command failed (exit {}): {command}", outcome.exit_code)
-                },
+                summary: format!("Shell command succeeded: {trimmed}"),
             }),
-            Err(e) => Err(format!("Sandbox execution failed: {e}")),
         }
     }
 
@@ -183,14 +283,27 @@ impl TaskOrchestrator {
         spec: &str,
         agent: &str,
     ) -> Result<StepOutcome, String> {
-        let registry = self
-            .agents
-            .as_ref()
-            .ok_or_else(|| "Agent registry not attached to orchestrator".to_string())?;
+        let registry = self.agents.as_ref().ok_or_else(|| {
+            "No specialist agents are configured — install one (e.g. claude-code, \
+             aider, codex) on your PATH and it will be picked up on the next boot."
+                .to_string()
+        })?;
 
-        let primary = registry
-            .get(agent)
-            .map_err(|e| format!("Delegate '{agent}' unavailable: {e}"))?;
+        let primary = registry.get(agent).map_err(|_| {
+            let known = registry.list();
+            if known.is_empty() {
+                format!(
+                    "Specialist agent '{agent}' isn't available — no agents are \
+                     currently registered. Install one on your PATH or pick a \
+                     different planner."
+                )
+            } else {
+                format!(
+                    "Specialist agent '{agent}' isn't available. Available agents: {}.",
+                    known.join(", ")
+                )
+            }
+        })?;
 
         let task_spec = self.build_delegate_task_spec(spec).await;
         let task = delegate::AgentTask::new(task_spec);
@@ -238,6 +351,158 @@ impl TaskOrchestrator {
     }
 }
 
+/// Parsed result of a shell-style command string we run in the sandbox.
+#[derive(Debug)]
+pub(crate) struct ParsedCommand {
+    pub argv: Vec<String>,
+    /// `Some((path, append))` if a trailing `> path` / `>> path` redirect
+    /// was extracted. The orchestrator captures stdout to that path after
+    /// the sandbox returns — the sandbox itself only sees argv.
+    pub redirect: Option<(std::path::PathBuf, bool)>,
+}
+
+/// Tokenize a command string with single/double-quote handling, then
+/// split off a trailing `> path` / `>> path` redirect. Reject any other
+/// shell metacharacter — pipes, sequencing, backgrounding, command
+/// substitution — because the sandbox executes argv directly with no
+/// shell to interpret them. A clear error here beats silently passing
+/// `|` as an argument to `find`.
+pub(crate) fn parse_sandbox_command(command: &str) -> Result<ParsedCommand, String> {
+    let tokens = tokenize_shell(command)?;
+    if tokens.is_empty() {
+        return Err("Empty command".to_string());
+    }
+
+    for tok in &tokens {
+        // Reject metacharacters that would need a real shell. `>`/`>>` are
+        // handled below as a structured redirect, not by passing through.
+        if tok == "|" || tok == "||" || tok == "&&" || tok == ";" || tok == "&" || tok == "<" {
+            return Err(format!(
+                "Shell metacharacter {tok:?} not supported — sandbox runs argv directly. \
+                 Split this into multiple steps or capture output via the trailing `> path` form."
+            ));
+        }
+        if tok.contains('`') || tok.contains("$(") {
+            return Err(format!(
+                "Shell substitution in {tok:?} not supported — sandbox runs argv directly."
+            ));
+        }
+    }
+
+    // Strip a trailing redirect: `… > path` or `… >> path`.
+    let mut tokens = tokens;
+    let mut redirect = None;
+    if tokens.len() >= 3 {
+        let last = tokens.len() - 1;
+        let op = &tokens[last - 1];
+        if op == ">" || op == ">>" {
+            let append = op == ">>";
+            let path = std::path::PathBuf::from(tokens.remove(last));
+            tokens.pop(); // remove the operator token
+            redirect = Some((path, append));
+        }
+    }
+    // Reject any remaining redirect operators in non-trailing positions.
+    if tokens.iter().any(|t| t == ">" || t == ">>") {
+        return Err(
+            "Multiple or non-trailing `>` redirects are not supported — sandbox runs argv directly."
+                .to_string(),
+        );
+    }
+
+    Ok(ParsedCommand {
+        argv: tokens,
+        redirect,
+    })
+}
+
+/// Minimal POSIX-style tokenizer: whitespace splits, single/double quotes
+/// group, backslash escapes the next char (outside single quotes). Enough
+/// to handle the shapes the LLM decomposer produces; not a full shell.
+fn tokenize_shell(input: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut chars = input.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' if !in_double => {
+                in_single = !in_single;
+            }
+            '"' if !in_single => {
+                in_double = !in_double;
+            }
+            '\\' if !in_single => {
+                if let Some(next) = chars.next() {
+                    cur.push(next);
+                }
+            }
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            }
+            // Emit `>` / `>>` / `|` / `||` / `&` / `&&` / `;` / `<` as their own tokens
+            // so the redirect/metacharacter checks above can spot them
+            // even when the LLM doesn't space-separate them.
+            c @ ('>' | '<' | '|' | '&' | ';') if !in_single && !in_double => {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+                let mut op = String::from(c);
+                if let Some(&peek) = chars.peek() {
+                    if (c == '>' && peek == '>')
+                        || (c == '|' && peek == '|')
+                        || (c == '&' && peek == '&')
+                    {
+                        op.push(peek);
+                        chars.next();
+                    }
+                }
+                out.push(op);
+            }
+            _ => cur.push(c),
+        }
+    }
+    if in_single || in_double {
+        return Err("Unterminated quoted string".to_string());
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    Ok(out)
+}
+
+/// Translate a `SandboxError` into a one-liner the chat user can act on.
+/// Strips the internal "binary X not in allowlist" / "workdir Y not in
+/// allowlist" framing in favour of plain language plus the actionable
+/// config key. The full structured error still hits the audit trail.
+pub(crate) fn humanize_sandbox_error(binary: &str, e: &sandbox::SandboxError) -> String {
+    use sandbox::SandboxError;
+    match e {
+        SandboxError::Forbidden(msg) => {
+            if msg.contains("not in allowlist") {
+                format!(
+                    "Cannot run `{binary}` here — it isn't on the sandbox allowlist. \
+                     Add it under `security.exec_allowlist` if this command is safe to run."
+                )
+            } else if msg.contains("explicitly forbidden") {
+                format!("`{binary}` is explicitly forbidden by config and cannot run.")
+            } else {
+                format!("`{binary}` was blocked: {msg}")
+            }
+        }
+        SandboxError::PathNotAllowed(_) => format!(
+            "Working directory for `{binary}` isn't allowed. Add the path under \
+             `security.allowed_paths` to permit it."
+        ),
+        SandboxError::Timeout(_) => format!("`{binary}` was killed for taking too long."),
+        other => format!("`{binary}` failed to run: {other}"),
+    }
+}
+
 /// First non-empty line of `s`, truncated to 160 chars; falls back to
 /// `default_label` when the LLM returned only whitespace.
 pub(crate) fn summary_first_line(s: &str, default_label: &str) -> String {
@@ -254,5 +519,74 @@ pub(crate) fn summary_first_line(s: &str, default_label: &str) -> String {
         format!("{truncated}…")
     } else {
         line.to_string()
+    }
+}
+
+#[cfg(test)]
+mod parse_tests {
+    use super::*;
+
+    #[test]
+    fn parses_simple_argv() {
+        let p = parse_sandbox_command("find /tmp -type f").unwrap();
+        assert_eq!(p.argv, vec!["find", "/tmp", "-type", "f"]);
+        assert!(p.redirect.is_none());
+    }
+
+    #[test]
+    fn extracts_trailing_redirect() {
+        let p = parse_sandbox_command("find /tmp -type f > /tmp/list.txt").unwrap();
+        assert_eq!(p.argv, vec!["find", "/tmp", "-type", "f"]);
+        let (path, append) = p.redirect.unwrap();
+        assert_eq!(path, std::path::PathBuf::from("/tmp/list.txt"));
+        assert!(!append);
+    }
+
+    #[test]
+    fn extracts_trailing_append_redirect() {
+        let p = parse_sandbox_command("ls /etc >> /tmp/log").unwrap();
+        let (_, append) = p.redirect.unwrap();
+        assert!(append);
+    }
+
+    #[test]
+    fn handles_unspaced_redirect() {
+        let p = parse_sandbox_command("find /tmp -type f >/tmp/list.txt").unwrap();
+        assert_eq!(p.argv, vec!["find", "/tmp", "-type", "f"]);
+        assert_eq!(
+            p.redirect.unwrap().0,
+            std::path::PathBuf::from("/tmp/list.txt")
+        );
+    }
+
+    #[test]
+    fn rejects_pipe() {
+        let err = parse_sandbox_command("ls | grep foo").unwrap_err();
+        assert!(err.contains("Shell metacharacter"));
+    }
+
+    #[test]
+    fn rejects_command_substitution() {
+        let err = parse_sandbox_command("echo $(pwd)").unwrap_err();
+        assert!(err.contains("Shell substitution"));
+    }
+
+    #[test]
+    fn respects_quotes() {
+        let p = parse_sandbox_command(r#"grep "hello world" file.txt"#).unwrap();
+        assert_eq!(p.argv, vec!["grep", "hello world", "file.txt"]);
+    }
+
+    #[test]
+    fn redirect_inside_quotes_is_argument_not_operator() {
+        let p = parse_sandbox_command(r#"echo "a > b""#).unwrap();
+        assert_eq!(p.argv, vec!["echo", "a > b"]);
+        assert!(p.redirect.is_none());
+    }
+
+    #[test]
+    fn rejects_redirect_in_middle() {
+        let err = parse_sandbox_command("foo > bar baz").unwrap_err();
+        assert!(err.contains("non-trailing"));
     }
 }

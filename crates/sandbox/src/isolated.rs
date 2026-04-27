@@ -116,15 +116,25 @@ impl IsolatedSandbox {
     fn validate(&self, command: &SandboxCommand) -> Result<(), SandboxError> {
         // Binary allowlist — empty allowlist means "reject everything"
         // (fail-closed; the config default ships a non-empty list).
+        // Shell-mode commands (`sh -c "..."`) only gate `sh` itself —
+        // by opting in via SandboxCommand::shell the caller has accepted
+        // that the wrapped command can call any binary on PATH. The
+        // remaining safety controls (rlimits, Seatbelt, timeout, and
+        // the explicit `forbidden_commands` deny-list) still apply.
         let basename = Self::binary_basename(&command.binary);
         if self.command_allowlist.is_empty() {
             return Err(SandboxError::Forbidden(
                 "sandbox allowlist is empty; configure security.exec_allowlist".into(),
             ));
         }
-        if !self.command_allowlist.contains(basename) {
+        if !command.shell_mode && !self.command_allowlist.contains(basename) {
             return Err(SandboxError::Forbidden(format!(
                 "binary '{basename}' not in allowlist"
+            )));
+        }
+        if command.shell_mode && basename != "sh" {
+            return Err(SandboxError::Forbidden(format!(
+                "shell_mode requires binary='sh', got '{basename}'"
             )));
         }
 
@@ -133,6 +143,25 @@ impl IsolatedSandbox {
                 return Err(SandboxError::Forbidden(format!(
                     "binary '{basename}' is explicitly forbidden"
                 )));
+            }
+            // For shell mode also reject if the wrapped command names a
+            // forbidden binary as its first token. Cheap pre-screen —
+            // a determined caller can still hide it behind variables,
+            // but most of the time this catches obvious cases.
+            if command.shell_mode {
+                if let Some(wrapped) = command.args.get(1) {
+                    if let Some(first_token) = wrapped.split_whitespace().next() {
+                        let wrapped_base = std::path::Path::new(first_token)
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(first_token);
+                        if wrapped_base == forbidden {
+                            return Err(SandboxError::Forbidden(format!(
+                                "shell command starts with forbidden binary '{forbidden}'"
+                            )));
+                        }
+                    }
+                }
             }
         }
 
@@ -231,12 +260,33 @@ impl SandboxExecutor for IsolatedSandbox {
             cmd.env(k, v);
         }
         // PATH is essential for most binaries to resolve subcommands.
+        // Shell-mode commands additionally get the user's toolchain
+        // dirs prepended (`~/.cargo/bin`, `/opt/homebrew/bin`, etc.) so
+        // a plan that runs `cargo` works regardless of how the daemon
+        // was launched. Argv-mode keeps the original behaviour — the
+        // per-binary allowlist is the gate, and absolute paths still
+        // work.
         if !command.env.contains_key("PATH") {
-            cmd.env(
-                "PATH",
-                std::env::var("PATH")
-                    .unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string()),
-            );
+            let mut path = std::env::var("PATH")
+                .unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
+            if command.shell_mode {
+                if let Some(home) = std::env::var_os("HOME") {
+                    let extras = [
+                        std::path::PathBuf::from(&home).join(".cargo/bin"),
+                        std::path::PathBuf::from(&home).join(".rustup/toolchains"),
+                        std::path::PathBuf::from("/opt/homebrew/bin"),
+                        std::path::PathBuf::from("/usr/local/sbin"),
+                    ];
+                    for p in extras.iter().filter(|p| p.exists()) {
+                        path = format!("{}:{}", p.display(), path);
+                    }
+                }
+                // HOME itself is needed by cargo/git for config lookup.
+                if let Some(home) = std::env::var_os("HOME") {
+                    cmd.env("HOME", home);
+                }
+            }
+            cmd.env("PATH", path);
         }
 
         cmd.stdout(std::process::Stdio::piped());
@@ -447,6 +497,48 @@ mod tests {
         let cmd = SandboxCommand::new("curl", vec!["http://169.254.169.254/meta".into()]);
         let err = sandbox.run(cmd).await.unwrap_err();
         assert!(matches!(err, SandboxError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn shell_mode_runs_pipelines() {
+        // Argv mode can't pipe; shell mode delegates to /bin/sh which
+        // can. Verifies the new SandboxCommand::shell tier works
+        // end-to-end through the IsolatedSandbox.
+        let sandbox = IsolatedSandbox::new(default_allowlist(), Duration::from_secs(5));
+        let cmd = SandboxCommand::shell("printf 'a\\nb\\nc\\n' | wc -l");
+        let outcome = sandbox.run(cmd).await.unwrap();
+        assert_eq!(outcome.exit_code, 0, "stderr: {:?}", outcome.stderr);
+        assert!(
+            outcome.stdout.trim().ends_with("3"),
+            "expected line count 3, got {:?}",
+            outcome.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_mode_bypasses_per_binary_allowlist() {
+        // `wc` isn't on this allowlist, but shell mode wraps in `sh -c`
+        // and only `sh` itself is gated. The wrapped `wc` runs because
+        // the caller opted into shell mode.
+        let sandbox = IsolatedSandbox::new(vec!["sh".into()], Duration::from_secs(5));
+        let cmd = SandboxCommand::shell("echo hi | wc -c");
+        let outcome = sandbox.run(cmd).await.unwrap();
+        assert_eq!(outcome.exit_code, 0, "stderr: {:?}", outcome.stderr);
+    }
+
+    #[tokio::test]
+    async fn shell_mode_still_blocks_forbidden_first_token() {
+        // The forbidden_commands deny-list still applies even in shell
+        // mode when the wrapped command's first token names a banned
+        // binary. Defense in depth — rlimits would also catch dd, but
+        // the early reject is clearer.
+        let sandbox = IsolatedSandbox::new(vec!["sh".into()], Duration::from_secs(5));
+        let cmd = SandboxCommand::shell("dd if=/dev/zero of=/tmp/x bs=1");
+        let err = sandbox.run(cmd).await.unwrap_err();
+        assert!(
+            matches!(err, SandboxError::Forbidden(_)),
+            "expected Forbidden, got {err:?}"
+        );
     }
 
     #[tokio::test]

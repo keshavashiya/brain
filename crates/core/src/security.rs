@@ -34,13 +34,19 @@ impl ActionTier {
     }
 
     /// Default approval timeout for this tier.
+    ///
+    /// `External` is shorter than `Destructive` (60s vs 300s): a destructive
+    /// action may legitimately need a few minutes of consideration, but an
+    /// External call is almost always issued mid-chat where the user is
+    /// either watching or has already moved on. A 5-minute deadlock there
+    /// just makes the chat feel broken.
     pub fn default_timeout(self) -> std::time::Duration {
         match self {
             ActionTier::Read => std::time::Duration::from_secs(30),
             ActionTier::Write => std::time::Duration::from_secs(60),
             ActionTier::Execute => std::time::Duration::from_secs(120),
             ActionTier::Destructive => std::time::Duration::from_secs(300),
-            ActionTier::External => std::time::Duration::from_secs(300),
+            ActionTier::External => std::time::Duration::from_secs(60),
         }
     }
 }
@@ -75,6 +81,12 @@ mod tests {
     fn default_timeout_increases_with_tier() {
         assert!(ActionTier::Read.default_timeout() < ActionTier::Execute.default_timeout());
         assert!(ActionTier::Execute.default_timeout() < ActionTier::Destructive.default_timeout());
+    }
+
+    #[test]
+    fn external_timeout_is_shorter_than_destructive() {
+        // External lives in chat; a 5-min deadlock there feels broken.
+        assert!(ActionTier::External.default_timeout() < ActionTier::Destructive.default_timeout());
     }
 
     #[test]

@@ -41,6 +41,12 @@ fn format_executing(request: &str, counts: &TaskCounts, total: usize) -> String 
     if counts.failed > 0 {
         parts.push(format!("{} failed", counts.failed));
     }
+    if counts.skipped > 0 {
+        parts.push(format!("{} skipped", counts.skipped));
+    }
+    if counts.cancelled > 0 {
+        parts.push(format!("{} cancelled", counts.cancelled));
+    }
     let progress = parts.join(", ");
     format!("Executing: \"{request}\" — {progress} (of {total} steps)")
 }
@@ -53,22 +59,92 @@ fn format_completed(request: &str, state: &TaskState, counts: &TaskCounts, total
             "Completed: \"{request}\" — all {total} steps succeeded"
         ));
     } else {
-        lines.push(format!(
+        // Include cancelled in the headline so a 5-of-5 plan never shows
+        // "2/5 succeeded, 2 failed, 0 skipped" with one step silently
+        // dropped from the count.
+        let mut headline = format!(
             "Completed: \"{request}\" — {}/{total} succeeded, {} failed, {} skipped",
             counts.completed, counts.failed, counts.skipped
-        ));
+        );
+        if counts.cancelled > 0 {
+            headline.push_str(&format!(", {} cancelled", counts.cancelled));
+        }
+        lines.push(headline);
     }
 
-    // List failures with their error messages
-    for (step_id, step_state) in &state.step_states {
-        if let StepState::Failed { error, .. } = step_state {
-            if let Some(step) = state.graph.steps.get(step_id) {
-                lines.push(format!("  FAILED: {} — {}", step.description, error));
+    // Walk steps in topological (display) order so summaries don't come
+    // back in HashMap iteration order.
+    let order = state.graph.topological_order();
+    let mut had_results = false;
+    for (i, step_id) in order.iter().enumerate() {
+        let Some(step) = state.graph.steps.get(step_id) else {
+            continue;
+        };
+        match state.step_states.get(step_id) {
+            Some(StepState::Completed { outcome, .. }) => {
+                had_results = true;
+                let summary = if outcome.summary.trim().is_empty() {
+                    "(no output)".to_string()
+                } else {
+                    outcome.summary.clone()
+                };
+                lines.push(format!("  {}. ✓ {} — {summary}", i + 1, step.description));
             }
+            Some(StepState::Failed { error, .. }) => {
+                had_results = true;
+                lines.push(format!("  {}. ✗ {} — {error}", i + 1, step.description));
+            }
+            Some(StepState::Skipped { reason }) => {
+                had_results = true;
+                lines.push(format!(
+                    "  {}. — {} (skipped: {reason})",
+                    i + 1,
+                    step.description
+                ));
+            }
+            Some(StepState::Cancelled) => {
+                had_results = true;
+                lines.push(format!("  {}. — {} (cancelled)", i + 1, step.description));
+            }
+            _ => {}
+        }
+    }
+
+    // Stitch any free-text artifacts the user is likely to want — the
+    // `Plan` step's `output` field and `Research`/`Review` LLM responses
+    // already land in `outcome.stdout`. Surface the longest one as the
+    // task's primary deliverable when present, so the chat answer is the
+    // actual report rather than a status line.
+    if had_results {
+        if let Some(report) = pick_primary_artifact(state, &order) {
+            lines.push(String::new());
+            lines.push("─── Result ───".to_string());
+            lines.push(report);
         }
     }
 
     lines.join("\n")
+}
+
+/// Pick the single most useful free-text artifact from the task's
+/// successful steps. Heuristic: longest non-empty `stdout` from any
+/// `Completed` step, since `Research`/`Review`/`Plan` all land their
+/// output there and that's almost always the thing the user asked for.
+fn pick_primary_artifact(state: &TaskState, order: &[String]) -> Option<String> {
+    let mut best: Option<&str> = None;
+    for step_id in order {
+        if let Some(StepState::Completed { outcome, .. }) = state.step_states.get(step_id) {
+            let s = outcome.stdout.trim();
+            if s.is_empty() {
+                continue;
+            }
+            match best {
+                Some(b) if s.len() <= b.len() => {}
+                _ => best = Some(s),
+            }
+        }
+    }
+    best.map(|s| s.to_string())
 }
 
 /// Format the task plan for user review before execution.
@@ -82,12 +158,16 @@ pub fn format_plan_for_approval(state: &TaskState) -> String {
 
     for (i, step_id) in order.iter().enumerate() {
         if let Some(step) = state.graph.steps.get(step_id) {
+            // Only flag tiers that materially change the user's risk
+            // exposure. Read/Write/Execute are routine; show them
+            // unmarked. Destructive/External *must* be visible because
+            // they imply a separate per-step confirmation later.
             let tier_marker = match step.tier {
-                audit::ActionTier::Read => "",
-                audit::ActionTier::Write => " [write]",
-                audit::ActionTier::Execute => " [exec]",
-                audit::ActionTier::Destructive => " [DESTRUCTIVE — requires approval]",
-                audit::ActionTier::External => " [EXTERNAL — requires approval]",
+                audit::ActionTier::Read | audit::ActionTier::Write | audit::ActionTier::Execute => {
+                    ""
+                }
+                audit::ActionTier::Destructive => " (destructive — extra confirmation)",
+                audit::ActionTier::External => " (external call — extra confirmation)",
             };
 
             let deps = if step.depends_on.is_empty() {
@@ -117,10 +197,13 @@ pub fn format_plan_for_approval(state: &TaskState) -> String {
     }
 
     lines.push(String::new());
-    lines.push(format!(
-        "Approve this plan? Reply 'approve {id}' or 'reject {id}'.",
-        id = state.id
-    ));
+    lines.push(
+        "Reply `approve` to run it, or `reject` to discard.\n\
+         (You can also reply `approve <id>` if multiple plans are pending — id: "
+            .to_string()
+            + &state.id
+            + ")",
+    );
 
     lines.join("\n")
 }
@@ -174,23 +257,48 @@ mod tests {
         let plan = format_plan_for_approval(&state);
         assert!(plan.contains("Research"));
         assert!(plan.contains("Implement"));
-        assert!(plan.contains("[exec]"));
+        // Routine `Execute` tier no longer renders a `[exec]` tag — only
+        // destructive/external tiers get a marker now.
+        assert!(!plan.contains("[exec]"));
+        // Bare `approve` shortcut must be advertised.
+        assert!(plan.contains("`approve`") && plan.contains("`reject`"));
     }
 
     #[test]
     fn test_format_plan_embeds_task_id() {
         let state = test_state();
         let plan = format_plan_for_approval(&state);
-        // The prompt must literally include the task ID so the user can copy
-        // it back as `approve <id>` / `reject <id>`.
+        // The plan still surfaces the task id in case multiple plans are
+        // pending and the user needs to disambiguate via `approve <id>`.
         assert!(
-            plan.contains("approve t1") && plan.contains("reject t1"),
+            plan.contains("t1"),
             "approval prompt missing literal task id, got:\n{plan}"
         );
         // The old `<nonce>` placeholder must be gone — it was the bug.
         assert!(
             !plan.contains("<nonce>"),
             "literal `<nonce>` placeholder still present"
+        );
+    }
+
+    #[test]
+    fn test_format_plan_marks_destructive_tier() {
+        let steps = vec![TaskStep {
+            id: "rm".to_string(),
+            description: "drop tables".to_string(),
+            action: StepAction::Plan {
+                output: "DROP TABLE x".to_string(),
+            },
+            depends_on: vec![],
+            tier: audit::ActionTier::Destructive,
+            estimated_tokens: 0,
+        }];
+        let graph = TaskGraph::from_steps(steps).unwrap();
+        let state = TaskState::new("t1".to_string(), "drop".to_string(), graph);
+        let plan = format_plan_for_approval(&state);
+        assert!(
+            plan.contains("destructive"),
+            "destructive tier must be flagged, got:\n{plan}"
         );
     }
 }

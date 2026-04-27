@@ -58,9 +58,18 @@ pub struct TaskOrchestrator {
     /// Default fallback chain applied to every delegation. Individual
     /// step failures follow this chain unless overridden in the future.
     pub(crate) delegation_policy: delegate::EscalationPolicy,
+    /// Cached binary allowlist used to rebuild a `DecompositionContext`
+    /// inside the replan-on-failure loop. Populated by the wiring
+    /// layer; empty by default (no allowlist constraint surfaced to
+    /// the LLM during replan).
+    pub(crate) available_tools: Vec<String>,
     /// Active tasks indexed by task ID.
     pub(crate) tasks: RwLock<HashMap<String, TaskState>>,
 }
+
+/// Maximum number of replan-on-failure attempts per task. Bounds LLM
+/// cost when the model keeps producing plans the sandbox refuses.
+pub(crate) const MAX_REPLAN_ATTEMPTS: u32 = 2;
 
 impl TaskOrchestrator {
     pub fn new(decomposer: Arc<dyn TaskDecomposer>) -> Self {
@@ -75,8 +84,18 @@ impl TaskOrchestrator {
             dispatcher: None,
             episodic: None,
             delegation_policy: delegate::EscalationPolicy::default(),
+            available_tools: Vec::new(),
             tasks: RwLock::new(HashMap::new()),
         }
+    }
+
+    /// Cache the sandbox's binary allowlist so the replan-on-failure
+    /// loop can include it in its corrective LLM call. Without this the
+    /// replan call has no allowlist context and may suggest binaries
+    /// the sandbox would reject.
+    pub fn with_available_tools(mut self, tools: Vec<String>) -> Self {
+        self.available_tools = tools;
+        self
     }
 
     pub fn with_audit(mut self, audit: Arc<dyn audit::AuditTrail>) -> Self {
@@ -184,7 +203,12 @@ impl TaskOrchestrator {
 
         tracing::info!(task_id = %task_id, "Starting task execution");
 
-        // Execute steps in topological order, respecting dependencies
+        // Execute steps in topological order, respecting dependencies.
+        //
+        // `ready_steps` is computed against the *succeeded* set, not the
+        // terminal set — a failed step must NOT unblock its dependents.
+        // Failure cascades are handled below by marking dependents
+        // `Skipped` so the loop still terminates without busy-looping.
         loop {
             let ready_steps = {
                 let tasks = self.tasks.read().await;
@@ -196,13 +220,29 @@ impl TaskOrchestrator {
                     break;
                 }
 
-                let completed: HashSet<String> = task
+                let succeeded: HashSet<String> = task
                     .step_states
                     .iter()
-                    .filter(|(_, s)| s.is_terminal())
+                    .filter(|(_, s)| s.is_success())
                     .map(|(id, _)| id.clone())
                     .collect();
-                task.graph.ready_steps(&completed)
+                // `ready_steps` only checks dep-satisfaction — it does
+                // NOT exclude steps that are already terminal. Without
+                // this filter a Failed step (which is not in `succeeded`
+                // and has no missing deps) would be picked as "ready"
+                // again on the next iteration, re-running the failure
+                // and re-triggering the replan loop. Only steps whose
+                // current state is Pending may be (re)scheduled.
+                task.graph
+                    .ready_steps(&succeeded)
+                    .into_iter()
+                    .filter(|id| {
+                        matches!(
+                            task.step_states.get(id),
+                            Some(StepState::Pending) | Some(StepState::Ready)
+                        )
+                    })
+                    .collect::<Vec<_>>()
             };
 
             if ready_steps.is_empty() {
@@ -317,14 +357,34 @@ impl TaskOrchestrator {
             StepAction::Execute { command, workdir } | StepAction::Test { command, workdir } => {
                 self.execute_sandbox_step(command, workdir).await
             }
+            StepAction::Shell { command, workdir } => {
+                self.execute_shell_step(command, workdir).await
+            }
             StepAction::Research { query } => self.execute_research_step(query).await,
-            StepAction::Plan { output } => Ok(StepOutcome {
-                stdout: output.clone(),
-                stderr: String::new(),
-                exit_code: None,
-                artifacts: vec![],
-                summary: "Plan produced".to_string(),
-            }),
+            StepAction::Plan { output } => {
+                // A `Plan` step that carries no output is effectively a
+                // no-op — the LLM emitted a step the executor cannot
+                // perform but marked it `plan` so it would silently
+                // succeed. Treat that as an honest failure so the user
+                // sees that nothing happened, instead of a "succeeded"
+                // count that masks an empty result.
+                let trimmed = output.trim();
+                if trimmed.is_empty() {
+                    Err(format!(
+                        "Plan step '{description}' had no output to produce — \
+                         the planner did not specify what this step should write. \
+                         Re-plan with concrete steps (research/execute/implement)."
+                    ))
+                } else {
+                    Ok(StepOutcome {
+                        stdout: output.clone(),
+                        stderr: String::new(),
+                        exit_code: None,
+                        artifacts: vec![],
+                        summary: summarize_first_line(trimmed),
+                    })
+                }
+            }
             StepAction::Implement { spec, agent } => {
                 self.delegate_implement_step(spec, agent).await
             }
@@ -371,6 +431,19 @@ impl TaskOrchestrator {
                 );
             }
             Err(error) => {
+                // Mirror the success-path audit write so failed steps
+                // are recorded in the audit trail too — otherwise a
+                // sandbox exit-1 disappears from history once we lifted
+                // it out of the Ok arm.
+                if let Some(audit) = &self.audit {
+                    let entry = audit::AuditEntry::new(&description, "step failed", &error, tier)
+                        .with_source("orchestrator")
+                        .with_outcome(audit::AuditOutcome::Failure);
+                    if let Err(e) = audit.record(entry).await {
+                        tracing::warn!("Failed to audit step failure: {e}");
+                    }
+                }
+
                 task.set_step_state(
                     step_id,
                     StepState::Failed {
@@ -379,10 +452,51 @@ impl TaskOrchestrator {
                         failed_at: Utc::now(),
                     },
                 );
+
+                // Mark all transitive dependents `Skipped` so the loop
+                // terminates and the user sees an honest status instead
+                // of cascading attempts against missing inputs.
+                let dependents = task.graph.transitive_dependents(step_id);
+                let reason = format!("dependency {step_id} failed");
+                for dep_id in dependents {
+                    if let Some(state) = task.step_states.get(&dep_id) {
+                        if !state.is_terminal() {
+                            task.set_step_state(
+                                &dep_id,
+                                StepState::Skipped {
+                                    reason: reason.clone(),
+                                },
+                            );
+                        }
+                    }
+                }
+
+                // Drop the write lock before the (potentially slow) LLM
+                // replan call below. We still own a snapshot of the
+                // fields the replan needs.
+                drop(tasks);
+
+                // Try to repair the plan if we still have replan budget.
+                // Best-effort: a replan failure leaves the task in the
+                // standard "failed step + skipped dependents" state.
+                self.try_replan_after_failure(task_id, step_id, &description, &error)
+                    .await;
+
+                // Re-acquire the lock to mark the task complete (or not).
+                let mut tasks = self.tasks.write().await;
+                let task = tasks
+                    .get_mut(task_id)
+                    .expect("invariant: task_id always corresponds to a planned task");
+                if task.is_complete() {
+                    task.phase = TaskPhase::Completed;
+                    task.completed_at = Some(Utc::now());
+                    tracing::info!(task_id = %task_id, "Task completed");
+                }
+                return Ok(());
             }
         }
 
-        // Check if task is complete
+        // Check if task is complete (success path).
         if task.is_complete() {
             task.phase = TaskPhase::Completed;
             task.completed_at = Some(Utc::now());
@@ -392,9 +506,128 @@ impl TaskOrchestrator {
         Ok(())
     }
 
+    /// Best-effort corrective replan after a step failure. Asks the
+    /// decomposer for a fresh sub-plan given the original goal +
+    /// what's already succeeded + the actual error, then splices the
+    /// new steps into the graph so the execution loop picks them up
+    /// next iteration. Bounded by `MAX_REPLAN_ATTEMPTS`.
+    pub(crate) async fn try_replan_after_failure(
+        &self,
+        task_id: &str,
+        failed_step_id: &str,
+        failed_step_description: &str,
+        error: &str,
+    ) {
+        // Snapshot the fields we need under a short read lock.
+        let (request, completed, attempts) = {
+            let tasks = self.tasks.read().await;
+            let task = match tasks.get(task_id) {
+                Some(t) => t,
+                None => return,
+            };
+            if task.replan_attempts >= MAX_REPLAN_ATTEMPTS {
+                tracing::info!(
+                    task_id = %task_id,
+                    attempts = task.replan_attempts,
+                    "replan budget exhausted; leaving plan in failed state"
+                );
+                return;
+            }
+            let completed: Vec<String> = task
+                .graph
+                .topological_order()
+                .into_iter()
+                .filter_map(|id| {
+                    let state = task.step_states.get(&id)?;
+                    if matches!(state, StepState::Completed { .. }) {
+                        task.graph.steps.get(&id).map(|s| s.description.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            (task.request.clone(), completed, task.replan_attempts)
+        };
+
+        let context = crate::decompose::DecompositionContext {
+            available_tools: self.available_tools.clone(),
+            ..Default::default()
+        };
+        let repair = crate::decompose::RepairContext {
+            original_request: request,
+            failed_step: failed_step_description.to_string(),
+            error: error.to_string(),
+            completed,
+        };
+
+        tracing::info!(
+            task_id = %task_id,
+            failed_step_id = %failed_step_id,
+            attempt = attempts + 1,
+            max = MAX_REPLAN_ATTEMPTS,
+            "attempting replan after step failure"
+        );
+
+        let new_steps = match self.decomposer.replan_after_failure(repair, context).await {
+            Ok(steps) if !steps.is_empty() => steps,
+            Ok(_) => {
+                tracing::info!(task_id = %task_id, "replan returned empty plan; skipping");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "replan failed; leaving plan as-is");
+                return;
+            }
+        };
+
+        // Splice the new steps in. Each new step's depends_on already
+        // references its sibling new steps via UUIDs from build_task_step
+        // (via the sequential-fallback in replan_after_failure), so the
+        // first new step has no deps and runs immediately on the next
+        // execute() loop iteration.
+        let mut tasks = self.tasks.write().await;
+        let task = match tasks.get_mut(task_id) {
+            Some(t) => t,
+            None => return,
+        };
+
+        let new_ids: Vec<String> = new_steps.iter().map(|s| s.id.clone()).collect();
+        match task.graph.add_steps(new_steps) {
+            Ok(()) => {
+                for id in &new_ids {
+                    task.step_states
+                        .insert(id.clone(), crate::state::StepState::Pending);
+                }
+                task.replan_attempts += 1;
+                tracing::info!(
+                    task_id = %task_id,
+                    spliced = new_ids.len(),
+                    total_attempts = task.replan_attempts,
+                    "replan succeeded; new steps spliced into graph"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(task_id = %task_id, error = %e, "splicing replan steps failed");
+            }
+        }
+    }
+
     /// Get the current state of a task.
     pub async fn get_task(&self, task_id: &str) -> Option<TaskState> {
         self.tasks.read().await.get(task_id).cloned()
+    }
+
+    /// Return task IDs currently in the `AwaitingApproval` phase. Used by
+    /// the signal pipeline to resolve bare `approve` / `reject` (no id)
+    /// to the single pending plan when there's exactly one.
+    pub async fn pending_approvals(&self) -> Vec<String> {
+        self.tasks
+            .read()
+            .await
+            .iter()
+            .filter(|(_, t)| t.phase == TaskPhase::AwaitingApproval)
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// List all active tasks.
@@ -420,6 +653,22 @@ impl TaskOrchestrator {
             }
         }
         Ok(())
+    }
+}
+
+/// First non-empty line of `s` truncated to 160 chars — used for short
+/// step summaries surfaced in the user-facing task report.
+fn summarize_first_line(s: &str) -> String {
+    let line = s
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("Plan produced");
+    if line.chars().count() > 160 {
+        let truncated: String = line.chars().take(157).collect();
+        format!("{truncated}…")
+    } else {
+        line.to_string()
     }
 }
 
@@ -623,6 +872,220 @@ mod tests {
             matches!(step, StepState::Failed { .. }),
             "expected Failed without registry, got {step:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn failed_step_skips_dependents_instead_of_running_them() {
+        // Regression: previously `is_terminal()` was used to decide which
+        // deps were satisfied, so a Failed step unblocked its dependents
+        // and they ran against missing inputs. Now they should be Skipped.
+        let steps = vec![
+            TaskStep {
+                id: "s1".to_string(),
+                description: "fail".to_string(),
+                action: StepAction::Implement {
+                    spec: "won't matter".to_string(),
+                    agent: "missing".to_string(), // no registry → fails
+                },
+                depends_on: vec![],
+                tier: audit::ActionTier::Read,
+                estimated_tokens: 0,
+            },
+            TaskStep {
+                id: "s2".to_string(),
+                description: "depends on s1".to_string(),
+                action: StepAction::Plan {
+                    output: "should not run".to_string(),
+                },
+                depends_on: vec!["s1".to_string()],
+                tier: audit::ActionTier::Read,
+                estimated_tokens: 0,
+            },
+            TaskStep {
+                id: "s3".to_string(),
+                description: "depends on s2".to_string(),
+                action: StepAction::Plan {
+                    output: "should not run".to_string(),
+                },
+                depends_on: vec!["s2".to_string()],
+                tier: audit::ActionTier::Read,
+                estimated_tokens: 0,
+            },
+        ];
+        let decomposer = Arc::new(MockDecomposer { steps });
+        let orchestrator = TaskOrchestrator::new(decomposer);
+
+        let (task_id, _) = orchestrator
+            .plan("anything", DecompositionContext::default())
+            .await
+            .unwrap();
+        orchestrator.execute(&task_id).await.unwrap();
+
+        let task = orchestrator.get_task(&task_id).await.unwrap();
+        assert!(matches!(
+            task.step_states.get("s1"),
+            Some(StepState::Failed { .. })
+        ));
+        assert!(
+            matches!(task.step_states.get("s2"), Some(StepState::Skipped { .. })),
+            "s2 should be Skipped after s1 failed, got {:?}",
+            task.step_states.get("s2")
+        );
+        assert!(
+            matches!(task.step_states.get("s3"), Some(StepState::Skipped { .. })),
+            "s3 should be transitively Skipped, got {:?}",
+            task.step_states.get("s3")
+        );
+        assert_eq!(task.phase, TaskPhase::Completed);
+    }
+
+    #[tokio::test]
+    async fn nonzero_exit_marks_step_failed_and_skips_dependents() {
+        // Regression for the daemon RCA: a sandbox command that returns
+        // exit_code != 0 used to be recorded as `Completed` because the
+        // executor returned `Ok(StepOutcome { exit_code: Some(1), .. })`.
+        // It must now be marked Failed so dependents cascade-skip.
+        let sandbox = Arc::new(sandbox::StubSandbox::new());
+        let steps = vec![
+            TaskStep {
+                id: "fail".to_string(),
+                description: "always-fail command".to_string(),
+                action: StepAction::Execute {
+                    command: "false".to_string(),
+                    workdir: "/tmp".into(),
+                },
+                depends_on: vec![],
+                tier: audit::ActionTier::Execute,
+                estimated_tokens: 0,
+            },
+            TaskStep {
+                id: "after".to_string(),
+                description: "should be skipped".to_string(),
+                action: StepAction::Plan {
+                    output: "must not run".to_string(),
+                },
+                depends_on: vec!["fail".to_string()],
+                tier: audit::ActionTier::Read,
+                estimated_tokens: 0,
+            },
+        ];
+        let decomposer = Arc::new(MockDecomposer { steps });
+        let orchestrator = TaskOrchestrator::new(decomposer).with_sandbox(sandbox);
+
+        let (task_id, _) = orchestrator
+            .plan("anything", DecompositionContext::default())
+            .await
+            .unwrap();
+        orchestrator.execute(&task_id).await.unwrap();
+
+        let task = orchestrator.get_task(&task_id).await.unwrap();
+        let fail = task.step_states.get("fail").unwrap();
+        assert!(
+            matches!(fail, StepState::Failed { .. }),
+            "non-zero exit must mark step Failed, got {fail:?}"
+        );
+        let after = task.step_states.get("after").unwrap();
+        assert!(
+            matches!(after, StepState::Skipped { .. }),
+            "dependent must be Skipped, got {after:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn replan_on_failure_splices_corrective_steps() {
+        // After a step fails, the orchestrator should call the
+        // decomposer's replan_after_failure hook and splice the
+        // returned steps into the graph so they execute next.
+        use crate::decompose::RepairContext;
+
+        struct ReplanDecomposer {
+            initial: Vec<TaskStep>,
+            replan_called: std::sync::atomic::AtomicUsize,
+            replan_steps: Vec<TaskStep>,
+        }
+
+        #[async_trait::async_trait]
+        impl TaskDecomposer for ReplanDecomposer {
+            async fn decompose(
+                &self,
+                _request: &str,
+                _context: DecompositionContext,
+            ) -> Result<Vec<TaskStep>, crate::decompose::DecompositionError> {
+                Ok(self.initial.clone())
+            }
+            async fn replan_after_failure(
+                &self,
+                _repair: RepairContext,
+                _context: DecompositionContext,
+            ) -> Result<Vec<TaskStep>, crate::decompose::DecompositionError> {
+                self.replan_called
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(self.replan_steps.clone())
+            }
+        }
+
+        // Initial plan: one step that always fails.
+        let initial = vec![TaskStep {
+            id: "fail".to_string(),
+            description: "missing-agent step".to_string(),
+            action: StepAction::Implement {
+                spec: "doomed".to_string(),
+                agent: "ghost".to_string(),
+            },
+            depends_on: vec![],
+            tier: audit::ActionTier::Read,
+            estimated_tokens: 0,
+        }];
+        // Replan plan: a single Plan step that always succeeds.
+        let replan_steps = vec![TaskStep {
+            id: "replan-1".to_string(),
+            description: "corrective step".to_string(),
+            action: StepAction::Plan {
+                output: "fixed it".to_string(),
+            },
+            depends_on: vec![],
+            tier: audit::ActionTier::Read,
+            estimated_tokens: 0,
+        }];
+
+        let decomposer = Arc::new(ReplanDecomposer {
+            initial,
+            replan_called: std::sync::atomic::AtomicUsize::new(0),
+            replan_steps: replan_steps.clone(),
+        });
+        let decomposer_handle = decomposer.clone();
+        let orchestrator = TaskOrchestrator::new(decomposer);
+
+        let (task_id, _) = orchestrator
+            .plan("anything", DecompositionContext::default())
+            .await
+            .unwrap();
+        orchestrator.execute(&task_id).await.unwrap();
+
+        assert_eq!(
+            decomposer_handle
+                .replan_called
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "decomposer.replan_after_failure must be invoked exactly once"
+        );
+
+        let task = orchestrator.get_task(&task_id).await.unwrap();
+        assert_eq!(
+            task.replan_attempts, 1,
+            "task.replan_attempts must increment after a successful splice"
+        );
+        // The original step stays Failed; the replanned step succeeds.
+        assert!(matches!(
+            task.step_states.get("fail"),
+            Some(StepState::Failed { .. })
+        ));
+        assert!(matches!(
+            task.step_states.get("replan-1"),
+            Some(StepState::Completed { .. })
+        ));
+        // Task is now complete with mixed outcomes.
+        assert_eq!(task.phase, TaskPhase::Completed);
     }
 
     #[tokio::test]

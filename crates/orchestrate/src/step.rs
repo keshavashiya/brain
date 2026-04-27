@@ -32,10 +32,20 @@ pub enum StepAction {
     Plan { output: String },
     /// Implement — delegate to an agent.
     Implement { spec: String, agent: String },
-    /// Execute — run a command in the sandbox.
+    /// Execute — run a command in the sandbox via direct argv (no shell).
+    /// Use for simple `binary arg arg` commands. The first token must be
+    /// on the per-binary allowlist. No pipes, redirects, $VAR, or
+    /// PATH-dependent lookups beyond the sanitised env.
     Execute { command: String, workdir: PathBuf },
-    /// Test — run tests in the sandbox.
+    /// Test — run tests in the sandbox via direct argv.
     Test { command: String, workdir: PathBuf },
+    /// Shell — run a command via `sh -c "<command>"` so the system
+    /// shell handles pipes, redirects, escaping, $VAR, and PATH
+    /// resolution. Use for any non-trivial command. The per-binary
+    /// allowlist is bypassed for the wrapped command (only `sh` is
+    /// gated); rlimits + Seatbelt + timeout + the explicit
+    /// forbidden-list still apply.
+    Shell { command: String, workdir: PathBuf },
     /// Review — present an artifact for human review.
     Review { artifact: String },
     /// Notify — send a notification via a channel.

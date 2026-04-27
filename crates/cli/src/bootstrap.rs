@@ -155,7 +155,10 @@ async fn wire_safety_infrastructure(
         .with_channel_dispatcher(dispatcher.clone())
         .with_llm(processor.llm_arc())
         .with_episodic(Arc::new(hippocampus::EpisodicStore::new(db.clone())))
-        .with_delegation_policy(escalation_policy);
+        .with_delegation_policy(escalation_policy)
+        // Cache the sandbox allowlist so the replan-on-failure loop can
+        // include it in its corrective LLM call.
+        .with_available_tools(config.security.exec_allowlist.clone());
     let processor = processor
         .with_orchestrator(Arc::new(orchestrator))
         .with_agent_registry(agent_registry_arc);
