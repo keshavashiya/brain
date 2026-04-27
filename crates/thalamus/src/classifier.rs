@@ -35,9 +35,10 @@ static MEMORY_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
             (?:summarise|summarize|sum\s+up|give\s+me\s+a\s+summary\s+of)\s+(?:my\s+)?(?:memory|memories|what\s+you\s+know)|
             what\s+(?:do\s+you\s+know|have\s+you\s+(?:learned|stored|remembered))\??|
             what\s+(?:are\s+)?(?:you\s+)?(?:in\s+my\s+memory|stored\s+about\s+me|you\s+remember(?:\s+about\s+me)?)\??|
-            show\s+(?:me\s+)?(?:my\s+)?(?:memory|memories|what\s+you\s+know)|
-            tell\s+me\s+what\s+you\s+(?:know|remember)(?:\s+about\s+me)?\??|
-            (?:dump|list|display)\s+(?:my\s+)?(?:memory|memories|all\s+facts)
+            show\s+(?:me\s+)?(?:my\s+|all\s+)?(?:memory|memories|what\s+you\s+know|stored\s+facts?)|
+            (?:share|give)\s+(?:me\s+)?(?:all\s+|my\s+|the\s+)?(?:memory|memories|stored\s+facts?|stored\s+memories?)(?:\s+with\s+me)?|
+            tell\s+me\s+(?:everything|what)\s+you\s+(?:know|remember|have)(?:\s+about\s+me)?\??|
+            (?:dump|list|display)\s+(?:my\s+|all\s+)?(?:memory|memories|all\s+facts|stored\s+facts?)
         )$
     ").expect("invariant: MEMORY_SUMMARY_RE must be valid")
 });
@@ -80,7 +81,13 @@ static LIST_APPROVALS_RE: LazyLock<Regex> = LazyLock::new(|| {
 static RESPOND_TO_APPROVAL_RE: LazyLock<Regex> = LazyLock::new(|| {
     // Accept hyphens so UUID-style IDs (both confirm-engine nonces and
     // orchestrator task IDs) match the fast path.
-    Regex::new(r"(?i)^(approve|reject)\s+([a-zA-Z0-9-]+)$")
+    //
+    // Two shapes:
+    //   `approve <id>` / `reject <id>`            — explicit
+    //   `approve` / `y` / `yes` / `reject` / `n`  — bare; resolved by the
+    //                                               signal handler against
+    //                                               `pending_approvals()`
+    Regex::new(r"(?i)^(?P<decision>approve|reject|yes|no|y|n)(?:\s+(?P<nonce>[a-zA-Z0-9-]+))?$")
         .expect("invariant: RESPOND_TO_APPROVAL_RE must be valid")
 });
 
@@ -153,6 +160,35 @@ static DECOMPOSE_TASK_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("invariant: DECOMPOSE_TASK_RE must be valid")
 });
 
+/// Read-only inspection: "look at <path>", "tell me about <path>",
+/// "summarise the project at <path>", "describe the codebase at <path>",
+/// "report on <path>", "analyse <path>". Captures the path token.
+/// Restricted to absolute paths or `~/`-prefixed paths so we don't
+/// accidentally swallow phrases like "look at this issue".
+static PROJECT_INSPECT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?ix)
+        (?:
+            (?:can\s+you\s+)?
+            (?:look\s+at|tell\s+me\s+about|describe|summari[sz]e|analy[sz]e|inspect|review)
+            (?:\s+(?:the\s+)?(?:project|codebase|repo(?:sitory)?|directory|folder|code))?
+            (?:\s+(?:at|in|under))?\s+
+            (?P<path>(?:~|/|\./|\.\./|[A-Za-z]:[\\/])\S+)
+            (?:\s+and\s+(?:provide|give\s+me|generate|produce|write)\s+(?:a\s+)?(?P<focus>.+?))?
+            \??$
+            |
+            (?:provide|give\s+me|generate|produce|write)\s+(?:a\s+)?
+            (?:detailed\s+)?(?:report|summary|overview)
+            \s+(?:on|of|for|about)\s+
+            (?:(?:the\s+)?(?:project|codebase|repo(?:sitory)?|directory)\s+(?:at|in)\s+)?
+            (?P<path2>(?:~|/|\./|\.\./|[A-Za-z]:[\\/])\S+)
+            \??$
+        )
+    ",
+    )
+    .expect("invariant: PROJECT_INSPECT_RE must be valid")
+});
+
 static LIST_CHANNELS_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(?:list channels|show channels|what channels(?:\s+are\s+available)?)\??$")
         .expect("invariant: LIST_CHANNELS_RE must be valid")
@@ -183,6 +219,18 @@ pub(crate) const PATTERNS: &[PatternDef] = &[
         regex: &MEMORY_SUMMARY_RE,
         base_intent: Intent::MemorySummary,
         extractors: &[],
+    },
+    // ProjectInspect must come before RECALL_RE — `tell me about /tmp/x`
+    // is a path-bearing inspection, not a memory recall about a topic
+    // named `/tmp/x`. The path-anchored regex is strict enough that
+    // non-path "tell me about Rust" still falls through to recall.
+    PatternDef {
+        regex: &PROJECT_INSPECT_RE,
+        base_intent: Intent::ProjectInspect {
+            path: String::new(),
+            focus: None,
+        },
+        extractors: &[("path", 0), ("focus", 0)],
     },
     PatternDef {
         regex: &RECALL_RE,
@@ -247,7 +295,8 @@ pub(crate) const PATTERNS: &[PatternDef] = &[
             nonce: String::new(),
             decision: String::new(),
         },
-        extractors: &[("decision", 1), ("nonce", 2)],
+        // Named-group lookup; numeric indices are unused for this pattern.
+        extractors: &[("decision", 0), ("nonce", 0)],
     },
     PatternDef {
         regex: &BUDGET_STATUS_RE,
@@ -478,10 +527,22 @@ impl IntentClassifier {
             Intent::QueryAgents { .. } => Intent::QueryAgents {
                 filter: get_group("filter").trim().to_string(),
             },
-            Intent::RespondToApproval { .. } => Intent::RespondToApproval {
-                decision: get_group("decision").to_lowercase(),
-                nonce: get_group("nonce"),
-            },
+            Intent::RespondToApproval { .. } => {
+                let raw = captures
+                    .name("decision")
+                    .map(|m| m.as_str().to_lowercase())
+                    .unwrap_or_default();
+                let decision = match raw.as_str() {
+                    "yes" | "y" => "approve".to_string(),
+                    "no" | "n" => "reject".to_string(),
+                    other => other.to_string(),
+                };
+                let nonce = captures
+                    .name("nonce")
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default();
+                Intent::RespondToApproval { nonce, decision }
+            }
             Intent::ChannelPreferences { .. } => {
                 let cat = get_group("category");
                 let category = if cat.is_empty() {
@@ -492,6 +553,29 @@ impl IntentClassifier {
                 Intent::ChannelPreferences {
                     namespace: None,
                     category,
+                }
+            }
+            Intent::ProjectInspect { .. } => {
+                let path = captures
+                    .name("path")
+                    .or_else(|| captures.name("path2"))
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default();
+                let focus = captures
+                    .name("focus")
+                    .map(|m| m.as_str().trim().to_string())
+                    .filter(|s| !s.is_empty());
+                Intent::ProjectInspect { path, focus }
+            }
+            Intent::DecomposeTask { .. } => {
+                // The PATTERNS entry maps `("request", 1)` but the
+                // default arm fell back to the empty base intent. Pull
+                // the captured group explicitly so `decompose this …`
+                // doesn't reach the orchestrator with an empty request
+                // (which then synthesizes a useless "ask for clarification"
+                // plan).
+                Intent::DecomposeTask {
+                    request: get_group("request"),
                 }
             }
             Intent::SetChannelPreference { .. } => {
