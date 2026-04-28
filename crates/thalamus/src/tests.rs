@@ -16,6 +16,31 @@ struct MockFallback {
     response: Option<Classification>,
 }
 
+/// Records every (input, history) pair the classifier passes in so tests
+/// can assert that history actually reaches the LLM call.
+struct RecordingFallback {
+    response: Classification,
+    seen: std::sync::Mutex<Vec<(String, Vec<cortex::llm::Message>)>>,
+}
+
+#[async_trait::async_trait]
+impl IntentFallback for RecordingFallback {
+    async fn classify_with_llm(&self, input: &str) -> Option<Classification> {
+        self.classify_with_history(input, &[]).await
+    }
+    async fn classify_with_history(
+        &self,
+        input: &str,
+        history: &[cortex::llm::Message],
+    ) -> Option<Classification> {
+        self.seen
+            .lock()
+            .unwrap()
+            .push((input.to_string(), history.to_vec()));
+        Some(self.response.clone())
+    }
+}
+
 impl MockFallback {
     fn chat() -> Self {
         Self {
@@ -90,6 +115,66 @@ async fn test_classify_execute_command_regex_fallback() {
         matches!(result.intent, Intent::ExecuteCommand { .. }),
         "Expected ExecuteCommand, got {:?}",
         result.intent
+    );
+}
+
+#[tokio::test]
+async fn classify_with_history_passes_recent_turns_to_fallback() {
+    use cortex::llm::{Message, Role};
+
+    let recording = Arc::new(RecordingFallback {
+        response: Classification {
+            intent: Intent::Chat {
+                content: "ack".to_string(),
+            },
+            confidence: 0.7,
+            method: ClassificationMethod::Llm,
+            extracted_facts: Vec::new(),
+        },
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let classifier = IntentClassifier::new().with_llm_fallback(recording.clone());
+    let history = vec![
+        Message {
+            role: Role::Assistant,
+            content: "What's your username?".to_string(),
+        },
+        Message {
+            role: Role::User,
+            content: "Hold on…".to_string(),
+        },
+    ];
+    let _ = classifier
+        .classify_with_history("username : keshavashiya", &history)
+        .await;
+    let seen = recording.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1, "fallback should be invoked exactly once");
+    let (input, hist) = &seen[0];
+    assert_eq!(input, "username : keshavashiya");
+    assert_eq!(hist.len(), 2, "history should be forwarded verbatim");
+    assert_eq!(hist[0].content, "What's your username?");
+}
+
+#[tokio::test]
+async fn legacy_classify_passes_no_history() {
+    let recording = Arc::new(RecordingFallback {
+        response: Classification {
+            intent: Intent::Chat {
+                content: "ack".to_string(),
+            },
+            confidence: 0.7,
+            method: ClassificationMethod::Llm,
+            extracted_facts: Vec::new(),
+        },
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    let classifier = IntentClassifier::new().with_llm_fallback(recording.clone());
+    let _ = classifier.classify("anything ambiguous").await;
+    let seen = recording.seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert!(
+        seen[0].1.is_empty(),
+        "legacy classify() must not synthesise history"
     );
 }
 

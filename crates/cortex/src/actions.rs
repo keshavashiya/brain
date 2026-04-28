@@ -118,6 +118,28 @@ pub trait WebSearchBackend: Send + Sync {
     async fn search(&self, query: &str, top_k: usize) -> Result<Vec<SearchHit>, ActionError>;
 }
 
+/// Result of fetching a single URL: cleaned, bounded text content the
+/// LLM can be given as grounding. `text` is plain text — HTML tags and
+/// scripts have been stripped by the backend.
+#[derive(Debug, Clone)]
+pub struct FetchedPage {
+    pub url: String,
+    pub title: String,
+    pub text: String,
+}
+
+/// Optional backend for fetching the body of a URL the user (or an
+/// upstream search hit) handed us. Kept separate from `WebSearchBackend`
+/// so a deployment can have search without fetch (or vice versa) and so
+/// the two contracts can evolve independently.
+#[async_trait::async_trait]
+pub trait UrlFetchBackend: Send + Sync {
+    /// Fetch a single URL. The backend is responsible for timeouts, body
+    /// size caps, and HTML-to-text reduction so the returned page is
+    /// safe to pass straight into an LLM context window.
+    async fn fetch(&self, url: &str) -> Result<FetchedPage, ActionError>;
+}
+
 /// Structured scheduling outcome returned by SchedulingBackend.
 #[derive(Debug, Clone)]
 pub struct ScheduleOutcome {
@@ -220,6 +242,7 @@ pub struct ActionDispatcher {
     config: ActionConfig,
     memory_backend: Option<Arc<dyn MemoryBackend>>,
     web_search_backend: Option<Arc<dyn WebSearchBackend>>,
+    url_fetch_backend: Option<Arc<dyn UrlFetchBackend>>,
     scheduling_backend: Option<Arc<dyn SchedulingBackend>>,
     message_backend: Option<Arc<dyn MessageBackend>>,
     namespace: String,
@@ -232,6 +255,7 @@ impl ActionDispatcher {
             config,
             memory_backend: None,
             web_search_backend: None,
+            url_fetch_backend: None,
             scheduling_backend: None,
             message_backend: None,
             namespace: "personal".to_string(),
@@ -260,6 +284,15 @@ impl ActionDispatcher {
     /// Attach a web-search backend.
     pub fn with_web_search_backend(mut self, backend: Arc<dyn WebSearchBackend>) -> Self {
         self.web_search_backend = Some(backend);
+        self
+    }
+
+    /// Attach a URL-fetch backend so user-provided links can be enriched
+    /// inline with web-search results. Optional — without it, URLs in the
+    /// query are still surfaced as part of the search query string but
+    /// not fetched.
+    pub fn with_url_fetch_backend(mut self, backend: Arc<dyn UrlFetchBackend>) -> Self {
+        self.url_fetch_backend = Some(backend);
         self
     }
 
@@ -355,7 +388,10 @@ impl ActionDispatcher {
         }
     }
 
-    /// Search the web.
+    /// Search the web. If the query contains URLs, fetch their bodies
+    /// in parallel and append them as a `Linked sources:` block so the
+    /// downstream LLM can ground its answer in what the user actually
+    /// pasted, not just what the search engine surfaced.
     async fn web_search(&self, query: &str) -> ActionResult {
         if !self.config.enable_web_search {
             return ActionResult::failure("Web search is disabled by config");
@@ -364,14 +400,35 @@ impl ActionDispatcher {
             return ActionResult::failure("Web search backend not configured");
         };
         let top_k = self.config.web_search_top_k.max(1);
-        match backend.search(query, top_k).await {
+        let urls = extract_urls(query);
+
+        // Strip the URLs out of the search query so we send the engine
+        // the actual semantic question, not a wall of links it will
+        // tokenize into noise. If nothing else remains, fall back to
+        // searching for the first URL's hostname (which usually still
+        // returns the canonical landing page).
+        let cleaned = strip_urls(query);
+        let search_query = if cleaned.trim().is_empty() {
+            urls.first()
+                .and_then(|u| url_hostname(u))
+                .unwrap_or_else(|| query.to_string())
+        } else {
+            cleaned
+        };
+
+        let search_future = backend.search(&search_query, top_k);
+        let fetch_future = self.fetch_urls(&urls);
+        let (search_result, fetched) = tokio::join!(search_future, fetch_future);
+
+        let mut out = String::new();
+        match search_result {
+            Ok(hits) if hits.is_empty() => {
+                out.push_str(&format!(
+                    "web_search ok query=\"{}\" top_k={} hits=0\n",
+                    search_query, top_k
+                ));
+            }
             Ok(hits) => {
-                if hits.is_empty() {
-                    return ActionResult::success(format!(
-                        "web_search ok query=\"{}\" top_k={} hits=0",
-                        query, top_k
-                    ));
-                }
                 let lines = hits
                     .iter()
                     .enumerate()
@@ -380,16 +437,71 @@ impl ActionDispatcher {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                ActionResult::success(format!(
-                    "web_search ok query=\"{}\" top_k={} hits={}\n{}",
-                    query,
+                out.push_str(&format!(
+                    "web_search ok query=\"{}\" top_k={} hits={}\n{}\n",
+                    search_query,
                     top_k,
                     hits.len(),
                     lines
-                ))
+                ));
             }
-            Err(e) => ActionResult::failure(format!("Web search failed: {e}")),
+            Err(e) => {
+                // Search failure is not fatal if we managed to fetch the
+                // user's pasted URLs — the LLM can still answer from
+                // those. Surface the search error inline so the caller
+                // can see what happened.
+                out.push_str(&format!("web_search error: {e}\n"));
+                if fetched.is_empty() {
+                    return ActionResult::failure(format!("Web search failed: {e}"));
+                }
+            }
         }
+
+        if !fetched.is_empty() {
+            out.push_str("\nLinked sources (fetched directly):\n");
+            for (i, page) in fetched.iter().enumerate() {
+                out.push_str(&format!(
+                    "--- [{}] {} ({})\n{}\n\n",
+                    i + 1,
+                    page.title,
+                    page.url,
+                    page.text
+                ));
+            }
+        }
+
+        ActionResult::success(out.trim_end().to_string())
+    }
+
+    /// Fetch up to `MAX_FETCH_URLS` URLs in parallel using the configured
+    /// fetch backend. Returns successfully fetched pages only — failures
+    /// are logged and dropped so a single bad URL doesn't block the rest.
+    async fn fetch_urls(&self, urls: &[String]) -> Vec<FetchedPage> {
+        const MAX_FETCH_URLS: usize = 4;
+        let Some(fetcher) = &self.url_fetch_backend else {
+            return Vec::new();
+        };
+        if urls.is_empty() {
+            return Vec::new();
+        }
+        let to_fetch: Vec<String> = urls.iter().take(MAX_FETCH_URLS).cloned().collect();
+        let futures = to_fetch.into_iter().map(|u| {
+            let fetcher = fetcher.clone();
+            async move {
+                match fetcher.fetch(&u).await {
+                    Ok(page) => Some(page),
+                    Err(e) => {
+                        tracing::warn!(url = %u, error = %e, "URL fetch failed");
+                        None
+                    }
+                }
+            }
+        });
+        futures::future::join_all(futures)
+            .await
+            .into_iter()
+            .flatten()
+            .collect()
     }
 
     /// Schedule a task.
@@ -475,5 +587,52 @@ impl ActionDispatcher {
             )),
             Err(e) => ActionResult::failure(format!("Send message failed: {e}")),
         }
+    }
+}
+
+/// Extract `http(s)://` URLs from a free-form text. Strips trailing
+/// punctuation that's almost certainly not part of the URL (`.`, `,`,
+/// `)`, `]`, `}`, `;`, `'`, `"`).
+pub(crate) fn extract_urls(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for token in text.split(|c: char| c.is_whitespace() || c == '<' || c == '>') {
+        let t = token.trim();
+        if !(t.starts_with("http://") || t.starts_with("https://")) {
+            continue;
+        }
+        let cleaned = t.trim_end_matches(|c: char| {
+            matches!(
+                c,
+                '.' | ',' | ')' | ']' | '}' | ';' | '\'' | '"' | '!' | '?'
+            )
+        });
+        if cleaned.len() > "https://".len() && !out.iter().any(|u: &String| u == cleaned) {
+            out.push(cleaned.to_string());
+        }
+    }
+    out
+}
+
+/// Remove `http(s)://...` tokens from `text` so a query passed to a
+/// search engine isn't dominated by the link wall.
+pub(crate) fn strip_urls(text: &str) -> String {
+    text.split_whitespace()
+        .filter(|t| !t.starts_with("http://") && !t.starts_with("https://"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Best-effort hostname extraction (no `url` crate dependency). Used as
+/// a fallback search query when the user pasted only links and no
+/// surrounding question.
+pub(crate) fn url_hostname(url: &str) -> Option<String> {
+    let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let host = after_scheme.split('/').next().unwrap_or(after_scheme);
+    let host = host.split('@').next_back().unwrap_or(host);
+    let host = host.split(':').next().unwrap_or(host);
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
     }
 }

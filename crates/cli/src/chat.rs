@@ -47,12 +47,14 @@ fn clear_status_line() -> std::io::Result<()> {
 }
 
 /// A reasonable terminal width for markdown rendering. Falls back to 80
-/// when stdout isn't a TTY (e.g. piped output) so wrapped lines stay sane.
+/// when stdout isn't a TTY (e.g. piped output) so wrapped lines stay
+/// sane. Capped at 100 because lines longer than that hurt readability
+/// even on wide monitors — the eye loses track of the wrap target.
 fn terminal_width() -> usize {
     crossterm::terminal::size()
         .map(|(c, _)| c as usize)
         .unwrap_or(80)
-        .clamp(40, 120)
+        .clamp(40, 100)
 }
 
 /// Markdown skin tuned for Brain's dark-terminal aesthetic.
@@ -138,9 +140,11 @@ impl ResponseLabel {
     }
 }
 
-/// The single rendering path for any response body. Prints the label header
-/// on its own line, then the markdown-rendered body. Always called *after*
-/// the transient status line has been cleared.
+/// The single rendering path for any response body. Prints the label
+/// header on its own line, then the markdown-rendered body, then a
+/// trailing blank line so the next `You:` prompt has visual breathing
+/// room. Always called *after* the transient status line has been
+/// cleared.
 fn render_response(label: ResponseLabel, body: &str) {
     let trimmed = body.trim_end();
     if trimmed.is_empty() {
@@ -150,8 +154,9 @@ fn render_response(label: ResponseLabel, body: &str) {
     let processed = preprocess_markdown(trimmed);
     let skin = brain_skin();
     let formatted = skin.text(&processed, Some(terminal_width()));
-    print!("{formatted}");
-    println!();
+    let rendered = formatted.to_string();
+    let rendered = rendered.trim_end_matches('\n');
+    print!("{rendered}\n\n");
     let _ = stdout().flush();
 }
 

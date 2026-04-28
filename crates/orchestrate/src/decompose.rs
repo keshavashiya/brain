@@ -324,6 +324,21 @@ Notify rules:
 - Internal notifications to the user (telling the user a task is done, surfacing results) are "read" tier — they are output, not external API calls.
 - Reserve "external" for genuine third-party calls (Slack webhook to a public channel, email send via an SMTP API, etc.).
 
+Grounding rules — when "Relevant project context" appears in this prompt, it
+contains real file or directory snippets the daemon read from disk:
+- Treat that content as ground truth for what exists. Do NOT invent file
+  paths, command names, or workflow jobs that are not present.
+- If the user asked you to act on a manifest-style file (a CI workflow, a
+  Makefile, a justfile, a docker-compose, a package script section), the
+  excerpt IS the source of truth for what commands to run. Plan one shell
+  step per real command in the file, in declaration order. Don't substitute
+  a wrapper CLI that "would have" run those commands remotely (e.g. don't
+  use `gh workflow run` to satisfy "run CI locally" — emit the actual
+  cargo/npm/pytest invocations from the file).
+- If the excerpt is missing the detail you'd need, add a single early shell
+  step that reads more of the file (`cat path/to/file`, `head -n 200 path`)
+  and depend the rest of the plan on it.
+
 Keep the plan practical and minimal — no unnecessary steps.
 
 Return ONLY valid JSON (an array of objects). No markdown, no explanations."#;

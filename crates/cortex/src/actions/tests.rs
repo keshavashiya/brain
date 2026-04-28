@@ -460,6 +460,136 @@ fn test_validate_args_allows_relative_paths() {
     assert!(super::validation::validate_args("cat", &["Cargo.toml".to_string()]).is_ok());
 }
 
+struct MockUrlFetcher;
+
+#[async_trait::async_trait]
+impl UrlFetchBackend for MockUrlFetcher {
+    async fn fetch(&self, url: &str) -> Result<FetchedPage, ActionError> {
+        Ok(FetchedPage {
+            url: url.to_string(),
+            title: format!("title-of-{url}"),
+            text: format!("body-of-{url}"),
+        })
+    }
+}
+
+#[test]
+fn extract_urls_finds_http_and_https_and_dedupes() {
+    let urls = super::extract_urls(
+        "see https://example.com, also http://x.io/path, and https://example.com again",
+    );
+    assert_eq!(
+        urls,
+        vec![
+            "https://example.com".to_string(),
+            "http://x.io/path".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn extract_urls_strips_trailing_punctuation() {
+    let urls = super::extract_urls("look here: https://example.com/foo. Also https://b.io/bar?");
+    assert!(urls.contains(&"https://example.com/foo".to_string()));
+    assert!(urls.contains(&"https://b.io/bar".to_string()));
+}
+
+#[test]
+fn strip_urls_leaves_query_text_intact() {
+    let cleaned = super::strip_urls("search this term https://x.io and https://y.io please");
+    assert_eq!(cleaned, "search this term and please");
+}
+
+#[test]
+fn url_hostname_handles_typical_inputs() {
+    assert_eq!(
+        super::url_hostname("https://github.com/keshavashiya"),
+        Some("github.com".to_string())
+    );
+    assert_eq!(
+        super::url_hostname("http://user:pass@x.io:8080/p?q=1"),
+        Some("x.io".to_string())
+    );
+}
+
+#[tokio::test]
+async fn web_search_fetches_user_provided_urls_alongside_search() {
+    let dispatcher = ActionDispatcher::with_defaults()
+        .with_web_search_backend(Arc::new(MockWebSearchBackend))
+        .with_url_fetch_backend(Arc::new(MockUrlFetcher));
+    let result = dispatcher
+        .dispatch(&Action::WebSearch {
+            query: "look up keshavashiya https://github.com/keshavashiya \
+                    https://app.daily.dev/keshavashiya"
+                .to_string(),
+        })
+        .await;
+    assert!(result.success);
+    // The cleaned query (without URLs) is what reaches the search engine.
+    assert!(result.output.contains("look up keshavashiya"));
+    // Linked-source bodies must show up so the answering LLM can cite them.
+    assert!(result.output.contains("Linked sources"));
+    assert!(result
+        .output
+        .contains("body-of-https://github.com/keshavashiya"));
+    assert!(result
+        .output
+        .contains("body-of-https://app.daily.dev/keshavashiya"));
+}
+
+#[tokio::test]
+async fn web_search_falls_back_to_hostname_when_query_is_only_urls() {
+    struct CapturingSearch {
+        last_query: std::sync::Mutex<Option<String>>,
+    }
+    #[async_trait::async_trait]
+    impl WebSearchBackend for CapturingSearch {
+        async fn search(&self, query: &str, _top_k: usize) -> Result<Vec<SearchHit>, ActionError> {
+            *self.last_query.lock().unwrap() = Some(query.to_string());
+            Ok(Vec::new())
+        }
+    }
+    let capturing = Arc::new(CapturingSearch {
+        last_query: std::sync::Mutex::new(None),
+    });
+    let dispatcher = ActionDispatcher::with_defaults()
+        .with_web_search_backend(capturing.clone())
+        .with_url_fetch_backend(Arc::new(MockUrlFetcher));
+    let _ = dispatcher
+        .dispatch(&Action::WebSearch {
+            query: "https://github.com/keshavashiya".to_string(),
+        })
+        .await;
+    assert_eq!(
+        capturing.last_query.lock().unwrap().as_deref(),
+        Some("github.com")
+    );
+}
+
+#[tokio::test]
+async fn web_search_succeeds_via_fetch_when_search_backend_fails() {
+    struct FailingSearch;
+    #[async_trait::async_trait]
+    impl WebSearchBackend for FailingSearch {
+        async fn search(&self, _query: &str, _top_k: usize) -> Result<Vec<SearchHit>, ActionError> {
+            Err(ActionError::ExecutionFailed("upstream down".to_string()))
+        }
+    }
+    let dispatcher = ActionDispatcher::with_defaults()
+        .with_web_search_backend(Arc::new(FailingSearch))
+        .with_url_fetch_backend(Arc::new(MockUrlFetcher));
+    let result = dispatcher
+        .dispatch(&Action::WebSearch {
+            query: "tell me about https://example.com/x".to_string(),
+        })
+        .await;
+    assert!(
+        result.success,
+        "fetched URLs should rescue the answer when search itself failed"
+    );
+    assert!(result.output.contains("body-of-https://example.com/x"));
+}
+
 #[tokio::test]
 async fn test_execute_command_blocked_args() {
     let dispatcher = ActionDispatcher::with_defaults();

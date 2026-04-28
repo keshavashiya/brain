@@ -36,6 +36,13 @@ const PRESETS: &[Preset] = &[
         name: "gemini-compat",
         base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
     },
+    // NVIDIA's "build" platform — generous free tier (40 RPM at the time
+    // of writing) and OpenAI-compatible. Get a key at
+    // https://build.nvidia.com/settings/api-keys
+    Preset {
+        name: "nvidia",
+        base_url: "https://integrate.api.nvidia.com/v1",
+    },
 ];
 
 /// Look up a preset by name. Case-insensitive.
@@ -81,5 +88,16 @@ mod tests {
         assert!(all.contains(&"groq"));
         assert!(all.contains(&"deepseek"));
         assert!(all.contains(&"gemini-compat"));
+        assert!(all.contains(&"nvidia"));
+    }
+
+    #[test]
+    fn nvidia_preset_targets_integrate_api() {
+        // Locked-in: the build.nvidia.com onboarding flow hands keys
+        // valid against integrate.api.nvidia.com — not build.nvidia.com.
+        assert_eq!(
+            resolve("nvidia").map(|p| p.base_url),
+            Some("https://integrate.api.nvidia.com/v1")
+        );
     }
 }

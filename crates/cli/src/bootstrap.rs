@@ -325,6 +325,20 @@ fn build_action_dispatcher(
         cortex::actions::ActionDispatcher::with_memory_backend(action_config, action_backend);
     dispatcher.set_namespace("personal");
 
+    // ── URL fetch backend ────────────────────────────────────────────────
+    // Always wired when web search is enabled so user-provided links can
+    // be fetched alongside the search query. Cheap, no config, no key.
+    if config.actions.web_search.enabled {
+        let res = &config.actions.resilience;
+        match BasicUrlFetcher::new_with_metrics(res, Some(processor.metrics().clone())) {
+            Ok(fetcher) => {
+                tracing::info!("URL fetch backend configured");
+                dispatcher = dispatcher.with_url_fetch_backend(Arc::new(fetcher));
+            }
+            Err(e) => tracing::warn!("URL fetch backend init failed: {e}"),
+        }
+    }
+
     // ── Web search backend ───────────────────────────────────────────────
     if config.actions.web_search.enabled {
         let ws = &config.actions.web_search;

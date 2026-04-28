@@ -614,6 +614,18 @@ impl IntentClassifier {
     }
 
     pub async fn classify(&self, input: &str) -> Classification {
+        self.classify_with_history(input, &[]).await
+    }
+
+    /// History-aware classification. The regex fast-paths and explicit
+    /// prefix matches don't need history (they're unambiguous on their
+    /// own), but the LLM fallback does — that's how it can tell a
+    /// follow-up parameter ("username : foo") from a self-introduction.
+    pub async fn classify_with_history(
+        &self,
+        input: &str,
+        history: &[cortex::llm::Message],
+    ) -> Classification {
         if input.starts_with('/') {
             if let Some(c) = self.classify_slash_command(input) {
                 return c;
@@ -630,7 +642,9 @@ impl IntentClassifier {
 
         if let Some(fallback) = &self.llm_fallback {
             let timeout = tokio::time::Duration::from_millis(15000);
-            match tokio::time::timeout(timeout, fallback.classify_with_llm(input)).await {
+            match tokio::time::timeout(timeout, fallback.classify_with_history(input, history))
+                .await
+            {
                 Ok(Some(classification)) => return classification,
                 Ok(None) => {
                     tracing::warn!("LLM classifier returned None (error or parse failure)");

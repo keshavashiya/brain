@@ -119,7 +119,9 @@ impl SignalProcessor {
 
         let pending_notifications = self.drain_pending_notifications();
         let importance = self.importance.score(&signal.content);
-        let classification = self.classify_and_store_facts(signal).await;
+        let classification = self
+            .classify_and_store_facts(signal, conversation_history)
+            .await;
         let procedure_context = self.match_procedures(&signal.content);
 
         // Helper: prepend notification nudges to a response
@@ -316,9 +318,19 @@ impl SignalProcessor {
     }
 
     /// Run intent classification, log the outcome, and persist any facts
-    /// the classifier extracted on the side. Returns the classification.
-    async fn classify_and_store_facts(&self, signal: &Signal) -> thalamus::Classification {
-        let classification = self.classifier.classify(&signal.content).await;
+    /// the classifier extracted on the side. When `history` is supplied,
+    /// the LLM fallback uses it to disambiguate follow-up replies from
+    /// new biographical claims.
+    async fn classify_and_store_facts(
+        &self,
+        signal: &Signal,
+        history: Option<&[cortex::llm::Message]>,
+    ) -> thalamus::Classification {
+        let history = history.unwrap_or(&[]);
+        let classification = self
+            .classifier
+            .classify_with_history(&signal.content, history)
+            .await;
         self.metrics.inc_intent_classification();
         if matches!(classification.method, thalamus::ClassificationMethod::Llm) {
             self.metrics.inc_intent_llm_fallback();
@@ -733,9 +745,9 @@ impl SignalProcessor {
             by_subject.entry(f.subject.clone()).or_default().push(f);
         }
 
-        let mut out = String::new();
-        out.push_str(&format!(
-            "Memory snapshot — {} fact{} across {} subject{}, {} recent episode{}.\n",
+        let mut md = crate::render::Markdown::new();
+        md.push_line(format!(
+            "**Memory snapshot** — {} fact{} across {} subject{}, {} recent episode{}.",
             facts.len(),
             if facts.len() == 1 { "" } else { "s" },
             by_subject.len(),
@@ -745,22 +757,22 @@ impl SignalProcessor {
         ));
 
         if !by_subject.is_empty() {
-            out.push_str("\nStored facts:\n");
+            md.push_heading(3, "Stored facts");
             for (subject, subj_facts) in &by_subject {
-                out.push_str(&format!("  {subject}:\n"));
+                md.push_bullet(0, format!("**{subject}**"));
                 let mut seen = std::collections::HashSet::new();
                 for f in subj_facts {
                     let key = format!("{}|{}", f.predicate, f.object);
                     if !seen.insert(key) {
                         continue;
                     }
-                    out.push_str(&format!("    • {} → {}\n", f.predicate, f.object));
+                    md.push_bullet(1, format!("`{}` → {}", f.predicate, f.object));
                 }
             }
         }
 
         if !episodes.is_empty() {
-            out.push_str("\nRecent activity (most recent first):\n");
+            md.push_heading(3, "Recent activity");
             for ep in episodes.iter().take(8) {
                 let one_line = ep.content.lines().next().unwrap_or("").trim();
                 let trimmed = if one_line.chars().count() > 140 {
@@ -771,12 +783,12 @@ impl SignalProcessor {
                     one_line.to_string()
                 };
                 let ts_short: String = ep.timestamp.chars().take(16).collect();
-                out.push_str(&format!("  • [{ts_short}] {trimmed}\n"));
+                md.push_bullet(0, format!("*{ts_short}* — {trimmed}"));
             }
         }
 
-        out.push_str(
-            "\nTell me anything else you'd like remembered — projects, goals, \
+        md.push_line(
+            "Tell me anything else you'd like remembered — projects, goals, \
              preferences, or context I should keep around.",
         );
 
@@ -784,7 +796,7 @@ impl SignalProcessor {
         let resp = prepend_nudges(SignalResponse {
             signal_id,
             status: ResponseStatus::Ok,
-            response: ResponseContent::Text(out),
+            response: ResponseContent::Text(md.build()),
             memory_context: crate::MemoryContext {
                 facts_used: facts.len(),
                 episodes_used: episodes.len(),
@@ -898,14 +910,18 @@ impl SignalProcessor {
                 if entries.is_empty() {
                     "Audit trail is empty.".to_string()
                 } else {
-                    let mut out = "Recent audit entries:\n".to_string();
+                    let mut md = crate::render::Markdown::new();
+                    md.push_heading(3, "Recent audit entries");
                     for entry in entries {
-                        out.push_str(&format!(
-                            "  • [{}] {} -> {}\n",
-                            entry.timestamp, entry.action, entry.outcome
-                        ));
+                        md.push_bullet(
+                            0,
+                            format!(
+                                "*{}* — `{}` → {}",
+                                entry.timestamp, entry.action, entry.outcome
+                            ),
+                        );
                     }
-                    out.trim_end().to_string()
+                    md.build()
                 }
             }
             None => "Audit trail is not wired.".to_string(),
@@ -952,12 +968,13 @@ impl SignalProcessor {
                 if pending.is_empty() {
                     "No pending approvals.".to_string()
                 } else {
-                    let mut out = "Pending approvals:\n".to_string();
+                    let mut md = crate::render::Markdown::new();
+                    md.push_heading(3, "Pending approvals");
                     for p in pending {
-                        out.push_str(&format!("  • [{}] {}\n", p.nonce, p.action_description));
+                        md.push_bullet(0, format!("`{}` — {}", p.nonce, p.action_description));
                     }
-                    out.push_str("\nReply with 'approve <nonce>' or 'reject <nonce>'.");
-                    out
+                    md.push_line("Reply `approve <nonce>` or `reject <nonce>`.");
+                    md.build()
                 }
             }
             None => "Confirmation engine is not wired.".to_string(),
@@ -1070,16 +1087,17 @@ impl SignalProcessor {
                     .status()
                     .await
                     .map_err(|e| SignalError::Processing(format!("Budget status failed: {e}")))?;
-                let mut out = "Budget status:\n".to_string();
-                out.push_str("  Hourly consumption:\n");
+                let mut md = crate::render::Markdown::new();
+                md.push_heading(3, "Budget status");
+                md.push_bullet(0, "**Hourly consumption**");
                 for (k, v) in &status.hourly_consumption {
-                    out.push_str(&format!("    • {}: {}\n", k, v));
+                    md.push_kv(1, k, v.to_string());
                 }
-                out.push_str("  Daily consumption:\n");
+                md.push_bullet(0, "**Daily consumption**");
                 for (k, v) in &status.daily_consumption {
-                    out.push_str(&format!("    • {}: {}\n", k, v));
+                    md.push_kv(1, k, v.to_string());
                 }
-                out.trim_end().to_string()
+                md.build()
             }
             None => "Cost budget is not wired.".to_string(),
         };
@@ -1153,17 +1171,15 @@ impl SignalProcessor {
             format!("No known agents match '{filter}'.")
         } else {
             let registered: Vec<String> = registry.list();
-            let mut out = String::new();
-            out.push_str("Known agents:\n");
+            let mut md = crate::render::Markdown::new();
+            md.push_heading(3, "Known agents");
             for line in &matches_line {
-                out.push_str("  • ");
-                out.push_str(line);
-                out.push('\n');
+                md.push_bullet(0, line);
             }
             if needle.is_empty() && !registered.is_empty() {
-                out.push_str(&format!("\nReady to delegate: {}", registered.join(", ")));
+                md.push_line(format!("**Ready to delegate**: {}", registered.join(", ")));
             }
-            out.trim_end().to_string()
+            md.build()
         };
 
         let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
@@ -1189,11 +1205,19 @@ impl SignalProcessor {
             }
         };
 
+        // Auto-expand: if the request names files or directories the
+        // daemon can read, attach short excerpts so the decomposer plans
+        // against real content instead of guessing. This is the general
+        // fix for "user said run CI from .github/workflows/ci.yml and the
+        // planner invented `gh run view` because it never saw the file".
+        let relevant_facts = collect_path_excerpts(&request);
+
         // Build decomposition context from config + memory so the
         // decomposer LLM sees the actual sandbox allowlist and won't
         // produce plans that try to call binaries the sandbox refuses.
         let context = orchestrate::DecompositionContext {
             available_tools: self.config.security.exec_allowlist.clone(),
+            relevant_facts,
             ..Default::default()
         };
 
@@ -1222,11 +1246,12 @@ impl SignalProcessor {
                 if tasks.is_empty() {
                     "No active or recent tasks.".to_string()
                 } else {
-                    let mut out = "Recent tasks:\n".to_string();
+                    let mut md = crate::render::Markdown::new();
+                    md.push_heading(3, "Recent tasks");
                     for (id, desc, phase) in tasks {
-                        out.push_str(&format!("  • [{}] {} — {:?}\n", id, desc, phase));
+                        md.push_bullet(0, format!("`{id}` — {desc} *({phase:?})*"));
                     }
-                    out.trim_end().to_string()
+                    md.build()
                 }
             }
             None => "Task orchestrator is not wired.".to_string(),
@@ -1346,12 +1371,16 @@ impl SignalProcessor {
                         .to_string()
                 }
                 Ok(channels) => {
-                    let mut lines = vec!["Registered channels:".to_string()];
+                    let mut md = crate::render::Markdown::new();
+                    md.push_heading(3, "Registered channels");
                     for c in channels {
                         let health = if c.healthy { "healthy" } else { "down" };
-                        lines.push(format!("  • {} ({}, {}) — {health}", c.id, c.label, c.kind));
+                        md.push_bullet(
+                            0,
+                            format!("**{}** *({}, {})* — {health}", c.id, c.label, c.kind),
+                        );
                     }
-                    lines.join("\n")
+                    md.build()
                 }
                 Err(e) => format!("Channel listing failed: {e}"),
             },
@@ -1474,13 +1503,23 @@ impl SignalProcessor {
                         && !result.output.is_empty()
                     {
                         let search_context = format!(
-                            "The user asked: \"{}\"\n\nHere are web search results:\n{}\n\nUsing these search results, provide a helpful and concise answer to the user's question. Cite sources when relevant.",
+                            "The user asked: \"{}\"\n\nResearch material:\n{}\n\n\
+                             Answer the user's question grounded in the material above. \
+                             The `Linked sources` block (when present) is content fetched \
+                             directly from URLs the user pasted — treat it as authoritative \
+                             over the generic search hits. Quote page titles and URLs when \
+                             you reference them. If the material is silent on the user's \
+                             question, say so honestly instead of speculating.",
                             signal.content, result.output
                         );
                         let messages = vec![
                             cortex::llm::Message {
                                 role: cortex::llm::Role::System,
-                                content: "You are Brain OS. Answer the user's question using the provided web search results. Be concise and cite your sources.".to_string(),
+                                content: "You are Brain OS. Answer the user's question \
+                                          using the supplied research material. Be concise, \
+                                          cite sources by URL, and never invent content not \
+                                          present in the material."
+                                    .to_string(),
                             },
                             cortex::llm::Message {
                                 role: cortex::llm::Role::User,
@@ -1699,23 +1738,223 @@ fn build_file_snapshot(p: &std::path::Path) -> String {
     out
 }
 
-/// Read the first `cap` bytes of a path, returning a string. If the
-/// content is non-UTF-8 we declare it binary instead of garbling it.
+/// Read the first `cap` bytes of a path, returning a string. Routes
+/// through the format-aware extractor first so PDFs (and other
+/// supported binary formats) come back as real text. Falls back to a
+/// raw UTF-8 read for plain text files; non-text binaries return a
+/// short "(binary)" stub so the LLM doesn't see garbled bytes.
 fn read_truncated(path: &std::path::Path, cap: usize) -> String {
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(e) => return format!("(read failed: {})\n", friendly_io_error(&e)),
-    };
-    let truncated = bytes.len() > cap;
-    let head = &bytes[..bytes.len().min(cap)];
-    match std::str::from_utf8(head) {
-        Ok(s) => {
-            if truncated {
-                format!("{s}\n… (file truncated at {cap} bytes)\n")
-            } else {
-                format!("{s}\n")
+    match crate::extract::read_path_as_text(path, cap) {
+        Ok(s) => format!("{s}\n"),
+        Err(crate::extract::ExtractError::Io(e)) => {
+            format!("(read failed: {})\n", friendly_io_error(&e))
+        }
+        Err(crate::extract::ExtractError::NotText) => "(binary file — not displayed)\n".to_string(),
+        Err(crate::extract::ExtractError::Pdf(why)) => {
+            format!("(PDF parse failed: {why})\n")
+        }
+    }
+}
+
+// ── Auto-context expansion for decompose ───────────────────────────────────
+
+/// Maximum number of distinct paths we'll attach to a single decompose
+/// request. Caps the prompt size so a request that pastes a dozen files
+/// can't blow the LLM context window.
+const MAX_DECOMPOSE_PATHS: usize = 4;
+/// Per-file content cap when building the decomposer's relevant_facts.
+/// Tighter than `read_truncated`'s 12 KB because the decomposer needs a
+/// nudge, not a full code-review-quality excerpt.
+const DECOMPOSE_FILE_BYTES: usize = 3 * 1024;
+/// Bare filenames that are recognised as path tokens even without a
+/// directory separator. Common manifests + CI files only — the goal is
+/// to surface real grounding, not to scoop arbitrary identifiers.
+const BARE_MANIFEST_NAMES: &[&str] = &[
+    "Cargo.toml",
+    "Cargo.lock",
+    "package.json",
+    "pyproject.toml",
+    "setup.py",
+    "go.mod",
+    "Gemfile",
+    "Makefile",
+    "justfile",
+    "Justfile",
+    "README.md",
+    "CHANGELOG.md",
+    "ARCHITECTURE.md",
+    "Dockerfile",
+];
+
+/// Scan a free-form request for path-like tokens. Conservative on
+/// purpose — only tokens that are unambiguously paths (absolute,
+/// home-relative, explicitly relative, or contain a slash plus a
+/// recognisable file extension) qualify. A bare word like `brain` is
+/// NOT treated as a path even if it happens to be a directory in cwd.
+pub(crate) fn extract_path_tokens(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in text.split(|c: char| c.is_whitespace() || c == ',' || c == ';') {
+        // Trim wrapping punctuation from each end independently. We only
+        // strip a trailing `.` because `.github/workflows/...` is a real
+        // path token, while `.../ci.yml.` (sentence terminator) isn't.
+        let token = raw.trim_start_matches(['(', '[', '{', '\'', '"', '`']);
+        let token = token.trim_end_matches(['.', ')', ']', '}', '\'', '"', '!', '?', '`', ':']);
+        if token.is_empty() {
+            continue;
+        }
+        if !is_pathlike(token) {
+            continue;
+        }
+        if !out.iter().any(|p: &String| p == token) {
+            out.push(token.to_string());
+        }
+    }
+    out
+}
+
+fn is_pathlike(s: &str) -> bool {
+    if s.starts_with('/')
+        || s.starts_with("./")
+        || s.starts_with("../")
+        || s.starts_with("~/")
+        || s == "~"
+    {
+        return true;
+    }
+    if BARE_MANIFEST_NAMES.contains(&s) {
+        return true;
+    }
+    if !s.contains('/') {
+        return false;
+    }
+    // Relative path with at least one slash AND the basename has an
+    // extension — covers `crates/foo/Cargo.toml`, `.github/workflows/ci.yml`,
+    // etc., without falling for prose like `and/or`.
+    let basename = s.rsplit('/').next().unwrap_or("");
+    if basename.contains('.') {
+        return true;
+    }
+    // Common workflow/config dot-dirs.
+    s.starts_with(".github/") || s.starts_with(".vscode/") || s.starts_with(".cargo/")
+}
+
+/// Read short excerpts for every path token mentioned in `request`.
+/// Each entry becomes one `relevant_facts` line on the decomposer's
+/// prompt. Failures (missing path, unreadable, binary) are silently
+/// dropped — we don't want a prompt full of "(read failed: ...)".
+pub(crate) fn collect_path_excerpts(request: &str) -> Vec<String> {
+    let cwd = std::env::current_dir().ok();
+    extract_path_tokens(request)
+        .into_iter()
+        .take(MAX_DECOMPOSE_PATHS)
+        .filter_map(|tok| {
+            let expanded = expand_user_path(&tok);
+            let mut pb = std::path::PathBuf::from(&expanded);
+            if pb.is_relative() {
+                if let Some(base) = &cwd {
+                    pb = base.join(&pb);
+                }
+            }
+            build_decompose_excerpt(&tok, &pb)
+        })
+        .collect()
+}
+
+fn build_decompose_excerpt(token: &str, pb: &std::path::Path) -> Option<String> {
+    let meta = std::fs::metadata(pb).ok()?;
+    if meta.is_file() {
+        // Route through the extractor so PDFs (and any other binary
+        // formats we add later) come back as real text, not a refusal
+        // that pushes the planner into `grep -a` workarounds.
+        match crate::extract::read_path_as_text(pb, DECOMPOSE_FILE_BYTES) {
+            Ok(body) => Some(format!("File `{token}`:\n```\n{body}\n```")),
+            Err(e) => {
+                tracing::debug!(path = %pb.display(), error = %e, "decompose excerpt skipped");
+                None
             }
         }
-        Err(_) => "(binary file — not displayed)\n".to_string(),
+    } else if meta.is_dir() {
+        let mut entries: Vec<String> = std::fs::read_dir(pb)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if SKIP_DIRS.contains(&name.as_str()) {
+                    return None;
+                }
+                let suffix = if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                    "/"
+                } else {
+                    ""
+                };
+                Some(format!("{name}{suffix}"))
+            })
+            .collect();
+        entries.sort();
+        let shown: Vec<String> = entries.iter().take(20).cloned().collect();
+        let extra = entries.len().saturating_sub(shown.len());
+        let extra_line = if extra > 0 {
+            format!(", +{extra} more")
+        } else {
+            String::new()
+        };
+        Some(format!(
+            "Directory `{token}` ({} entries{extra_line}):\n  {}",
+            entries.len(),
+            shown.join("\n  ")
+        ))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod path_extraction_tests {
+    use super::*;
+
+    #[test]
+    fn extracts_absolute_relative_and_workflow_paths() {
+        let text = "perform CI from .github/workflows/ci.yml \
+                    in /Users/me/proj — also check ./crates/foo/Cargo.toml.";
+        let paths = extract_path_tokens(text);
+        assert!(paths.contains(&".github/workflows/ci.yml".to_string()));
+        assert!(paths.contains(&"/Users/me/proj".to_string()));
+        assert!(paths.contains(&"./crates/foo/Cargo.toml".to_string()));
+    }
+
+    #[test]
+    fn ignores_prose_words_with_slashes() {
+        let paths = extract_path_tokens("evaluate true/false logic and/or branches");
+        assert!(paths.is_empty(), "got {paths:?}");
+    }
+
+    #[test]
+    fn picks_up_bare_manifests() {
+        let paths = extract_path_tokens("look at Cargo.toml and package.json please");
+        assert!(paths.contains(&"Cargo.toml".to_string()));
+        assert!(paths.contains(&"package.json".to_string()));
+    }
+
+    #[test]
+    fn dedupes_repeated_paths() {
+        let paths = extract_path_tokens("/a/b /a/b /a/b/c");
+        assert_eq!(paths, vec!["/a/b".to_string(), "/a/b/c".to_string()]);
+    }
+
+    #[test]
+    fn collect_excerpts_returns_real_file_content() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("snippet.txt");
+        std::fs::write(&path, "hello world").expect("write");
+        let request = format!("look at {} please", path.display());
+        let excerpts = collect_path_excerpts(&request);
+        assert_eq!(excerpts.len(), 1);
+        assert!(excerpts[0].contains("hello world"));
+    }
+
+    #[test]
+    fn collect_excerpts_silently_skips_missing_paths() {
+        let excerpts = collect_path_excerpts("touch /tmp/does-not-exist-9384234");
+        assert!(excerpts.is_empty());
     }
 }

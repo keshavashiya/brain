@@ -165,6 +165,18 @@ pub trait IntentFallback: Send + Sync {
     /// Returns a best-effort classification for ambiguous input.
     /// Return `None` to allow the classifier's normal fallback behavior.
     async fn classify_with_llm(&self, input: &str) -> Option<Classification>;
+
+    /// History-aware variant. Default impl ignores history so trait
+    /// implementors stay backwards-compatible. Override to feed prior
+    /// turns into the classifier prompt — that's how the LLM tells
+    /// "username : foo" (a follow-up parameter) from a self-introduction.
+    async fn classify_with_history(
+        &self,
+        input: &str,
+        _history: &[cortex::llm::Message],
+    ) -> Option<Classification> {
+        self.classify_with_llm(input).await
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,7 +274,12 @@ Rules:
 
 FACT EXTRACTION: Regardless of intent, if the input contains personal facts about the user (name, role, company, projects, skills, interests, goals, location, preferences, habits), extract them into the "facts" array. Each fact is {"subject": "user", "predicate": "<snake_case_verb>", "object": "<value>"}.
 Predicates: name_is, role_is, works_at, works_on, title_is, interested_in, lives_in, skill_is, goal_is, preference_is, likes, etc.
-Only extract clear factual statements. If no facts, set facts to [].
+Only extract a fact when the user is making a clear self-statement in natural language ("my name is X", "I work at Y", "I'm a Z developer"). Do NOT extract facts from:
+- Short parameter-shaped messages (`username : foo`, `email = bar`, `5 minutes`, `yes`, `no`) — these are almost always follow-up parameters to a previous turn. Classify the intent as `chat` and return facts: [].
+- Bare identifiers, paths, or URLs typed alone — they're context for the prior request, not biography.
+- Anything you wouldn't confidently restate as a sentence about the user.
+When recent conversation history is supplied above your input, USE it: a one-line reply right after a question is a parameter to that question, not a new biographical claim. If no history is supplied, default to skepticism — extract facts only when the wording is self-evidently a self-statement.
+If no facts qualify, set facts to [].
 
 Return only JSON with keys: intent, subject, predicate, object, query, filter, since, limit, older_than, status, nonce, decision, window, id, task_id, enabled, until, target, command, args, description, cron, channel, recipient, content, path, focus, facts.
 Missing keys must be null. facts must be [] if none."#;
@@ -270,7 +287,52 @@ Missing keys must be null. facts must be [] if none."#;
 #[async_trait::async_trait]
 impl IntentFallback for LlmIntentFallback {
     async fn classify_with_llm(&self, input: &str) -> Option<Classification> {
+        self.classify_with_history(input, &[]).await
+    }
+
+    async fn classify_with_history(
+        &self,
+        input: &str,
+        history: &[cortex::llm::Message],
+    ) -> Option<Classification> {
         use cortex::llm::{Message, Role};
+
+        // Build a compact transcript from at most the last 4 turns. The
+        // classifier only needs enough context to recognise follow-ups —
+        // not the full thread. Keeping it short also caps token cost on
+        // every classification call.
+        const HISTORY_TURNS: usize = 4;
+        const PER_TURN_CHARS: usize = 240;
+        let transcript = if history.is_empty() {
+            String::new()
+        } else {
+            let recent: Vec<&Message> = history.iter().rev().take(HISTORY_TURNS).collect();
+            let mut lines = Vec::new();
+            for msg in recent.into_iter().rev() {
+                let label = match msg.role {
+                    Role::User => "user",
+                    Role::Assistant => "assistant",
+                    Role::System => continue,
+                };
+                let trimmed: String = msg.content.chars().take(PER_TURN_CHARS).collect();
+                let suffix = if msg.content.chars().count() > PER_TURN_CHARS {
+                    "…"
+                } else {
+                    ""
+                };
+                lines.push(format!("{label}: {trimmed}{suffix}"));
+            }
+            format!(
+                "Recent conversation (oldest first):\n{}\n\n",
+                lines.join("\n")
+            )
+        };
+
+        let user_content = if transcript.is_empty() {
+            input.to_string()
+        } else {
+            format!("{transcript}New input to classify:\n{input}")
+        };
 
         let messages = vec![
             Message {
@@ -279,7 +341,7 @@ impl IntentFallback for LlmIntentFallback {
             },
             Message {
                 role: Role::User,
-                content: input.to_string(),
+                content: user_content,
             },
         ];
 

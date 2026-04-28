@@ -16,8 +16,10 @@ pub mod types;
 
 mod constructors;
 mod exchange;
+mod extract;
 mod pipeline;
 mod recall;
+mod render;
 mod streaming;
 mod wiring;
 
