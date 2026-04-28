@@ -1105,4 +1105,32 @@ mod tests {
         let task = orchestrator.get_task(&task_id).await.unwrap();
         assert_eq!(task.phase, TaskPhase::Cancelled);
     }
+
+    #[tokio::test]
+    async fn notify_with_no_channels_is_soft_success() {
+        // When the dispatcher has no transports registered, the router
+        // returns NoChannelAvailable. The orchestrator must NOT fail the
+        // step — replan-on-failure produces Notify steps as its honest
+        // "I cannot do this" path, and a hard failure here recurses into
+        // more Notify steps until the replan budget is exhausted (see
+        // brain.log:1036–1043 for the user-visible cascade).
+        let db = storage::SqlitePool::open_memory().unwrap();
+        let prefs = Arc::new(channel::SqlitePreferenceStore::new(db));
+        prefs.ensure_tables().unwrap();
+        let router: Arc<dyn channel::ChannelRouter> =
+            Arc::new(channel::DefaultChannelRouter::new(prefs));
+        let dispatcher = Arc::new(channel::ChannelDispatcher::new(router));
+
+        let decomposer = Arc::new(MockDecomposer {
+            steps: test_steps(),
+        });
+        let orchestrator = TaskOrchestrator::new(decomposer).with_channel_dispatcher(dispatcher);
+
+        let outcome = orchestrator
+            .execute_notify_step("default", "PDF cannot be parsed: pdftotext missing")
+            .await
+            .expect("notify must not fail when no channels are configured");
+        assert!(outcome.summary.contains("no external channel"));
+        assert!(outcome.summary.contains("pdftotext missing"));
+    }
 }

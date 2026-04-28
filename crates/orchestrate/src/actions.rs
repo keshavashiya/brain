@@ -129,6 +129,22 @@ impl TaskOrchestrator {
                 artifacts: vec![],
                 summary: format!("Notified via {}: {message}", receipt.channel_id),
             }),
+            // No transports configured / no channel matches the intent — surface
+            // the message via the orchestrator's task-completion summary instead
+            // of failing the step. Replan-on-failure produces Notify steps as
+            // its honest "I cannot do this" path; if delivery itself failed
+            // here we'd recurse into more Notify steps and exhaust the replan
+            // budget, leaving the user with a cascade of "delivery failed"
+            // entries hiding the actual blocker message.
+            Err(channel::ChannelError::NoChannelAvailable(_, _)) => Ok(StepOutcome {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: None,
+                artifacts: vec![],
+                summary: format!(
+                    "Notify (no external channel — included in this report): {message}"
+                ),
+            }),
             Err(e) => Err(format!("Notify delivery failed: {e}")),
         }
     }
