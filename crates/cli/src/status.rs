@@ -141,14 +141,22 @@ pub(crate) async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Res
         println!("    (daemon not running — start with `brain start` to view)");
     }
 
-    // External service health
+    // External service health — only probe SearXNG when the user has
+    // explicitly selected it as the provider. The default DuckDuckGo
+    // backend has no external service to probe, so we'd otherwise report
+    // "SearXNG: stopped" on every default install and create the
+    // impression of a missing dependency.
     let searxng_ep = config
         .actions
         .web_search
         .endpoint
         .trim()
         .trim_end_matches('/');
-    if !searxng_ep.is_empty() {
+    let probes_searxng = matches!(
+        config.actions.web_search.provider,
+        brain_core::config::WebSearchProvider::Searxng
+    );
+    if probes_searxng && !searxng_ep.is_empty() {
         println!("\n  External Services:");
         let client = reqwest::Client::builder()
             .timeout(brain_core::timeouts::STATUS_CHECK)

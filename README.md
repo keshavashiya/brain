@@ -62,7 +62,7 @@ The memory engine combines vector search (HNSW) with full-text search (BM25 FTS5
 
 ## Install
 
-**Requirements:** [Ollama](https://ollama.com) (or any OpenAI-compatible API), Docker (optional, for web search)
+**Requirements:** [Ollama](https://ollama.com) (or any OpenAI-compatible API). Docker is optional — only needed if you want to upgrade the default DuckDuckGo web search to the higher-quality bundled SearXNG container.
 
 <details>
 <summary><strong>From crates.io (recommended)</strong></summary>
@@ -72,7 +72,7 @@ cargo install brainos          # requires Rust 1.82+
 brain init                     # creates ~/.brain/ with config, database, vector index
 ollama pull qwen2.5-coder:7b
 ollama pull nomic-embed-text
-brain deps up                  # optional: starts SearXNG web search on port 8888
+brain deps up                  # optional: upgrade web search from DuckDuckGo (default) to SearXNG on port 8888
 ```
 
 </details>
@@ -467,11 +467,12 @@ Action intents routed by Thalamus (`web_search`, `schedule_task`, `send_message`
 
 **Web Search Providers:**
 
-| Provider | Auth | Self-hosted | Setup |
-|----------|------|-------------|-------|
-| `searxng` | None | Yes | `brain deps up` |
-| `tavily` | API key (free, no CC) | No | Sign up at tavily.com |
-| `custom` | None | — | Any OpenAI-compatible JSON search API |
+| Provider | Auth | Self-hosted | Setup | Notes |
+|----------|------|-------------|-------|-------|
+| `duckduckgo` | None | — | None — works out of box | Default. Single-engine HTML scrape; basic quality |
+| `searxng` | None | Yes | `brain deps up` | Multi-engine metasearch; best quality |
+| `tavily` | API key (free, no CC) | No | Sign up at tavily.com | Hosted, AI-tuned snippets |
+| `custom` | None | — | Any OpenAI-compatible JSON search API | |
 
 **Scheduling:**
 ```yaml

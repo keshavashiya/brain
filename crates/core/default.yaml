@@ -87,9 +87,13 @@ security:
 # ── Actions ────────────────────────────────────────────────────────────────────
 actions:
   web_search:
+    # On by default. The "duckduckgo" provider is a zero-config built-in
+    # that works without Docker or an API key — basic quality, but always
+    # available. Switch to "searxng" (run `brain deps up` first) for the
+    # best results, or "tavily" with an API key for a hosted option.
     enabled: true
-    provider: "searxng"         # searxng | tavily | custom
-    endpoint: "http://localhost:8888"
+    provider: "duckduckgo"      # duckduckgo | searxng | tavily | custom
+    endpoint: "http://localhost:8888"  # used by searxng/custom only
     api_key: ""                 # required for tavily
     timeout_ms: 3000
     default_top_k: 5

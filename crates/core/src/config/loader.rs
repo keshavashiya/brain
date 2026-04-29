@@ -361,8 +361,11 @@ impl Default for BrainConfig {
             },
             actions: ActionsConfig {
                 web_search: WebSearchActionConfig {
+                    // On by default. DuckDuckGo HTML scraping is the
+                    // zero-config built-in so first-run has working web
+                    // search without Docker or an API key.
                     enabled: true,
-                    provider: WebSearchProvider::Searxng,
+                    provider: WebSearchProvider::DuckDuckGo,
                     endpoint: "http://localhost:8888".to_string(),
                     api_key: String::new(),
                     timeout_ms: 3_000,

@@ -1,4 +1,5 @@
-//! Web search backends — SearXNG, Tavily, and custom endpoint providers.
+//! Web search backends — DuckDuckGo (zero-config built-in), SearXNG,
+//! Tavily, and custom endpoint providers.
 
 use std::sync::Arc;
 
@@ -68,6 +69,257 @@ pub fn build_search_client(timeout_ms: u64) -> anyhow::Result<reqwest::Client> {
         .timeout(std::time::Duration::from_millis(timeout_ms.max(1)))
         .build()
         .map_err(|e| anyhow::anyhow!("search client init failed: {e}"))
+}
+
+/// DuckDuckGo HTML provider — zero-config, no API key, no Docker.
+/// Hits the public `html.duckduckgo.com` endpoint and parses result
+/// blocks out of the response. Quality is more limited than a metasearch
+/// aggregator like SearXNG (single engine, no rich snippets), but it
+/// works on every install with no setup. Falls back gracefully when
+/// the HTML layout changes — bad parses return empty rather than panic.
+pub struct DuckDuckGoSearchBackend {
+    client: reqwest::Client,
+    circuit_breaker: Arc<CircuitBreaker>,
+    max_retries: u32,
+    retry_base_ms: u64,
+}
+
+impl DuckDuckGoSearchBackend {
+    pub fn new(
+        timeout_ms: u64,
+        resilience: &brain_core::config::ResilienceConfig,
+    ) -> anyhow::Result<Self> {
+        Self::new_with_metrics(timeout_ms, resilience, None)
+    }
+
+    pub fn new_with_metrics(
+        timeout_ms: u64,
+        resilience: &brain_core::config::ResilienceConfig,
+        metrics: Option<Arc<SubsystemMetrics>>,
+    ) -> anyhow::Result<Self> {
+        // DDG's HTML endpoint inspects the User-Agent and serves the
+        // post-only "we redirected you" stub if it looks too generic.
+        // A normal-looking UA gets the real result list.
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(timeout_ms.max(1)))
+            .user_agent(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+                 AppleWebKit/537.36 (KHTML, like Gecko) \
+                 Chrome/124.0.0.0 Safari/537.36",
+            )
+            .redirect(reqwest::redirect::Policy::limited(3))
+            .build()
+            .map_err(|e| anyhow::anyhow!("DuckDuckGo client init failed: {e}"))?;
+        Ok(Self {
+            client,
+            circuit_breaker: Arc::new(make_cb("duckduckgo", resilience, metrics)),
+            max_retries: resilience.max_retries,
+            retry_base_ms: resilience.retry_base_ms,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl cortex::actions::WebSearchBackend for DuckDuckGoSearchBackend {
+    async fn search(
+        &self,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<cortex::actions::SearchHit>, cortex::actions::ActionError> {
+        let url = "https://html.duckduckgo.com/html/";
+        let client = self.client.clone();
+        let query_owned = query.to_string();
+        let response = resilient_send(
+            || client.get(url).query(&[("q", query_owned.as_str())]),
+            &self.circuit_breaker,
+            self.max_retries,
+            self.retry_base_ms,
+        )
+        .await?;
+
+        if !response.status().is_success() {
+            return Err(cortex::actions::ActionError::ExecutionFailed(format!(
+                "DuckDuckGo returned HTTP {}",
+                response.status()
+            )));
+        }
+
+        let html = response
+            .text()
+            .await
+            .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))?;
+
+        Ok(parse_duckduckgo_html(&html, top_k))
+    }
+}
+
+/// Pull title/url/snippet out of DuckDuckGo's HTML response. Each result
+/// is wrapped in a `<div class="result …">` block; inside it the title
+/// link has class `result__a`, the snippet has class `result__snippet`.
+/// DDG rewrites destination URLs through `/l/?uddg=<percent-encoded>`,
+/// so we have to undo that to surface the real link.
+fn parse_duckduckgo_html(html: &str, top_k: usize) -> Vec<cortex::actions::SearchHit> {
+    let mut hits = Vec::new();
+    let mut cursor = 0usize;
+    let max = top_k.max(1);
+
+    while hits.len() < max {
+        // Find the next result block. Match on the class anchor that's
+        // stable across DDG's HTML variants: every result row contains
+        // an `<a class="result__a"` for the title link.
+        let Some(rel) = html[cursor..].find("class=\"result__a\"") else {
+            break;
+        };
+        let block_start = cursor + rel;
+        // Walk back to find the opening `<a` of that anchor.
+        let Some(a_open) = html[..block_start].rfind("<a ") else {
+            cursor = block_start + 1;
+            continue;
+        };
+        // Extract href.
+        let after_a_open = a_open + 3;
+        let Some(href_rel) = html[after_a_open..].find("href=\"") else {
+            cursor = block_start + 1;
+            continue;
+        };
+        let href_start = after_a_open + href_rel + 6;
+        let Some(href_end_rel) = html[href_start..].find('"') else {
+            cursor = block_start + 1;
+            continue;
+        };
+        let href_raw = &html[href_start..href_start + href_end_rel];
+        let url = decode_ddg_redirect(href_raw);
+
+        // Title text: everything between the `>` after the anchor open
+        // and the matching `</a>`.
+        let Some(gt_rel) = html[block_start..].find('>') else {
+            cursor = block_start + 1;
+            continue;
+        };
+        let title_start = block_start + gt_rel + 1;
+        let Some(title_end_rel) = html[title_start..].find("</a>") else {
+            cursor = block_start + 1;
+            continue;
+        };
+        let title = strip_html(&html[title_start..title_start + title_end_rel]);
+        let snippet_search_from = title_start + title_end_rel;
+
+        // Snippet — the next `class="result__snippet"` block within a
+        // bounded window so we don't pull a snippet from the next result.
+        let window_end = html[snippet_search_from..]
+            .find("class=\"result__a\"")
+            .map(|r| snippet_search_from + r)
+            .unwrap_or(html.len());
+        let window = &html[snippet_search_from..window_end];
+        let snippet = window
+            .find("class=\"result__snippet\"")
+            .and_then(|s| {
+                let from = snippet_search_from + s;
+                let gt = html[from..].find('>')? + from + 1;
+                let end = html[gt..].find("</a>")? + gt;
+                Some(strip_html(&html[gt..end]))
+            })
+            .unwrap_or_default();
+
+        if !url.is_empty() && !title.is_empty() {
+            hits.push(cortex::actions::SearchHit {
+                title,
+                url,
+                snippet,
+            });
+        }
+        cursor = window_end;
+    }
+
+    hits
+}
+
+/// DDG wraps every result URL in `https://duckduckgo.com/l/?uddg=…&…` (or
+/// the protocol-relative `//duckduckgo.com/l/?uddg=…`). Extract the
+/// `uddg` parameter and percent-decode it; if the input isn't a redirect,
+/// return it unchanged so direct links still work.
+fn decode_ddg_redirect(href: &str) -> String {
+    let trimmed = href
+        .trim()
+        .trim_start_matches("https:")
+        .trim_start_matches("http:");
+    if !(trimmed.starts_with("//duckduckgo.com/l/") || trimmed.starts_with("/l/?uddg=")) {
+        // Not a redirect — but still normalise protocol-relative URLs
+        // so downstream consumers get a fully-qualified scheme.
+        if let Some(stripped) = href.strip_prefix("//") {
+            return format!("https://{stripped}");
+        }
+        return href.to_string();
+    }
+    // Find `uddg=` and percent-decode up to the next `&` or end of string.
+    let Some(start) = href.find("uddg=") else {
+        return href.to_string();
+    };
+    let after = &href[start + 5..];
+    let end = after.find('&').unwrap_or(after.len());
+    percent_decode(&after[..end])
+}
+
+/// Minimal percent-decoder. We can't pull `percent-encoding` for one
+/// call site without bloating the dep tree; the input is well-formed
+/// query-string output so this covers the cases that matter.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = hex_digit(bytes[i + 1]);
+            let lo = hex_digit(bytes[i + 2]);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        if bytes[i] == b'+' {
+            out.push(b' ');
+        } else {
+            out.push(bytes[i]);
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Strip HTML tags + decode the entities DDG actually emits in titles
+/// and snippets (`&amp;`, `&#39;`, `&quot;`, `&lt;`, `&gt;`, `&nbsp;`).
+/// Whitespace runs collapse to a single space so the snippet renders
+/// cleanly when the LLM quotes it back.
+fn strip_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for ch in s.chars() {
+        match ch {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if in_tag => {}
+            _ => out.push(ch),
+        }
+    }
+    let decoded = out
+        .replace("&amp;", "&")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+        .replace("&quot;", "\"")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&nbsp;", " ");
+    decoded.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// SearXNG provider — self-hosted metasearch engine.
@@ -334,6 +586,84 @@ impl cortex::actions::WebSearchBackend for CustomSearchBackend {
             .unwrap_or_default();
 
         Ok(parse_search_results(candidates, top_k))
+    }
+}
+
+#[cfg(test)]
+mod ddg_parser_tests {
+    use super::*;
+
+    const SAMPLE_HTML: &str = r#"
+        <div class="result results_links">
+          <h2 class="result__title">
+            <a class="result__a" rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.rust-lang.org%2F&amp;rut=abc">
+              The Rust Programming Language
+            </a>
+          </h2>
+          <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.rust-lang.org%2F">
+            A language empowering everyone to build <b>reliable</b> and efficient software.
+          </a>
+        </div>
+        <div class="result results_links">
+          <h2 class="result__title">
+            <a class="result__a" rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fdoc.rust-lang.org%2Fbook%2F&amp;rut=def">
+              The Rust Programming Language - The Rust Book
+            </a>
+          </h2>
+          <a class="result__snippet">
+            An introductory book about Rust&#39;s ownership &amp; lifetimes.
+          </a>
+        </div>
+    "#;
+
+    #[test]
+    fn parses_title_url_and_snippet_from_real_layout() {
+        let hits = parse_duckduckgo_html(SAMPLE_HTML, 10);
+        assert_eq!(hits.len(), 2, "should pick up both result blocks");
+        assert_eq!(hits[0].title, "The Rust Programming Language");
+        assert_eq!(hits[0].url, "https://www.rust-lang.org/");
+        assert!(hits[0].snippet.contains("reliable and efficient"));
+        assert_eq!(hits[1].url, "https://doc.rust-lang.org/book/");
+        // HTML entities in the snippet should be decoded.
+        assert!(hits[1].snippet.contains("Rust's ownership & lifetimes"));
+    }
+
+    #[test]
+    fn respects_top_k() {
+        let hits = parse_duckduckgo_html(SAMPLE_HTML, 1);
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn returns_empty_on_unrecognised_layout() {
+        let hits = parse_duckduckgo_html("<html><body>no results</body></html>", 5);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn decodes_redirect_and_passes_direct_urls_through() {
+        assert_eq!(
+            decode_ddg_redirect("//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa&rut=x"),
+            "https://example.com/a"
+        );
+        // Direct https URL — pass through unchanged.
+        assert_eq!(
+            decode_ddg_redirect("https://example.com/direct"),
+            "https://example.com/direct"
+        );
+        // Protocol-relative non-redirect — normalise to https.
+        assert_eq!(
+            decode_ddg_redirect("//example.com/x"),
+            "https://example.com/x"
+        );
+    }
+
+    #[test]
+    fn percent_decoder_handles_plus_and_hex() {
+        assert_eq!(percent_decode("hello+world"), "hello world");
+        assert_eq!(percent_decode("a%20b%2Fc"), "a b/c");
+        // Malformed escapes are passed through verbatim instead of panicking.
+        assert_eq!(percent_decode("a%ZZb"), "a%ZZb");
     }
 }
 

@@ -351,6 +351,10 @@ fn build_action_dispatcher(
             Option<Arc<dyn cortex::actions::WebSearchBackend>>,
             anyhow::Error,
         > = match ws.provider {
+            brain_core::config::WebSearchProvider::DuckDuckGo => {
+                DuckDuckGoSearchBackend::new_with_metrics(timeout, res, metrics.clone())
+                    .map(|b| Some(Arc::new(b) as _))
+            }
             brain_core::config::WebSearchProvider::Searxng => {
                 let ep = if endpoint.is_empty() {
                     "http://localhost:8888"

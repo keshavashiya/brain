@@ -16,4 +16,6 @@ pub use messaging::{
 };
 pub use resilience::{resilient_send, CircuitBreaker};
 pub use scheduling::DefaultSchedulingBackend;
-pub use search::{CustomSearchBackend, SearxngSearchBackend, TavilySearchBackend};
+pub use search::{
+    CustomSearchBackend, DuckDuckGoSearchBackend, SearxngSearchBackend, TavilySearchBackend,
+};

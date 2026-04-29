@@ -14,7 +14,7 @@ fn test_default_config() {
     assert!(!config.encryption.enabled);
     assert_eq!(
         config.actions.web_search.provider,
-        WebSearchProvider::Searxng
+        WebSearchProvider::DuckDuckGo
     );
     assert_eq!(config.actions.scheduling.mode, SchedulingMode::PersistOnly);
     assert!(!config.proactivity.enabled);
@@ -142,10 +142,12 @@ fn test_validate_consolidation_interval_zero_warning() {
 #[test]
 fn test_actions_defaults_deserialize() {
     let config = BrainConfig::default();
+    // On by default; DuckDuckGo HTML is the zero-config built-in so
+    // web search works without Docker or an API key.
     assert!(config.actions.web_search.enabled);
     assert_eq!(
         config.actions.web_search.provider,
-        WebSearchProvider::Searxng
+        WebSearchProvider::DuckDuckGo
     );
     assert_eq!(config.actions.web_search.default_top_k, 5);
     assert_eq!(config.actions.scheduling.mode, SchedulingMode::PersistOnly);

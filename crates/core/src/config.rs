@@ -209,9 +209,12 @@ impl Default for ResilienceConfig {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WebSearchProvider {
+    /// Built-in DuckDuckGo HTML scraper. Zero-config, no API key, no
+    /// Docker — basic quality but always available.
+    #[default]
+    DuckDuckGo,
     Searxng,
     Tavily,
-    #[default]
     Custom,
 }
 
