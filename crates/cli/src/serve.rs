@@ -581,14 +581,19 @@ pub(crate) async fn promote_candidates(
 }
 
 /// Pipe an inbound transport message into the main signal pipeline with the
-/// same shape the relay handler uses.
+/// same shape the relay handler uses, then route the pipeline's response
+/// back to the originating channel via the dispatcher. Without the
+/// round-trip, replies to inbound Telegram/etc. messages would be silently
+/// dropped (the request side has no live WS adapter to write back to).
 async fn forward_inbound_to_signal(
     msg: channel::InboundMessage,
     processor: Arc<signal::SignalProcessor>,
+    dispatcher: Arc<channel::ChannelDispatcher>,
     channel_id: String,
     namespace: String,
 ) {
     let sender = msg.user_ref.clone().unwrap_or_else(|| "transport".into());
+    let reply_to = msg.reply_to.clone();
     let sig = signal::Signal::new(
         signal::SignalSource::WebSocket,
         &channel_id,
@@ -596,8 +601,31 @@ async fn forward_inbound_to_signal(
         &msg.content,
     )
     .with_namespace(&namespace);
-    if let Err(e) = processor.process(sig).await {
-        tracing::warn!(channel = %channel_id, error = %e, "Transport inbound pipeline error");
+    let resp = match processor.process(sig).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(channel = %channel_id, error = %e, "Transport inbound pipeline error");
+            return;
+        }
+    };
+
+    let body = signal::response_to_text(&resp.response);
+    if body.trim().is_empty() {
+        return;
+    }
+    let mut intent = channel::DeliveryIntent::new(
+        body,
+        channel::DeliveryCategory::Response,
+        channel::UrgencyLevel::Normal,
+    )
+    .with_namespace(&namespace)
+    .with_preferred(&channel_id)
+    .with_initiation(&channel_id);
+    if let Some(rt) = reply_to {
+        intent = intent.with_metadata("reply_to", rt);
+    }
+    if let Err(e) = dispatcher.dispatch(intent).await {
+        tracing::warn!(channel = %channel_id, error = %e, "Failed to route inbound response back to source");
     }
 }
 
@@ -671,6 +699,7 @@ async fn wire_preset_transports(
 
                 let rx = transport.inbound();
                 let proc_clone = processor.clone();
+                let disp_clone = dispatcher.clone();
                 let chan_id = entry.id.clone();
                 let ns = entry.namespace.clone();
                 let corr = correlator.clone();
@@ -687,6 +716,7 @@ async fn wire_preset_transports(
                         forward_inbound_to_signal(
                             msg,
                             proc_clone.clone(),
+                            disp_clone.clone(),
                             chan_id.clone(),
                             ns.clone(),
                         )

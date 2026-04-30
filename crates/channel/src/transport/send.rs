@@ -35,8 +35,25 @@ pub async fn http_send(
         }
     }
 
+    // URL template: percent-encoding is the caller's job; raw substitution
+    // is fine for `{credential}` and cursor-style values.
     let url = render_template(&send.url_template, &vars);
-    let body = render_template(&send.body_template, &vars);
+
+    // Body template: when the wire format is JSON, the values must be
+    // JSON-string-escaped or any quote/newline/backslash in `content` will
+    // produce a malformed body and the platform will reject it (Telegram
+    // 400 "can't parse entities"). Escape per content type.
+    let body = if is_json_content_type(&send.content_type) {
+        let escaped: HashMap<&str, String> = vars
+            .iter()
+            .map(|(k, v)| (*k, json_escape_inner(v)))
+            .collect();
+        let escaped_refs: HashMap<&str, &str> =
+            escaped.iter().map(|(k, v)| (*k, v.as_str())).collect();
+        render_template(&send.body_template, &escaped_refs)
+    } else {
+        render_template(&send.body_template, &vars)
+    };
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -85,4 +102,58 @@ pub async fn http_send(
         handle = handle.with_platform_id(id);
     }
     Ok(handle)
+}
+
+fn is_json_content_type(ct: &str) -> bool {
+    let lower = ct.to_ascii_lowercase();
+    lower.starts_with("application/json") || lower.contains("+json")
+}
+
+/// Escape the *inner* characters of a JSON string — caller is responsible
+/// for the surrounding quotes (the preset body_template already includes
+/// them). Handles the minimum required by RFC 8259.
+fn json_escape_inner(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\x08' => out.push_str("\\b"),
+            '\x0c' => out.push_str("\\f"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn json_escape_basics() {
+        assert_eq!(json_escape_inner("hi"), "hi");
+        assert_eq!(json_escape_inner("a\"b"), "a\\\"b");
+        assert_eq!(json_escape_inner("a\nb"), "a\\nb");
+        assert_eq!(json_escape_inner("a\\b"), "a\\\\b");
+        assert_eq!(json_escape_inner("a\tb"), "a\\tb");
+    }
+
+    #[test]
+    fn json_escape_control_char() {
+        assert_eq!(json_escape_inner("\x01"), "\\u0001");
+    }
+
+    #[test]
+    fn json_content_type_detection() {
+        assert!(is_json_content_type("application/json"));
+        assert!(is_json_content_type("application/json; charset=utf-8"));
+        assert!(is_json_content_type("application/vnd.api+json"));
+        assert!(!is_json_content_type("text/plain"));
+        assert!(!is_json_content_type("application/x-www-form-urlencoded"));
+    }
 }

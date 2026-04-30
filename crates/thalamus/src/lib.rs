@@ -93,6 +93,11 @@ pub enum Intent {
     /// Ask about available specialist agents (delegates). Optional
     /// `filter` narrows the answer: e.g. "rust", "aider", or "".
     QueryAgents { filter: String },
+    /// Run a single-turn delegation to a named specialist agent. Bypasses
+    /// task decomposition — used when the user explicitly asks "delegate
+    /// to claude-code: ..." or "@codex: ...". For multi-step plans the
+    /// orchestrator picks the agent itself via [`DecomposeTask`].
+    DelegateTask { agent: String, prompt: String },
     /// Configure proactivity / nudges.
     SetProactivity {
         enabled: bool,
@@ -208,6 +213,11 @@ struct LlmIntentPayload {
     content: Option<String>,
     path: Option<String>,
     focus: Option<String>,
+    /// Specialist agent id for `delegate_task` (e.g. `"claude-code"`).
+    agent: Option<String>,
+    /// Prompt body for `delegate_task` (separate from `query`/`content`
+    /// so the LLM can disambiguate from chat).
+    prompt: Option<String>,
     /// Facts extracted from conversational input (populated for chat intent).
     facts: Option<Vec<LlmFactPayload>>,
 }
@@ -245,7 +255,7 @@ impl LlmIntentFallback {
 }
 
 const CLASSIFIER_SYSTEM_PROMPT: &str = r#"You classify user input into exactly one intent for Brain OS.
-Valid intents: store_fact, recall, forget, execute_command, web_search, query_audit, prune_audit, list_approvals, respond_to_approval, budget_status, schedule, list_schedules, cancel_schedule, send_message, system_status, decompose_task, list_tasks, task_status, cancel_task, query_agents, set_proactivity, proactivity_status, memory_summary, project_inspect, chat.
+Valid intents: store_fact, recall, forget, execute_command, web_search, query_audit, prune_audit, list_approvals, respond_to_approval, budget_status, schedule, list_schedules, cancel_schedule, send_message, system_status, decompose_task, list_tasks, task_status, cancel_task, query_agents, delegate_task, set_proactivity, proactivity_status, memory_summary, project_inspect, chat.
 Rules:
 - query_audit is for checking past actions: "what did I run today", "show my audit entries", "what did I approve yesterday".
 - prune_audit is for deleting old audit entries: "prune audit logs older than 30 days".
@@ -266,6 +276,7 @@ Rules:
 - decompose_task is for multi-step requests that need planning and execution: "build a CSV export feature", "set up CI/CD pipeline", "refactor the auth module and add tests", "deploy to production". The request must involve multiple steps or coordination. Simple single-step requests are NOT decompose_task.
 - project_inspect is for read-only, single-step requests to look at a local directory or file and describe/summarise/report on it: "look at the project at /path and summarise it", "tell me about /path", "describe the codebase at /path", "give me a report on /path", "analyse /path". REQUIRED: extract `path` from the input (the file/directory path the user named). Optional: `focus` is whatever the user wants emphasised ("its dependencies", "the test layout"). NEVER pick decompose_task for this shape — inspection is a read action, not a workflow.
 - query_agents is for asking which specialist agents are available or why a named agent is unavailable: "what agents do you have", "which agents can code rust", "why aren't you using aider".
+- delegate_task is for explicit single-shot delegation to a named agent: "delegate to claude-code: refactor X", "ask codex: explain Y", "@aider: fix the bug". Set `agent` to the lowercase agent id and `prompt` to the task body. Do NOT use this for multi-step plans — those go to decompose_task and the orchestrator picks an agent itself.
 - Conversational statements ("I've done X", "I completed X", "I like X") are chat but ALSO extract any personal facts (see below).
 - Prefer web_search for explicit search requests about internet/google/latest/current external info.
 - For web_search, set 'query' to the exact optimal search terms, stripping conversational fluff.
@@ -489,6 +500,29 @@ impl IntentFallback for LlmIntentFallback {
             "query_agents" => Intent::QueryAgents {
                 filter: payload.query.unwrap_or_default(),
             },
+            "delegate_task" => {
+                let agent = payload
+                    .agent
+                    .clone()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_lowercase();
+                let prompt = payload
+                    .prompt
+                    .clone()
+                    .or(payload.content.clone())
+                    .or(payload.query.clone())
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                if agent.is_empty() || prompt.is_empty() {
+                    Intent::Chat {
+                        content: input.to_string(),
+                    }
+                } else {
+                    Intent::DelegateTask { agent, prompt }
+                }
+            }
             "set_proactivity" => Intent::SetProactivity {
                 enabled: payload.enabled.unwrap_or(true),
                 until: payload.until,

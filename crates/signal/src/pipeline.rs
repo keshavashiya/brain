@@ -234,6 +234,10 @@ impl SignalProcessor {
             thalamus::Intent::QueryAgents { filter } => {
                 self.handle_query_agents(signal_id, filter, &prepend_nudges)
             }
+            thalamus::Intent::DelegateTask { agent, prompt } => {
+                self.handle_delegate_task(signal_id, agent, prompt, &prepend_nudges)
+                    .await
+            }
             thalamus::Intent::SetProactivity { enabled, until } => {
                 self.handle_set_proactivity(signal_id, enabled, until, &prepend_nudges)
                     .await
@@ -1184,6 +1188,83 @@ impl SignalProcessor {
 
         let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
         Ok(PipelineResult::Complete(resp))
+    }
+
+    pub(super) async fn handle_delegate_task(
+        &self,
+        signal_id: Uuid,
+        agent: String,
+        prompt: String,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let registry = match self.agent_registry() {
+            Some(r) => r,
+            None => {
+                let resp = prepend_nudges(SignalResponse::ok(
+                    signal_id,
+                    "Agent registry is not wired — delegation unavailable.".to_string(),
+                ));
+                return Ok(PipelineResult::Complete(resp));
+            }
+        };
+
+        if prompt.trim().is_empty() {
+            let resp = prepend_nudges(SignalResponse::ok(
+                signal_id,
+                format!("Asked to delegate to '{agent}' but no prompt was supplied."),
+            ));
+            return Ok(PipelineResult::Complete(resp));
+        }
+
+        let delegate = match registry.get(&agent) {
+            Ok(d) => d,
+            Err(e) => {
+                let known: Vec<String> = registry.list();
+                let hint = if known.is_empty() {
+                    "no agents are currently registered.".to_string()
+                } else {
+                    format!("registered: {}", known.join(", "))
+                };
+                let resp = prepend_nudges(SignalResponse::ok(
+                    signal_id,
+                    format!("Could not delegate to '{agent}': {e}. {hint}"),
+                ));
+                return Ok(PipelineResult::Complete(resp));
+            }
+        };
+
+        let task = delegate::AgentTask::new(prompt.clone());
+        let task_id = task.id.clone();
+        match delegate.delegate(task).await {
+            Ok(result) => {
+                let summary = if result.summary.trim().is_empty() {
+                    result.stdout.clone()
+                } else {
+                    result.summary.clone()
+                };
+                let body = if summary.trim().is_empty() {
+                    format!(
+                        "Delegate '{agent}' completed (status: {:?}, task_id: {}). \
+                         No summary produced.",
+                        result.status, task_id
+                    )
+                } else {
+                    format!(
+                        "Delegate '{agent}' ({:?}, task_id: {}):\n\n{}",
+                        result.status, task_id, summary
+                    )
+                };
+                let resp = prepend_nudges(SignalResponse::ok(signal_id, body));
+                Ok(PipelineResult::Complete(resp))
+            }
+            Err(e) => {
+                let resp = prepend_nudges(SignalResponse::ok(
+                    signal_id,
+                    format!("Delegate '{agent}' failed: {e}"),
+                ));
+                Ok(PipelineResult::Complete(resp))
+            }
+        }
     }
 
     pub(super) async fn handle_decompose_task(

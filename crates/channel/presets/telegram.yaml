@@ -23,4 +23,4 @@ send:
   url_template: "https://api.telegram.org/bot{credential}/sendMessage"
   method: POST
   content_type: "application/json"
-  body_template: '{"chat_id":"{reply_to}","text":"{content}","parse_mode":"Markdown"}'
+  body_template: '{"chat_id":"{reply_to}","text":"{content}"}'

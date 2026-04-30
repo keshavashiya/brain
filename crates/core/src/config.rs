@@ -212,6 +212,7 @@ pub enum WebSearchProvider {
     /// Built-in DuckDuckGo HTML scraper. Zero-config, no API key, no
     /// Docker — basic quality but always available.
     #[default]
+    #[serde(alias = "duckduckgo", rename = "duckduckgo")]
     DuckDuckGo,
     Searxng,
     Tavily,

@@ -533,17 +533,31 @@ impl TaskOrchestrator {
                 );
                 return;
             }
-            let completed: Vec<String> = task
+            // Stdout per completed step, capped so a single noisy step
+            // can't dominate the prompt. The replan LLM uses these to
+            // ground its next step in the real data prior steps produced.
+            const PER_STEP_OUTPUT_LIMIT: usize = 1500;
+            let completed: Vec<crate::decompose::CompletedStepRecap> = task
                 .graph
                 .topological_order()
                 .into_iter()
                 .filter_map(|id| {
                     let state = task.step_states.get(&id)?;
-                    if matches!(state, StepState::Completed { .. }) {
-                        task.graph.steps.get(&id).map(|s| s.description.clone())
+                    let StepState::Completed { outcome, .. } = state else {
+                        return None;
+                    };
+                    let step = task.graph.steps.get(&id)?;
+                    let trimmed = outcome.stdout.trim();
+                    let excerpt = if trimmed.len() > PER_STEP_OUTPUT_LIMIT {
+                        let head = &trimmed[..PER_STEP_OUTPUT_LIMIT];
+                        format!("{head}\n…[truncated]")
                     } else {
-                        None
-                    }
+                        trimmed.to_string()
+                    };
+                    Some(crate::decompose::CompletedStepRecap {
+                        description: step.description.clone(),
+                        output_excerpt: excerpt,
+                    })
                 })
                 .collect();
             (task.request.clone(), completed, task.replan_attempts)

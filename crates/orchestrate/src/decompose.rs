@@ -46,9 +46,19 @@ pub struct RepairContext {
     pub failed_step: String,
     /// The actual error returned by the failed step.
     pub error: String,
-    /// Brief notes on what already succeeded so the new plan can build
-    /// on it (descriptions only, not full outputs).
-    pub completed: Vec<String>,
+    /// What already succeeded — description **and** a stdout excerpt so
+    /// the LLM can ground the next step in the data those steps actually
+    /// produced (instead of inventing intermediate file names).
+    pub completed: Vec<CompletedStepRecap>,
+}
+
+/// One completed-step recap fed back into the replan prompt.
+#[derive(Debug, Clone)]
+pub struct CompletedStepRecap {
+    pub description: String,
+    /// Trimmed stdout from the step. The orchestrator caps length so a
+    /// single noisy step can't crowd out the rest of the prompt.
+    pub output_excerpt: String,
 }
 
 /// Decompose a user request into executable task steps.
@@ -527,6 +537,9 @@ Rules:
 - Keep the plan minimal. 1–4 steps is plenty for most repairs; never more than 6.
 - Sequential dependencies (step N depends on step N-1) unless you can clearly justify parallelism.
 - All execution-mode rules from the main planner still apply (shell vs execute, allowlist, no install steps, etc.).
+- The completed steps' stdout is shown above. Treat it as the only real source of intermediate data — do NOT reference files, paths, or variables you did not actually create. If the data you need is in a prior step's stdout, repeat or reformat that command rather than reading from a fabricated file.
+- For action_type "execute": `command` must be a SINGLE binary plus args. No shell metacharacters (`&&`, `||`, `;`, `|`, `>`, `<`, backticks). If you need pipes/redirects, use action_type "shell" instead — and even then keep the pipeline short.
+- For "notify": only emit a notify step when the user genuinely needs to be told something (final result, hard blocker). Never fabricate a `cat <file>` notify when stdout from prior steps already carries the answer.
 
 Return ONLY valid JSON. No markdown, no explanation."#;
 
@@ -537,14 +550,23 @@ impl LlmDecomposer {
         context: &DecompositionContext,
     ) -> Result<Vec<RawStep>, DecompositionError> {
         let mut user_prompt = format!(
-            "Original request:\n  {}\n\nWhat already succeeded (do NOT redo):\n",
+            "Original request:\n  {}\n\nWhat already succeeded (do NOT redo). Each entry includes the actual stdout the step produced — base your next step on this real data, do not invent intermediate files:\n",
             repair.original_request
         );
         if repair.completed.is_empty() {
             user_prompt.push_str("  (nothing yet)\n");
         } else {
-            for line in &repair.completed {
-                user_prompt.push_str(&format!("  - {line}\n"));
+            for recap in &repair.completed {
+                user_prompt.push_str(&format!("  - {}\n", recap.description));
+                let excerpt = recap.output_excerpt.trim();
+                if excerpt.is_empty() {
+                    user_prompt.push_str("    (no stdout)\n");
+                } else {
+                    user_prompt.push_str("    stdout:\n");
+                    for line in excerpt.lines() {
+                        user_prompt.push_str(&format!("      {line}\n"));
+                    }
+                }
             }
         }
         user_prompt.push_str(&format!(

@@ -17,10 +17,10 @@ use tokio::time::timeout;
 
 use crate::traits::AgentCapabilities;
 
-/// Per-binary version probe deadline. Kept tight so discovery at
-/// daemon boot doesn't visibly slow startup even when several
-/// fingerprinted binaries are on `$PATH`.
-pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
+/// Per-binary version probe deadline. 3s gives Node-based CLIs
+/// (gemini-cli, qwen-code, opencode) enough time to cold-start and
+/// print --version; faster CLIs still return well under the cap.
+pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_millis(3000);
 
 /// How a discovered agent should be wired into a runnable delegate.
 ///

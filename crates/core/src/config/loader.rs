@@ -204,7 +204,9 @@ impl BrainConfig {
 
         if self.actions.messaging.enabled {
             if self.actions.messaging.channels.is_empty() {
-                warnings.push("Actions messaging is enabled but actions.messaging.channels has no mappings; dispatches will fail for all channels.".to_string());
+                if self.channel.transports.is_empty() && self.channel.relays.is_empty() {
+                    warnings.push("Actions messaging is enabled but neither actions.messaging.channels, channel.transports, nor channel.relays are configured; dispatches will fail.".to_string());
+                }
             } else {
                 for (name, channel_cfg) in &self.actions.messaging.channels {
                     if channel_cfg.url.trim().is_empty() {

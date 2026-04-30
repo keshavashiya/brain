@@ -126,11 +126,77 @@ impl cortex::actions::WebSearchBackend for DuckDuckGoSearchBackend {
         query: &str,
         top_k: usize,
     ) -> Result<Vec<cortex::actions::SearchHit>, cortex::actions::ActionError> {
+        // Strategy: try the official Instant Answer JSON API first (always
+        // reachable, no anti-bot, but only returns hits when DDG has a
+        // categorized answer). If it produces nothing useful, fall back
+        // to scraping `html.duckduckgo.com` — which DDG sometimes blocks
+        // with an anomaly/CAPTCHA page; that case is detected and surfaced
+        // as a clear error pointing to SearXNG / Tavily.
+        let from_ia = self.search_instant_answer(query, top_k).await?;
+        if !from_ia.is_empty() {
+            return Ok(from_ia);
+        }
+        self.search_html(query, top_k).await
+    }
+}
+
+impl DuckDuckGoSearchBackend {
+    async fn search_instant_answer(
+        &self,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<cortex::actions::SearchHit>, cortex::actions::ActionError> {
+        let url = "https://api.duckduckgo.com/";
+        let client = self.client.clone();
+        let q = query.to_string();
+        let resp = resilient_send(
+            || {
+                client.get(url).query(&[
+                    ("q", q.as_str()),
+                    ("format", "json"),
+                    ("no_html", "1"),
+                    ("skip_disambig", "1"),
+                ])
+            },
+            &self.circuit_breaker,
+            self.max_retries,
+            self.retry_base_ms,
+        )
+        .await?;
+        if !resp.status().is_success() {
+            return Ok(Vec::new());
+        }
+        let body: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(_) => return Ok(Vec::new()),
+        };
+        Ok(parse_instant_answer(&body, top_k))
+    }
+
+    async fn search_html(
+        &self,
+        query: &str,
+        top_k: usize,
+    ) -> Result<Vec<cortex::actions::SearchHit>, cortex::actions::ActionError> {
+        // POST to the same `html.duckduckgo.com/html/` endpoint with
+        // browser-style headers — this is the form a real search submission
+        // takes, and DDG is somewhat less aggressive about challenging it.
         let url = "https://html.duckduckgo.com/html/";
         let client = self.client.clone();
-        let query_owned = query.to_string();
+        let q = query.to_string();
         let response = resilient_send(
-            || client.get(url).query(&[("q", query_owned.as_str())]),
+            || {
+                client
+                    .post(url)
+                    .header(
+                        reqwest::header::ACCEPT,
+                        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    )
+                    .header(reqwest::header::ACCEPT_LANGUAGE, "en-US,en;q=0.9")
+                    .header(reqwest::header::REFERER, "https://duckduckgo.com/")
+                    .header(reqwest::header::ORIGIN, "https://duckduckgo.com")
+                    .form(&[("q", q.as_str())])
+            },
             &self.circuit_breaker,
             self.max_retries,
             self.retry_base_ms,
@@ -149,8 +215,74 @@ impl cortex::actions::WebSearchBackend for DuckDuckGoSearchBackend {
             .await
             .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))?;
 
+        // DDG's anti-bot interstitial swaps out result markup for an
+        // "anomaly-modal" CAPTCHA. Detect and surface a clean error so
+        // callers know to switch backends instead of seeing silent zero
+        // hits.
+        if html.contains("anomaly-modal") {
+            return Err(cortex::actions::ActionError::ExecutionFailed(
+                "DuckDuckGo served a bot-challenge page instead of results. \
+                 Run `brain deps up` to use SearXNG, or set \
+                 `actions.web_search.provider: tavily` with an API key."
+                    .into(),
+            ));
+        }
+
         Ok(parse_duckduckgo_html(&html, top_k))
     }
+}
+
+/// Convert DuckDuckGo Instant Answer API response into search hits.
+/// Picks up the abstract (with source URL) and any RelatedTopics that
+/// have first-class URL+text — skipping disambiguation/category headers.
+fn parse_instant_answer(body: &serde_json::Value, top_k: usize) -> Vec<cortex::actions::SearchHit> {
+    let mut hits = Vec::new();
+
+    let abstract_text = body
+        .get("AbstractText")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let abstract_url = body
+        .get("AbstractURL")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let heading = body.get("Heading").and_then(|v| v.as_str()).unwrap_or("");
+    if !abstract_text.is_empty() && !abstract_url.is_empty() {
+        hits.push(cortex::actions::SearchHit {
+            title: if heading.is_empty() {
+                "DuckDuckGo Instant Answer".to_string()
+            } else {
+                heading.to_string()
+            },
+            url: abstract_url.to_string(),
+            snippet: abstract_text.to_string(),
+        });
+    }
+
+    if let Some(topics) = body.get("RelatedTopics").and_then(|v| v.as_array()) {
+        for t in topics {
+            if hits.len() >= top_k.max(1) {
+                break;
+            }
+            let url = t.get("FirstURL").and_then(|v| v.as_str()).unwrap_or("");
+            let text = t.get("Text").and_then(|v| v.as_str()).unwrap_or("");
+            if url.is_empty() || text.is_empty() {
+                continue;
+            }
+            // Use the first sentence of `Text` as the title, the rest as snippet.
+            let (title, snippet) = match text.split_once(" - ") {
+                Some((t, s)) => (t.to_string(), s.to_string()),
+                None => (text.to_string(), text.to_string()),
+            };
+            hits.push(cortex::actions::SearchHit {
+                title,
+                url: url.to_string(),
+                snippet,
+            });
+        }
+    }
+
+    hits.into_iter().take(top_k.max(1)).collect()
 }
 
 /// Pull title/url/snippet out of DuckDuckGo's HTML response. Each result

@@ -63,6 +63,39 @@ static WEB_SEARCH_FIND_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("invariant: WEB_SEARCH_FIND_RE must be valid")
 });
 
+/// `delegate to <agent>: <prompt>` or `@<agent> <prompt>` — single-turn
+/// invocation of a named specialist agent. Agent names are lowercase
+/// alphanumeric with optional `-` (claude-code, codex, aider, gemini-cli).
+static DELEGATE_TASK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?ix)
+        ^(?:
+            (?:please\s+)?(?:ask|delegate(?:\s+to)?|hand(?:\s+off|\s+over)?(?:\s+to)?|forward\s+to|use)\s+
+            (?P<agent>[a-z][a-z0-9_-]*)\s*[:,\-]\s*(?P<prompt>.+)
+            |
+            @(?P<agent2>[a-z][a-z0-9_-]*)\s*[:,]?\s*(?P<prompt2>.+)
+        )$
+        ",
+    )
+    .expect("invariant: DELEGATE_TASK_RE must be valid")
+});
+
+/// URL grounding — message contains an http(s) URL alongside a fetch-like
+/// verb (`fetch`, `read`, `open`, `summarise`, etc.). Routes to WebSearch
+/// so the action runner pulls the URL body as grounding for the LLM.
+/// The whole message is captured as the query because the WebSearch
+/// backend's `extract_urls()` will harvest the URL itself and fetch it
+/// in parallel with the search.
+static URL_FETCH_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?ix)
+        ^(?:.*\b(?:fetch|read|open|summari[sz]e|grab|pull|get|show|visit|browse|scrape|crawl|check|view|extract|parse|tell\s+me\s+about|what\s+does)\b.*)?
+        \s*(?P<query>.*?https?://\S+.*?)\s*\??$
+        ",
+    )
+    .expect("invariant: URL_FETCH_RE must be valid")
+});
+
 static QUERY_AUDIT_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(?:what did I (?:run|do|approve)|show (?:my )?audit|list audit)(?:\s+(?:today|yesterday|since\s+(.+)))?\??$")
         .expect("invariant: QUERY_AUDIT_RE must be valid")
@@ -268,6 +301,16 @@ pub(crate) const PATTERNS: &[PatternDef] = &[
         },
         extractors: &[("query", 1)],
     },
+    // URL-bearing requests route to WebSearch so the action runner fetches
+    // their bodies. Placed after the `search ...` patterns so explicit
+    // search verbs win, but before downstream patterns can swallow URLs.
+    PatternDef {
+        regex: &URL_FETCH_RE,
+        base_intent: Intent::WebSearch {
+            query: String::new(),
+        },
+        extractors: &[("query", 0)],
+    },
     PatternDef {
         regex: &QUERY_AUDIT_RE,
         base_intent: Intent::QueryAudit {
@@ -341,6 +384,15 @@ pub(crate) const PATTERNS: &[PatternDef] = &[
             filter: String::new(),
         },
         extractors: &[("filter", 1)],
+    },
+    PatternDef {
+        regex: &DELEGATE_TASK_RE,
+        base_intent: Intent::DelegateTask {
+            agent: String::new(),
+            prompt: String::new(),
+        },
+        // Named-group lookup; numeric indices are unused.
+        extractors: &[("agent", 0), ("prompt", 0)],
     },
     PatternDef {
         regex: &QUERY_AGENTS_WHY_RE,
@@ -527,6 +579,19 @@ impl IntentClassifier {
             Intent::QueryAgents { .. } => Intent::QueryAgents {
                 filter: get_group("filter").trim().to_string(),
             },
+            Intent::DelegateTask { .. } => {
+                let agent = captures
+                    .name("agent")
+                    .or_else(|| captures.name("agent2"))
+                    .map(|m| m.as_str().trim().to_lowercase())
+                    .unwrap_or_default();
+                let prompt = captures
+                    .name("prompt")
+                    .or_else(|| captures.name("prompt2"))
+                    .map(|m| m.as_str().trim().to_string())
+                    .unwrap_or_default();
+                Intent::DelegateTask { agent, prompt }
+            }
             Intent::RespondToApproval { .. } => {
                 let raw = captures
                     .name("decision")

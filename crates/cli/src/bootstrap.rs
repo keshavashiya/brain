@@ -425,9 +425,14 @@ fn build_action_dispatcher(
     // ── Messaging backend ────────────────────────────────────────────────
     if config.actions.messaging.enabled {
         if config.actions.messaging.channels.is_empty() {
-            tracing::warn!(
-                "actions.messaging.enabled=true but no channel webhook mappings are configured"
-            );
+            // Only warn when neither the legacy webhook channels nor the
+            // newer preset-driven transports are configured — otherwise
+            // delivery still works through `channel.transports[]`.
+            if config.channel.transports.is_empty() {
+                tracing::warn!(
+                    "actions.messaging.enabled=true but no channel webhook mappings are configured"
+                );
+            }
         } else {
             let res = &config.actions.resilience;
             match WebhookMessageBackend::new_with_metrics(
