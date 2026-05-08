@@ -249,43 +249,60 @@ async fn probe(
     version_args: &[String],
     budget: Duration,
 ) -> (DiscoveryStatus, Option<String>) {
-    let fut = Command::new(path)
-        .args(version_args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .output();
+    // Linux can return ETXTBSY (errno 26, "Text file busy") when execing a
+    // file whose write/close just happened — kernel-side state hasn't fully
+    // propagated. Hits in CI right after `std::fs::write` and in real
+    // life right after a fresh `cargo install`. A handful of short retries
+    // smooths it out without changing observable behavior elsewhere.
+    let mut attempt = 0u32;
+    loop {
+        let fut = Command::new(path)
+            .args(version_args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .output();
 
-    match timeout(budget, fut).await {
-        Ok(Ok(out)) if out.status.success() => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            let v = text
-                .lines()
-                .map(str::trim)
-                .find(|l| !l.is_empty())
-                .map(|l| l.to_string());
-            (DiscoveryStatus::Available, v)
+        match timeout(budget, fut).await {
+            Ok(Ok(out)) if out.status.success() => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                let v = text
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .map(|l| l.to_string());
+                return (DiscoveryStatus::Available, v);
+            }
+            Ok(Ok(out)) => {
+                let code = out.status.code().unwrap_or(-1);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let msg = stderr.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+                let reason = if msg.is_empty() {
+                    format!("version probe exited {code}")
+                } else {
+                    format!("version probe exited {code}: {}", msg.trim())
+                };
+                return (DiscoveryStatus::Unavailable(reason), None);
+            }
+            Ok(Err(e)) if e.raw_os_error() == Some(26) && attempt < 4 => {
+                tokio::time::sleep(Duration::from_millis(20 * (attempt as u64 + 1))).await;
+                attempt += 1;
+                continue;
+            }
+            Ok(Err(e)) => {
+                return (
+                    DiscoveryStatus::Unavailable(format!("probe spawn failed: {e}")),
+                    None,
+                );
+            }
+            Err(_) => {
+                return (
+                    DiscoveryStatus::Unavailable(format!("probe timed out after {budget:?}")),
+                    None,
+                );
+            }
         }
-        Ok(Ok(out)) => {
-            let code = out.status.code().unwrap_or(-1);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let msg = stderr.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-            let reason = if msg.is_empty() {
-                format!("version probe exited {code}")
-            } else {
-                format!("version probe exited {code}: {}", msg.trim())
-            };
-            (DiscoveryStatus::Unavailable(reason), None)
-        }
-        Ok(Err(e)) => (
-            DiscoveryStatus::Unavailable(format!("probe spawn failed: {e}")),
-            None,
-        ),
-        Err(_) => (
-            DiscoveryStatus::Unavailable(format!("probe timed out after {budget:?}")),
-            None,
-        ),
     }
 }
 
