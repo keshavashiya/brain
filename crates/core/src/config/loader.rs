@@ -42,7 +42,26 @@ impl BrainConfig {
         // Layer 4: Environment variables (BRAIN_LLM__MODEL=...)
         figment = figment.merge(Env::prefixed("BRAIN_").split("__"));
 
-        figment.extract()
+        let mut cfg: Self = figment.extract()?;
+
+        // Post-load: if the user set legacy llm.{base_url,model,api_key} via
+        // env vars but `providers[]` is non-empty, the multi-provider path
+        // would silently ignore the env override. Forward those overrides
+        // onto providers[0] so `BRAIN_LLM__BASE_URL=...` does what users
+        // expect regardless of how the YAML is structured.
+        if !cfg.llm.providers.is_empty() {
+            if std::env::var("BRAIN_LLM__BASE_URL").is_ok() {
+                cfg.llm.providers[0].base_url = cfg.llm.base_url.clone();
+            }
+            if std::env::var("BRAIN_LLM__MODEL").is_ok() {
+                cfg.llm.providers[0].model = cfg.llm.model.clone();
+            }
+            if std::env::var("BRAIN_LLM__API_KEY").is_ok() {
+                cfg.llm.providers[0].api_key = cfg.llm.api_key.clone();
+            }
+        }
+
+        Ok(cfg)
     }
 
     /// Resolve the data directory path, expanding `~` to the home directory.
@@ -126,7 +145,15 @@ impl BrainConfig {
     }
 
     /// Path to user config file.
+    ///
+    /// `BRAIN_CONFIG` env var overrides the default `~/.brain/config.yaml`,
+    /// useful for sandboxes, CI, and multi-config workflows.
     pub fn user_config_path() -> PathBuf {
+        if let Ok(p) = std::env::var("BRAIN_CONFIG") {
+            if !p.trim().is_empty() {
+                return PathBuf::from(p);
+            }
+        }
         expand_tilde("~/.brain/config.yaml")
     }
 

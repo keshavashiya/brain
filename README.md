@@ -16,9 +16,14 @@ It routes intents through a Thalamus, scores importance via an Amygdala, and sto
 ## Quick Start
 
 ```bash
-cargo install brainos && brain init
+# 1. Install Ollama first — https://ollama.com (one-line installer for macOS/Linux/Windows)
 ollama pull qwen2.5-coder:7b && ollama pull nomic-embed-text
-brain start
+
+# 2. Install Brain
+cargo install brainos
+brain init             # writes ~/.brain/config.yaml + prints your API key
+brain doctor           # verify Ollama, models, ports — fix anything red
+brain start            # wake the daemon
 brain chat "remember that I use dark mode"
 ```
 

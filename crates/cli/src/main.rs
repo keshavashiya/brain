@@ -3,6 +3,7 @@ mod bridge;
 mod chat;
 mod daemon;
 mod deps;
+mod doctor;
 mod encryption;
 mod errors;
 mod export;
@@ -10,6 +11,8 @@ mod serve;
 mod service;
 mod status;
 mod vault;
+
+use crate::doctor::check_ollama_models;
 
 use clap::{Parser, Subcommand};
 
@@ -47,6 +50,13 @@ enum Commands {
 
     /// Run a brain scan — show system vitals
     Status,
+
+    /// Diagnose the local environment — Ollama, models, ports, data dir.
+    ///
+    /// Run this when `brain start` or `brain chat` is misbehaving. Prints
+    /// pass/fail per check and exits non-zero on failures so it's safe
+    /// to use in scripts.
+    Doctor,
 
     /// Wake the brain — start all services as a background daemon.
     ///
@@ -198,21 +208,33 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
-    let _verbose = cli.verbose;
-
-    // For `brain mcp` (stdio transport), stdout IS the JSON-RPC channel.
-    // Tracing must go to stderr with ANSI disabled so it never corrupts the stream.
+    // Tracing routing:
+    //   - `brain mcp` stdout IS the JSON-RPC channel → tracing must go to
+    //     stderr with ANSI off so it never corrupts the stream.
+    //   - All other commands also route tracing to stderr so human-readable
+    //     stdout (`init`, `status`, `chat`, …) stays clean.
+    //
+    // Default filter:
+    //   - RUST_LOG wins if set
+    //   - --verbose / -v → brain=info
+    //   - `serve` / `mcp` (long-running services) → brain=info
+    //   - everything else → warn (no INFO leaking into stdout-adjacent UX)
+    let default_filter =
+        if cli.verbose || matches!(cli.command, Commands::Serve { .. } | Commands::Mcp) {
+            "brain=info"
+        } else {
+            "warn"
+        };
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "brain=info".into());
+        .unwrap_or_else(|_| default_filter.into());
 
+    let builder = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_writer(std::io::stderr);
     if matches!(cli.command, Commands::Mcp) {
-        tracing_subscriber::fmt()
-            .with_env_filter(env_filter)
-            .with_writer(std::io::stderr)
-            .with_ansi(false)
-            .init();
+        builder.with_ansi(false).init();
     } else {
-        tracing_subscriber::fmt().with_env_filter(env_filter).init();
+        builder.init();
     }
 
     let config = brain_core::BrainConfig::load().unwrap_or_else(|e| {
@@ -231,16 +253,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         } => {
             let data_dir = config.data_dir();
             println!("Forming neural pathways...");
-            println!("  Cortex:    {}", data_dir.display());
+            println!("  Cortex (data dir):  {}", data_dir.display());
 
             let generated_key = match brain_core::BrainConfig::write_default_config(force)? {
                 Some((path, key)) => {
-                    println!("  Genome:    {} (written)", path.display());
+                    println!("  Genome (config):    {} (written)", path.display());
                     Some(key)
                 }
                 None => {
                     println!(
-                        "  Genome:    {} (already exists, use --force to overwrite)",
+                        "  Genome (config):    {} (exists, --force to overwrite)",
                         brain_core::BrainConfig::user_config_path().display()
                     );
                     None
@@ -249,13 +271,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
             let subdirs = ["db", "ruvector", "models", "logs", "exports"];
             for sub in &subdirs {
-                println!("  Region:    {}", data_dir.join(sub).display());
+                println!("  Region:             {}", data_dir.join(sub).display());
             }
 
-            println!(
-                "\n  Sensory cortex: {} (pull with `ollama pull {}`)",
-                config.embedding.model, config.embedding.model
-            );
+            // Probe Ollama and only warn about the embedding model when it's
+            // actually missing. Avoids the previous "(pull with `ollama
+            // pull`)" hint firing even when the model was already installed.
+            check_ollama_models(&config).await;
 
             #[cfg(feature = "encryption")]
             if encrypt {
@@ -302,6 +324,11 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         // ── status ────────────────────────────────────────────────────────────
         Commands::Status => {
             status::show_status(&config).await?;
+        }
+
+        // ── doctor ────────────────────────────────────────────────────────────
+        Commands::Doctor => {
+            doctor::cmd_doctor(&config).await?;
         }
 
         // ── start (daemon) ────────────────────────────────────────────────────
@@ -456,14 +483,14 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Stop => {
             // Check if daemon is running BEFORE stopping the service, so we can
             // report accurately whether we stopped something or it was already down.
-            let was_running = daemon::is_daemon_running(&config);
+            let was_running = daemon::is_daemon_running(&config).await;
 
             // Always stop the service manager first (if installed) to prevent respawn.
             // This unloads/disables the service so it doesn't restart the daemon.
             if daemon::is_service_installed() {
                 daemon::stop_service();
                 // Give the service manager time to propagate the stop
-                std::thread::sleep(std::time::Duration::from_millis(500));
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
 
             match daemon::read_pid(&config) {
@@ -471,7 +498,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     daemon::stop_process(pid)?;
                     // Wait for process to exit (max 5s).
                     for _ in 0..10 {
-                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                         if !daemon::is_process_running(pid) {
                             break;
                         }
@@ -489,12 +516,12 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     if was_running {
                         // It was running — wait for the service stop to take effect.
                         for _ in 0..10 {
-                            std::thread::sleep(std::time::Duration::from_millis(500));
-                            if !daemon::is_daemon_running(&config) {
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            if !daemon::is_daemon_running(&config).await {
                                 break;
                             }
                         }
-                        if daemon::is_daemon_running(&config) {
+                        if daemon::is_daemon_running(&config).await {
                             println!("Brain stop requested but daemon did not exit cleanly.");
                         } else {
                             println!("Brain is asleep.");
@@ -547,7 +574,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
         // ── service ───────────────────────────────────────────────────────────
         Commands::Service { action } => match action {
-            service::ServiceAction::Install => service::cmd_service_install()?,
+            service::ServiceAction::Install => service::cmd_service_install().await?,
             service::ServiceAction::Uninstall => service::cmd_service_uninstall()?,
         },
 

@@ -162,25 +162,28 @@ pub(crate) fn is_service_installed() -> bool {
     }
 }
 
-/// Sync health check — probes the daemon's HTTP /health endpoint.
+/// Async health check — probes the daemon's HTTP /health endpoint.
 /// Returns true if a daemon is responding on the configured HTTP port.
-pub(crate) fn is_daemon_running(config: &brain_core::BrainConfig) -> bool {
+///
+/// Uses async reqwest because the CLI runs under #[tokio::main]; the blocking
+/// client spawns its own runtime and panics when dropped inside an async
+/// context (`Cannot drop a runtime in a context where blocking is not allowed`).
+pub(crate) async fn is_daemon_running(config: &brain_core::BrainConfig) -> bool {
     let host = &config.adapters.http.host;
     let port = config.adapters.http.port;
     let health_url = format!("http://{host}:{port}/health");
 
-    let client = reqwest::blocking::Client::builder()
+    let Ok(client) = reqwest::Client::builder()
         .timeout(brain_core::timeouts::HEALTH_CHECK)
         .build()
-        .ok();
-    if let Some(client) = client {
-        match client.get(&health_url).send() {
-            Ok(resp) => resp.status().is_success(),
-            Err(_) => false,
-        }
-    } else {
-        false
-    }
+    else {
+        return false;
+    };
+
+    matches!(
+        client.get(&health_url).send().await,
+        Ok(resp) if resp.status().is_success()
+    )
 }
 
 /// Stop the login service (if installed), preventing auto-restart.

@@ -50,6 +50,7 @@ pub fn create_router(
         .layer(tower::limit::ConcurrencyLimitLayer::new(100));
 
     let router = Router::new()
+        .route("/", get(root_handler))
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
         .route("/ui", get(ui_handler))

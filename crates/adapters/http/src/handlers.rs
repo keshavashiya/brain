@@ -48,6 +48,11 @@ pub async fn ui_handler() -> impl IntoResponse {
     ([("content-type", "text/html; charset=utf-8")], UI_HTML)
 }
 
+/// GET / — soft redirect to the diagnostic UI so the bare host:port lands somewhere.
+pub async fn root_handler() -> axum::response::Redirect {
+    axum::response::Redirect::temporary("/ui")
+}
+
 /// GET /openapi.json — OpenAPI 3.0 specification
 pub async fn openapi_handler() -> impl IntoResponse {
     let spec = OPENAPI_JSON.replace("{{VERSION}}", env!("CARGO_PKG_VERSION"));

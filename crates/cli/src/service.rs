@@ -11,7 +11,7 @@ pub(crate) enum ServiceAction {
 }
 
 #[allow(clippy::needless_return)]
-pub(crate) fn cmd_service_install() -> anyhow::Result<()> {
+pub(crate) async fn cmd_service_install() -> anyhow::Result<()> {
     let exe = std::env::current_exe()
         .map_err(|e| anyhow::anyhow!("Cannot determine Brain binary path: {e}"))?;
     let exe_str = exe
@@ -77,7 +77,7 @@ pub(crate) fn cmd_service_install() -> anyhow::Result<()> {
         use crate::daemon;
         let config = brain_core::BrainConfig::load().ok();
         if let Some(ref cfg) = config {
-            if daemon::is_daemon_running(cfg) {
+            if daemon::is_daemon_running(cfg).await {
                 // Daemon respondinging to HTTP — kill via PID if we have it.
                 if let Some(pid) = daemon::read_pid(cfg) {
                     let _ = daemon::stop_process(pid);
@@ -99,8 +99,8 @@ pub(crate) fn cmd_service_install() -> anyhow::Result<()> {
                 }
                 // Wait for process to exit and release file locks (max 5s).
                 for _ in 0..10 {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    if !daemon::is_daemon_running(cfg) {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if !daemon::is_daemon_running(cfg).await {
                         break;
                     }
                 }
