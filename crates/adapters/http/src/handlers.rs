@@ -80,6 +80,11 @@ pub async fn post_signal_handler(
     let t0 = Instant::now();
     state.metrics.signals_total.fetch_add(1, Ordering::Relaxed);
 
+    // v1.0.0 Phase 1: resolve Principal from the API-key → agent_id mapping
+    // before constructing the Signal. None when the key has no agent_id
+    // configured (pre-Phase-1 back-compat) or no IdentityStore is wired.
+    let principal = auth::resolve_principal(&state, &headers).await;
+
     let source = signal::SignalSource::parse(body.source.as_deref(), signal::SignalSource::Http);
     let sig = signal::Signal::from_adapter_request(signal::AdapterRequest {
         source,
@@ -92,7 +97,8 @@ pub async fn post_signal_handler(
         session_id: body.session_id,
         default_channel: "http".to_string(),
         default_sender: "apiclient".to_string(),
-    });
+    })
+    .with_principal_opt(principal);
 
     let signal_id = sig.id;
     let result = state.processor.process(sig).await;

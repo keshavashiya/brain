@@ -124,11 +124,10 @@ async fn handle_connection(
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
     // ── Phase 1: authenticate ────────────────────────────────────────────────
-    let authed = match ws_rx.next().await {
-        None => {
-            // Client disconnected before sending auth frame
-            return;
-        }
+    // Also resolves the v1.0.0 Phase 1 `Principal` once and binds it to
+    // the connection's lifetime — every subsequent signal frame uses it.
+    let (authed, principal): (bool, Option<identity::Principal>) = match ws_rx.next().await {
+        None => return,
         Some(Err(e)) => {
             tracing::debug!(conn_id = %conn_id, "WS recv error during auth: {e}");
             return;
@@ -154,6 +153,10 @@ async fn handle_connection(
                         send_json_frame(&mut ws_tx, &resp, conn_id).await;
                         return;
                     }
+                    // Resolve the v1.0.0 Phase 1 Principal once. None when
+                    // the key has no agent_id mapping or no IdentityStore
+                    // is wired (back-compat).
+                    let principal = resolve_principal(api_keys, &auth.api_key, &processor).await;
                     // Auth OK — send confirmation
                     let resp = AuthResponse {
                         status: "authenticated",
@@ -161,13 +164,12 @@ async fn handle_connection(
                         message: None,
                     };
                     send_json_frame(&mut ws_tx, &resp, conn_id).await;
-                    true
+                    (true, principal)
                 }
             }
         }
         Some(Ok(Message::Close(_))) => return,
         Some(Ok(_)) => {
-            // Non-text frames before auth are rejected
             let resp = AuthResponse {
                 status: "error",
                 conn_id: None,
@@ -228,12 +230,13 @@ async fn handle_connection(
                                     conn_id,
                                     processor.clone(),
                                     cm.clone(),
+                                    principal.clone(),
                                 ).await;
                                 continue;
                             }
                         }
                         // Non-streaming: use the standard pipeline
-                        let response = match process_text_frame(text.as_str(), conn_id, &processor).await {
+                        let response = match process_text_frame(text.as_str(), conn_id, &processor, principal.as_ref()).await {
                             Ok(Some(r)) => r,
                             Ok(None) => continue, // Shouldn't happen for non-streaming, but be safe
                             Err(e) => {
@@ -336,6 +339,25 @@ where
 fn validate_key(api_keys: &[ApiKeyConfig], key: &str) -> bool {
     // WS connections need write permission since they can send signals.
     brain_core::check_auth(api_keys, Some(key), "write").is_allowed()
+}
+
+/// Resolve the `Principal` bound to this connection from the validated key.
+/// Returns `None` for keys without `agent_id` (back-compat) or when no
+/// `IdentityStore` is wired on the processor.
+async fn resolve_principal(
+    api_keys: &[ApiKeyConfig],
+    key: &str,
+    processor: &signal::SignalProcessor,
+) -> Option<identity::Principal> {
+    let agent_id = api_keys
+        .iter()
+        .find(|k| k.key == key)
+        .and_then(|k| k.agent_id.clone())?;
+    let store = processor.identity_store()?;
+    store
+        .principal_for(&identity::AgentHint::AgentId(agent_id.into()))
+        .await
+        .ok()
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -490,7 +512,7 @@ mod tests {
         let processor = signal::SignalProcessor::new(config).await.unwrap();
 
         let conn_id = Uuid::new_v4();
-        let response = process_text_frame("not json at all", conn_id, &processor).await;
+        let response = process_text_frame("not json at all", conn_id, &processor, None).await;
         assert!(response.is_ok());
         let resp = response.unwrap().unwrap();
         assert_eq!(resp.status, signal::ResponseStatus::Error);
@@ -506,7 +528,7 @@ mod tests {
 
         let conn_id = Uuid::new_v4();
         let text = r#"{"source":"ws","content":"Remember that Rust is fast","sender":"user-1"}"#;
-        let response = process_text_frame(text, conn_id, &processor).await;
+        let response = process_text_frame(text, conn_id, &processor, None).await;
         assert!(response.is_ok());
         let resp = response.unwrap().unwrap();
         assert_eq!(resp.status, signal::ResponseStatus::Ok);

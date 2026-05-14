@@ -843,6 +843,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "brainos-core",
+ "brainos-identity",
  "brainos-observe",
  "brainos-signal",
  "chrono",
@@ -891,6 +892,7 @@ dependencies = [
  "brainos-channel",
  "brainos-core",
  "brainos-hippocampus",
+ "brainos-identity",
  "brainos-observe",
  "brainos-signal",
  "chrono",
@@ -1103,6 +1105,7 @@ version = "0.3.0"
 dependencies = [
  "anyhow",
  "brainos-core",
+ "brainos-identity",
  "brainos-observe",
  "brainos-signal",
  "futures-util",

@@ -62,11 +62,22 @@ pub enum GrpcAdapterError {
 /// gRPC implementation of `MemoryService`.
 pub struct MemoryServiceImpl {
     processor: Arc<signal::SignalProcessor>,
+    api_keys: Arc<Vec<brain_core::ApiKeyConfig>>,
 }
 
 impl MemoryServiceImpl {
     pub fn new(processor: Arc<signal::SignalProcessor>) -> Self {
-        Self { processor }
+        let api_keys = Arc::new(processor.config().access.api_keys.clone());
+        Self {
+            processor,
+            api_keys,
+        }
+    }
+
+    /// Resolve the Phase 1 `Principal` from the request metadata.
+    /// Returns `None` for keys without `agent_id` (back-compat).
+    async fn resolve_principal<T>(&self, req: &Request<T>) -> Option<identity::Principal> {
+        resolve_principal_from_metadata(req, &self.api_keys, self.processor.as_ref()).await
     }
 }
 
@@ -179,6 +190,7 @@ impl MemoryService for MemoryServiceImpl {
         &self,
         request: Request<MemorySignalRequest>,
     ) -> Result<Response<Self::StreamSignalsStream>, Status> {
+        let principal = self.resolve_principal(&request).await;
         let req = request.into_inner();
         let source = SignalSource::parse(Some(&req.source), SignalSource::Grpc);
 
@@ -193,7 +205,8 @@ impl MemoryService for MemoryServiceImpl {
             session_id: non_empty(req.session_id),
             default_channel: "grpc".to_string(),
             default_sender: "grpcclient".to_string(),
-        });
+        })
+        .with_principal_opt(principal);
 
         let processor = self.processor.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(4);
@@ -227,11 +240,20 @@ impl MemoryService for MemoryServiceImpl {
 /// gRPC implementation of `AgentService`.
 pub struct AgentServiceImpl {
     processor: Arc<signal::SignalProcessor>,
+    api_keys: Arc<Vec<brain_core::ApiKeyConfig>>,
 }
 
 impl AgentServiceImpl {
     pub fn new(processor: Arc<signal::SignalProcessor>) -> Self {
-        Self { processor }
+        let api_keys = Arc::new(processor.config().access.api_keys.clone());
+        Self {
+            processor,
+            api_keys,
+        }
+    }
+
+    async fn resolve_principal<T>(&self, req: &Request<T>) -> Option<identity::Principal> {
+        resolve_principal_from_metadata(req, &self.api_keys, self.processor.as_ref()).await
     }
 }
 
@@ -319,6 +341,7 @@ impl AgentService for AgentServiceImpl {
         &self,
         request: Request<AgentSignalRequest>,
     ) -> Result<Response<AgentSignalResponse>, Status> {
+        let principal = self.resolve_principal(&request).await;
         let req = request.into_inner();
         let source = SignalSource::parse(Some(&req.source), SignalSource::Grpc);
 
@@ -333,7 +356,8 @@ impl AgentService for AgentServiceImpl {
             session_id: non_empty(req.session_id),
             default_channel: "grpc".to_string(),
             default_sender: "agent".to_string(),
-        });
+        })
+        .with_principal_opt(principal);
 
         match self.processor.process(sig).await {
             Ok(resp) => Ok(Response::new(AgentSignalResponse {
@@ -542,6 +566,38 @@ fn auth_interceptor(
             result.error_message("write").unwrap_or_default(),
         )),
     }
+}
+
+/// Resolve the v1.0.0 Phase 1 `Principal` for a gRPC request by reading
+/// the key from `x-api-key` / `authorization` metadata, looking up its
+/// configured `agent_id`, and asking the `IdentityStore` for the principal.
+/// Returns `None` when any step is missing — Signal.principal then stays
+/// `None` and the pipeline's identity gate is skipped (back-compat).
+async fn resolve_principal_from_metadata<T>(
+    req: &Request<T>,
+    api_keys: &[brain_core::ApiKeyConfig],
+    processor: &signal::SignalProcessor,
+) -> Option<identity::Principal> {
+    let metadata = req.metadata();
+    let key = metadata
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| {
+            metadata.get("authorization").and_then(|v| {
+                v.to_str()
+                    .ok()
+                    .and_then(|s| brain_core::auth::extract_bearer_from_value(s).or(Some(s)))
+            })
+        })?;
+    let agent_id = api_keys
+        .iter()
+        .find(|k| k.key == key)
+        .and_then(|k| k.agent_id.clone())?;
+    let store = processor.identity_store()?;
+    store
+        .principal_for(&identity::AgentHint::AgentId(agent_id.into()))
+        .await
+        .ok()
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

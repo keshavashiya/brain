@@ -15,6 +15,7 @@ pub(crate) async fn process_text_frame(
     text: &str,
     conn_id: Uuid,
     processor: &signal::SignalProcessor,
+    principal: Option<&identity::Principal>,
 ) -> Result<Option<SignalResponse>, SignalError> {
     let client_msg: ClientMessage = match serde_json::from_str(text) {
         Ok(m) => m,
@@ -39,7 +40,8 @@ pub(crate) async fn process_text_frame(
         session_id: client_msg.session_id,
         default_channel: format!("ws:{conn_id}"),
         default_sender: "wsclient".to_string(),
-    });
+    })
+    .with_principal_opt(principal.cloned());
 
     let signal_id = signal.id;
 
@@ -150,6 +152,7 @@ pub(crate) async fn handle_streaming_request(
     conn_id: Uuid,
     processor: Arc<signal::SignalProcessor>,
     client_msg: ClientMessage,
+    principal: Option<identity::Principal>,
 ) {
     let source = SignalSource::parse(client_msg.source.as_deref(), SignalSource::WebSocket);
     let signal = Signal::from_adapter_request(signal::AdapterRequest {
@@ -163,7 +166,8 @@ pub(crate) async fn handle_streaming_request(
         session_id: client_msg.session_id.clone(),
         default_channel: format!("ws:{conn_id}"),
         default_sender: "wsclient".to_string(),
-    });
+    })
+    .with_principal_opt(principal);
 
     let signal_id = signal.id;
 

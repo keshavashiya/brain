@@ -376,6 +376,7 @@ mod tests {
             key: "read-only-key".to_string(),
             name: "Read Only".to_string(),
             permissions: vec!["read".to_string()],
+            agent_id: None,
         });
         let api_keys = config.access.api_keys.clone();
         let processor = signal::SignalProcessor::new(config).await.unwrap();
@@ -409,6 +410,7 @@ mod tests {
             key: "read-only-key".to_string(),
             name: "Read Only".to_string(),
             permissions: vec!["read".to_string()],
+            agent_id: None,
         });
         let api_keys = config.access.api_keys.clone();
         let processor = signal::SignalProcessor::new(config).await.unwrap();

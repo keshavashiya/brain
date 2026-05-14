@@ -98,11 +98,13 @@ mod tests {
                 key: "rw-key".to_string(),
                 name: "Read-Write".to_string(),
                 permissions: vec!["read".to_string(), "write".to_string()],
+                agent_id: None,
             },
             ApiKeyConfig {
                 key: "ro-key".to_string(),
                 name: "Read-Only".to_string(),
                 permissions: vec!["read".to_string()],
+                agent_id: None,
             },
         ]
     }

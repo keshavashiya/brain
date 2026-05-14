@@ -23,6 +23,12 @@ impl From<&str> for UserId {
     }
 }
 
+impl From<String> for UserId {
+    fn from(s: String) -> Self {
+        Self(s)
+    }
+}
+
 /// Opaque agent identifier. Examples: `"claude-code"`, `"cursor"`,
 /// `"terminal:zsh"`, `"reflex:fs"`, `"mcp:stdio"`.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -37,6 +43,12 @@ impl fmt::Display for AgentId {
 impl From<&str> for AgentId {
     fn from(s: &str) -> Self {
         Self(s.to_string())
+    }
+}
+
+impl From<String> for AgentId {
+    fn from(s: String) -> Self {
+        Self(s)
     }
 }
 

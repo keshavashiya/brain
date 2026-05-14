@@ -429,6 +429,7 @@ impl Default for BrainConfig {
                     key: Self::generate_api_key(),
                     name: "Default Key".to_string(),
                     permissions: vec!["read".to_string(), "write".to_string()],
+                    agent_id: None,
                 }],
             },
             channel: ChannelIntelligenceConfig::default(),
