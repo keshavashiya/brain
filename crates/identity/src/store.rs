@@ -119,16 +119,27 @@ impl ConfigIdentityStore {
     /// `true` if this verb+request pair must have its path checked against
     /// the principal's `path_allowlist`. The rule:
     ///
-    /// - `fs.*` and `memory.*` ALWAYS require a `path` modifier — these
-    ///   verbs semantically operate on a filesystem location.
+    /// - `fs.*` ALWAYS requires a `path` modifier — every fs verb touches
+    ///   a filesystem location.
+    /// - `memory.import` / `memory.export` require a `path` modifier — these
+    ///   are the file-bound memory verbs. Other `memory.*` operations
+    ///   (`store`, `delete`, `recall`) act on the embedded semantic memory,
+    ///   not a filesystem path, so they are NOT path-scoped.
     /// - `shell.exec` only requires path-scoping when `cwd` is explicitly
     ///   set (the sandbox executor handles the default-cwd case).
     /// - Every other verb is not path-scoped.
     fn needs_path_check(req: &AuthorizationRequest) -> bool {
-        matches!(req.verb_ns.as_str(), "fs" | "memory")
-            || (req.verb_ns == "shell"
-                && req.verb_action == "exec"
-                && req.modifier_str("cwd").is_some())
+        if req.verb_ns == "fs" {
+            return true;
+        }
+        if req.verb_ns == "memory" && matches!(req.verb_action.as_str(), "import" | "export") {
+            return true;
+        }
+        if req.verb_ns == "shell" && req.verb_action == "exec" && req.modifier_str("cwd").is_some()
+        {
+            return true;
+        }
+        false
     }
 
     /// Returns the path (if any) the request claims access to. Inspects

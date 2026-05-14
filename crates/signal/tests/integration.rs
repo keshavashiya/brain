@@ -508,3 +508,120 @@ fn response_text(resp: &brainos_signal::SignalResponse) -> String {
         other => format!("{other:?}"),
     }
 }
+
+/// Happy-path Phase 1 acceptance complement: signal with a principal that
+/// satisfies the gate flows through unimpeded, and an audit entry written
+/// alongside carries the same principal in both the SQLite row and the
+/// `BrainEvent::AuditAppended` payload.
+///
+/// Tier B already covers the denied path (cursor is escalated). This is the
+/// other half: confirms the full chain works when the principal is allowed
+/// (audit-write sites pulling from `Signal.principal` directly is a broader
+/// rewire, queued behind Phase 1 — this test constructs the audit entry
+/// manually to exercise the persistence + observer path end to end).
+#[tokio::test]
+async fn phase_1_happy_path_audit_carries_principal() {
+    use identity::IdentityStore as _;
+    use std::sync::Arc;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut config = brain_core::BrainConfig::default();
+    config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
+
+    let id_cfg: identity::IdentityConfig = serde_yaml::from_str(
+        r#"
+        user_id: keshav
+        principals:
+          - agent_id: claude-code
+            scopes: ["shell.exec", "memory.store"]
+            tier: execute
+        "#,
+    )
+    .unwrap();
+    let identity_store = Arc::new(identity::ConfigIdentityStore::from_config(id_cfg));
+
+    let observer = observe::BroadcastObserver::new();
+    let pool = storage::SqlitePool::open_memory().unwrap();
+    let audit_trail = Arc::new(audit::SqliteAuditTrail::new(pool).with_observer(observer.clone()));
+    audit_trail.ensure_tables().unwrap();
+
+    let processor = SignalProcessor::new(config)
+        .await
+        .unwrap()
+        .with_observer(observer.clone())
+        .with_identity_store(identity_store.clone());
+
+    let claude = identity_store
+        .principal_for(&identity::AgentHint::AgentId("claude-code".into()))
+        .await
+        .unwrap();
+
+    // Signal with Execute-tier principal — should pass the gate (StoreFact
+    // → memory.store @ Write, satisfied by tier=Execute and scope memory.store).
+    let signal = Signal::new(
+        SignalSource::Cli,
+        "cli",
+        "user",
+        "Remember that Rust is fast",
+    )
+    .with_principal(claude.clone());
+    let resp = processor.process(signal).await.unwrap();
+    assert_eq!(
+        resp.status,
+        ResponseStatus::Ok,
+        "expected Ok, got {:?}: {}",
+        resp.status,
+        response_text(&resp)
+    );
+
+    // Now simulate a handler writing an audit row tagged with the same
+    // principal (the wire-up step is broader than Phase 1).
+    let entry = audit::AuditEntry::new(
+        "remember rust",
+        "store-fact",
+        "memory.store",
+        audit::ActionTier::Write,
+    )
+    .with_principal(claude.clone());
+    let entry_id = audit::AuditTrail::record(audit_trail.as_ref(), entry)
+        .await
+        .unwrap();
+
+    // Round-trip from SQLite must preserve the full principal.
+    let rows = audit::AuditTrail::query(audit_trail.as_ref(), audit::AuditQuerySpec::default())
+        .await
+        .unwrap();
+    let row = rows.iter().find(|r| r.id == entry_id).unwrap();
+    let stored = row.principal.as_ref().unwrap();
+    assert_eq!(stored.agent_id, claude.agent_id);
+    assert_eq!(stored.user_id, claude.user_id);
+    assert_eq!(stored.tier, claude.tier);
+
+    // Drain the bus to find the AuditAppended event for this entry.
+    use observe::Observer as _;
+    let mut rx = observer.subscribe();
+
+    // Record one more so a fresh subscriber definitely sees an event.
+    let probe_entry = audit::AuditEntry::new("probe", "d", "a", audit::ActionTier::Read)
+        .with_principal(claude.clone());
+    audit::AuditTrail::record(audit_trail.as_ref(), probe_entry)
+        .await
+        .unwrap();
+
+    let event = tokio::time::timeout(std::time::Duration::from_millis(100), async {
+        loop {
+            if let Ok(ev) = rx.recv().await {
+                if matches!(ev, observe::BrainEvent::AuditAppended { .. }) {
+                    return ev;
+                }
+            }
+        }
+    })
+    .await
+    .expect("AuditAppended within 100ms");
+    if let observe::BrainEvent::AuditAppended { principal, .. } = event {
+        let summary = principal.expect("event carries principal");
+        assert_eq!(summary.agent_id, "claude-code");
+        assert_eq!(summary.user_id, "keshav");
+    }
+}
