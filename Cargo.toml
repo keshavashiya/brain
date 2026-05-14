@@ -35,7 +35,7 @@ license = "MIT"
 repository = "https://github.com/keshavashiya/brain"
 homepage = "https://github.com/keshavashiya/brain"
 keywords = ["ai", "memory", "local", "mcp", "llm"]
-categories = ["cli", "database"]
+categories = ["command-line-utilities", "database"]
 
 [workspace.dependencies]
 # Async runtime
