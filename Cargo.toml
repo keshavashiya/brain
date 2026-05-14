@@ -26,6 +26,7 @@ members = [
     "crates/channel",
     "crates/delegate",
     "crates/observe",
+    "crates/identity",
 ]
 
 [workspace.package]
@@ -136,6 +137,7 @@ orchestrate = { package = "brainos-orchestrate", path = "crates/orchestrate", ve
 channel = { package = "brainos-channel", path = "crates/channel", version = "0.3.0" }
 delegate = { package = "brainos-delegate", path = "crates/delegate", version = "0.3.0" }
 observe = { package = "brainos-observe", path = "crates/observe", version = "0.3.0" }
+identity = { package = "brainos-identity", path = "crates/identity", version = "0.3.0" }
 
 # Benchmarks
 criterion = { version = "0.5", features = ["html_reports"] }
