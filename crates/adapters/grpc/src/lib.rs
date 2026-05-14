@@ -40,8 +40,8 @@ pub mod agent_proto {
 
 use agent_proto::{
     agent_service_server::{AgentService, AgentServiceServer},
-    ConnectRequest, ConnectResponse, ReceiveRequest, SignalRequest as AgentSignalRequest,
-    SignalResponse as AgentSignalResponse, SignalUpdate,
+    BrainEventMessage, BrainEventsRequest, ConnectRequest, ConnectResponse, ReceiveRequest,
+    SignalRequest as AgentSignalRequest, SignalResponse as AgentSignalResponse, SignalUpdate,
 };
 use memory_proto::{
     memory_service_server::{MemoryService, MemoryServiceServer},
@@ -239,6 +239,54 @@ impl AgentServiceImpl {
 type SignalUpdateStream =
     Pin<Box<dyn Stream<Item = Result<SignalUpdate, Status>> + Send + 'static>>;
 
+/// Stream type alias for the server-streaming `BrainEvents` RPC.
+type BrainEventStream =
+    Pin<Box<dyn Stream<Item = Result<BrainEventMessage, Status>> + Send + 'static>>;
+
+/// Predicate matching a `BrainEvent` against the gRPC filter fields.
+fn brain_event_matches(ev: &observe::BrainEvent, filter: &BrainEventsRequest) -> bool {
+    if !filter.kind.is_empty() && ev.kind() != filter.kind {
+        return false;
+    }
+    if !filter.tool_id.is_empty() && ev.tool_id() != Some(filter.tool_id.as_str()) {
+        return false;
+    }
+    if !filter.principal.is_empty() {
+        // Phase 0 events do not carry a principal; the filter rejects everything
+        // when set. Phase 1 (docs/v1.0.0.md §7) populates the field.
+        return false;
+    }
+    if !filter.since.is_empty() {
+        let Ok(since) = chrono::DateTime::parse_from_rfc3339(&filter.since) else {
+            return false;
+        };
+        let since = since.with_timezone(&chrono::Utc);
+        if brain_event_ts(ev) < since {
+            return false;
+        }
+    }
+    true
+}
+
+fn brain_event_ts(ev: &observe::BrainEvent) -> chrono::DateTime<chrono::Utc> {
+    use observe::BrainEvent::*;
+    match ev {
+        SignalReceived { ts, .. }
+        | IntentClassified { ts, .. }
+        | ReasoningStep { ts, .. }
+        | ToolRouteResolved { ts, .. }
+        | ConfirmationRequested { ts, .. }
+        | ConfirmationResolved { ts, .. }
+        | ToolCallStarted { ts, .. }
+        | ToolCallFinished { ts, .. }
+        | ReflexFired { ts, .. }
+        | AuditAppended { ts, .. }
+        | BudgetCrossed { ts, .. }
+        | BreakerStateChange { ts, .. }
+        | Error { ts, .. } => *ts,
+    }
+}
+
 #[tonic::async_trait]
 impl AgentService for AgentServiceImpl {
     /// Establish a session and return a session ID.
@@ -368,6 +416,57 @@ impl AgentService for AgentServiceImpl {
         });
 
         let stream: SignalUpdateStream = Box::pin(tokio_stream::wrappers::ReceiverStream::new(rx));
+        Ok(Response::new(stream))
+    }
+
+    type BrainEventsStream = BrainEventStream;
+
+    /// Subscribe to the v1.0.0 BrainEvent bus, mirroring the SSE/WS surfaces.
+    /// Each emitted message carries the BrainEvent as JSON in `event_json`.
+    async fn brain_events(
+        &self,
+        request: Request<BrainEventsRequest>,
+    ) -> Result<Response<Self::BrainEventsStream>, Status> {
+        let filter = request.into_inner();
+        let Some(mut rx) = self.processor.subscribe_brain_events() else {
+            return Err(Status::failed_precondition(
+                "observability bus not wired on this SignalProcessor",
+            ));
+        };
+
+        tracing::debug!(?filter.kind, ?filter.tool_id, "BrainEvents stream opened");
+
+        let (tx, out) = tokio::sync::mpsc::channel::<Result<BrainEventMessage, Status>>(64);
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        if !brain_event_matches(&ev, &filter) {
+                            continue;
+                        }
+                        let event_json = match serde_json::to_string(&ev) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                tracing::warn!("BrainEvents serialise failed: {e}");
+                                continue;
+                            }
+                        };
+                        if tx.send(Ok(BrainEventMessage { event_json })).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_n)) => {
+                        // Client is slow; skip silently. (HTTP SSE / WS surfaces
+                        // emit a Lagged marker; gRPC's strongly-typed stream has
+                        // no idle frame — silent drop keeps the protocol clean.)
+                        continue;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
+        let stream: BrainEventStream = Box::pin(tokio_stream::wrappers::ReceiverStream::new(out));
         Ok(Response::new(stream))
     }
 }

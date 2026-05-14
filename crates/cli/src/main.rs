@@ -10,6 +10,7 @@ mod export;
 mod serve;
 mod service;
 mod status;
+mod tail;
 mod vault;
 
 use crate::doctor::check_ollama_models;
@@ -176,6 +177,31 @@ enum Commands {
         /// Brain API key for authentication (defaults to config key)
         #[arg(long)]
         api_key: Option<String>,
+    },
+
+    /// Tail the observability bus — print BrainEvents from the running daemon.
+    ///
+    /// Subscribes to `GET /v1/events` (SSE) and emits each `brain_event`
+    /// payload as a JSON line on stdout. Useful in headless / SSH sessions
+    /// or when the UI is down.
+    ///
+    /// Examples:
+    ///   brain tail
+    ///   brain tail --kind signal_received
+    ///   brain tail --tool-id mcp:fs:read --since 2026-05-14T00:00:00Z
+    Tail {
+        /// BrainEvent variant discriminant (e.g. signal_received, tool_call_started).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Filter to a specific tool_id (matches tool-bound events only).
+        #[arg(long = "tool-id")]
+        tool_id: Option<String>,
+        /// Principal filter — forward-compatible; Phase 0 events do not yet carry one.
+        #[arg(long)]
+        principal: Option<String>,
+        /// RFC3339 timestamp; only events with ts >= since are forwarded.
+        #[arg(long)]
+        since: Option<String>,
     },
 
     /// Manage the credential vault — store, retrieve, list, delete secrets.
@@ -591,6 +617,25 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         // ── vault ───────────────────────────────────────────────────────────
         Commands::Vault { action } => {
             vault::cmd_vault(&config, action).await?;
+        }
+
+        // ── tail ────────────────────────────────────────────────────────────
+        Commands::Tail {
+            kind,
+            tool_id,
+            principal,
+            since,
+        } => {
+            tail::cmd_tail(
+                &config,
+                tail::TailFilter {
+                    kind,
+                    tool_id,
+                    principal,
+                    since,
+                },
+            )
+            .await?;
         }
     }
 

@@ -13,6 +13,11 @@ service AgentService {
 
   // Subscribe to a stream of updates for a session.
   rpc ReceiveSignals(ReceiveRequest) returns (stream SignalUpdate);
+
+  // Subscribe to the v1.0.0 BrainEvent observability bus
+  // (see docs/v1.0.0.md §8). Mirrors the HTTP SSE and WebSocket surfaces;
+  // events are emitted as JSON strings using the same enum schema.
+  rpc BrainEvents(BrainEventsRequest) returns (stream BrainEventMessage);
 }
 
 // ── Connect ───────────────────────────────────────────────────────────────────
@@ -64,4 +69,24 @@ message SignalUpdate {
   string event_type = 1;
   string content    = 2;
   string timestamp  = 3;
+}
+
+// ── BrainEvents ──────────────────────────────────────────────────────────────
+
+message BrainEventsRequest {
+  // BrainEvent variant discriminant (e.g. "signal_received"). Empty = all.
+  string kind      = 1;
+  // Filter to a specific tool_id (only meaningful for tool-bound events).
+  string tool_id   = 2;
+  // Principal filter — accepted for forward compatibility; Phase 0 events do
+  // not yet carry a principal. Empty = no filter.
+  string principal = 3;
+  // RFC3339 timestamp; only events with ts >= since are forwarded.
+  string since     = 4;
+}
+
+message BrainEventMessage {
+  // BrainEvent serialised as JSON. Clients deserialise into the same enum
+  // schema used by the SSE / WS / brain-tail surfaces.
+  string event_json = 1;
 }

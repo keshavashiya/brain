@@ -389,9 +389,78 @@ pub async fn cancel_schedule_handler(
     }
 }
 
-/// `GET /v1/events` — Server-Sent Events stream of proactive notifications.
+/// Filter parameters for `GET /v1/events`. All fields optional.
+/// Matches the spec in `docs/v1.0.0.md` §8.3.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct EventQuery {
+    /// BrainEvent variant discriminant, e.g. `signal_received`, `tool_call_started`.
+    pub kind: Option<String>,
+    /// Filter to a specific tool_id (only applies to tool-bound BrainEvents).
+    pub tool_id: Option<String>,
+    /// Principal filter — accepted for forward compatibility; Phase 0 events
+    /// do not yet carry a principal so this filter currently matches nothing
+    /// when set. Implemented in Phase 1 (`docs/v1.0.0.md` §7).
+    pub principal: Option<String>,
+    /// RFC3339 timestamp; only events with `ts >= since` are forwarded.
+    pub since: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl EventQuery {
+    /// Returns `true` if the event should be forwarded to the client.
+    pub fn matches(&self, ev: &observe::BrainEvent) -> bool {
+        if let Some(k) = &self.kind {
+            if ev.kind() != k.as_str() {
+                return false;
+            }
+        }
+        if let Some(t) = &self.tool_id {
+            if ev.tool_id() != Some(t.as_str()) {
+                return false;
+            }
+        }
+        if let Some(since) = self.since {
+            let ts = brain_event_ts(ev);
+            if ts < since {
+                return false;
+            }
+        }
+        // Principal filter: Phase 0 events don't carry a principal yet.
+        if self.principal.is_some() {
+            return false;
+        }
+        true
+    }
+}
+
+fn brain_event_ts(ev: &observe::BrainEvent) -> chrono::DateTime<chrono::Utc> {
+    use observe::BrainEvent::*;
+    match ev {
+        SignalReceived { ts, .. }
+        | IntentClassified { ts, .. }
+        | ReasoningStep { ts, .. }
+        | ToolRouteResolved { ts, .. }
+        | ConfirmationRequested { ts, .. }
+        | ConfirmationResolved { ts, .. }
+        | ToolCallStarted { ts, .. }
+        | ToolCallFinished { ts, .. }
+        | ReflexFired { ts, .. }
+        | AuditAppended { ts, .. }
+        | BudgetCrossed { ts, .. }
+        | BreakerStateChange { ts, .. }
+        | Error { ts, .. } => *ts,
+    }
+}
+
+/// `GET /v1/events` — Server-Sent Events stream.
+///
+/// Surfaces three classes of events on a single connection:
+/// - `brain_event` — structured `BrainEvent`s from the v1.0.0 Observer bus
+///   (filterable via `?kind=`, `?tool_id=`, `?principal=`, `?since=`).
+/// - `signal` — legacy `SignalProcessedEvent` (kept for existing consumers).
+/// - `notification` — proactive notifications.
 pub async fn sse_events_handler(
     State(state): State<Arc<AppState>>,
+    Query(filter): Query<EventQuery>,
     headers: HeaderMap,
 ) -> Result<
     Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>>,
@@ -401,10 +470,36 @@ pub async fn sse_events_handler(
 
     let mut signal_rx = state.processor.subscribe_events();
     let mut notif_rx = state.processor.notification_router().map(|r| r.subscribe());
+    let mut brain_rx = state.processor.subscribe_brain_events();
 
     let stream = async_stream::stream! {
         loop {
             tokio::select! {
+                result = async {
+                    match brain_rx.as_mut() {
+                        Some(rx) => rx.recv().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    match result {
+                        Ok(ev) => {
+                            if !filter.matches(&ev) { continue; }
+                            yield Ok(Event::default()
+                                .event("brain_event")
+                                .json_data(&ev)
+                                .unwrap_or_else(|_| Event::default().data("{}")));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(skipped = n, "SSE brain_event stream lagged");
+                            yield Ok(Event::default()
+                                .event("error")
+                                .data(format!("{{\"lagged\":{n}}}")));
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            brain_rx = None;
+                        }
+                    }
+                }
                 result = signal_rx.recv() => {
                     match result {
                         Ok(event) => {

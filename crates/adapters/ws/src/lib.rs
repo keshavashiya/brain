@@ -185,12 +185,21 @@ async fn handle_connection(
     // ── Phase 2: process signal frames + proactive push ─────────────────────
     // Subscribe to proactive notifications (if router is available).
     let mut proactive_rx = processor.notification_router().map(|r| r.subscribe());
+    // Subscribe to the v1.0.0 BrainEvent bus (if observer is wired).
+    let mut brain_rx = processor.subscribe_brain_events();
 
     loop {
         // Build a future that resolves when a proactive notification arrives,
         // or pends forever if no router is configured.
         let proactive_fut = async {
             match proactive_rx.as_mut() {
+                Some(rx) => rx.recv().await,
+                None => std::future::pending().await,
+            }
+        };
+        // Same pattern for the BrainEvent bus.
+        let brain_fut = async {
+            match brain_rx.as_mut() {
                 Some(rx) => rx.recv().await,
                 None => std::future::pending().await,
             }
@@ -250,6 +259,28 @@ async fn handle_connection(
                         break;
                     }
                     _ => {}
+                }
+            }
+            // BrainEvent push (v1.0.0 §8 observability bus)
+            result = brain_fut => {
+                match result {
+                    Ok(ev) => {
+                        let frame = serde_json::json!({
+                            "type": "brain_event",
+                            "event": ev,
+                        });
+                        if let Ok(json) = serde_json::to_string(&frame) {
+                            if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(conn_id = %conn_id, skipped = n, "WS brain_event stream lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                        brain_rx = None;
+                    }
                 }
             }
             // Proactive notification push
