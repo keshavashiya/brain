@@ -1,0 +1,109 @@
+syntax = "proto3";
+
+package brain.terminal.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// TerminalSession is the gRPC Terminal Bridge — Brain's motor cortex for
+// spawning, attaching to, and driving PTY sessions across platforms.
+//
+// Default port: 19793 (sibling of the 19792 Memory/Agent gRPC service).
+//
+// Split RPCs (Open / Attach / Send / Resize / Signal / Close) are
+// gRPC-Web-compatible, retryable, and compose with the existing tonic auth
+// interceptor. `Interact` is a bidi stream for latency-critical use cases
+// (one connection, deterministic teardown on disconnect).
+service TerminalSession {
+  rpc Open    (OpenRequest)        returns (SessionHandle);
+  rpc Close   (SessionHandle)      returns (CloseAck);
+  rpc Attach  (SessionHandle)      returns (stream OutputChunk);
+  rpc Send    (stream InputChunk)  returns (SendAck);
+  rpc Resize  (ResizeRequest)      returns (ResizeAck);
+  rpc Signal  (SignalRequest)      returns (SignalAck);
+  rpc Interact(stream ClientFrame) returns (stream ServerFrame);
+}
+
+message PtySize {
+  uint32 rows = 1;
+  uint32 cols = 2;
+  uint32 pixel_width = 3;
+  uint32 pixel_height = 4;
+}
+
+message OpenRequest {
+  string program = 1;
+  repeated string args = 2;
+  map<string, string> env = 3;
+  string cwd = 4;
+  PtySize initial_size = 5;
+  bool set_controlling_tty = 6;
+  string client_id = 7;
+}
+
+message SessionHandle {
+  string session_id = 1;
+}
+
+message OutputChunk {
+  bytes data = 1;
+  google.protobuf.Timestamp ts = 2;
+  uint64 seq = 3;
+  bool eof = 4;
+}
+
+message InputChunk {
+  string session_id = 1;
+  bytes data = 2;
+}
+
+message SendAck {
+  uint64 bytes_written = 1;
+}
+
+message ResizeRequest {
+  string session_id = 1;
+  PtySize size = 2;
+}
+
+message ResizeAck {}
+
+enum Sig {
+  UNSPECIFIED = 0;
+  SIGINT = 1;
+  SIGTERM = 2;
+  SIGQUIT = 3;
+  SIGHUP = 4;
+  SIGKILL = 9;
+}
+
+message SignalRequest {
+  string session_id = 1;
+  Sig signal = 2;
+}
+
+message SignalAck {}
+
+message CloseAck {
+  int32 exit_code = 1;
+  bool was_killed = 2;
+}
+
+message ClientFrame {
+  oneof k {
+    OpenRequest open = 1;
+    InputChunk input = 2;
+    ResizeRequest resize = 3;
+    SignalRequest signal = 4;
+    SessionHandle close = 5;
+  }
+}
+
+message ServerFrame {
+  oneof k {
+    SessionHandle handle = 1;
+    OutputChunk output = 2;
+    SendAck ack = 3;
+    CloseAck closed = 4;
+    string error = 5;
+  }
+}

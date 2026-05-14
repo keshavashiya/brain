@@ -27,6 +27,7 @@ members = [
     "crates/delegate",
     "crates/observe",
     "crates/identity",
+    "crates/adapters/terminal",
 ]
 
 [workspace.package]
@@ -138,6 +139,7 @@ channel = { package = "brainos-channel", path = "crates/channel", version = "0.3
 delegate = { package = "brainos-delegate", path = "crates/delegate", version = "0.3.0" }
 observe = { package = "brainos-observe", path = "crates/observe", version = "0.3.0" }
 identity = { package = "brainos-identity", path = "crates/identity", version = "0.3.0" }
+terminal = { package = "brainos-terminal", path = "crates/adapters/terminal", version = "0.3.0" }
 
 # Benchmarks
 criterion = { version = "0.5", features = ["html_reports"] }

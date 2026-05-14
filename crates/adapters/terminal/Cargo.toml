@@ -1,0 +1,40 @@
+[package]
+name = "brainos-terminal"
+description = "Terminal Bridge gRPC adapter (PTY motor cortex) for Brain OS"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+brain_core   = { workspace = true }
+signal       = { workspace = true }
+observe      = { workspace = true }
+identity     = { workspace = true }
+tonic        = { version = "0.14", features = ["transport"] }
+tonic-prost  = "0.14"
+prost        = "0.14"
+prost-types  = "0.14"
+portable-pty = "0.9"
+bytes        = "1"
+tokio        = { workspace = true }
+tokio-stream = "0.1"
+async-trait  = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+anyhow       = { workspace = true }
+tracing      = { workspace = true }
+uuid         = { workspace = true }
+chrono       = { workspace = true }
+
+[build-dependencies]
+tonic-prost-build = "0.14"
+protobuf-src = "2.1"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
