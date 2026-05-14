@@ -1697,7 +1697,11 @@ impl SignalProcessor {
     /// Publish a `BrainEvent::SignalReceived` to the observability bus if one
     /// is configured. Silent no-op when no observer or no subscribers are
     /// attached — observability must never block the pipeline.
-    pub(super) async fn publish_signal_received(&self, signal: &Signal) {
+    ///
+    /// All string fields are passed through [`observe::Redactor`] first so a
+    /// vault-marked secret embedded in `Signal.content` cannot leak onto the
+    /// bus (docs/v1.0.0.md §8.5).
+    pub async fn publish_signal_received(&self, signal: &Signal) {
         let Some(observer) = &self.observer else {
             return;
         };
@@ -1711,14 +1715,20 @@ impl SignalProcessor {
             }
             format!("{}…", &signal.content[..end])
         };
+        let redactor = observe::Redactor::new();
+        let scrub = |s: String| -> String {
+            let mut v = serde_json::Value::String(s);
+            redactor.redact(&mut v);
+            v.as_str().map(|s| s.to_string()).unwrap_or_default()
+        };
         let ev = observe::BrainEvent::SignalReceived {
             id: signal.id,
             signal: observe::SignalSummary {
                 source: format!("{:?}", signal.source).to_lowercase(),
-                channel: signal.channel.clone(),
-                sender: signal.sender.clone(),
-                namespace: signal.namespace.clone(),
-                content_preview: preview,
+                channel: scrub(signal.channel.clone()),
+                sender: scrub(signal.sender.clone()),
+                namespace: scrub(signal.namespace.clone()),
+                content_preview: scrub(preview),
             },
             ts: chrono::Utc::now(),
         };

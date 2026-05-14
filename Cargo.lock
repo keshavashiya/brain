@@ -1012,6 +1012,7 @@ dependencies = [
  "chrono",
  "futures",
  "pdf-extract",
+ "proptest",
  "rusqlite",
  "serde",
  "serde_json",

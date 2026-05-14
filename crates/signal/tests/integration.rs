@@ -261,3 +261,142 @@ async fn cancel_signal_triggers_registered_notify() {
     let was_registered = cancel_task.await.unwrap();
     assert!(was_registered, "cancel_signal should report true");
 }
+
+// ── v1.0.0 Phase 0 acceptance suite ──────────────────────────────────────────
+
+use brainos_signal as _signal_alias; // anchor crate root for proptest! macro path
+
+/// Phase 0 acceptance per `docs/v1.0.0.md` §10 line 1326:
+///
+/// > Send a Signal via any adapter → it appears in the Live tab within
+/// > ~50 ms → cancel button stops in-flight tool call → audit row and
+/// > event row carry the same redacted args.
+///
+/// This test exercises the in-process equivalent: SignalProcessor with an
+/// Observer wired publishes a `SignalReceived` event the moment `process()`
+/// is called; a subsequent `AuditTrail::record` publishes `AuditAppended`
+/// with the same id the SQLite row carries; cancellation triggers cleanly.
+#[tokio::test]
+async fn phase_0_acceptance_signal_audit_cancel_within_budget() {
+    use std::sync::Arc;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut config = brain_core::BrainConfig::default();
+    config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
+
+    let observer = observe::BroadcastObserver::new();
+    let pool = storage::SqlitePool::open_memory().unwrap();
+    let audit = Arc::new(audit::SqliteAuditTrail::new(pool).with_observer(observer.clone()));
+    audit.ensure_tables().unwrap();
+
+    let processor = Arc::new(
+        SignalProcessor::new(config)
+            .await
+            .unwrap()
+            .with_observer(observer.clone()),
+    );
+
+    use observe::Observer as _;
+    let mut rx = observer.subscribe();
+
+    // 1) Process a signal — SignalReceived must arrive within 50ms.
+    let signal = Signal::new(SignalSource::Cli, "cli", "user", "Remember Rust is fast");
+    let signal_id = signal.id;
+    let proc = processor.clone();
+    let handle = tokio::spawn(async move { proc.process(signal).await });
+
+    let signal_event = tokio::time::timeout(std::time::Duration::from_millis(50), async {
+        loop {
+            if let Ok(ev) = rx.recv().await {
+                if let observe::BrainEvent::SignalReceived { .. } = &ev {
+                    return ev;
+                }
+            }
+        }
+    })
+    .await
+    .expect("SignalReceived within 50ms");
+    if let observe::BrainEvent::SignalReceived { id, .. } = &signal_event {
+        assert_eq!(*id, signal_id, "event id matches signal id");
+    }
+
+    // 2) Record an audit entry — AuditAppended must arrive carrying the same
+    //    UUID the SQLite row holds.
+    let entry = audit::AuditEntry::new("req", "decision", "act", audit::ActionTier::Read);
+    let expected_audit_id = entry.id.clone();
+    let returned = audit::AuditTrail::record(audit.as_ref(), entry)
+        .await
+        .unwrap();
+    assert_eq!(returned, expected_audit_id);
+
+    let audit_event = tokio::time::timeout(std::time::Duration::from_millis(50), async {
+        loop {
+            if let Ok(ev) = rx.recv().await {
+                if let observe::BrainEvent::AuditAppended { .. } = &ev {
+                    return ev;
+                }
+            }
+        }
+    })
+    .await
+    .expect("AuditAppended within 50ms");
+    if let observe::BrainEvent::AuditAppended { audit_entry_id, .. } = &audit_event {
+        assert_eq!(audit_entry_id, &expected_audit_id);
+    }
+
+    // 3) Cancellation of an unknown id returns cleanly (no panic).
+    let cancelled = processor.cancel_signal(uuid::Uuid::new_v4()).await;
+    assert!(!cancelled, "unregistered id reports false, not panic");
+
+    // Let the spawned signal complete (or error on missing LLM).
+    let _ = handle.await;
+}
+
+/// Redaction wiring proptest: a vault-marked secret embedded in
+/// `Signal.content` MUST NOT appear in the BrainEvent::SignalReceived
+/// payload that lands on the bus. PR1 proves the Redactor itself is safe;
+/// this proves we actually call it on the wiring path.
+proptest::proptest! {
+    #![proptest_config(proptest::test_runner::Config {
+        cases: 64,
+        .. proptest::test_runner::Config::default()
+    })]
+    #[test]
+    fn signal_received_event_never_carries_raw_secret(
+        handle in "[a-zA-Z0-9_-]{1,16}",
+        value in "[^\\x00:]{4,32}",
+        prefix in "[^\\x00]{0,16}",
+        suffix in "[^\\x00]{0,16}",
+    ) {
+        let body = format!("{prefix}{}{suffix}", observe::redact::mark(&handle, &value));
+        let value_owned = value.clone();
+        let handle_owned = handle.clone();
+
+        let result = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async move {
+                let temp = tempfile::tempdir().unwrap();
+                let mut cfg = brain_core::BrainConfig::default();
+                cfg.brain.data_dir = temp.path().to_str().unwrap().to_string();
+                let observer = observe::BroadcastObserver::new();
+                let processor = SignalProcessor::new(cfg)
+                    .await
+                    .unwrap()
+                    .with_observer(observer.clone());
+                use observe::Observer as _;
+                let mut rx = observer.subscribe();
+                processor.publish_signal_received(&Signal::new(
+                    SignalSource::Cli, "cli", "user", &body,
+                )).await;
+                rx.recv().await.unwrap()
+            });
+
+        let serialized = serde_json::to_string(&result).unwrap();
+        proptest::prop_assert!(!serialized.contains(&value_owned),
+            "raw secret leaked into BrainEvent: {serialized}");
+        proptest::prop_assert!(serialized.contains(&format!("<vault:{handle_owned}>")),
+            "redacted handle missing from event: {serialized}");
+    }
+}

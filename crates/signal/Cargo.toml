@@ -47,3 +47,4 @@ pdf-extract = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
+proptest = "1"
