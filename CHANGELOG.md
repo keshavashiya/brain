@@ -5,6 +5,60 @@ All notable changes to Brain OS are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-05-14
+
+Natural-language interface release. Focus: collapse the CLI surface
+down to bootstrap + security-sensitive stdin, enforce the v0.2 budget
+promise end-to-end, and reconcile docs to code so every claim is
+verifiable. Workspace-locked version: all 24 crates publish at 0.3.0
+together.
+
+### Added
+
+- **Pre-flight LLM budget enforcement** — the main Chat/Recall path
+  now calls `CostBudget::check` before invoking the LLM. A configured
+  ceiling blocks the call *before* tokens burn and returns a friendly
+  message naming the provider and the limit hit. Post-call recording
+  prefers real `Usage` from the provider and falls back to the
+  pre-flight `chars/2` estimate. New module: `signal::budget_guard`.
+
+### Changed
+
+- **Natural-language is the interface** — every operation that can be
+  an intent is one. Thalamus now classifies and `SignalProcessor`
+  handles `QueryAudit`, `PruneAudit`, `ListApprovals`,
+  `RespondToApproval`, `BudgetStatus`, `ListSchedules`,
+  `CancelSchedule`, `ListTasks`, `TaskStatus`, `CancelTask`,
+  `ListChannels`, `ChannelPreferences`, `SetChannelPreference`,
+  `MemorySummary`, and `ProjectInspect`. Legacy subcommands remain
+  as thin deprecation shims; the canonical entry point is
+  `brain chat "…"`.
+- **Config can no longer lie** — removed three documented "ignored"
+  keys: `memory.episodic.max_entries`, `memory.episodic.retention_days`,
+  and `memory.search.hybrid_weight`. Forgetting-curve consolidation
+  (`decay_rate`) replaces the first two; RRF (`rrf_k`) replaces the
+  third. Existing yamls with these keys continue to load — figment
+  ignores them — but the warnings are gone and `default.yaml` no
+  longer advertises them.
+
+### Fixed
+
+- **Docs reconciled to code** — ARCHITECTURE / IMPLEMENTATION /
+  OPERATIONS doc text that still claimed the `POST /v1/webhooks/:id`
+  route was "still pending" has been updated. The route is wired in
+  `crates/adapters/http/src/server.rs` and dispatches into the
+  registered `WebhookInboundTransport` for HMAC/Ed25519 verification.
+
+### Deferred
+
+- **`ExportMemory` / `ImportMemory` intents** — filesystem-path intents
+  need capability scoping (v1.0.0 Pillar 7) before they can be safe
+  from LLM path-extraction errors. The `brain export` / `brain import`
+  CLI subcommands remain the canonical surface.
+- **Orchestrator decomposer LLM budget** — single-call per
+  `DecomposeTask` request; wired with the v1.0.0 §Pillar 8
+  orchestration state machine instead of bolted on now.
+
 ## [0.2.0] — 2026-04-11
 
 First minor release after 0.1.0. Focus: security hardening, resilience,
