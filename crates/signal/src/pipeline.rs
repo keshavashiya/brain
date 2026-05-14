@@ -68,7 +68,39 @@ impl SignalProcessor {
                 agent,
                 ..
             } => {
+                let provider_name = self.llm.name().to_string();
+                let gate = crate::budget_guard::check_llm_input(
+                    self.cost_budget(),
+                    &provider_name,
+                    &messages,
+                )
+                .await;
+                let estimated_input = match gate {
+                    crate::budget_guard::BudgetGate::Blocked { message } => {
+                        let resp = SignalResponse {
+                            signal_id,
+                            status: ResponseStatus::Ok,
+                            response: ResponseContent::Text(message),
+                            memory_context,
+                            session_id,
+                        };
+                        self.publish_event(&signal, &resp);
+                        return Ok(resp);
+                    }
+                    crate::budget_guard::BudgetGate::Proceed {
+                        estimated_input_tokens,
+                    } => estimated_input_tokens,
+                };
+
                 let llm_resp = self.llm.generate(&messages).await?;
+
+                crate::budget_guard::record_llm_usage(
+                    self.cost_budget(),
+                    &provider_name,
+                    llm_resp.usage.as_ref(),
+                    estimated_input,
+                )
+                .await;
 
                 // Store assistant episode for Chat/Recall
                 if let Some(sid) = &session_id {

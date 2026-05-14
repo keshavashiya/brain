@@ -14,6 +14,7 @@ pub mod approval;
 pub mod notification;
 pub mod types;
 
+mod budget_guard;
 mod constructors;
 mod exchange;
 mod extract;
@@ -22,6 +23,8 @@ mod recall;
 mod render;
 mod streaming;
 mod wiring;
+
+pub use budget_guard::{check_llm_input, record_llm_usage, BudgetGate};
 
 pub use approval::ChannelApprovalNotifier;
 
