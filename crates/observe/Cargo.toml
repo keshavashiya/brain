@@ -1,0 +1,25 @@
+[package]
+name = "brainos-observe"
+description = "Observability bus and event types for Brain OS"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+proptest = "1"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

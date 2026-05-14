@@ -25,6 +25,7 @@ members = [
     "crates/orchestrate",
     "crates/channel",
     "crates/delegate",
+    "crates/observe",
 ]
 
 [workspace.package]
@@ -134,6 +135,7 @@ vault = { package = "brainos-vault", path = "crates/vault", version = "0.3.0" }
 orchestrate = { package = "brainos-orchestrate", path = "crates/orchestrate", version = "0.3.0" }
 channel = { package = "brainos-channel", path = "crates/channel", version = "0.3.0" }
 delegate = { package = "brainos-delegate", path = "crates/delegate", version = "0.3.0" }
+observe = { package = "brainos-observe", path = "crates/observe", version = "0.3.0" }
 
 # Benchmarks
 criterion = { version = "0.5", features = ["html_reports"] }
