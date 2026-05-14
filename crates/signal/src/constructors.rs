@@ -133,7 +133,8 @@ impl SignalProcessor {
             search_cfg.decay_rate,
             config.memory.semantic.similarity_threshold,
         ));
-        let (events_tx, _) = tokio::sync::broadcast::channel(512);
+        // Capacity raised to 4096 with lag-drop semantics per docs/v1.0.0.md §8.6.
+        let (events_tx, _) = tokio::sync::broadcast::channel(4096);
 
         let classifier = thalamus::IntentClassifier::new()
             .with_llm_fallback(Arc::new(thalamus::LlmIntentFallback::new(llm.clone())));
@@ -166,6 +167,7 @@ impl SignalProcessor {
             confirmation_correlator: None,
             channel_dispatcher: None,
             agent_registry: None,
+            observer: None,
         };
 
         // Warm up the LLM model in the background to avoid first-call timeout

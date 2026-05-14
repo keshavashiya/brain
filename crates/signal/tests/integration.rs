@@ -157,3 +157,52 @@ async fn test_process_chat_reaches_llm() {
         }
     }
 }
+
+// ── v1.0.0 Phase 0: Observer wiring ──────────────────────────────────────────
+
+/// `SignalProcessor::with_observer` makes `process()` publish a
+/// `BrainEvent::SignalReceived` carrying the signal's id, source, channel,
+/// sender, namespace, and a UTF-8-safe content preview.
+#[tokio::test]
+async fn observer_receives_signal_received_event() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut config = brain_core::BrainConfig::default();
+    config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
+
+    let observer = observe::BroadcastObserver::new();
+    let processor = SignalProcessor::new(config)
+        .await
+        .unwrap()
+        .with_observer(observer.clone());
+
+    let mut rx = processor.subscribe_brain_events().expect("observer wired");
+    let signal = Signal::new(
+        SignalSource::Cli,
+        "cli",
+        "user",
+        "Remember that Rust is fast",
+    );
+    let signal_id = signal.id;
+
+    // Spawn the pipeline; ignore the result — we're asserting on the event,
+    // not on whether the LLM is reachable.
+    let handle = tokio::spawn(async move { processor.process(signal).await });
+
+    let ev = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+        .await
+        .expect("event arrived within 500ms")
+        .expect("bus delivered");
+
+    match ev {
+        observe::BrainEvent::SignalReceived { id, signal, .. } => {
+            assert_eq!(id, signal_id);
+            assert_eq!(signal.source, "cli");
+            assert_eq!(signal.channel, "cli");
+            assert_eq!(signal.sender, "user");
+            assert_eq!(signal.content_preview, "Remember that Rust is fast");
+        }
+        other => panic!("expected SignalReceived, got {other:?}"),
+    }
+
+    let _ = handle.await;
+}

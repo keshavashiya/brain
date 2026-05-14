@@ -173,11 +173,23 @@ pub struct AuditSummary {
 /// SQLite-backed audit trail implementation.
 pub struct SqliteAuditTrail {
     db: SqlitePool,
+    /// Optional observability bus. When set, `record` fires a
+    /// [`observe::BrainEvent::AuditAppended`] after the row is committed —
+    /// the SQLite insert and the event publication share one ingestion path
+    /// so the two cannot drift (docs/v1.0.0.md §8.2 audit-bus unity).
+    observer: Option<Arc<dyn observe::Observer>>,
 }
 
 impl SqliteAuditTrail {
     pub fn new(db: SqlitePool) -> Self {
-        Self { db }
+        Self { db, observer: None }
+    }
+
+    /// Attach an observability bus (builder pattern). When set, every
+    /// successful `record` call publishes a `BrainEvent::AuditAppended`.
+    pub fn with_observer(mut self, observer: Arc<dyn observe::Observer>) -> Self {
+        self.observer = Some(observer);
+        self
     }
 
     pub fn ensure_tables(&self) -> Result<(), AuditError> {
@@ -307,6 +319,19 @@ impl AuditTrail for SqliteAuditTrail {
         })?;
 
         tracing::info!(id = %id, tier = %entry.tier, outcome = %entry.outcome, "audit entry recorded");
+
+        // Audit-bus unity: publish to Observer after the row commits.
+        if let Some(observer) = &self.observer {
+            let ev = observe::BrainEvent::AuditAppended {
+                id: Uuid::new_v4(),
+                audit_entry_id: id.clone(),
+                principal: None, // populated in Phase 1 once Signal carries Principal
+                ts: Utc::now(),
+            };
+            // BusClosed (no subscribers) is informational, not fatal.
+            let _ = observer.publish(ev).await;
+        }
+
         Ok(id)
     }
 
@@ -498,5 +523,58 @@ mod tests {
             )?)
         });
         assert!(result.is_err());
+    }
+
+    /// v1.0.0 Phase 0 — audit-bus unity: a successful `record` publishes a
+    /// `BrainEvent::AuditAppended` carrying the same UUID as the persisted row.
+    #[tokio::test]
+    async fn record_publishes_audit_appended_event() {
+        use observe::Observer as _;
+        let pool = storage::SqlitePool::open_memory().unwrap();
+        let observer = observe::BroadcastObserver::new();
+        let trail = SqliteAuditTrail::new(pool).with_observer(observer.clone());
+        trail.ensure_tables().unwrap();
+
+        let mut rx = observer.subscribe();
+        let entry = AuditEntry::new(
+            "test request",
+            "test decision",
+            "test action",
+            ActionTier::Execute,
+        );
+        let expected_id = entry.id.clone();
+        let returned_id = trail.record(entry).await.unwrap();
+        assert_eq!(returned_id, expected_id);
+
+        let ev = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .expect("event arrived within 50ms")
+            .expect("bus delivered");
+
+        match ev {
+            observe::BrainEvent::AuditAppended {
+                audit_entry_id,
+                principal,
+                ..
+            } => {
+                assert_eq!(audit_entry_id, expected_id);
+                assert!(principal.is_none(), "Phase 0: principal not yet threaded");
+            }
+            other => panic!("expected AuditAppended, got {other:?}"),
+        }
+    }
+
+    /// Observer must not break record() when no subscribers are listening.
+    #[tokio::test]
+    async fn record_succeeds_when_no_subscribers() {
+        let pool = storage::SqlitePool::open_memory().unwrap();
+        let observer = observe::BroadcastObserver::new();
+        let trail = SqliteAuditTrail::new(pool).with_observer(observer);
+        trail.ensure_tables().unwrap();
+
+        // No subscriber attached — publish returns BusClosed, record must still succeed.
+        let entry = AuditEntry::new("r", "d", "a", ActionTier::Read);
+        let id = trail.record(entry).await.unwrap();
+        assert!(!id.is_empty());
     }
 }

@@ -54,6 +54,7 @@ impl SignalProcessor {
         )
     )]
     pub async fn process(&self, signal: Signal) -> Result<SignalResponse, SignalError> {
+        self.publish_signal_received(&signal).await;
         match self.prepare(&signal, None, None).await? {
             PipelineResult::Complete(resp) => {
                 self.publish_event(&signal, &resp);
@@ -1665,6 +1666,38 @@ impl SignalProcessor {
         };
         let resp = prepend_nudges(resp);
         Ok(PipelineResult::Complete(resp))
+    }
+
+    /// Publish a `BrainEvent::SignalReceived` to the observability bus if one
+    /// is configured. Silent no-op when no observer or no subscribers are
+    /// attached — observability must never block the pipeline.
+    pub(super) async fn publish_signal_received(&self, signal: &Signal) {
+        let Some(observer) = &self.observer else {
+            return;
+        };
+        const PREVIEW_BYTES: usize = 256;
+        let preview = if signal.content.len() <= PREVIEW_BYTES {
+            signal.content.clone()
+        } else {
+            let mut end = PREVIEW_BYTES;
+            while end > 0 && !signal.content.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}…", &signal.content[..end])
+        };
+        let ev = observe::BrainEvent::SignalReceived {
+            id: signal.id,
+            signal: observe::SignalSummary {
+                source: format!("{:?}", signal.source).to_lowercase(),
+                channel: signal.channel.clone(),
+                sender: signal.sender.clone(),
+                namespace: signal.namespace.clone(),
+                content_preview: preview,
+            },
+            ts: chrono::Utc::now(),
+        };
+        // BusClosed (no subscribers) is informational, not fatal.
+        let _ = observer.publish(ev).await;
     }
 
     pub(super) fn publish_event(&self, signal: &Signal, response: &SignalResponse) {

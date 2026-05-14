@@ -85,6 +85,15 @@ pub struct SignalProcessor {
     // ── Agent delegation (Phase 3) ───────────────────────────────────────
     /// Registry of specialist agent delegates (Claude Code, custom subprocess, etc.).
     agent_registry: Option<std::sync::Arc<delegate::AgentRegistry>>,
+
+    // ── Observability (v1.0.0 Phase 0) ───────────────────────────────────
+    /// Optional event bus. When set, the pipeline publishes structured
+    /// `BrainEvent`s for the Live tab, `brain tail`, and remote subscribers.
+    /// Coexists with the legacy `events_tx` `SignalProcessedEvent` bus during
+    /// the Phase-0 → Phase-2 transition; that bus is removed once all
+    /// consumers (httpadapter, grpcadapter) migrate to subscribing through
+    /// `Observer`.
+    observer: Option<std::sync::Arc<dyn observe::Observer>>,
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

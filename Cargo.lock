@@ -636,6 +636,7 @@ version = "0.3.0"
 dependencies = [
  "async-trait",
  "brainos-core",
+ "brainos-observe",
  "brainos-storage",
  "chrono",
  "rusqlite",
@@ -1000,6 +1001,7 @@ dependencies = [
  "brainos-delegate",
  "brainos-ganglia",
  "brainos-hippocampus",
+ "brainos-observe",
  "brainos-orchestrate",
  "brainos-sandbox",
  "brainos-storage",

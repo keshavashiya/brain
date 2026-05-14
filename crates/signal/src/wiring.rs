@@ -258,4 +258,25 @@ impl SignalProcessor {
     ) -> tokio::sync::broadcast::Receiver<crate::types::SignalProcessedEvent> {
         self.events_tx.subscribe()
     }
+
+    /// Attach an observability event bus (builder pattern). When set, the
+    /// pipeline publishes structured `BrainEvent`s alongside the legacy
+    /// `SignalProcessedEvent` bus. See `docs/v1.0.0.md` §8.
+    pub fn with_observer(mut self, observer: Arc<dyn observe::Observer>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
+    /// Expose the configured observability bus, if any.
+    pub fn observer(&self) -> Option<&Arc<dyn observe::Observer>> {
+        self.observer.as_ref()
+    }
+
+    /// Subscribe to the structured `BrainEvent` bus. Returns `None` if no
+    /// observer was wired via `with_observer`.
+    pub fn subscribe_brain_events(
+        &self,
+    ) -> Option<tokio::sync::broadcast::Receiver<observe::BrainEvent>> {
+        self.observer.as_ref().map(|o| o.subscribe())
+    }
 }

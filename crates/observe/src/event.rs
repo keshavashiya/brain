@@ -66,7 +66,10 @@ pub enum BrainEvent {
     },
     AuditAppended {
         id: Uuid,
-        audit_row_id: i64,
+        /// The `AuditEntry.id` (UUID-as-string) — matches the existing audit
+        /// schema in `crates/audit`. (Spec §8.1 said `audit_row_id: i64`, but
+        /// the audit table is keyed by string UUID, not SQLite ROWID.)
+        audit_entry_id: String,
         principal: Option<PrincipalSummary>,
         ts: DateTime<Utc>,
     },
