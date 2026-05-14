@@ -221,7 +221,7 @@ async fn cancel_signal_for_unknown_id_returns_noop_message() {
         SignalSource::Cli,
         "cli",
         "user",
-        &format!("cancel signal {target}"),
+        format!("cancel signal {target}"),
     );
     let resp = processor.process(signal).await.unwrap();
     if let ResponseContent::Text(text) = &resp.response {
