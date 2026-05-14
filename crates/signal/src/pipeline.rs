@@ -177,6 +177,17 @@ impl SignalProcessor {
             .await;
         let procedure_context = self.match_procedures(&signal.content);
 
+        // v1.0.0 Phase 1 identity gate. Runs after classification (so we
+        // know the intent) and before any handler executes. Three short-
+        // circuit outcomes: EscalateToUser → text response pointing to the
+        // pending approval; Deny → error response; otherwise proceed.
+        if let Some(early) = self
+            .enforce_identity(signal, signal_id, &classification.intent)
+            .await
+        {
+            return Ok(PipelineResult::Complete(early));
+        }
+
         // Helper: prepend notification nudges to a response
         let prepend_nudges = |mut resp: SignalResponse| -> SignalResponse {
             if !pending_notifications.is_empty() {
@@ -1750,6 +1761,59 @@ impl SignalProcessor {
             timestamp: chrono::Utc::now(),
         };
         let _ = self.events_tx.send(event);
+    }
+
+    // ── Identity gate (v1.0.0 Phase 1 §7) ────────────────────────────────
+
+    /// Run the configured `IdentityStore::check` against the classified
+    /// intent. Returns `Some(resp)` if the pipeline should short-circuit
+    /// with that response, `None` to proceed.
+    ///
+    /// Skipped when no identity store is wired, when the signal carries no
+    /// principal, or when the intent is unguarded (chat/inspection).
+    pub(super) async fn enforce_identity(
+        &self,
+        signal: &Signal,
+        signal_id: Uuid,
+        intent: &thalamus::Intent,
+    ) -> Option<SignalResponse> {
+        let store = self.identity_store.as_ref()?;
+        let principal = signal.principal.as_ref()?;
+        let (req, required) = crate::authz::intent_to_auth(intent)?;
+
+        match store.check(principal, &req, required).await {
+            identity::CheckOutcome::Allow => None,
+            identity::CheckOutcome::EscalateToUser { reason } => {
+                if let Some(observer) = &self.observer {
+                    let ev = observe::BrainEvent::ConfirmationRequested {
+                        id: signal_id,
+                        nonce: signal_id.to_string(),
+                        reason: reason.clone(),
+                        ts: chrono::Utc::now(),
+                    };
+                    let _ = observer.publish(ev).await;
+                }
+                Some(SignalResponse::ok(
+                    signal_id,
+                    format!(
+                        "Approval required: {reason}. Awaiting your decision \
+                         (Live tab → cancel/approve, or `respond` from chat)."
+                    ),
+                ))
+            }
+            identity::CheckOutcome::Deny { reason } => {
+                if let Some(observer) = &self.observer {
+                    let ev = observe::BrainEvent::Error {
+                        id: signal_id,
+                        source: "identity.deny".into(),
+                        message: reason.clone(),
+                        ts: chrono::Utc::now(),
+                    };
+                    let _ = observer.publish(ev).await;
+                }
+                Some(SignalResponse::error(signal_id, reason))
+            }
+        }
     }
 
     // ── Signal cancellation (v1.0.0 Phase 0 §8.4) ────────────────────────

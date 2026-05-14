@@ -32,6 +32,7 @@ orchestrate = { workspace = true }
 channel = { workspace = true }
 delegate = { workspace = true }
 observe = { workspace = true }
+identity = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -48,3 +49,4 @@ pdf-extract = "0.10"
 [dev-dependencies]
 tempfile = "3"
 proptest = "1"
+serde_yaml = { workspace = true }

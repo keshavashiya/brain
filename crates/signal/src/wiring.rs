@@ -279,4 +279,18 @@ impl SignalProcessor {
     ) -> Option<tokio::sync::broadcast::Receiver<observe::BrainEvent>> {
         self.observer.as_ref().map(|o| o.subscribe())
     }
+
+    /// Attach an `IdentityStore` (v1.0.0 Phase 1). When wired and a
+    /// `Signal` carries a `Principal`, the pipeline gates the classified
+    /// intent through `IdentityStore::check` before executing.
+    /// See `docs/v1.0.0.md` §7.
+    pub fn with_identity_store(mut self, store: Arc<dyn identity::IdentityStore>) -> Self {
+        self.identity_store = Some(store);
+        self
+    }
+
+    /// Expose the configured identity store, if any.
+    pub fn identity_store(&self) -> Option<&Arc<dyn identity::IdentityStore>> {
+        self.identity_store.as_ref()
+    }
 }

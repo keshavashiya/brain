@@ -264,8 +264,6 @@ async fn cancel_signal_triggers_registered_notify() {
 
 // ── v1.0.0 Phase 0 acceptance suite ──────────────────────────────────────────
 
-use brainos_signal as _signal_alias; // anchor crate root for proptest! macro path
-
 /// Phase 0 acceptance per `docs/v1.0.0.md` §10 line 1326:
 ///
 /// > Send a Signal via any adapter → it appears in the Live tab within
@@ -352,10 +350,10 @@ async fn phase_0_acceptance_signal_audit_cancel_within_budget() {
     let _ = handle.await;
 }
 
-/// Redaction wiring proptest: a vault-marked secret embedded in
-/// `Signal.content` MUST NOT appear in the BrainEvent::SignalReceived
-/// payload that lands on the bus. PR1 proves the Redactor itself is safe;
-/// this proves we actually call it on the wiring path.
+// Redaction wiring proptest: a vault-marked secret embedded in
+// `Signal.content` MUST NOT appear in the BrainEvent::SignalReceived
+// payload that lands on the bus. PR1 proves the Redactor itself is safe;
+// this proves we actually call it on the wiring path.
 proptest::proptest! {
     #![proptest_config(proptest::test_runner::Config {
         cases: 64,
@@ -398,5 +396,115 @@ proptest::proptest! {
             "raw secret leaked into BrainEvent: {serialized}");
         proptest::prop_assert!(serialized.contains(&format!("<vault:{handle_owned}>")),
             "redacted handle missing from event: {serialized}");
+    }
+}
+
+// ── v1.0.0 Phase 1 acceptance: two agents, two tiers ──────────────────────────
+
+/// Phase 1 acceptance per `docs/v1.0.0.md` §10 line 1337:
+///
+/// > Two agents (`claude-code` with `Execute` tier, `cursor` with `Read` tier)
+/// > invoke the same `shell.exec` intent. The first runs; the second escalates
+/// > to user and surfaces in the Live tab as `ConfirmationRequested
+/// > { reason: "agent_id=cursor missing scope shell.exec" }`.
+#[tokio::test]
+async fn phase_1_two_agents_one_runs_one_escalates() {
+    use identity::IdentityStore as _;
+    use std::sync::Arc;
+
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut config = brain_core::BrainConfig::default();
+    config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
+
+    // Identity config: claude-code holds shell.exec at Execute; cursor at Read.
+    let id_cfg: identity::IdentityConfig = serde_yaml::from_str(
+        r#"
+        user_id: keshav
+        principals:
+          - agent_id: claude-code
+            scopes: [shell.exec]
+            tier: execute
+          - agent_id: cursor
+            scopes: [shell.exec]
+            tier: read
+        "#,
+    )
+    .unwrap();
+    let identity_store = Arc::new(identity::ConfigIdentityStore::from_config(id_cfg));
+
+    let observer = observe::BroadcastObserver::new();
+    let processor = SignalProcessor::new(config)
+        .await
+        .unwrap()
+        .with_observer(observer.clone())
+        .with_identity_store(identity_store.clone());
+
+    use observe::Observer as _;
+    let mut rx = observer.subscribe();
+
+    let claude = identity_store
+        .principal_for(&identity::AgentHint::AgentId("claude-code".into()))
+        .await
+        .unwrap();
+    let cursor = identity_store
+        .principal_for(&identity::AgentHint::AgentId("cursor".into()))
+        .await
+        .unwrap();
+
+    // claude-code: Execute-tier → should pass the identity gate. The
+    // command itself fails because no sandbox is wired in this test, but
+    // the *gate* let it through — that's what we're asserting.
+    let claude_signal =
+        Signal::new(SignalSource::Cli, "cli", "user", "run echo hi").with_principal(claude);
+    let claude_resp = processor.process(claude_signal).await.unwrap();
+    assert!(
+        !response_text(&claude_resp).contains("Approval required"),
+        "claude-code with Execute tier should NOT be escalated: {:?}",
+        claude_resp
+    );
+
+    // cursor: Read-tier → identity gate escalates. Response text says so,
+    // and a ConfirmationRequested BrainEvent fires.
+    let cursor_signal =
+        Signal::new(SignalSource::Cli, "cli", "user", "run echo hi").with_principal(cursor);
+    let cursor_id = cursor_signal.id;
+    let cursor_resp = processor.process(cursor_signal).await.unwrap();
+    let text = response_text(&cursor_resp);
+    assert!(
+        text.contains("Approval required"),
+        "expected escalation, got: {text}"
+    );
+    assert!(
+        text.contains("tier=read") || text.contains("missing scope") || text.contains("tier"),
+        "escalation reason should mention tier or scope: {text}"
+    );
+
+    // Drain the bus until we see the ConfirmationRequested for cursor.
+    let event = tokio::time::timeout(std::time::Duration::from_millis(200), async {
+        loop {
+            if let Ok(ev) = rx.recv().await {
+                if let observe::BrainEvent::ConfirmationRequested { id, .. } = &ev {
+                    if *id == cursor_id {
+                        return ev;
+                    }
+                }
+            }
+        }
+    })
+    .await
+    .expect("ConfirmationRequested arrived");
+    if let observe::BrainEvent::ConfirmationRequested { reason, .. } = event {
+        assert!(
+            reason.contains("cursor"),
+            "reason should name the agent: {reason}"
+        );
+    }
+}
+
+fn response_text(resp: &brainos_signal::SignalResponse) -> String {
+    match &resp.response {
+        brainos_signal::ResponseContent::Text(t) => t.clone(),
+        brainos_signal::ResponseContent::Error(e) => e.clone(),
+        other => format!("{other:?}"),
     }
 }

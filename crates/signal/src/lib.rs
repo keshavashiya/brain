@@ -11,6 +11,7 @@
 //! - NotificationRouter (proactive delivery)
 
 pub mod approval;
+pub mod authz;
 pub mod notification;
 pub mod types;
 
@@ -105,6 +106,11 @@ pub struct SignalProcessor {
             std::collections::HashMap<uuid::Uuid, std::sync::Arc<tokio::sync::Notify>>,
         >,
     >,
+    /// Authorization store (v1.0.0 Phase 1, `docs/v1.0.0.md` §7). When set
+    /// and the incoming `Signal` carries a `Principal`, the pipeline gates
+    /// the classified intent through `IdentityStore::check` before
+    /// executing it. Unwired = back-compat (no enforcement).
+    identity_store: Option<std::sync::Arc<dyn identity::IdentityStore>>,
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

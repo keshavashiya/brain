@@ -74,6 +74,12 @@ pub struct Signal {
     /// When provided, the processor reuses this session instead of creating a new one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Who is asking (v1.0.0 Phase 1, `docs/v1.0.0.md` §7). Resolved by the
+    /// originating adapter from its auth context. `None` means the adapter
+    /// did not authenticate the caller; the pipeline's identity gate (if
+    /// wired) treats this as anonymous.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<identity::Principal>,
 }
 
 fn default_namespace() -> String {
@@ -99,7 +105,24 @@ impl Signal {
             namespace: "personal".to_string(),
             agent: None,
             session_id: None,
+            principal: None,
         }
+    }
+
+    /// Builder: attach a `Principal` resolved by the adapter from its
+    /// auth context. The identity gate consults this when authorizing the
+    /// signal's intent.
+    pub fn with_principal(mut self, principal: identity::Principal) -> Self {
+        self.principal = Some(principal);
+        self
+    }
+
+    /// Builder: attach a principal from an Option (no-op if None).
+    pub fn with_principal_opt(mut self, principal: Option<identity::Principal>) -> Self {
+        if let Some(p) = principal {
+            self.principal = Some(p);
+        }
+        self
     }
 
     /// Builder: set the originating agent identity.
