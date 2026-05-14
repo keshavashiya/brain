@@ -117,11 +117,8 @@ pub struct MemoryConfig {
     pub consolidation: ConsolidationConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EpisodicConfig {
-    pub max_entries: u64,
-    pub retention_days: u32,
-}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EpisodicConfig {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticConfig {
@@ -131,7 +128,6 @@ pub struct SemanticConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchConfig {
-    pub hybrid_weight: f64,
     pub rrf_k: u32,
     /// Candidates fetched from each source (BM25, ANN) before RRF fusion.
     #[serde(default = "default_pre_fusion_limit")]

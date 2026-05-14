@@ -41,19 +41,16 @@ embedding:
 
 # ── Memory ─────────────────────────────────────────────────────────────────────
 memory:
-  episodic:
-    max_entries: 100000
-    retention_days: 365
+  episodic: {}
   semantic:
     similarity_threshold: 0.65
     max_results: 20
   search:
-    hybrid_weight: 0.7          # vector weight  (1 - hybrid_weight = BM25 weight)
-    rrf_k: 60
-    pre_fusion_limit: 50
-    importance_weight: 0.3
-    recency_weight: 0.2
-    decay_rate: 0.01
+    rrf_k: 60                   # Reciprocal Rank Fusion constant
+    pre_fusion_limit: 50        # candidates fetched from each source (BM25, ANN) before fusion
+    importance_weight: 0.3      # weight for importance in final reranking
+    recency_weight: 0.2         # weight for recency in final reranking
+    decay_rate: 0.01            # forgetting-curve decay rate (higher = faster forgetting)
   consolidation:
     enabled: true
     interval_hours: 24

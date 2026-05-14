@@ -245,23 +245,6 @@ impl BrainConfig {
             }
         }
 
-        #[allow(clippy::float_cmp)]
-        if self.memory.search.hybrid_weight != 0.7 {
-            warnings.push(
-                "memory.search.hybrid_weight is set but unused — recall uses Reciprocal Rank Fusion (rrf_k) instead. This field will be removed in a future release.".to_string()
-            );
-        }
-        if self.memory.episodic.max_entries != 100_000 {
-            warnings.push(
-                "memory.episodic.max_entries is set but not enforced — no pruning logic exists yet. This field is reserved for future use.".to_string()
-            );
-        }
-        if self.memory.episodic.retention_days != 365 {
-            warnings.push(
-                "memory.episodic.retention_days is set but not enforced — recall uses a forgetting curve (decay_rate) instead of TTL-based retention.".to_string()
-            );
-        }
-
         for (name, ms) in [
             ("web_search.timeout_ms", self.actions.web_search.timeout_ms),
             ("messaging.timeout_ms", self.actions.messaging.timeout_ms),
@@ -320,16 +303,12 @@ impl Default for BrainConfig {
                 dimensions: 768,
             },
             memory: MemoryConfig {
-                episodic: EpisodicConfig {
-                    max_entries: 100_000,
-                    retention_days: 365,
-                },
+                episodic: EpisodicConfig {},
                 semantic: SemanticConfig {
                     similarity_threshold: 0.65,
                     max_results: 20,
                 },
                 search: SearchConfig {
-                    hybrid_weight: 0.7,
                     rrf_k: 60,
                     pre_fusion_limit: 50,
                     importance_weight: 0.3,
