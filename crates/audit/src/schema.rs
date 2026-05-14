@@ -58,6 +58,11 @@ pub struct AuditEntry {
     pub outcome: AuditOutcome,
     pub rollback: Option<String>, // Rollback coordinates (JSON)
     pub metadata: Option<String>, // Additional context (JSON)
+    /// Requesting principal (v1.0.0 Phase 1, `docs/v1.0.0.md` §7.3).
+    /// `None` on pre-Phase-1 rows — the spec's deliberate
+    /// "<unknown principal>" sentinel; not back-filled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal: Option<identity::Principal>,
 }
 
 impl AuditEntry {
@@ -84,11 +89,26 @@ impl AuditEntry {
             outcome: AuditOutcome::Success,
             rollback: None,
             metadata: None,
+            principal: None,
         }
     }
 
     pub fn with_source(mut self, source: impl Into<String>) -> Self {
         self.source = source.into();
+        self
+    }
+
+    /// Builder: attach the requesting principal (v1.0.0 Phase 1).
+    pub fn with_principal(mut self, principal: identity::Principal) -> Self {
+        self.principal = Some(principal);
+        self
+    }
+
+    /// Builder: attach a principal from an `Option` (no-op if None).
+    pub fn with_principal_opt(mut self, principal: Option<identity::Principal>) -> Self {
+        if let Some(p) = principal {
+            self.principal = Some(p);
+        }
         self
     }
 
@@ -212,7 +232,8 @@ impl SqliteAuditTrail {
                     duration_ms INTEGER,
                     outcome     TEXT NOT NULL,
                     rollback    TEXT,
-                    metadata    TEXT
+                    metadata    TEXT,
+                    principal_json TEXT
                 );
 
                 CREATE TRIGGER IF NOT EXISTS audit_no_update
@@ -228,6 +249,12 @@ impl SqliteAuditTrail {
                     END;
                 "#,
             )?;
+            // v1.0.0 Phase 1 v19 upgrade: add principal_json to existing
+            // installs. Idempotent — silently no-op on duplicate-column.
+            let _ = conn.execute(
+                "ALTER TABLE audit_entries ADD COLUMN principal_json TEXT",
+                [],
+            );
             Ok(())
         })?;
         Ok(())
@@ -261,6 +288,18 @@ impl SqliteAuditTrail {
             }
         };
 
+        // Column 16 is principal_json (v1.0.0 Phase 1, v19 upgrade). Pre-v19
+        // rows have NULL here → AuditEntry.principal stays None, which the
+        // UI renders as "<unknown principal>" per docs/v1.0.0.md §7.3.
+        // The column may also be missing entirely from older SELECT shapes
+        // — guard with try_get + ok().
+        let principal = row
+            .get::<_, Option<String>>(16)
+            .ok()
+            .flatten()
+            .filter(|s| !s.is_empty())
+            .and_then(|s| serde_json::from_str::<identity::Principal>(&s).ok());
+
         Ok(AuditEntry {
             id: row.get(0)?,
             timestamp: row.get(1)?,
@@ -278,6 +317,7 @@ impl SqliteAuditTrail {
             outcome,
             rollback: row.get::<_, Option<String>>(13)?.filter(|s| !s.is_empty()),
             metadata: row.get::<_, Option<String>>(15)?.filter(|s| !s.is_empty()),
+            principal,
         })
     }
 }
@@ -286,33 +326,38 @@ impl SqliteAuditTrail {
 impl AuditTrail for SqliteAuditTrail {
     async fn record(&self, entry: AuditEntry) -> Result<String, AuditError> {
         let id = entry.id.clone();
+        let principal_json = entry
+            .principal
+            .as_ref()
+            .and_then(|p| serde_json::to_string(p).ok());
         let entry = Arc::new(entry);
 
-        let entry = Arc::clone(&entry);
+        let entry_for_insert = Arc::clone(&entry);
         self.db.with_conn(|conn| {
             conn.execute(
                 r#"INSERT INTO audit_entries (
                     id, timestamp, source, request, decision, action, tier,
                     approved_by, approval_nonce, stdout, stderr, exit_code,
-                    duration_ms, outcome, rollback, metadata
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)"#,
+                    duration_ms, outcome, rollback, metadata, principal_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)"#,
                 params![
-                    entry.id,
-                    entry.timestamp,
-                    entry.source,
-                    entry.request,
-                    entry.decision,
-                    entry.action,
-                    entry.tier.to_string(),
-                    entry.approved_by,
-                    entry.approval_nonce,
-                    entry.stdout,
-                    entry.stderr,
-                    entry.exit_code,
-                    entry.duration_ms,
-                    entry.outcome.to_string(),
-                    entry.rollback,
-                    entry.metadata,
+                    entry_for_insert.id,
+                    entry_for_insert.timestamp,
+                    entry_for_insert.source,
+                    entry_for_insert.request,
+                    entry_for_insert.decision,
+                    entry_for_insert.action,
+                    entry_for_insert.tier.to_string(),
+                    entry_for_insert.approved_by,
+                    entry_for_insert.approval_nonce,
+                    entry_for_insert.stdout,
+                    entry_for_insert.stderr,
+                    entry_for_insert.exit_code,
+                    entry_for_insert.duration_ms,
+                    entry_for_insert.outcome.to_string(),
+                    entry_for_insert.rollback,
+                    entry_for_insert.metadata,
+                    principal_json,
                 ],
             )?;
             Ok(())
@@ -322,10 +367,14 @@ impl AuditTrail for SqliteAuditTrail {
 
         // Audit-bus unity: publish to Observer after the row commits.
         if let Some(observer) = &self.observer {
+            let principal_summary = entry.principal.as_ref().map(|p| observe::PrincipalSummary {
+                user_id: p.user_id.to_string(),
+                agent_id: p.agent_id.to_string(),
+            });
             let ev = observe::BrainEvent::AuditAppended {
                 id: Uuid::new_v4(),
                 audit_entry_id: id.clone(),
-                principal: None, // populated in Phase 1 once Signal carries Principal
+                principal: principal_summary,
                 ts: Utc::now(),
             };
             // BusClosed (no subscribers) is informational, not fatal.
@@ -341,7 +390,7 @@ impl AuditTrail for SqliteAuditTrail {
                 let mut sql = String::from(
                     "SELECT id, timestamp, source, request, decision, action, tier,
                         approved_by, approval_nonce, stdout, stderr, exit_code,
-                        duration_ms, rollback, outcome, metadata
+                        duration_ms, rollback, outcome, metadata, principal_json
                  FROM audit_entries WHERE 1=1",
                 );
                 let mut param_values: Vec<String> = Vec::new();
@@ -576,5 +625,88 @@ mod tests {
         let entry = AuditEntry::new("r", "d", "a", ActionTier::Read);
         let id = trail.record(entry).await.unwrap();
         assert!(!id.is_empty());
+    }
+
+    // ── v1.0.0 Phase 1 Tier D: principal_json round-trip ───────────────────
+
+    fn test_principal() -> identity::Principal {
+        identity::Principal {
+            user_id: "keshav".into(),
+            agent_id: "claude-code".into(),
+            scopes: vec!["shell.exec".into()],
+            tier: identity::Tier::Execute,
+        }
+    }
+
+    /// AuditEntry.principal round-trips through SQLite via principal_json.
+    #[tokio::test]
+    async fn principal_round_trips_through_sqlite() {
+        let trail = test_trail();
+        let entry = AuditEntry::new("req", "decision", "action", ActionTier::Execute)
+            .with_principal(test_principal());
+        let id = trail.record(entry).await.unwrap();
+
+        let rows = trail.query(AuditQuerySpec::default()).await.unwrap();
+        let row = rows.iter().find(|r| r.id == id).expect("row present");
+        let principal = row.principal.as_ref().expect("principal preserved");
+        assert_eq!(principal.agent_id, identity::AgentId("claude-code".into()));
+        assert_eq!(principal.user_id, identity::UserId("keshav".into()));
+        assert_eq!(principal.tier, identity::Tier::Execute);
+    }
+
+    /// AuditAppended carries the principal summary when one is on the entry.
+    #[tokio::test]
+    async fn audit_appended_event_carries_principal_summary() {
+        use observe::Observer as _;
+        let pool = storage::SqlitePool::open_memory().unwrap();
+        let observer = observe::BroadcastObserver::new();
+        let trail = SqliteAuditTrail::new(pool).with_observer(observer.clone());
+        trail.ensure_tables().unwrap();
+
+        let mut rx = observer.subscribe();
+        let entry =
+            AuditEntry::new("r", "d", "a", ActionTier::Execute).with_principal(test_principal());
+        let _ = trail.record(entry).await.unwrap();
+
+        let ev = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match ev {
+            observe::BrainEvent::AuditAppended {
+                principal: Some(p), ..
+            } => {
+                assert_eq!(p.agent_id, "claude-code");
+                assert_eq!(p.user_id, "keshav");
+            }
+            other => panic!("expected AuditAppended with principal, got {other:?}"),
+        }
+    }
+
+    /// Pre-Phase-1 entries (no principal) still record and publish cleanly.
+    /// Their event carries `principal: None` — the spec's "<unknown principal>"
+    /// sentinel (docs/v1.0.0.md §7.3).
+    #[tokio::test]
+    async fn audit_appended_event_principal_none_for_pre_phase_1_entries() {
+        use observe::Observer as _;
+        let pool = storage::SqlitePool::open_memory().unwrap();
+        let observer = observe::BroadcastObserver::new();
+        let trail = SqliteAuditTrail::new(pool).with_observer(observer.clone());
+        trail.ensure_tables().unwrap();
+
+        let mut rx = observer.subscribe();
+        let entry = AuditEntry::new("r", "d", "a", ActionTier::Read);
+        let _ = trail.record(entry).await.unwrap();
+
+        let ev = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        match ev {
+            observe::BrainEvent::AuditAppended { principal, .. } => {
+                assert!(principal.is_none(), "Pre-Phase-1 entries have no principal");
+            }
+            other => panic!("expected AuditAppended, got {other:?}"),
+        }
     }
 }
