@@ -122,7 +122,7 @@ brain/
 │   │                     ChannelTransport engines: polled, webhook-inbound,
 │   │                     webhook-outbound, preset/jsonpath/send helpers.
 │   │                     `channel.transports[]` is first-class; webhook-inbound
-│   │                     route wiring is still pending in the HTTP adapter.
+│   │                     route `POST /v1/webhooks/:id` is wired in the HTTP adapter.
 │   │
 │   ├── storage/        # Storage abstraction layer
 │   │   ├── sqlite      # SqlitePool: 18 migrations (v1–v18), WAL mode, thread-safe Mutex<Connection>
@@ -670,7 +670,7 @@ The bridge is **not** inside Brain. It is a separate process (and typically a se
 3. Wraps them as `{"content": "...", "sender": "...", "namespace": "..."}` and sends to Brain
 4. Receives `SignalResponse` from Brain and relays the response back to the platform
 
-Current gap: `WebhookInboundTransport` is registered and health-checked, but the HTTP route that should call `WebhookInboundTransport::handle_request()` is still pending in [`crates/cli/src/serve.rs`](crates/cli/src/serve.rs).
+`WebhookInboundTransport` is registered and health-checked, and inbound traffic flows through `POST /v1/webhooks/:id` on the HTTP adapter ([`crates/adapters/http/src/server.rs`](crates/adapters/http/src/server.rs)) into `WebhookInboundTransport::handle_request()`, which runs HMAC/Ed25519 verification before dispatching into `SignalProcessor`.
 
 </details>
 
