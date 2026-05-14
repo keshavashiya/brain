@@ -593,3 +593,27 @@ async fn test_project_inspect_does_not_swallow_chat() {
         }
     }
 }
+
+#[tokio::test]
+async fn cancel_signal_regex_captures_uuid() {
+    let classifier = IntentClassifier::new();
+    let result = classifier
+        .classify("cancel signal 550e8400-e29b-41d4-a716-446655440000")
+        .await;
+    match result.intent {
+        Intent::CancelSignal { signal_id } => {
+            assert_eq!(signal_id, "550e8400-e29b-41d4-a716-446655440000");
+        }
+        other => panic!("Expected CancelSignal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn cancel_signal_does_not_collide_with_cancel_task() {
+    let classifier = IntentClassifier::new();
+    let result = classifier.classify("cancel task 42").await;
+    match result.intent {
+        Intent::CancelTask { .. } => {} // expected
+        other => panic!("'cancel task 42' should classify as CancelTask, got {other:?}"),
+    }
+}

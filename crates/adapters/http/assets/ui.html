@@ -34,6 +34,30 @@
   .key-bar label{font-size:.75rem;color:#64748b}
   .key-bar input{background:#0f172a;border:1px solid #334155;border-radius:.25rem;padding:.35rem .5rem;color:#94a3b8;font-size:.75rem;width:10rem;outline:none}
   .key-bar input:focus{border-color:#38bdf8}
+  /* Live tab */
+  .event-card{background:#1e293b;border:1px solid #334155;border-left:3px solid #0ea5e9;border-radius:.5rem;padding:.75rem 1rem;margin-bottom:.5rem}
+  .event-card.kind-error{border-left-color:#f87171}
+  .event-card.kind-audit_appended{border-left-color:#4ade80}
+  .event-card.kind-signal_received{border-left-color:#38bdf8}
+  .event-card.kind-tool_call_started,.event-card.kind-tool_call_finished{border-left-color:#fbbf24}
+  .event-card.kind-confirmation_requested{border-left-color:#a78bfa}
+  .event-row{display:flex;align-items:center;gap:.5rem;font-size:.8rem}
+  .event-kind{font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.04em}
+  .event-id{color:#64748b;font-family:ui-monospace,monospace;font-size:.7rem}
+  .event-ts{margin-left:auto;color:#64748b;font-size:.7rem}
+  .event-card details{margin-top:.4rem}
+  .event-card details summary{cursor:pointer;color:#64748b;font-size:.7rem;list-style:none}
+  .event-card details summary::-webkit-details-marker{display:none}
+  .event-card details summary::before{content:'▸ ';color:#475569}
+  .event-card details[open] summary::before{content:'▾ '}
+  .event-card pre{background:#0f172a;border-radius:.25rem;padding:.5rem;font-size:.7rem;color:#cbd5e1;overflow-x:auto;margin-top:.4rem;font-family:ui-monospace,monospace}
+  .cancel-btn{background:#7f1d1d;border:none;border-radius:.25rem;padding:.2rem .55rem;color:#fecaca;font-size:.7rem;cursor:pointer;margin-left:.25rem}
+  .cancel-btn:hover{background:#b91c1c;color:#fff}
+  .live-bar{display:flex;align-items:center;gap:.5rem;margin-bottom:.5rem;font-size:.75rem;color:#64748b}
+  .live-bar input{background:#0f172a;border:1px solid #334155;border-radius:.25rem;padding:.25rem .5rem;color:#94a3b8;font-size:.75rem;width:9rem;outline:none}
+  .live-bar input:focus{border-color:#38bdf8}
+  .live-bar .dot{width:.5rem;height:.5rem;border-radius:50%;background:#475569}
+  .live-bar .dot.on{background:#4ade80}
 </style>
 </head>
 <body>
@@ -54,9 +78,32 @@
   <div class="tabs">
     <div class="tab active" id="tab-search" onclick="switchTab('search')">Search Results</div>
     <div class="tab" id="tab-facts" onclick="switchTab('facts')">All Facts</div>
+    <div class="tab" id="tab-live" onclick="switchTab('live')">Live</div>
+    <div class="tab" id="tab-audit" onclick="switchTab('audit')">Audit</div>
   </div>
   <div id="status"></div>
   <div id="results" class="grid"></div>
+  <div id="live-pane" style="display:none">
+    <div class="live-bar">
+      <span class="dot" id="live-dot"></span>
+      <span id="live-state">disconnected</span>
+      <label for="live-kind">kind</label>
+      <input id="live-kind" placeholder="signal_received…">
+      <label for="live-tool">tool_id</label>
+      <input id="live-tool" placeholder="mcp:fs:read">
+      <button onclick="restartLive()">Apply</button>
+      <button onclick="clearEvents()">Clear</button>
+    </div>
+    <div id="events"></div>
+  </div>
+  <div id="audit-pane" style="display:none">
+    <div class="live-bar">
+      <label for="audit-since">since</label>
+      <input id="audit-since" placeholder="today, 1h, RFC3339…">
+      <button onclick="loadAudit()">Load</button>
+    </div>
+    <pre id="audit-output" style="background:#0f172a;border:1px solid #334155;border-radius:.5rem;padding:1rem;color:#cbd5e1;font-size:.8rem;white-space:pre-wrap;font-family:ui-monospace,monospace"></pre>
+  </div>
 </main>
 <script>
 const API = '';
@@ -143,11 +190,120 @@ async function loadFacts(){
 function switchTab(t){
   document.querySelectorAll('.tab').forEach(el=>el.classList.remove('active'));
   document.getElementById('tab-'+t).classList.add('active');
-  if(t==='facts')loadFacts();
-  else{document.getElementById('results').innerHTML='';setStatus('');}
+  // Hide all panes
+  document.getElementById('results').style.display='none';
+  document.getElementById('live-pane').style.display='none';
+  document.getElementById('audit-pane').style.display='none';
+  // Stop the live stream by default; tab switch is an explicit request.
+  stopLive();
+  if(t==='facts'){document.getElementById('results').style.display='grid';loadFacts();}
+  else if(t==='live'){document.getElementById('live-pane').style.display='block';startLive();}
+  else if(t==='audit'){document.getElementById('audit-pane').style.display='block';loadAudit();}
+  else{document.getElementById('results').style.display='grid';document.getElementById('results').innerHTML='';setStatus('');}
+}
+
+// ── Live tab: BrainEvent stream ─────────────────────────────────────────────
+let liveCtrl=null;
+function setLiveState(s,on){
+  document.getElementById('live-state').textContent=s;
+  document.getElementById('live-dot').classList.toggle('on',!!on);
+}
+function clearEvents(){document.getElementById('events').innerHTML='';}
+function restartLive(){stopLive();startLive();}
+function stopLive(){
+  if(liveCtrl){liveCtrl.abort();liveCtrl=null;}
+  setLiveState('disconnected',false);
+}
+function renderEvent(ev){
+  const card=document.createElement('div');
+  card.className='event-card kind-'+(ev.kind||'unknown');
+  const id=String(ev.id||'').slice(0,8);
+  const cancel=ev.kind==='signal_received'
+    ? `<button class="cancel-btn" onclick="cancelEvent('${esc(ev.id)}')">cancel</button>` : '';
+  card.innerHTML=`<div class="event-row">
+    <span class="event-kind">${esc(ev.kind||'?')}</span>
+    <span class="event-id">${esc(id)}</span>
+    ${cancel}
+    <span class="event-ts">${esc(ev.ts||'')}</span>
+  </div>
+  <details><summary>payload</summary><pre>${esc(JSON.stringify(ev,null,2))}</pre></details>`;
+  const list=document.getElementById('events');
+  list.insertBefore(card,list.firstChild);
+  // Cap at 200 cards to keep the DOM small.
+  while(list.children.length>200)list.removeChild(list.lastChild);
+}
+async function cancelEvent(signalId){
+  if(!apiKey){flagKeyInput('Enter your API key to cancel');return;}
+  try{
+    await fetch(API+'/v1/signals',{method:'POST',headers:hdr(),
+      body:JSON.stringify({source:'cli',channel:'ui',sender:'live',content:'cancel signal '+signalId})});
+  }catch(e){setStatus('cancel failed: '+e.message,true);}
+}
+async function startLive(){
+  if(!apiKey){flagKeyInput('Enter your API key to subscribe');return;}
+  stopLive();
+  liveCtrl=new AbortController();
+  const params=new URLSearchParams();
+  const k=document.getElementById('live-kind').value.trim();
+  const t=document.getElementById('live-tool').value.trim();
+  if(k)params.set('kind',k);
+  if(t)params.set('tool_id',t);
+  const url=API+'/v1/events'+(params.toString()?'?'+params:'');
+  setLiveState('connecting…',false);
+  let resp;
+  try{
+    resp=await fetch(url,{headers:{...hdr(),Accept:'text/event-stream'},signal:liveCtrl.signal});
+  }catch(e){
+    if(e.name!=='AbortError'){setLiveState('error: '+e.message,false);}
+    return;
+  }
+  if(!resp.ok){setLiveState('error '+resp.status,false);return;}
+  setLiveState('connected',true);
+  const reader=resp.body.getReader();
+  const dec=new TextDecoder();
+  let buf='', eventName='', dataBuf='';
+  try{
+    while(true){
+      const {value,done}=await reader.read();
+      if(done)break;
+      buf+=dec.decode(value,{stream:true});
+      let nl;
+      while((nl=buf.indexOf('\n'))!==-1){
+        const line=buf.slice(0,nl).replace(/\r$/,'');
+        buf=buf.slice(nl+1);
+        if(line===''){
+          if(eventName==='brain_event'&&dataBuf){
+            try{renderEvent(JSON.parse(dataBuf));}catch(_){}
+          }
+          eventName=''; dataBuf='';
+        }else if(line.startsWith('event:'))eventName=line.slice(6).trim();
+        else if(line.startsWith('data:'))dataBuf+=(dataBuf?'\n':'')+line.slice(5).trimStart();
+      }
+    }
+  }catch(e){
+    if(e.name!=='AbortError'){setLiveState('error: '+e.message,false);}
+  }
+  setLiveState('disconnected',false);
+}
+
+// ── Audit tab: QueryAudit intent ────────────────────────────────────────────
+async function loadAudit(){
+  if(!apiKey){flagKeyInput('Enter your API key to view audit');return;}
+  const since=document.getElementById('audit-since').value.trim();
+  const content=since?`show audit since ${since}`:'show audit log';
+  const out=document.getElementById('audit-output');
+  out.textContent='loading…';
+  try{
+    const r=await fetch(API+'/v1/signals',{method:'POST',headers:hdr(),
+      body:JSON.stringify({source:'cli',channel:'ui',sender:'audit',content})});
+    if(r.status===401){flagKeyInput();out.textContent='';return;}
+    const j=await r.json();
+    out.textContent=(j.response&&j.response.text)||JSON.stringify(j,null,2);
+  }catch(e){out.textContent='error: '+e.message;}
 }
 
 document.getElementById('q').addEventListener('keydown',e=>{if(e.key==='Enter')search();});
+window.addEventListener('beforeunload',stopLive);
 checkHealth();
 loadFacts();
 </script>

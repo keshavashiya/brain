@@ -206,3 +206,58 @@ async fn observer_receives_signal_received_event() {
 
     let _ = handle.await;
 }
+
+/// Sending Intent::CancelSignal for an unknown signal id returns a clean
+/// "no in-flight signal" response — no panic, no leaked state.
+#[tokio::test]
+async fn cancel_signal_for_unknown_id_returns_noop_message() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut config = brain_core::BrainConfig::default();
+    config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
+    let processor = SignalProcessor::new(config).await.unwrap();
+
+    let target = uuid::Uuid::new_v4();
+    let signal = Signal::new(
+        SignalSource::Cli,
+        "cli",
+        "user",
+        &format!("cancel signal {target}"),
+    );
+    let resp = processor.process(signal).await.unwrap();
+    if let ResponseContent::Text(text) = &resp.response {
+        assert!(
+            text.contains("No in-flight signal"),
+            "unexpected response: {text}"
+        );
+    } else {
+        panic!("expected text response, got {:?}", resp.response);
+    }
+}
+
+/// `cancel_signal()` triggers the registered notify for an in-flight signal.
+/// Direct API call (the intent path is exercised above); this verifies the
+/// registry semantics.
+#[tokio::test]
+async fn cancel_signal_triggers_registered_notify() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut config = brain_core::BrainConfig::default();
+    config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
+    let processor = SignalProcessor::new(config).await.unwrap();
+
+    let id = uuid::Uuid::new_v4();
+    let notify = processor.register_cancel(id).await;
+
+    // Cancel from another task; main task awaits notified().
+    let proc = std::sync::Arc::new(processor);
+    let proc2 = proc.clone();
+    let cancel_task = tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        proc2.cancel_signal(id).await
+    });
+
+    tokio::time::timeout(std::time::Duration::from_millis(200), notify.notified())
+        .await
+        .expect("notify fired");
+    let was_registered = cancel_task.await.unwrap();
+    assert!(was_registered, "cancel_signal should report true");
+}

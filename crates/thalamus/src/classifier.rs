@@ -178,6 +178,10 @@ static CANCEL_TASK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^cancel\s+task\s+(.+?)$").expect("invariant: CANCEL_TASK_RE must be valid")
 });
 
+static CANCEL_SIGNAL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^cancel\s+signal\s+(.+?)$").expect("invariant: CANCEL_SIGNAL_RE must be valid")
+});
+
 static SET_PROACTIVITY_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(pause|disable|enable|turn (?:on|off))\s+(?:nudges|proactivity|reminders)(?:\s+(?:for\s+)?(.+))?$")
         .expect("invariant: SET_PROACTIVITY_RE must be valid")
@@ -421,6 +425,13 @@ pub(crate) const PATTERNS: &[PatternDef] = &[
         extractors: &[("task_id", 1)],
     },
     PatternDef {
+        regex: &CANCEL_SIGNAL_RE,
+        base_intent: Intent::CancelSignal {
+            signal_id: String::new(),
+        },
+        extractors: &[("signal_id", 1)],
+    },
+    PatternDef {
         regex: &SET_PROACTIVITY_RE,
         base_intent: Intent::SetProactivity {
             enabled: true,
@@ -643,6 +654,9 @@ impl IntentClassifier {
                     request: get_group("request"),
                 }
             }
+            Intent::CancelSignal { .. } => Intent::CancelSignal {
+                signal_id: get_group("signal_id").trim().to_string(),
+            },
             Intent::SetChannelPreference { .. } => {
                 let verb = get_group("verb").to_lowercase();
                 let channel = get_group("channel");

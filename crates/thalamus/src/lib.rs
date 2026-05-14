@@ -90,6 +90,11 @@ pub enum Intent {
     TaskStatus { task_id: String },
     /// Cancel a running task.
     CancelTask { task_id: String },
+    /// Cancel an in-flight signal by its id. Wires the Live-tab cancel
+    /// button (v1.0.0 Phase 0, docs/v1.0.0.md §8.4). Distinct from
+    /// `CancelTask` — that aborts an orchestrated multi-step plan;
+    /// this aborts a single Signal's pipeline.
+    CancelSignal { signal_id: String },
     /// Ask about available specialist agents (delegates). Optional
     /// `filter` narrows the answer: e.g. "rust", "aider", or "".
     QueryAgents { filter: String },
@@ -201,6 +206,7 @@ struct LlmIntentPayload {
     window: Option<String>,
     id: Option<String>,
     task_id: Option<String>,
+    signal_id: Option<String>,
     enabled: Option<bool>,
     until: Option<String>,
     target: Option<String>,
@@ -255,7 +261,7 @@ impl LlmIntentFallback {
 }
 
 const CLASSIFIER_SYSTEM_PROMPT: &str = r#"You classify user input into exactly one intent for Brain OS.
-Valid intents: store_fact, recall, forget, execute_command, web_search, query_audit, prune_audit, list_approvals, respond_to_approval, budget_status, schedule, list_schedules, cancel_schedule, send_message, system_status, decompose_task, list_tasks, task_status, cancel_task, query_agents, delegate_task, set_proactivity, proactivity_status, memory_summary, project_inspect, chat.
+Valid intents: store_fact, recall, forget, execute_command, web_search, query_audit, prune_audit, list_approvals, respond_to_approval, budget_status, schedule, list_schedules, cancel_schedule, send_message, system_status, decompose_task, list_tasks, task_status, cancel_task, cancel_signal, query_agents, delegate_task, set_proactivity, proactivity_status, memory_summary, project_inspect, chat.
 Rules:
 - query_audit is for checking past actions: "what did I run today", "show my audit entries", "what did I approve yesterday".
 - prune_audit is for deleting old audit entries: "prune audit logs older than 30 days".
@@ -265,6 +271,7 @@ Rules:
 - schedule is for new future tasks: "remind me in 5 minutes to...", "schedule a search every day for...".
 - list_schedules/cancel_schedule are for managing background schedules: "what's scheduled", "cancel schedule 123".
 - list_tasks/task_status/cancel_task are for managing complex multi-step tasks from decompose_task: "what tasks are running", "status of task 42", "cancel task 10".
+- cancel_signal aborts an in-flight Signal by its UUID — distinct from cancel_task: "cancel signal e4b8…". The signal_id payload field carries the UUID.
 - set_proactivity/proactivity_status are for managing nudges/habit engine: "pause nudges for 2h", "disable proactivity", "check proactivity status".
 - memory_summary is for broad "dump everything you know about me" requests: "summarise my memory", "what do you know", "what have you stored", "show me my memories", "tell me what you remember about me". No query parameter needed.
 - recall is for specific memory queries that name a concrete topic: "what do you know about my project", "what did we discuss about Rust", "what do you remember about my goals". The query MUST identify a topic.
@@ -496,6 +503,9 @@ impl IntentFallback for LlmIntentFallback {
             },
             "cancel_task" => Intent::CancelTask {
                 task_id: payload.task_id.unwrap_or_default(),
+            },
+            "cancel_signal" => Intent::CancelSignal {
+                signal_id: payload.signal_id.unwrap_or_default(),
             },
             "query_agents" => Intent::QueryAgents {
                 filter: payload.query.unwrap_or_default(),

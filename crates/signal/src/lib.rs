@@ -94,6 +94,17 @@ pub struct SignalProcessor {
     /// consumers (httpadapter, grpcadapter) migrate to subscribing through
     /// `Observer`.
     observer: Option<std::sync::Arc<dyn observe::Observer>>,
+    /// In-flight signal cancellation registry. `process()` registers a
+    /// `Notify` keyed by `Signal.id` at entry and removes it on completion
+    /// via the `CancelGuard` RAII. `Intent::CancelSignal` looks up the
+    /// notify and triggers it; the LLM-generation step listens via
+    /// `tokio::select!` and aborts. Structured concurrency at every
+    /// checkpoint lands with the Phase 6 orchestrator rewrite.
+    cancel_registry: std::sync::Arc<
+        tokio::sync::Mutex<
+            std::collections::HashMap<uuid::Uuid, std::sync::Arc<tokio::sync::Notify>>,
+        >,
+    >,
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

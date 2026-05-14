@@ -54,7 +54,21 @@ impl SignalProcessor {
         )
     )]
     pub async fn process(&self, signal: Signal) -> Result<SignalResponse, SignalError> {
+        // Register a cancellation notify for this signal id. The guard removes
+        // it on drop so abort/error paths don't leak entries.
+        let signal_id = signal.id;
+        let cancel = self.register_cancel(signal_id).await;
+        let _cancel_guard = CancelGuard {
+            processor: self,
+            signal_id,
+        };
+
         self.publish_signal_received(&signal).await;
+
+        // The fast-classify path inside prepare() may return Complete; the slow
+        // LLM-generation path returns LlmReady. Both are protected by the
+        // cancel notify below for any awaits that would otherwise block.
+        let _ = &cancel; // silence unused warning when there's no await checkpoint
         match self.prepare(&signal, None, None).await? {
             PipelineResult::Complete(resp) => {
                 self.publish_event(&signal, &resp);
@@ -93,7 +107,13 @@ impl SignalProcessor {
                     } => estimated_input_tokens,
                 };
 
-                let llm_resp = self.llm.generate(&messages).await?;
+                let llm_resp = tokio::select! {
+                    biased;
+                    _ = cancel.notified() => {
+                        return Ok(self.cancelled_response(signal_id, &signal).await);
+                    }
+                    r = self.llm.generate(&messages) => r?,
+                };
 
                 crate::budget_guard::record_llm_usage(
                     self.cost_budget(),
@@ -262,6 +282,12 @@ impl SignalProcessor {
             }
             thalamus::Intent::CancelTask { task_id } => {
                 self.handle_cancel_task(signal_id, task_id, &prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::CancelSignal {
+                signal_id: target_id,
+            } => {
+                self.handle_cancel_signal(signal_id, target_id, &prepend_nudges)
                     .await
             }
             thalamus::Intent::QueryAgents { filter } => {
@@ -1714,6 +1740,107 @@ impl SignalProcessor {
             timestamp: chrono::Utc::now(),
         };
         let _ = self.events_tx.send(event);
+    }
+
+    // ── Signal cancellation (v1.0.0 Phase 0 §8.4) ────────────────────────
+
+    /// Register a cancellation notify for an in-flight signal and return a
+    /// handle the pipeline can await. Idempotent — if a notify already exists
+    /// for this id (re-entry), the existing one is returned so any pending
+    /// cancel still fires on the new pipeline instance.
+    pub async fn register_cancel(&self, signal_id: Uuid) -> std::sync::Arc<tokio::sync::Notify> {
+        let mut reg = self.cancel_registry.lock().await;
+        reg.entry(signal_id)
+            .or_insert_with(|| std::sync::Arc::new(tokio::sync::Notify::new()))
+            .clone()
+    }
+
+    /// Remove the cancellation notify for a signal. Called from `CancelGuard::drop`.
+    pub(super) fn unregister_cancel(&self, signal_id: Uuid) {
+        // Best-effort: avoid blocking the drop path on the lock. If the lock
+        // is held, the entry will be GC'd by the next `register_cancel` call
+        // for the same id, or stay live until the process restarts (rare).
+        let registry = std::sync::Arc::clone(&self.cancel_registry);
+        tokio::spawn(async move {
+            registry.lock().await.remove(&signal_id);
+        });
+    }
+
+    /// Trigger cancellation for an in-flight signal. Returns `true` if a
+    /// notify was registered; `false` if the target id is unknown.
+    pub async fn cancel_signal(&self, signal_id: Uuid) -> bool {
+        let reg = self.cancel_registry.lock().await;
+        match reg.get(&signal_id) {
+            Some(notify) => {
+                notify.notify_waiters();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Build the response for a signal that was cancelled mid-flight.
+    /// Also publishes a `BrainEvent::Error { source: "cancelled" }`
+    /// correlated to the cancelled signal's id.
+    pub(super) async fn cancelled_response(
+        &self,
+        signal_id: Uuid,
+        signal: &Signal,
+    ) -> SignalResponse {
+        if let Some(observer) = &self.observer {
+            let ev = observe::BrainEvent::Error {
+                id: signal_id,
+                source: "cancelled".into(),
+                message: format!("signal {signal_id} cancelled by Intent::CancelSignal"),
+                ts: chrono::Utc::now(),
+            };
+            let _ = observer.publish(ev).await;
+        }
+        SignalResponse {
+            signal_id,
+            status: ResponseStatus::Error,
+            response: ResponseContent::Text(format!(
+                "Signal {} cancelled before completion.",
+                signal.id
+            )),
+            memory_context: MemoryContext::default(),
+            session_id: None,
+        }
+    }
+
+    /// Handle the `CancelSignal { signal_id }` intent. Parses the target id,
+    /// triggers the notify if present, returns a status response.
+    pub(super) async fn handle_cancel_signal(
+        &self,
+        signal_id: Uuid,
+        target_id: String,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let message = match Uuid::parse_str(&target_id) {
+            Err(_) => format!("Invalid signal id: {target_id}"),
+            Ok(target) => {
+                if self.cancel_signal(target).await {
+                    format!("Cancellation requested for signal {target}.")
+                } else {
+                    format!("No in-flight signal with id {target}.")
+                }
+            }
+        };
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+}
+
+/// RAII guard that drops a signal's cancel registry entry when the pipeline
+/// returns — whether normally, via early-return, or via panic.
+pub(super) struct CancelGuard<'a> {
+    pub(super) processor: &'a SignalProcessor,
+    pub(super) signal_id: Uuid,
+}
+
+impl<'a> Drop for CancelGuard<'a> {
+    fn drop(&mut self) {
+        self.processor.unregister_cancel(self.signal_id);
     }
 }
 
