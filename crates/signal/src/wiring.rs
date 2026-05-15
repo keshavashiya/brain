@@ -321,4 +321,19 @@ impl SignalProcessor {
     pub fn mcp_host(&self) -> Option<&Arc<dyn mcphost::MCPHost>> {
         self.mcp_host.as_ref()
     }
+
+    /// Attach a tool registry. Populated by the MCP host and native
+    /// backends at mount / registration time; the capability router (when
+    /// wired) resolves `Intent::ToolCall` against this registry. Without it
+    /// the router cannot enumerate tools and falls back to the
+    /// router-not-configured placeholder.
+    pub fn with_tool_registry(mut self, registry: Arc<dyn intent::ToolRegistry>) -> Self {
+        self.tool_registry = Some(registry);
+        self
+    }
+
+    /// Expose the configured tool registry, if any.
+    pub fn tool_registry(&self) -> Option<&Arc<dyn intent::ToolRegistry>> {
+        self.tool_registry.as_ref()
+    }
 }

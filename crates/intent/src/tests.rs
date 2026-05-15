@@ -172,6 +172,77 @@ fn intent_error_display() {
     assert_eq!(e.to_string(), "missing capability: fs.read");
 }
 
+fn sample_descriptor(tool_id: &str, verb_ns: &str, verb_action: &str) -> ToolDescriptor {
+    ToolDescriptor {
+        tool_id: tool_id.into(),
+        source: ToolSource::McpServer {
+            server: "stub".into(),
+        },
+        verb: Verb::new(verb_ns, verb_action),
+        description: format!("{tool_id} description"),
+        input_schema: json!({ "type": "object" }),
+        output_schema: None,
+        capabilities: vec![format!("{verb_ns}.{verb_action}")],
+        annotations: ToolAnnotations::default(),
+        embedding: None,
+    }
+}
+
+#[tokio::test]
+async fn in_memory_registry_register_and_get() {
+    let reg = InMemoryToolRegistry::new();
+    assert!(reg.is_empty());
+    reg.register(sample_descriptor("mcp:fs:read", "fs", "read"))
+        .await
+        .unwrap();
+    assert_eq!(reg.len(), 1);
+    let got = reg.get("mcp:fs:read").await.unwrap();
+    assert_eq!(got.verb.namespace, "fs");
+    assert!(reg.get("missing").await.is_none());
+}
+
+#[tokio::test]
+async fn in_memory_registry_register_overwrites_same_id() {
+    let reg = InMemoryToolRegistry::new();
+    reg.register(sample_descriptor("dup", "memory", "store"))
+        .await
+        .unwrap();
+    let mut updated = sample_descriptor("dup", "memory", "store");
+    updated.description = "updated".into();
+    reg.register(updated).await.unwrap();
+    assert_eq!(reg.len(), 1);
+    assert_eq!(reg.get("dup").await.unwrap().description, "updated");
+}
+
+#[tokio::test]
+async fn in_memory_registry_deregister_known_and_unknown() {
+    let reg = InMemoryToolRegistry::new();
+    reg.register(sample_descriptor("a", "fs", "read"))
+        .await
+        .unwrap();
+    reg.deregister("a").await.unwrap();
+    assert!(reg.is_empty());
+    let err = reg.deregister("a").await.unwrap_err();
+    match err {
+        IntentError::UnknownTool(id) => assert_eq!(id, "a"),
+        other => panic!("expected UnknownTool, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn in_memory_registry_list_returns_all() {
+    let reg = InMemoryToolRegistry::new();
+    reg.register(sample_descriptor("a", "fs", "read"))
+        .await
+        .unwrap();
+    reg.register(sample_descriptor("b", "shell", "exec"))
+        .await
+        .unwrap();
+    let mut ids: Vec<String> = reg.list().await.into_iter().map(|t| t.tool_id).collect();
+    ids.sort();
+    assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
+}
+
 #[test]
 fn intent_token_new_defaults() {
     let tok = IntentToken::new(

@@ -8,7 +8,8 @@
 //! trait signatures only. Concrete classifier, router, registry and index
 //! implementations live in higher-level crates that compose this schema.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::RwLock;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -258,6 +259,68 @@ pub trait ToolRegistry: Send + Sync {
 pub trait CapabilityIndex: Send + Sync {
     async fn search(&self, q: &str, caps: &[String], k: usize) -> Vec<ScoredTool>;
     async fn upsert(&self, t: &ToolDescriptor) -> Result<(), IntentError>;
+}
+
+// ─── Default implementations ────────────────────────────────────────────────
+
+/// In-memory [`ToolRegistry`] backed by a `RwLock<HashMap>`. The default
+/// registry the MCP host and native backends register into on mount; the
+/// router queries this when resolving an [`IntentToken`].
+#[derive(Default)]
+pub struct InMemoryToolRegistry {
+    tools: RwLock<HashMap<String, ToolDescriptor>>,
+}
+
+impl InMemoryToolRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Number of currently-registered tools. Useful for tests and metrics.
+    pub fn len(&self) -> usize {
+        self.tools.read().expect("registry lock poisoned").len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tools
+            .read()
+            .expect("registry lock poisoned")
+            .is_empty()
+    }
+}
+
+#[async_trait]
+impl ToolRegistry for InMemoryToolRegistry {
+    async fn register(&self, descriptor: ToolDescriptor) -> Result<(), IntentError> {
+        let mut tools = self.tools.write().expect("registry lock poisoned");
+        tools.insert(descriptor.tool_id.clone(), descriptor);
+        Ok(())
+    }
+
+    async fn deregister(&self, tool_id: &str) -> Result<(), IntentError> {
+        let mut tools = self.tools.write().expect("registry lock poisoned");
+        if tools.remove(tool_id).is_none() {
+            return Err(IntentError::UnknownTool(tool_id.to_string()));
+        }
+        Ok(())
+    }
+
+    async fn list(&self) -> Vec<ToolDescriptor> {
+        self.tools
+            .read()
+            .expect("registry lock poisoned")
+            .values()
+            .cloned()
+            .collect()
+    }
+
+    async fn get(&self, tool_id: &str) -> Option<ToolDescriptor> {
+        self.tools
+            .read()
+            .expect("registry lock poisoned")
+            .get(tool_id)
+            .cloned()
+    }
 }
 
 #[cfg(test)]

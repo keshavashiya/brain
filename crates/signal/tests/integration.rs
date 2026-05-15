@@ -625,3 +625,36 @@ async fn phase_1_happy_path_audit_carries_principal() {
         assert_eq!(summary.user_id, "keshav");
     }
 }
+
+#[tokio::test]
+async fn tool_registry_accessor_round_trips() {
+    use std::sync::Arc;
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut config = brain_core::BrainConfig::default();
+    config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
+    let processor = SignalProcessor::new(config).await.unwrap();
+    assert!(processor.tool_registry().is_none());
+
+    let registry: Arc<dyn intent::ToolRegistry> = Arc::new(intent::InMemoryToolRegistry::new());
+    registry
+        .register(intent::ToolDescriptor {
+            tool_id: "mcp:fs:read".into(),
+            source: intent::ToolSource::McpServer {
+                server: "fs".into(),
+            },
+            verb: intent::Verb::new("fs", "read"),
+            description: "Read a file".into(),
+            input_schema: serde_json::json!({ "type": "object" }),
+            output_schema: None,
+            capabilities: vec!["fs.read".into()],
+            annotations: intent::ToolAnnotations::default(),
+            embedding: None,
+        })
+        .await
+        .unwrap();
+
+    let processor = processor.with_tool_registry(registry);
+    let wired = processor.tool_registry().expect("registry wired");
+    assert_eq!(wired.list().await.len(), 1);
+    assert!(wired.get("mcp:fs:read").await.is_some());
+}

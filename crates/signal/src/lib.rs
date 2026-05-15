@@ -123,6 +123,13 @@ pub struct SignalProcessor {
     /// `ListMcpServers` intents. When unwired, those intents return a
     /// "not configured" response.
     mcp_host: Option<std::sync::Arc<dyn mcphost::MCPHost>>,
+
+    // ── Capability Kernel (Phase 3) ────────────────────────────────────
+    /// Tool registry the capability router resolves [`intent::IntentToken`]s
+    /// against. Populated by the MCP host and native backends at mount /
+    /// registration time. When unwired, `Intent::ToolCall` returns the
+    /// router-not-configured placeholder.
+    tool_registry: Option<std::sync::Arc<dyn intent::ToolRegistry>>,
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
