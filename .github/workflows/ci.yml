@@ -62,6 +62,11 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # PTY-spawning integration tests (terminal bridge) intermittently hit
+      # fork ENOMEM on the default heuristic overcommit policy when many
+      # heavyweight tests run in parallel. Switching to always-overcommit
+      # lets fork() clone page tables without spurious failures.
+      - run: sudo sysctl -w vm.overcommit_memory=1
       - run: cargo test --workspace
 
   security:
@@ -85,6 +90,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin --locked
+      - name: Enable memory overcommit for PTY tests
+        run: sudo sysctl -w vm.overcommit_memory=1
       - name: Run coverage
         run: |
           cargo tarpaulin --workspace \
