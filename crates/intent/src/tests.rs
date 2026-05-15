@@ -229,6 +229,183 @@ async fn in_memory_registry_deregister_known_and_unknown() {
     }
 }
 
+fn sample_user_token(verb_ns: &str, verb_action: &str, caps: &[&str]) -> IntentToken {
+    let mut tok = IntentToken::new(
+        Verb::new(verb_ns, verb_action),
+        Object {
+            kind: "intent_args".into(),
+            value: serde_json::Value::Null,
+        },
+        Provenance::User {
+            raw_input: format!("{verb_ns}.{verb_action}"),
+            ui_origin: None,
+            ts: fixed_ts(),
+        },
+        "personal".into(),
+    );
+    tok.required_capabilities = caps.iter().map(|s| s.to_string()).collect();
+    tok
+}
+
+fn descriptor_with(
+    tool_id: &str,
+    source: ToolSource,
+    verb_ns: &str,
+    verb_action: &str,
+    caps: &[&str],
+) -> ToolDescriptor {
+    ToolDescriptor {
+        tool_id: tool_id.into(),
+        source,
+        verb: Verb::new(verb_ns, verb_action),
+        description: tool_id.into(),
+        input_schema: json!({ "type": "object" }),
+        output_schema: None,
+        capabilities: caps.iter().map(|s| s.to_string()).collect(),
+        annotations: ToolAnnotations::default(),
+        embedding: None,
+    }
+}
+
+#[tokio::test]
+async fn router_exact_verb_match_routes_to_mcp() {
+    let registry = Arc::new(InMemoryToolRegistry::new());
+    registry
+        .register(descriptor_with(
+            "mcp:fs:read_text_file",
+            ToolSource::McpServer {
+                server: "fs".into(),
+            },
+            "fs",
+            "read",
+            &["fs.read"],
+        ))
+        .await
+        .unwrap();
+    let router = DefaultIntentRouter::new(registry as Arc<dyn ToolRegistry>);
+    let tok = sample_user_token("fs", "read", &["fs.read"]);
+    let route = router.resolve(&tok).await.unwrap();
+    match route {
+        ToolRoute::Mcp { server, tool } => {
+            assert_eq!(server, "fs");
+            assert_eq!(tool, "read");
+        }
+        other => panic!("expected ToolRoute::Mcp, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn router_no_candidate_returns_human_confirm() {
+    let registry = Arc::new(InMemoryToolRegistry::new()) as Arc<dyn ToolRegistry>;
+    let router = DefaultIntentRouter::new(registry);
+    let tok = sample_user_token("memory", "store", &[]);
+    let route = router.resolve(&tok).await.unwrap();
+    match route {
+        ToolRoute::HumanConfirm { ask } => {
+            assert!(ask.contains("memory.store"));
+        }
+        other => panic!("expected HumanConfirm, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn router_capability_overlap_breaks_tie() {
+    let registry = Arc::new(InMemoryToolRegistry::new());
+    // Two tools with same exact verb match — winner decided by capability
+    // Jaccard against the token's required_capabilities.
+    registry
+        .register(descriptor_with(
+            "tool:narrow",
+            ToolSource::NativeBackend {
+                backend: BackendId::new("narrow"),
+            },
+            "shell",
+            "exec",
+            &["shell.exec"],
+        ))
+        .await
+        .unwrap();
+    registry
+        .register(descriptor_with(
+            "tool:broad",
+            ToolSource::NativeBackend {
+                backend: BackendId::new("broad"),
+            },
+            "shell",
+            "exec",
+            &["shell.exec", "fs.read", "net.http"],
+        ))
+        .await
+        .unwrap();
+    let router = DefaultIntentRouter::new(registry as Arc<dyn ToolRegistry>);
+    let tok = sample_user_token("shell", "exec", &["shell.exec"]);
+    let route = router.resolve(&tok).await.unwrap();
+    // Narrow tool has a tighter Jaccard (1/1=1.0) vs broad (1/3≈0.33).
+    match route {
+        ToolRoute::NativeBackend { backend } => assert_eq!(backend.as_str(), "narrow"),
+        other => panic!("expected NativeBackend(narrow), got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn router_namespace_match_only_still_resolves() {
+    let registry = Arc::new(InMemoryToolRegistry::new());
+    registry
+        .register(descriptor_with(
+            "tool:fs:list",
+            ToolSource::Terminal,
+            "fs",
+            "list",
+            &[],
+        ))
+        .await
+        .unwrap();
+    let router = DefaultIntentRouter::new(registry as Arc<dyn ToolRegistry>);
+    // SIT wants fs.read; only fs.list registered → namespace match (+1.0).
+    let tok = sample_user_token("fs", "read", &[]);
+    let route = router.resolve(&tok).await.unwrap();
+    assert!(matches!(route, ToolRoute::Terminal { session_hint: None }));
+}
+
+#[tokio::test]
+async fn router_mcp_coarse_fallback_picks_action_match() {
+    let registry = Arc::new(InMemoryToolRegistry::new());
+    registry
+        .register(descriptor_with(
+            "mcp:gh:create_issue",
+            ToolSource::McpServer {
+                server: "gh".into(),
+            },
+            "mcp",
+            "create_issue",
+            &[],
+        ))
+        .await
+        .unwrap();
+    let router = DefaultIntentRouter::new(registry as Arc<dyn ToolRegistry>);
+    // SIT verb is "issue.create_issue" — same action segment, different ns.
+    // The MCP coarse fallback gives +0.5, enough to route over the empty
+    // baseline.
+    let tok = sample_user_token("issue", "create_issue", &[]);
+    let route = router.resolve(&tok).await.unwrap();
+    match route {
+        ToolRoute::Mcp { server, tool } => {
+            assert_eq!(server, "gh");
+            assert_eq!(tool, "create_issue");
+        }
+        other => panic!("expected Mcp(gh,create_issue), got {other:?}"),
+    }
+}
+
+#[test]
+fn router_score_components() {
+    let exact = descriptor_with("t", ToolSource::Terminal, "fs", "read", &["fs.read"]);
+    let tok = sample_user_token("fs", "read", &["fs.read"]);
+    let s = DefaultIntentRouter::score(&tok, &exact);
+    // 2.0 (exact verb) + 1.5 * 1.0 (Jaccard 1/1) = 3.5
+    assert!((s - 3.5).abs() < 1e-6, "exact-match score was {s}");
+}
+
 #[tokio::test]
 async fn in_memory_registry_list_returns_all() {
     let reg = InMemoryToolRegistry::new();

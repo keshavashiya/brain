@@ -9,7 +9,7 @@
 //! implementations live in higher-level crates that compose this schema.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -262,6 +262,104 @@ pub trait CapabilityIndex: Send + Sync {
 }
 
 // ─── Default implementations ────────────────────────────────────────────────
+
+/// Default [`IntentRouter`] that scores registered tools against a token and
+/// returns the highest-ranked candidate's route. Pure-data routing — no
+/// embeddings (the semantic [`CapabilityIndex`] lands in a separate slice);
+/// this router relies on verb match plus capability overlap.
+///
+/// Scoring (higher is better):
+/// - exact verb match (namespace + action) → `+2.0`
+/// - namespace-only match → `+1.0`
+/// - MCP coarse-verb fallback (`mcp.<tool_name>` matches the SIT's action) → `+0.5`
+/// - Jaccard overlap of `required_capabilities` × `tool.capabilities` → `× 1.5`
+///
+/// When no tool clears `0.0`, the router emits
+/// `ToolRoute::HumanConfirm { ask }` describing the unresolved verb — the
+/// pipeline surfaces that back to the user instead of guessing.
+pub struct DefaultIntentRouter {
+    registry: Arc<dyn ToolRegistry>,
+}
+
+impl DefaultIntentRouter {
+    pub fn new(registry: Arc<dyn ToolRegistry>) -> Self {
+        Self { registry }
+    }
+
+    /// Score a single candidate against the token. Public so callers /
+    /// tests can probe the ranking without invoking `resolve`.
+    pub fn score(tok: &IntentToken, tool: &ToolDescriptor) -> f32 {
+        let mut score = 0.0_f32;
+        if tok.verb == tool.verb {
+            score += 2.0;
+        } else if tok.verb.namespace == tool.verb.namespace {
+            score += 1.0;
+        }
+        if tool.verb.namespace == "mcp" && tool.verb.action == tok.verb.action {
+            score += 0.5;
+        }
+        score += jaccard(&tok.required_capabilities, &tool.capabilities) * 1.5;
+        score
+    }
+}
+
+#[async_trait]
+impl IntentRouter for DefaultIntentRouter {
+    async fn resolve(&self, tok: &IntentToken) -> Result<ToolRoute, IntentError> {
+        let tools = self.registry.list().await;
+        let mut best: Option<(ToolDescriptor, f32)> = None;
+        for t in tools {
+            let s = Self::score(tok, &t);
+            match best {
+                None if s > 0.0 => best = Some((t, s)),
+                Some((_, b)) if s > b => best = Some((t, s)),
+                _ => {}
+            }
+        }
+        Ok(match best {
+            Some((tool, _)) => route_for(&tool),
+            None => ToolRoute::HumanConfirm {
+                ask: format!(
+                    "No tool registered for verb '{}.{}' — review the capability registry or add a matching backend.",
+                    tok.verb.namespace, tok.verb.action,
+                ),
+            },
+        })
+    }
+}
+
+fn route_for(tool: &ToolDescriptor) -> ToolRoute {
+    match &tool.source {
+        ToolSource::McpServer { server } => ToolRoute::Mcp {
+            server: server.clone(),
+            // MCP tools registered by `mcphost` stamp the wire tool name into
+            // the verb's action slot, so the canonical handle stays
+            // round-trippable without re-parsing `tool_id`.
+            tool: tool.verb.action.clone(),
+        },
+        ToolSource::NativeBackend { backend } => ToolRoute::NativeBackend {
+            backend: backend.clone(),
+        },
+        ToolSource::Terminal => ToolRoute::Terminal { session_hint: None },
+    }
+}
+
+fn jaccard(a: &[String], b: &[String]) -> f32 {
+    if a.is_empty() && b.is_empty() {
+        return 0.0;
+    }
+    let set_a: std::collections::HashSet<&str> = a.iter().map(String::as_str).collect();
+    let set_b: std::collections::HashSet<&str> = b.iter().map(String::as_str).collect();
+    let intersection = set_a.intersection(&set_b).count() as f32;
+    let union = set_a.union(&set_b).count() as f32;
+    if union == 0.0 {
+        0.0
+    } else {
+        intersection / union
+    }
+}
+
+// ─── In-memory tool registry ────────────────────────────────────────────────
 
 /// In-memory [`ToolRegistry`] backed by a `RwLock<HashMap>`. The default
 /// registry the MCP host and native backends register into on mount; the
