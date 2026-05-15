@@ -49,7 +49,7 @@ pub enum IntentError {
 /// an executor. `verb` + `object` describe *what* the caller wants;
 /// `required_capabilities` and `constraints` describe *under what conditions*
 /// the action may run; `provenance` records *who asked*.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IntentToken {
     pub schema: String,
     pub id: Uuid,
@@ -103,13 +103,13 @@ impl Verb {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Object {
     pub kind: String,
     pub value: serde_json::Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum Provenance {
     User {
@@ -133,7 +133,7 @@ pub enum Provenance {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Constraint {
     PathExists {

@@ -154,6 +154,47 @@ pub fn intent_to_auth(intent: &Intent) -> Option<(AuthorizationRequest, Tier)> {
                 .with_modifiers(serde_json::json!({ "name": name })),
             Tier::Write,
         )),
+
+        // ── ToolCall — derive verb_ns / action from the SIT, infer tier
+        // from the verb. Conservative defaults: destructive verbs bump to
+        // `Destructive`; HTTP / mount verbs bump to `External`; everything
+        // else lands at `Execute` so the gate can prompt the user.
+        Intent::ToolCall(token) => {
+            let verb_ns = token.verb.namespace.as_str();
+            let verb_action = token.verb.action.as_str();
+            let tier = tier_for_verb(verb_ns, verb_action);
+            let req = AuthorizationRequest::new(verb_ns, verb_action)
+                .with_modifiers(token.object.value.clone());
+            Some((req, tier))
+        }
+    }
+}
+
+/// Conservative tier inference from a verb pair. Mirrors the per-variant
+/// mapping above so the typed and abstract paths converge on the same tier
+/// once the router lands.
+fn tier_for_verb(verb_ns: &str, verb_action: &str) -> Tier {
+    match (verb_ns, verb_action) {
+        ("memory", "delete") | ("audit", "prune") => Tier::Destructive,
+        (_, "delete") | (_, "drop") | (_, "destroy") => Tier::Destructive,
+        ("net", _) | ("notify", _) => Tier::External,
+        ("mcp", "mount") => Tier::External,
+        ("memory", "store")
+        | ("memory", "import")
+        | ("memory", "export")
+        | ("mcp", "unmount")
+        | ("schedule", _)
+        | ("task", "cancel")
+        | ("signal", "cancel")
+        | ("approval", _)
+        | ("channel", "configure")
+        | ("proactivity", "configure")
+        | ("terminal", "close") => Tier::Write,
+        ("fs", "read") => Tier::Read,
+        ("shell", _) | ("terminal", "open") | ("task", "decompose") | ("agent", "delegate") => {
+            Tier::Execute
+        }
+        _ => Tier::Execute,
     }
 }
 
@@ -242,6 +283,92 @@ mod tests {
     #[test]
     fn list_mcp_servers_unguarded() {
         assert!(intent_to_auth(&Intent::ListMcpServers).is_none());
+    }
+
+    #[test]
+    fn tool_call_destructive_verb_is_destructive_tier() {
+        let token = intent::IntentToken::new(
+            intent::Verb::new("memory", "delete"),
+            intent::Object {
+                kind: "intent_args".into(),
+                value: serde_json::json!({ "target": "x" }),
+            },
+            intent::Provenance::User {
+                raw_input: "forget x".into(),
+                ui_origin: None,
+                ts: chrono::Utc::now(),
+            },
+            "personal".into(),
+        );
+        let intent = Intent::ToolCall(Box::new(token));
+        let (req, tier) = intent_to_auth(&intent).unwrap();
+        assert_eq!(req.verb_ns, "memory");
+        assert_eq!(req.verb_action, "delete");
+        assert_eq!(tier, Tier::Destructive);
+    }
+
+    #[test]
+    fn tool_call_net_verb_is_external_tier() {
+        let token = intent::IntentToken::new(
+            intent::Verb::new("net", "http"),
+            intent::Object {
+                kind: "intent_args".into(),
+                value: serde_json::json!({ "query": "rust" }),
+            },
+            intent::Provenance::Reflex {
+                trigger: "cron:hourly".into(),
+                raw_input: None,
+                ts: chrono::Utc::now(),
+            },
+            "personal".into(),
+        );
+        let intent = Intent::ToolCall(Box::new(token));
+        let (req, tier) = intent_to_auth(&intent).unwrap();
+        assert_eq!(req.verb_ns, "net");
+        assert_eq!(tier, Tier::External);
+    }
+
+    #[test]
+    fn tool_call_fs_read_is_read_tier() {
+        let token = intent::IntentToken::new(
+            intent::Verb::new("fs", "read"),
+            intent::Object {
+                kind: "intent_args".into(),
+                value: serde_json::json!({ "path": "/etc/hosts" }),
+            },
+            intent::Provenance::User {
+                raw_input: "show /etc/hosts".into(),
+                ui_origin: None,
+                ts: chrono::Utc::now(),
+            },
+            "personal".into(),
+        );
+        let intent = Intent::ToolCall(Box::new(token));
+        let (req, tier) = intent_to_auth(&intent).unwrap();
+        assert_eq!(req.verb_ns, "fs");
+        assert_eq!(req.verb_action, "read");
+        assert_eq!(tier, Tier::Read);
+        assert_eq!(req.modifier_str("path"), Some("/etc/hosts"));
+    }
+
+    #[test]
+    fn tool_call_unknown_verb_defaults_to_execute() {
+        let token = intent::IntentToken::new(
+            intent::Verb::new("custom", "thing"),
+            intent::Object {
+                kind: "intent_args".into(),
+                value: serde_json::Value::Null,
+            },
+            intent::Provenance::User {
+                raw_input: "do the thing".into(),
+                ui_origin: None,
+                ts: chrono::Utc::now(),
+            },
+            "personal".into(),
+        );
+        let intent = Intent::ToolCall(Box::new(token));
+        let (_req, tier) = intent_to_auth(&intent).unwrap();
+        assert_eq!(tier, Tier::Execute);
     }
 
     #[test]

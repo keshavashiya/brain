@@ -398,6 +398,10 @@ impl SignalProcessor {
                 self.handle_list_mcp_servers(signal_id, &prepend_nudges)
                     .await
             }
+            thalamus::Intent::ToolCall(token) => {
+                self.handle_tool_call(signal_id, *token, &prepend_nudges)
+                    .await
+            }
         }
     }
 
@@ -2100,6 +2104,25 @@ impl SignalProcessor {
             Ok(()) => format!("Mounted MCP server '{name}' over {transport}."),
             Err(e) => format!("Failed to mount MCP server '{name}': {e}"),
         };
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    /// Handle `Intent::ToolCall`. The capability router that resolves
+    /// abstract SIT verbs into concrete tools is not yet wired through the
+    /// `SignalProcessor`; until it is, we return a deterministic placeholder
+    /// describing the requested verb so callers can detect the missing
+    /// dependency without crashing the pipeline.
+    pub(super) async fn handle_tool_call(
+        &self,
+        signal_id: Uuid,
+        token: intent::IntentToken,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let message = format!(
+            "Capability router not configured; cannot resolve tool call '{}.{}'.",
+            token.verb.namespace, token.verb.action
+        );
         let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
         Ok(PipelineResult::Complete(resp))
     }

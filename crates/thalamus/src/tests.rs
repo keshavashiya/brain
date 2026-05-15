@@ -617,3 +617,106 @@ async fn cancel_signal_does_not_collide_with_cancel_task() {
         other => panic!("'cancel task 42' should classify as CancelTask, got {other:?}"),
     }
 }
+
+#[test]
+fn to_intent_token_store_fact_maps_to_memory_store() {
+    let intent = Intent::StoreFact {
+        subject: "user".into(),
+        predicate: "likes".into(),
+        object: "rust".into(),
+    };
+    let prov = intent::Provenance::User {
+        raw_input: "remember that I like rust".into(),
+        ui_origin: None,
+        ts: chrono::Utc::now(),
+    };
+    let tok = intent.to_intent_token(prov, "personal").expect("mappable");
+    assert_eq!(tok.verb.namespace, "memory");
+    assert_eq!(tok.verb.action, "store");
+    assert_eq!(tok.namespace, "personal");
+    assert_eq!(tok.required_capabilities, vec!["memory.store".to_string()]);
+    assert_eq!(tok.object.value["subject"], "user");
+}
+
+#[test]
+fn to_intent_token_chat_is_unmappable() {
+    let intent = Intent::Chat {
+        content: "hi".into(),
+    };
+    let prov = intent::Provenance::User {
+        raw_input: "hi".into(),
+        ui_origin: None,
+        ts: chrono::Utc::now(),
+    };
+    assert!(intent.to_intent_token(prov, "personal").is_none());
+}
+
+#[test]
+fn to_intent_token_execute_command_maps_to_shell_exec() {
+    let intent = Intent::ExecuteCommand {
+        command: "ls".into(),
+        args: vec!["-la".into()],
+    };
+    let prov = intent::Provenance::User {
+        raw_input: "run ls -la".into(),
+        ui_origin: None,
+        ts: chrono::Utc::now(),
+    };
+    let tok = intent.to_intent_token(prov, "personal").unwrap();
+    assert_eq!(tok.verb.namespace, "shell");
+    assert_eq!(tok.verb.action, "exec");
+    assert_eq!(tok.object.value["command"], "ls");
+    assert_eq!(tok.object.value["args"][0], "-la");
+}
+
+#[test]
+fn to_intent_token_mount_mcp_server_maps() {
+    let intent = Intent::MountMcpServer {
+        name: "fs".into(),
+        transport: "stdio".into(),
+        command_or_url: "mcp-fs".into(),
+    };
+    let prov = intent::Provenance::User {
+        raw_input: "/mcp-mount fs stdio mcp-fs".into(),
+        ui_origin: None,
+        ts: chrono::Utc::now(),
+    };
+    let tok = intent.to_intent_token(prov, "personal").unwrap();
+    assert_eq!(tok.verb.namespace, "mcp");
+    assert_eq!(tok.verb.action, "mount");
+    assert_eq!(tok.required_capabilities, vec!["mcp.mount".to_string()]);
+}
+
+#[test]
+fn to_intent_token_round_trip_via_toolcall_variant() {
+    let mut tok = intent::IntentToken::new(
+        intent::Verb::new("fs", "read"),
+        intent::Object {
+            kind: "intent_args".into(),
+            value: serde_json::json!({ "path": "/etc" }),
+        },
+        intent::Provenance::Llm {
+            model: "claude-opus-4-7".into(),
+            call_id: "abc".into(),
+            raw_input: None,
+            ts: chrono::Utc::now(),
+        },
+        "personal".into(),
+    );
+    tok.required_capabilities = vec!["fs.read".into()];
+    let original = tok.clone();
+    let wrapped = Intent::ToolCall(Box::new(tok));
+    let back = wrapped
+        .to_intent_token(
+            intent::Provenance::User {
+                raw_input: "ignored — ToolCall preserves the inner token".into(),
+                ui_origin: None,
+                ts: chrono::Utc::now(),
+            },
+            "ignored",
+        )
+        .unwrap();
+    assert_eq!(back.verb, original.verb);
+    assert_eq!(back.required_capabilities, original.required_capabilities);
+    assert_eq!(back.namespace, original.namespace);
+}

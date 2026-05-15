@@ -1059,6 +1059,7 @@ dependencies = [
  "brainos-ganglia",
  "brainos-hippocampus",
  "brainos-identity",
+ "brainos-intent",
  "brainos-mcphost",
  "brainos-observe",
  "brainos-orchestrate",
@@ -1137,6 +1138,7 @@ version = "0.3.0"
 dependencies = [
  "async-trait",
  "brainos-cortex",
+ "brainos-intent",
  "chrono",
  "regex",
  "serde",

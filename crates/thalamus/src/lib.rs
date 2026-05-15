@@ -18,6 +18,7 @@ mod router;
 mod tests;
 
 pub use classifier::IntentClassifier;
+pub use intent::{IntentToken, Provenance};
 pub use router::SignalRouter;
 
 // ─── Errors ─────────────────────────────────────────────────────────────────
@@ -161,8 +162,125 @@ pub enum Intent {
     UnmountMcpServer { name: String },
     /// List currently-mounted MCP servers (read-only inspection).
     ListMcpServers,
+    /// Abstract tool invocation expressed as a Standardized Intent Token.
+    /// Emitted by the classifier when the requested action can't be served by
+    /// any of the typed variants above and must instead be resolved against
+    /// the capability index (MCP tools, native backends, terminal sessions).
+    /// The router scores candidates and dispatches the winner; until the
+    /// router is wired the pipeline returns a deterministic placeholder.
+    /// Boxed so the enum discriminant stays compact — the SIT envelope is
+    /// the heaviest variant by far.
+    ToolCall(Box<IntentToken>),
     /// Regular chat/conversation.
     Chat { content: String },
+}
+
+impl Intent {
+    /// Convert a typed `Intent` into a Standardized Intent Token. Returns
+    /// `None` for purely conversational variants (`Chat`, inspection
+    /// variants) that don't carry a capability claim. Used when re-routing
+    /// the existing taxonomy through the capability kernel — the same
+    /// envelope a fresh `ToolCall` carries.
+    pub fn to_intent_token(
+        &self,
+        provenance: Provenance,
+        namespace: impl Into<String>,
+    ) -> Option<IntentToken> {
+        use intent::{Object, Verb};
+        let namespace = namespace.into();
+        let (verb, object_value, caps) = match self {
+            Intent::ToolCall(token) => return Some(*token.clone()),
+            Intent::StoreFact {
+                subject,
+                predicate,
+                object,
+            } => (
+                Verb::new("memory", "store"),
+                serde_json::json!({
+                    "subject": subject,
+                    "predicate": predicate,
+                    "object": object,
+                }),
+                vec!["memory.store".to_string()],
+            ),
+            Intent::Forget { target } => (
+                Verb::new("memory", "delete"),
+                serde_json::json!({ "target": target }),
+                vec!["memory.delete".to_string()],
+            ),
+            Intent::ExecuteCommand { command, args } => (
+                Verb::new("shell", "exec"),
+                serde_json::json!({ "command": command, "args": args }),
+                vec!["shell.exec".to_string()],
+            ),
+            Intent::WebSearch { query } => (
+                Verb::new("net", "http"),
+                serde_json::json!({ "query": query }),
+                vec!["net.http".to_string()],
+            ),
+            Intent::SendMessage {
+                channel,
+                recipient,
+                content,
+            } => (
+                Verb::new("notify", "send"),
+                serde_json::json!({
+                    "channel": channel,
+                    "recipient": recipient,
+                    "content": content,
+                }),
+                vec!["notify.send".to_string()],
+            ),
+            Intent::ProjectInspect { path, focus } => (
+                Verb::new("fs", "read"),
+                serde_json::json!({ "path": path, "focus": focus }),
+                vec!["fs.read".to_string()],
+            ),
+            Intent::OpenTerminalSession { program, args, cwd } => (
+                Verb::new("terminal", "open"),
+                serde_json::json!({
+                    "program": program,
+                    "args": args,
+                    "cwd": cwd,
+                }),
+                vec!["terminal.open".to_string()],
+            ),
+            Intent::CloseTerminalSession { session_id } => (
+                Verb::new("terminal", "close"),
+                serde_json::json!({ "session_id": session_id }),
+                vec!["terminal.close".to_string()],
+            ),
+            Intent::MountMcpServer {
+                name,
+                transport,
+                command_or_url,
+            } => (
+                Verb::new("mcp", "mount"),
+                serde_json::json!({
+                    "name": name,
+                    "transport": transport,
+                    "command_or_url": command_or_url,
+                }),
+                vec!["mcp.mount".to_string()],
+            ),
+            Intent::UnmountMcpServer { name } => (
+                Verb::new("mcp", "unmount"),
+                serde_json::json!({ "name": name }),
+                vec!["mcp.unmount".to_string()],
+            ),
+            // Purely conversational / inspection variants do not map to a
+            // capability-routed verb. Callers fall back to the typed
+            // dispatch path for these.
+            _ => return None,
+        };
+        let object = Object {
+            kind: "intent_args".into(),
+            value: object_value,
+        };
+        let mut tok = IntentToken::new(verb, object, provenance, namespace);
+        tok.required_capabilities = caps;
+        Some(tok)
+    }
 }
 
 /// A fact extracted from conversational input alongside intent classification.
