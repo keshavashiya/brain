@@ -18,14 +18,15 @@ async-trait  = { workspace = true }
 serde        = { workspace = true }
 serde_json   = { workspace = true }
 thiserror    = { workspace = true }
-tokio        = { workspace = true }
+tokio        = { workspace = true, features = ["process"] }
 tracing      = { workspace = true }
 chrono       = { workspace = true }
 sha2         = { workspace = true }
+# Rust SDK for the Model Context Protocol. `client` enables the RoleClient
+# bindings; `transport-child-process` brings TokioChildProcess for stdio
+# mounts. HTTP transport features are added when the streamable HTTP
+# client lands.
+rmcp = { version = "1.7", features = ["client", "transport-child-process"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
-
-# `rmcp` (the Rust SDK for MCP) is added alongside the first transport
-# implementation. Kept out of this trait-only crate to avoid pulling a
-# large dep tree for types that aren't yet exercised.
