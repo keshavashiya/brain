@@ -1,40 +1,65 @@
 //! `MCPHost` implementation backed by the `rmcp` Rust SDK.
 //!
-//! Currently supports the **stdio** transport — child processes speaking
-//! MCP JSON-RPC on stdin/stdout. The HTTP transports (Streamable HTTP +
-//! legacy HTTP+SSE) hook in here once their rmcp feature flags are
-//! enabled.
+//! Transports supported:
+//! - **stdio** — child process speaking MCP JSON-RPC on stdin/stdout.
+//! - **Streamable HTTP** — current spec transport. With or without OAuth 2.1.
+//! - **HTTP+SSE** — legacy transport, routes through the same streamable HTTP
+//!   client (the rmcp transport speaks both shapes against the same endpoint).
+//!
+//! Per-server tool catalogs are hash-pinned: the SHA-256 of the canonicalized
+//! `tools/list` response is captured at mount time. On a refresh (driven by
+//! `notifications/tools/list_changed` in a later PR) a hash change emits a
+//! `BrainEvent::Error { source: "mcphost", message: "tools/list hash changed …" }`
+//! — that's the "rug-pull" signal the consent UI surfaces to the user.
 
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::Utc;
+use http::{HeaderName, HeaderValue};
+use observe::{BrainEvent, Observer};
 use rmcp::{
     model::CallToolRequestParams,
     service::{RoleClient, RunningService, ServiceExt},
-    transport::TokioChildProcess,
+    transport::{
+        auth::AuthClient,
+        streamable_http_client::{
+            StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+        },
+        TokioChildProcess,
+    },
 };
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tracing::warn;
+use uuid::Uuid;
+use vault::CredentialVault;
 
 use crate::{
     error::McpHostError,
+    oauth,
     types::{CallOutcome, MountedServer, ServerConfig, ServerInfo, ServerStatus, ToolDescriptor},
-    MCPHost,
+    MCPHost, MCP_PROTOCOL_VERSION,
 };
 
 /// Real `MCPHost` backed by `rmcp`. Each mounted server gets a
 /// `RunningService<RoleClient, ()>` peer plus a cached metadata snapshot
-/// for `list_servers` / `list_all_tools`.
+/// and a hash-pin of the initial `tools/list`.
 pub struct RmcpHost {
     mounted: RwLock<HashMap<String, Mounted>>,
+    observer: Option<Arc<dyn Observer>>,
+    vault: Option<Arc<dyn CredentialVault>>,
 }
 
 struct Mounted {
     record: MountedServer,
+    /// SHA-256 of the canonicalized initial `tools/list` response. A later
+    /// `notifications/tools/list_changed` refresh that produces a different
+    /// hash is the "rug-pull" signal (CVE-2025-54136 class).
+    tools_hash: String,
     /// The live rmcp peer. `None` is impossible for fully-initialized
-    /// stdio mounts; the option lets us pull the service out during
-    /// `unmount` to call `.cancel().await` (which consumes `self`).
+    /// mounts; the option lets us pull the service out during `unmount`
+    /// to call `.cancel().await` (which consumes `self`).
     service: Option<RunningService<RoleClient, ()>>,
 }
 
@@ -48,11 +73,28 @@ impl RmcpHost {
     pub fn new() -> Self {
         Self {
             mounted: RwLock::new(HashMap::new()),
+            observer: None,
+            vault: None,
         }
     }
 
     pub fn shared() -> Arc<dyn MCPHost> {
         Arc::new(Self::new())
+    }
+
+    /// Wire an [`Observer`] so rug-pull / refresh-failure events reach the
+    /// in-process event bus.
+    pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
+    /// Wire a [`CredentialVault`] so HTTP mounts with `oauth: Some` can load
+    /// persisted OAuth tokens. Without a vault, an `oauth: Some` config will
+    /// fail at mount with [`McpHostError::Auth`].
+    pub fn with_vault(mut self, vault: Arc<dyn CredentialVault>) -> Self {
+        self.vault = Some(vault);
+        self
     }
 
     async fn mount_stdio(&self, name: String, cfg: ServerConfig) -> Result<(), McpHostError> {
@@ -68,10 +110,6 @@ impl RmcpHost {
             ));
         };
 
-        // Build the child Command. `rmcp::transport::ConfigureCommandExt` is
-        // the ergonomic configure-by-closure pattern the rmcp examples use,
-        // but the bare `tokio::process::Command` already does everything we
-        // need here.
         let mut cmd = tokio::process::Command::new(command);
         cmd.args(args);
         for (k, v) in env {
@@ -83,17 +121,62 @@ impl RmcpHost {
         let transport = TokioChildProcess::new(cmd)
             .map_err(|e| McpHostError::Transport(format!("spawn '{command}': {e}")))?;
 
-        // `().serve(transport)` runs the MCP `initialize` handshake under
-        // the hood — that's why we get a `RunningService` back rather than
-        // having to call `initialize` ourselves.
         let svc: RunningService<RoleClient, ()> = ()
             .serve(transport)
             .await
             .map_err(|e| McpHostError::Initialize(e.to_string()))?;
 
-        // Snapshot server info + tools immediately. The peer is cheap to
-        // dereference; `list_all_tools` paginates internally so we get the
-        // complete catalog without follow-up calls.
+        self.finalize_mount(name, cfg, svc).await
+    }
+
+    async fn mount_http(&self, name: String, cfg: ServerConfig) -> Result<(), McpHostError> {
+        let (url, oauth_cfg) = match &cfg {
+            ServerConfig::StreamableHttp { url, oauth } | ServerConfig::HttpSse { url, oauth } => {
+                (url.clone(), oauth.clone())
+            }
+            ServerConfig::Stdio { .. } => {
+                return Err(McpHostError::Transport(
+                    "RmcpHost::mount_http called with non-HTTP config".into(),
+                ))
+            }
+        };
+
+        // Local HTTP servers must bind 127.0.0.1 and we enforce that by
+        // rejecting anything else as part of mounting. Per MCP spec, this
+        // mitigates DNS-rebinding against local-only servers.
+        validate_local_origin(&url)?;
+
+        let mut transport_cfg = StreamableHttpClientTransportConfig::with_uri(url.clone());
+        transport_cfg.custom_headers = protocol_version_headers();
+
+        let svc: RunningService<RoleClient, ()> = if oauth_cfg.is_some() {
+            let vault = self.vault.clone().ok_or_else(|| {
+                McpHostError::Auth(
+                    "OAuth configured but RmcpHost has no vault — wire one via with_vault()".into(),
+                )
+            })?;
+            let manager = oauth::manager_from_vault(&url, &name, vault).await?;
+            let auth_client = AuthClient::new(reqwest::Client::new(), manager);
+            let transport = StreamableHttpClientTransport::with_client(auth_client, transport_cfg);
+            ().serve(transport)
+                .await
+                .map_err(|e| McpHostError::Initialize(e.to_string()))?
+        } else {
+            let transport = StreamableHttpClientTransport::from_config(transport_cfg);
+            ().serve(transport)
+                .await
+                .map_err(|e| McpHostError::Initialize(e.to_string()))?
+        };
+
+        self.finalize_mount(name, cfg, svc).await
+    }
+
+    async fn finalize_mount(
+        &self,
+        name: String,
+        cfg: ServerConfig,
+        svc: RunningService<RoleClient, ()>,
+    ) -> Result<(), McpHostError> {
         let info = svc.peer_info().map(|init| ServerInfo {
             name: init.server_info.name.to_string(),
             version: init.server_info.version.to_string(),
@@ -112,6 +195,7 @@ impl RmcpHost {
                 input_schema: serde_json::Value::Object((*t.input_schema).clone()),
             })
             .collect();
+        let tools_hash = hash_tools(&tools);
 
         let record = MountedServer {
             name: name.clone(),
@@ -128,10 +212,64 @@ impl RmcpHost {
             name,
             Mounted {
                 record,
+                tools_hash,
                 service: Some(svc),
             },
         );
         Ok(())
+    }
+
+    /// Re-fetch `tools/list` for a mounted server and compare against the
+    /// pinned hash. A mismatch emits `BrainEvent::Error` (rug-pull signal)
+    /// and updates the pinned record with the new shape so subsequent
+    /// refreshes are scored against the latest.
+    pub async fn refresh_tools(&self, server: &str) -> Result<bool, McpHostError> {
+        let (tools, old_hash) = {
+            let guard = self.mounted.read().await;
+            let mounted = guard
+                .get(server)
+                .ok_or_else(|| McpHostError::NotMounted(server.to_string()))?;
+            let svc = mounted.service.as_ref().ok_or_else(|| {
+                McpHostError::Transport(format!("server '{server}' has no live service"))
+            })?;
+            let tools_raw = svc
+                .list_all_tools()
+                .await
+                .map_err(|e| McpHostError::Rmcp(format!("tools/list refresh: {e}")))?;
+            let tools: Vec<ToolDescriptor> = tools_raw
+                .into_iter()
+                .map(|t| ToolDescriptor {
+                    server: server.to_string(),
+                    name: t.name.to_string(),
+                    description: t.description.map(|d| d.to_string()),
+                    input_schema: serde_json::Value::Object((*t.input_schema).clone()),
+                })
+                .collect();
+            (tools, mounted.tools_hash.clone())
+        };
+        let new_hash = hash_tools(&tools);
+
+        let changed = new_hash != old_hash;
+        if changed {
+            if let Some(observer) = &self.observer {
+                let _ = observer
+                    .publish(BrainEvent::Error {
+                        id: Uuid::new_v4(),
+                        source: "mcphost".into(),
+                        message: format!(
+                            "tools/list hash changed for server '{server}' (old={old_hash}, new={new_hash})"
+                        ),
+                        ts: Utc::now(),
+                    })
+                    .await;
+            }
+            let mut guard = self.mounted.write().await;
+            if let Some(m) = guard.get_mut(server) {
+                m.record.tools = tools;
+                m.tools_hash = new_hash;
+            }
+        }
+        Ok(changed)
     }
 }
 
@@ -140,9 +278,9 @@ impl MCPHost for RmcpHost {
     async fn mount(&self, name: String, cfg: ServerConfig) -> Result<(), McpHostError> {
         match &cfg {
             ServerConfig::Stdio { .. } => self.mount_stdio(name, cfg).await,
-            ServerConfig::StreamableHttp { .. } | ServerConfig::HttpSse { .. } => Err(
-                McpHostError::Transport("HTTP transports not yet implemented".into()),
-            ),
+            ServerConfig::StreamableHttp { .. } | ServerConfig::HttpSse { .. } => {
+                self.mount_http(name, cfg).await
+            }
         }
     }
 
@@ -154,9 +292,6 @@ impl MCPHost for RmcpHost {
                 .ok_or_else(|| McpHostError::NotMounted(name.to_string()))?
         };
         if let Some(svc) = entry.service.take() {
-            // Graceful shutdown: cancellation completes after the server
-            // acks the cancel request or the transport drops, whichever
-            // comes first.
             match svc.cancel().await {
                 Ok(_) => {}
                 Err(e) => {
@@ -205,8 +340,6 @@ impl MCPHost for RmcpHost {
             McpHostError::Transport(format!("server '{server}' has no live service"))
         })?;
 
-        // `arguments` must be a JSON object per the MCP schema. Anything
-        // else gets rejected here rather than at the server side.
         let arguments = match args {
             serde_json::Value::Object(o) => Some(o),
             serde_json::Value::Null => None,
@@ -239,5 +372,149 @@ impl MCPHost for RmcpHost {
             content,
             elapsed_ms: started.elapsed().as_millis() as u64,
         })
+    }
+}
+
+/// Build the static custom-headers map for every HTTP request. The MCP spec
+/// requires every client request to advertise the protocol version it
+/// negotiated against (the negotiated version itself comes back from the
+/// server during `initialize`).
+fn protocol_version_headers() -> HashMap<HeaderName, HeaderValue> {
+    let mut headers = HashMap::new();
+    let name = HeaderName::from_static("mcp-protocol-version");
+    if let Ok(value) = HeaderValue::from_str(MCP_PROTOCOL_VERSION) {
+        headers.insert(name, value);
+    }
+    headers
+}
+
+/// SHA-256 of the canonicalized `(name, description, input_schema)` tuples in
+/// stable order. Stable serialization comes from `serde_json::to_vec` over a
+/// pre-sorted vector, since `serde_json::Value::Object` preserves insertion
+/// order but JSON object semantics are unordered.
+fn hash_tools(tools: &[ToolDescriptor]) -> String {
+    let mut canonical: Vec<(String, Option<String>, String)> = tools
+        .iter()
+        .map(|t| {
+            let schema = canonical_json(&t.input_schema);
+            (t.name.clone(), t.description.clone(), schema)
+        })
+        .collect();
+    canonical.sort_by(|a, b| a.0.cmp(&b.0));
+    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+/// Canonicalize JSON: sort object keys recursively so insertion order doesn't
+/// affect the hash.
+fn canonical_json(v: &serde_json::Value) -> String {
+    fn sort(v: &serde_json::Value) -> serde_json::Value {
+        match v {
+            serde_json::Value::Object(m) => {
+                let mut sorted: Vec<(String, serde_json::Value)> =
+                    m.iter().map(|(k, v)| (k.clone(), sort(v))).collect();
+                sorted.sort_by(|a, b| a.0.cmp(&b.0));
+                serde_json::Value::Object(sorted.into_iter().collect())
+            }
+            serde_json::Value::Array(a) => serde_json::Value::Array(a.iter().map(sort).collect()),
+            other => other.clone(),
+        }
+    }
+    serde_json::to_string(&sort(v)).unwrap_or_default()
+}
+
+/// Reject HTTP MCP URLs that point at a non-loopback address bound to a
+/// local-only port. Public hosts are allowed unconditionally; only the
+/// `localhost` / `127.0.0.1` / `::1` cases are checked.
+///
+/// This is the cheap-but-real mitigation for DNS rebinding against local-
+/// only servers (MCP spec security guidance, item 3 in the PR plan).
+fn validate_local_origin(url: &str) -> Result<(), McpHostError> {
+    let parsed = url::Url::parse(url)
+        .map_err(|e| McpHostError::Transport(format!("invalid URL '{url}': {e}")))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(McpHostError::Transport(format!(
+                "unsupported URL scheme '{other}' (expected http or https)"
+            )))
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn td(name: &str, desc: Option<&str>, schema: serde_json::Value) -> ToolDescriptor {
+        ToolDescriptor {
+            server: "s".into(),
+            name: name.into(),
+            description: desc.map(|s| s.to_string()),
+            input_schema: schema,
+        }
+    }
+
+    #[test]
+    fn hash_tools_is_order_independent() {
+        let a = vec![
+            td("z", None, json!({"type": "object"})),
+            td("a", None, json!({"type": "object"})),
+        ];
+        let b = vec![
+            td("a", None, json!({"type": "object"})),
+            td("z", None, json!({"type": "object"})),
+        ];
+        assert_eq!(hash_tools(&a), hash_tools(&b));
+    }
+
+    #[test]
+    fn hash_tools_detects_description_change() {
+        let a = vec![td("read", Some("safe"), json!({"type": "object"}))];
+        let b = vec![td("read", Some("MALICIOUS"), json!({"type": "object"}))];
+        assert_ne!(hash_tools(&a), hash_tools(&b));
+    }
+
+    #[test]
+    fn hash_tools_detects_schema_change() {
+        let a = vec![td(
+            "fs.read",
+            None,
+            json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+        )];
+        let b = vec![td(
+            "fs.read",
+            None,
+            json!({"type": "object", "properties": {"path": {"type": "string"}, "secret": {"type": "string"}}}),
+        )];
+        assert_ne!(hash_tools(&a), hash_tools(&b));
+    }
+
+    #[test]
+    fn canonical_json_sorts_keys() {
+        let a = json!({"b": 1, "a": 2});
+        let b = json!({"a": 2, "b": 1});
+        assert_eq!(canonical_json(&a), canonical_json(&b));
+    }
+
+    #[test]
+    fn protocol_version_header_is_set() {
+        let headers = protocol_version_headers();
+        let key = HeaderName::from_static("mcp-protocol-version");
+        let value = headers.get(&key).expect("header must be present");
+        assert_eq!(value.to_str().unwrap(), MCP_PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn validate_local_origin_rejects_non_http() {
+        assert!(validate_local_origin("ftp://example.com").is_err());
+        assert!(validate_local_origin("not a url").is_err());
+        assert!(validate_local_origin("http://example.com/mcp").is_ok());
+        assert!(validate_local_origin("https://example.com/mcp").is_ok());
+        assert!(validate_local_origin("http://127.0.0.1:8080/mcp").is_ok());
     }
 }

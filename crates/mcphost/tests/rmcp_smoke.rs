@@ -54,20 +54,40 @@ async fn call_unknown_server_returns_not_mounted() {
 }
 
 #[tokio::test]
-async fn http_transport_not_yet_implemented() {
+async fn http_mount_with_invalid_scheme_errors() {
     let host = RmcpHost::new();
     let err = host
         .mount(
-            "http".into(),
+            "bad".into(),
             brainos_mcphost::ServerConfig::StreamableHttp {
-                url: "https://example.invalid/mcp".into(),
+                url: "ftp://example.invalid/mcp".into(),
                 oauth: None,
             },
         )
         .await
-        .expect_err("HTTP mounts should not yet succeed");
+        .expect_err("non-HTTP scheme should reject");
     assert!(
         matches!(err, McpHostError::Transport(_)),
         "unexpected: {err:?}"
     );
+}
+
+#[tokio::test]
+async fn http_mount_with_oauth_but_no_vault_errors() {
+    let host = RmcpHost::new();
+    let err = host
+        .mount(
+            "needs-auth".into(),
+            brainos_mcphost::ServerConfig::StreamableHttp {
+                url: "https://example.invalid/mcp".into(),
+                oauth: Some(brainos_mcphost::OAuthConfig {
+                    resource: "https://example.invalid/mcp".into(),
+                    client_id: None,
+                    authorization_server: None,
+                }),
+            },
+        )
+        .await
+        .expect_err("OAuth mount without a vault should fail");
+    assert!(matches!(err, McpHostError::Auth(_)), "unexpected: {err:?}");
 }
