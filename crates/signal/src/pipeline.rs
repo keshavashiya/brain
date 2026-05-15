@@ -2151,7 +2151,20 @@ impl SignalProcessor {
                     } else {
                         token.object.value.clone()
                     };
-                    match host.call(&server, &tool, args).await {
+                    let tool_id = format!("mcp:{server}:{tool}");
+                    let outcome_result = host.call(&server, &tool, args).await;
+                    // Record into the per-tool breaker (if wired). A
+                    // transport error or an `is_error: true` outcome both
+                    // count as failures; otherwise success.
+                    if let Some(breakers) = self.breaker_registry() {
+                        let healthy = matches!(&outcome_result, Ok(o) if !o.is_error);
+                        if healthy {
+                            breakers.record_success(&tool_id).await;
+                        } else {
+                            breakers.record_failure(&tool_id).await;
+                        }
+                    }
+                    match outcome_result {
                         Ok(outcome) => {
                             let status = if outcome.is_error { "error" } else { "ok" };
                             let body = serde_json::to_string(&outcome.content)

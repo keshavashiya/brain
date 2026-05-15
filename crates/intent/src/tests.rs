@@ -397,6 +397,93 @@ async fn router_mcp_coarse_fallback_picks_action_match() {
     }
 }
 
+struct AlwaysOpenBreakers;
+
+#[async_trait::async_trait]
+impl BreakerCheck for AlwaysOpenBreakers {
+    async fn is_open(&self, _tool_id: &str) -> bool {
+        true
+    }
+}
+
+struct OpenOnly {
+    tool_id: String,
+}
+
+#[async_trait::async_trait]
+impl BreakerCheck for OpenOnly {
+    async fn is_open(&self, tool_id: &str) -> bool {
+        tool_id == self.tool_id
+    }
+}
+
+#[tokio::test]
+async fn router_skips_open_breakers_and_falls_through() {
+    let registry = Arc::new(InMemoryToolRegistry::new());
+    registry
+        .register(descriptor_with(
+            "mcp:fs:read_text_file",
+            ToolSource::McpServer {
+                server: "fs".into(),
+            },
+            "fs",
+            "read",
+            &["fs.read"],
+        ))
+        .await
+        .unwrap();
+    let router = DefaultIntentRouter::new(registry as Arc<dyn ToolRegistry>)
+        .with_breakers(Arc::new(AlwaysOpenBreakers) as Arc<dyn BreakerCheck>);
+    let tok = sample_user_token("fs", "read", &["fs.read"]);
+    let route = router.resolve(&tok).await.unwrap();
+    match route {
+        ToolRoute::HumanConfirm { ask } => {
+            assert!(ask.contains("fs.read"));
+        }
+        other => panic!("expected HumanConfirm (open breaker), got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn router_open_breaker_excludes_only_that_tool() {
+    let registry = Arc::new(InMemoryToolRegistry::new());
+    registry
+        .register(descriptor_with(
+            "tool:broken",
+            ToolSource::NativeBackend {
+                backend: BackendId::new("broken"),
+            },
+            "shell",
+            "exec",
+            &["shell.exec"],
+        ))
+        .await
+        .unwrap();
+    registry
+        .register(descriptor_with(
+            "tool:healthy",
+            ToolSource::NativeBackend {
+                backend: BackendId::new("healthy"),
+            },
+            "shell",
+            "exec",
+            &["shell.exec"],
+        ))
+        .await
+        .unwrap();
+    let router = DefaultIntentRouter::new(registry as Arc<dyn ToolRegistry>).with_breakers(
+        Arc::new(OpenOnly {
+            tool_id: "tool:broken".into(),
+        }) as Arc<dyn BreakerCheck>,
+    );
+    let tok = sample_user_token("shell", "exec", &["shell.exec"]);
+    let route = router.resolve(&tok).await.unwrap();
+    match route {
+        ToolRoute::NativeBackend { backend } => assert_eq!(backend.as_str(), "healthy"),
+        other => panic!("expected NativeBackend(healthy), got {other:?}"),
+    }
+}
+
 #[test]
 fn router_score_components() {
     let exact = descriptor_with("t", ToolSource::Terminal, "fs", "read", &["fs.read"]);

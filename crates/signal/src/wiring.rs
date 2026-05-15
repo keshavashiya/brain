@@ -351,4 +351,19 @@ impl SignalProcessor {
     pub fn intent_router(&self) -> Option<&Arc<dyn intent::IntentRouter>> {
         self.intent_router.as_ref()
     }
+
+    /// Attach a per-tool breaker registry. The pipeline records success /
+    /// failure into this registry after every tool dispatch; the router
+    /// queries it (via `intent::BreakerCheck`) to skip `Open` tools.
+    /// Wiring the router and the registry separately is intentional —
+    /// callers compose the two via `DefaultIntentRouter::with_breakers`.
+    pub fn with_breaker_registry(mut self, registry: Arc<resilience::BreakerRegistry>) -> Self {
+        self.breaker_registry = Some(registry);
+        self
+    }
+
+    /// Expose the configured breaker registry, if any.
+    pub fn breaker_registry(&self) -> Option<&Arc<resilience::BreakerRegistry>> {
+        self.breaker_registry.as_ref()
+    }
 }

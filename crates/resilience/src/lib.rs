@@ -9,12 +9,14 @@
 //! `BrainEvent::BreakerStateChange` so the Live tab, `brain tail`, and
 //! remote subscribers can render breaker health alongside tool calls.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use async_trait::async_trait;
 use chrono::Utc;
 use observe::{BrainEvent, Observer};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -227,6 +229,91 @@ impl CircuitBreaker {
                     ts: Utc::now(),
                 })
                 .await;
+        }
+    }
+}
+
+// ─── Per-tool registry ──────────────────────────────────────────────────────
+
+/// Owns one [`CircuitBreaker`] per `tool_id`. The capability router queries
+/// it via the [`intent::BreakerCheck`] impl to exclude `Open` tools from
+/// scoring; the dispatch site records success/failure after each tool call.
+pub struct BreakerRegistry {
+    breakers: RwLock<HashMap<String, Arc<CircuitBreaker>>>,
+    config: BreakerConfig,
+    observer: Option<Arc<dyn Observer>>,
+}
+
+impl BreakerRegistry {
+    /// Build a registry that lazily creates per-tool breakers with the
+    /// provided default config. Each breaker is wired to the same observer
+    /// (if any) so all transitions reach the bus.
+    pub fn new(config: BreakerConfig) -> Self {
+        Self {
+            breakers: RwLock::new(HashMap::new()),
+            config,
+            observer: None,
+        }
+    }
+
+    pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
+    /// Look up the breaker for `tool_id`, creating one on first access.
+    pub async fn get_or_create(&self, tool_id: &str) -> Arc<CircuitBreaker> {
+        if let Some(existing) = self.breakers.read().await.get(tool_id) {
+            return existing.clone();
+        }
+        let mut guard = self.breakers.write().await;
+        // Re-check under the write lock — another task may have raced us.
+        if let Some(existing) = guard.get(tool_id) {
+            return existing.clone();
+        }
+        let mut cb = CircuitBreaker::new(tool_id, self.config.clone());
+        if let Some(obs) = &self.observer {
+            cb = cb.with_observer(obs.clone());
+        }
+        let arc = Arc::new(cb);
+        guard.insert(tool_id.to_string(), arc.clone());
+        arc
+    }
+
+    /// Snapshot lookup — `None` if no breaker has been minted yet.
+    pub async fn get(&self, tool_id: &str) -> Option<Arc<CircuitBreaker>> {
+        self.breakers.read().await.get(tool_id).cloned()
+    }
+
+    /// Convenience wrapper: mint the breaker for `tool_id` if needed and
+    /// record a success.
+    pub async fn record_success(&self, tool_id: &str) {
+        self.get_or_create(tool_id).await.record_success().await;
+    }
+
+    /// Convenience wrapper: mint the breaker for `tool_id` if needed and
+    /// record a failure.
+    pub async fn record_failure(&self, tool_id: &str) {
+        self.get_or_create(tool_id).await.record_failure().await;
+    }
+
+    pub async fn len(&self) -> usize {
+        self.breakers.read().await.len()
+    }
+
+    pub async fn is_empty(&self) -> bool {
+        self.breakers.read().await.is_empty()
+    }
+}
+
+#[async_trait]
+impl intent::BreakerCheck for BreakerRegistry {
+    async fn is_open(&self, tool_id: &str) -> bool {
+        // Only query existing breakers — never mint one just to read state.
+        // A tool with no recorded outcomes is considered closed.
+        match self.get(tool_id).await {
+            Some(cb) => cb.is_open().await,
+            None => false,
         }
     }
 }

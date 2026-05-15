@@ -1031,6 +1031,7 @@ name = "brainos-resilience"
 version = "0.3.0"
 dependencies = [
  "async-trait",
+ "brainos-intent",
  "brainos-observe",
  "chrono",
  "tokio",
@@ -1076,6 +1077,7 @@ dependencies = [
  "brainos-mcphost",
  "brainos-observe",
  "brainos-orchestrate",
+ "brainos-resilience",
  "brainos-sandbox",
  "brainos-storage",
  "brainos-terminal",

@@ -135,6 +135,11 @@ pub struct SignalProcessor {
     /// `resolve` and dispatches the returned route. Without a router,
     /// `Intent::ToolCall` falls back to a deterministic placeholder.
     intent_router: Option<std::sync::Arc<dyn intent::IntentRouter>>,
+    /// Per-tool breaker registry. Wired into the router (to exclude `Open`
+    /// tools from scoring) and into the dispatch site (to record success /
+    /// failure after each MCP call). Unwired processors don't track tool
+    /// health.
+    breaker_registry: Option<std::sync::Arc<resilience::BreakerRegistry>>,
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

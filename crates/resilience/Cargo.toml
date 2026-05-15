@@ -13,6 +13,7 @@ categories.workspace = true
 [dependencies]
 async-trait = { workspace = true }
 chrono = { workspace = true }
+intent = { workspace = true }
 observe = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 tracing = { workspace = true }

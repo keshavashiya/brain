@@ -21,6 +21,7 @@ hippocampus = { workspace = true }
 cortex = { workspace = true }
 thalamus = { workspace = true }
 intent = { workspace = true }
+resilience = { workspace = true }
 amygdala = { workspace = true }
 cerebellum = { workspace = true }
 ganglia = { workspace = true }

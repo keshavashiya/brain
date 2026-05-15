@@ -139,3 +139,57 @@ fn breaker_state_wire_strings_are_stable() {
     );
     assert_eq!(BreakerState::HalfOpen.as_str(), "half_open");
 }
+
+#[tokio::test]
+async fn registry_creates_breakers_lazily() {
+    let reg = BreakerRegistry::new(fast_config());
+    assert!(reg.is_empty().await);
+    assert!(reg.get("missing").await.is_none());
+    let cb = reg.get_or_create("mcp:echo:echo").await;
+    assert_eq!(cb.tool_id(), "mcp:echo:echo");
+    assert_eq!(reg.len().await, 1);
+    let again = reg.get_or_create("mcp:echo:echo").await;
+    assert!(
+        Arc::ptr_eq(&cb, &again),
+        "must return same Arc on second call"
+    );
+}
+
+#[tokio::test]
+async fn registry_is_breaker_check_reports_open() {
+    use intent::BreakerCheck;
+    let reg = BreakerRegistry::new(fast_config());
+    // Unknown tool — never minted — must report closed.
+    assert!(!reg.is_open("unknown").await);
+    // Mint and trip it.
+    reg.record_failure("mcp:t:a").await;
+    reg.record_failure("mcp:t:a").await;
+    assert!(reg.is_open("mcp:t:a").await);
+    assert!(!reg.is_open("mcp:t:b").await);
+}
+
+#[tokio::test]
+async fn registry_record_success_resets_failures() {
+    let reg = BreakerRegistry::new(fast_config());
+    reg.record_failure("t").await;
+    reg.record_success("t").await;
+    reg.record_failure("t").await;
+    use intent::BreakerCheck;
+    assert!(!reg.is_open("t").await, "success must have reset");
+}
+
+#[tokio::test]
+async fn registry_forwards_observer_to_new_breakers() {
+    let broadcast = BroadcastObserver::new();
+    let mut rx = broadcast.subscribe();
+    let reg = BreakerRegistry::new(fast_config()).with_observer(broadcast as Arc<dyn Observer>);
+    reg.record_failure("t").await;
+    reg.record_failure("t").await; // opens
+    match tokio::time::timeout(Duration::from_millis(50), rx.recv()).await {
+        Ok(Ok(BrainEvent::BreakerStateChange { tool_id, to, .. })) => {
+            assert_eq!(tool_id, "t");
+            assert_eq!(to, "open");
+        }
+        other => panic!("expected BreakerStateChange, got {other:?}"),
+    }
+}

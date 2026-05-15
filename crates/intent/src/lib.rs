@@ -261,6 +261,17 @@ pub trait CapabilityIndex: Send + Sync {
     async fn upsert(&self, t: &ToolDescriptor) -> Result<(), IntentError>;
 }
 
+/// Per-tool circuit-breaker snapshot. The router calls this for every
+/// candidate during [`IntentRouter::resolve`]; tools whose breaker is
+/// `Open` are excluded from scoring so a recently-failing tool can't be
+/// chosen until the cooldown elapses. The concrete breaker lives in
+/// `brainos-resilience`; the trait keeps the schema crate independent
+/// of the resilience layer.
+#[async_trait]
+pub trait BreakerCheck: Send + Sync {
+    async fn is_open(&self, tool_id: &str) -> bool;
+}
+
 // ─── Default implementations ────────────────────────────────────────────────
 
 /// Default [`IntentRouter`] that scores registered tools against a token and
@@ -279,11 +290,22 @@ pub trait CapabilityIndex: Send + Sync {
 /// pipeline surfaces that back to the user instead of guessing.
 pub struct DefaultIntentRouter {
     registry: Arc<dyn ToolRegistry>,
+    breakers: Option<Arc<dyn BreakerCheck>>,
 }
 
 impl DefaultIntentRouter {
     pub fn new(registry: Arc<dyn ToolRegistry>) -> Self {
-        Self { registry }
+        Self {
+            registry,
+            breakers: None,
+        }
+    }
+
+    /// Wire a [`BreakerCheck`] so `Open` tools are excluded from scoring.
+    /// Without one, every registered tool is considered.
+    pub fn with_breakers(mut self, breakers: Arc<dyn BreakerCheck>) -> Self {
+        self.breakers = Some(breakers);
+        self
     }
 
     /// Score a single candidate against the token. Public so callers /
@@ -309,6 +331,11 @@ impl IntentRouter for DefaultIntentRouter {
         let tools = self.registry.list().await;
         let mut best: Option<(ToolDescriptor, f32)> = None;
         for t in tools {
+            if let Some(breakers) = &self.breakers {
+                if breakers.is_open(&t.tool_id).await {
+                    continue;
+                }
+            }
             let s = Self::score(tok, &t);
             match best {
                 None if s > 0.0 => best = Some((t, s)),
