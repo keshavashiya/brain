@@ -36,6 +36,7 @@ use uuid::Uuid;
 use vault::CredentialVault;
 
 use crate::{
+    capability_index::CapabilityIndex,
     error::McpHostError,
     oauth,
     types::{CallOutcome, MountedServer, ServerConfig, ServerInfo, ServerStatus, ToolDescriptor},
@@ -49,6 +50,7 @@ pub struct RmcpHost {
     mounted: RwLock<HashMap<String, Mounted>>,
     observer: Option<Arc<dyn Observer>>,
     vault: Option<Arc<dyn CredentialVault>>,
+    capability_index: Option<Arc<dyn CapabilityIndex>>,
 }
 
 struct Mounted {
@@ -75,6 +77,7 @@ impl RmcpHost {
             mounted: RwLock::new(HashMap::new()),
             observer: None,
             vault: None,
+            capability_index: None,
         }
     }
 
@@ -94,6 +97,14 @@ impl RmcpHost {
     /// fail at mount with [`McpHostError::Auth`].
     pub fn with_vault(mut self, vault: Arc<dyn CredentialVault>) -> Self {
         self.vault = Some(vault);
+        self
+    }
+
+    /// Wire a [`CapabilityIndex`] so every successful mount auto-registers
+    /// the server's tool catalog and every unmount drops it. The intent
+    /// router queries the same index when resolving a tool route.
+    pub fn with_capability_index(mut self, index: Arc<dyn CapabilityIndex>) -> Self {
+        self.capability_index = Some(index);
         self
     }
 
@@ -202,20 +213,24 @@ impl RmcpHost {
             config: cfg,
             mounted_at: Utc::now(),
             info,
-            tools,
+            tools: tools.clone(),
         };
         let mut guard = self.mounted.write().await;
         if guard.contains_key(&name) {
             return Err(McpHostError::AlreadyMounted(name));
         }
         guard.insert(
-            name,
+            name.clone(),
             Mounted {
                 record,
                 tools_hash,
                 service: Some(svc),
             },
         );
+        drop(guard);
+        if let Some(index) = &self.capability_index {
+            index.upsert(&name, tools);
+        }
         Ok(())
     }
 
@@ -265,8 +280,12 @@ impl RmcpHost {
             }
             let mut guard = self.mounted.write().await;
             if let Some(m) = guard.get_mut(server) {
-                m.record.tools = tools;
+                m.record.tools = tools.clone();
                 m.tools_hash = new_hash;
+            }
+            drop(guard);
+            if let Some(index) = &self.capability_index {
+                index.upsert(server, tools);
             }
         }
         Ok(changed)
@@ -291,6 +310,9 @@ impl MCPHost for RmcpHost {
                 .remove(name)
                 .ok_or_else(|| McpHostError::NotMounted(name.to_string()))?
         };
+        if let Some(index) = &self.capability_index {
+            index.remove(name);
+        }
         if let Some(svc) = entry.service.take() {
             match svc.cancel().await {
                 Ok(_) => {}

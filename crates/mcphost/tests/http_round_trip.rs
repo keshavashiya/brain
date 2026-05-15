@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use brainos_mcphost::{MCPHost, RmcpHost, ServerConfig};
+use brainos_mcphost::{CapabilityIndex, InMemoryCapabilityIndex, MCPHost, RmcpHost, ServerConfig};
 use observe::{BrainEvent, BroadcastObserver, Observer};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -141,6 +141,43 @@ async fn refresh_with_no_mount_errors() {
         matches!(err, brainos_mcphost::McpHostError::NotMounted(_)),
         "unexpected: {err:?}"
     );
+}
+
+#[tokio::test]
+async fn capability_index_auto_registers_and_drops() {
+    let server = spawn_server().await;
+    let index: Arc<dyn CapabilityIndex> = Arc::new(InMemoryCapabilityIndex::new());
+    let host = RmcpHost::new().with_capability_index(index.clone());
+
+    host.mount(
+        "echo".into(),
+        ServerConfig::StreamableHttp {
+            url: server.url.clone(),
+            oauth: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    // The echo server publishes exactly one tool named "echo".
+    let hits = index.find("", "echo");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].server, "echo");
+    assert_eq!(hits[0].name, "echo");
+    assert_eq!(index.snapshot().len(), 1);
+
+    // A clean refresh leaves the index alone.
+    let changed = host.refresh_tools("echo").await.unwrap();
+    assert!(!changed);
+    assert_eq!(index.snapshot().len(), 1);
+
+    host.unmount("echo").await.unwrap();
+    assert!(
+        index.snapshot().is_empty(),
+        "unmount must drop tools from the index"
+    );
+
+    server.cancel.cancel();
 }
 
 #[tokio::test]
