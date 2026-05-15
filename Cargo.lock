@@ -1046,6 +1046,7 @@ dependencies = [
  "brainos-ganglia",
  "brainos-hippocampus",
  "brainos-identity",
+ "brainos-mcphost",
  "brainos-observe",
  "brainos-orchestrate",
  "brainos-sandbox",

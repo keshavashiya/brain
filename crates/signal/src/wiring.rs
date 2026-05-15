@@ -307,4 +307,18 @@ impl SignalProcessor {
     pub fn terminal_bridge(&self) -> Option<&Arc<terminal::TerminalBridge>> {
         self.terminal_bridge.as_ref()
     }
+
+    /// Attach an MCP host so `MountMcpServer` / `UnmountMcpServer` /
+    /// `ListMcpServers` intents can drive real MCP server lifecycle.
+    /// Without this, the three intents return a "MCP host not configured"
+    /// response.
+    pub fn with_mcp_host(mut self, host: Arc<dyn mcphost::MCPHost>) -> Self {
+        self.mcp_host = Some(host);
+        self
+    }
+
+    /// Expose the configured MCP host, if any.
+    pub fn mcp_host(&self) -> Option<&Arc<dyn mcphost::MCPHost>> {
+        self.mcp_host.as_ref()
+    }
 }

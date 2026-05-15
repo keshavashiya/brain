@@ -147,6 +147,20 @@ pub enum Intent {
     ListTerminalSessions,
     /// Close an active terminal session by id. Kills the child if still running.
     CloseTerminalSession { session_id: String },
+    /// Mount an external MCP server (stdio / streamable-http / http-sse) for
+    /// tool routing through Brain. The `transport` string is one of
+    /// `"stdio"`, `"streamable_http"`, `"http_sse"`. `command_or_url` is the
+    /// child-process argv (space-separated) for stdio, or the endpoint URL
+    /// for HTTP transports.
+    MountMcpServer {
+        name: String,
+        transport: String,
+        command_or_url: String,
+    },
+    /// Unmount a previously-mounted MCP server by name.
+    UnmountMcpServer { name: String },
+    /// List currently-mounted MCP servers (read-only inspection).
+    ListMcpServers,
     /// Regular chat/conversation.
     Chat { content: String },
 }

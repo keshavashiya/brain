@@ -730,6 +730,49 @@ impl IntentClassifier {
                 });
             }
         }
+
+        // MCP host control commands. Slash forms only — full LLM-payload
+        // arms are out of scope here and would land alongside a richer
+        // natural-language story for MCP control.
+        if trimmed == "/mcp-list" {
+            return Some(Classification {
+                intent: Intent::ListMcpServers,
+                confidence: 1.0,
+                method: ClassificationMethod::Regex,
+                extracted_facts: Vec::new(),
+            });
+        }
+        if let Some(rest) = trimmed.strip_prefix("/mcp-mount") {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if parts.len() >= 3 {
+                let name = parts[0].to_string();
+                let transport = parts[1].to_string();
+                let command_or_url = parts[2..].join(" ");
+                return Some(Classification {
+                    intent: Intent::MountMcpServer {
+                        name,
+                        transport,
+                        command_or_url,
+                    },
+                    confidence: 1.0,
+                    method: ClassificationMethod::Regex,
+                    extracted_facts: Vec::new(),
+                });
+            }
+        }
+        if let Some(rest) = trimmed.strip_prefix("/mcp-unmount") {
+            let name = rest.trim();
+            if !name.is_empty() {
+                return Some(Classification {
+                    intent: Intent::UnmountMcpServer {
+                        name: name.to_string(),
+                    },
+                    confidence: 1.0,
+                    method: ClassificationMethod::Regex,
+                    extracted_facts: Vec::new(),
+                });
+            }
+        }
         None
     }
 

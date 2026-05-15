@@ -41,7 +41,8 @@ pub fn intent_to_auth(intent: &Intent) -> Option<(AuthorizationRequest, Tier)> {
         | Intent::QueryAudit { .. }
         | Intent::ListChannels
         | Intent::ChannelPreferences { .. }
-        | Intent::ListTerminalSessions => None,
+        | Intent::ListTerminalSessions
+        | Intent::ListMcpServers => None,
 
         // ── Memory mutations — Write tier under `memory.*` ─────────────
         Intent::StoreFact { .. } => {
@@ -131,6 +132,28 @@ pub fn intent_to_auth(intent: &Intent) -> Option<(AuthorizationRequest, Tier)> {
                 .with_modifiers(serde_json::json!({ "session_id": session_id })),
             Tier::Write,
         )),
+
+        // ── MCP host control — mounting any server is External (HTTP
+        // transports egress the network; stdio transports load untrusted
+        // tool descriptions into the planning context). Unmount drops state
+        // and is a Write. ListMcpServers is unguarded (see above).
+        Intent::MountMcpServer {
+            name,
+            transport,
+            command_or_url,
+        } => Some((
+            AuthorizationRequest::new("mcp", "mount").with_modifiers(serde_json::json!({
+                "name": name,
+                "transport": transport,
+                "command_or_url": command_or_url,
+            })),
+            Tier::External,
+        )),
+        Intent::UnmountMcpServer { name } => Some((
+            AuthorizationRequest::new("mcp", "unmount")
+                .with_modifiers(serde_json::json!({ "name": name })),
+            Tier::Write,
+        )),
     }
 }
 
@@ -190,6 +213,35 @@ mod tests {
     fn recall_and_memory_summary_unguarded() {
         assert!(intent_to_auth(&Intent::Recall { query: "x".into() }).is_none());
         assert!(intent_to_auth(&Intent::MemorySummary).is_none());
+    }
+
+    #[test]
+    fn mount_mcp_server_is_external_tier() {
+        let intent = Intent::MountMcpServer {
+            name: "fs".into(),
+            transport: "stdio".into(),
+            command_or_url: "mcp-fs".into(),
+        };
+        let (req, tier) = intent_to_auth(&intent).unwrap();
+        assert_eq!(req.verb_ns, "mcp");
+        assert_eq!(req.verb_action, "mount");
+        assert_eq!(tier, Tier::External);
+        assert_eq!(req.modifier_str("name"), Some("fs"));
+        assert_eq!(req.modifier_str("transport"), Some("stdio"));
+    }
+
+    #[test]
+    fn unmount_mcp_server_is_write_tier() {
+        let intent = Intent::UnmountMcpServer { name: "fs".into() };
+        let (req, tier) = intent_to_auth(&intent).unwrap();
+        assert_eq!(req.verb_ns, "mcp");
+        assert_eq!(req.verb_action, "unmount");
+        assert_eq!(tier, Tier::Write);
+    }
+
+    #[test]
+    fn list_mcp_servers_unguarded() {
+        assert!(intent_to_auth(&Intent::ListMcpServers).is_none());
     }
 
     #[test]

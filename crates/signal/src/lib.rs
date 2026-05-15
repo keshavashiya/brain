@@ -117,6 +117,12 @@ pub struct SignalProcessor {
     /// `ListTerminalSessions` / `CloseTerminalSession` intents. When
     /// unwired, those intents return a "not configured" response.
     terminal_bridge: Option<std::sync::Arc<terminal::TerminalBridge>>,
+
+    // ── MCP Host (Motor cortex) ────────────────────────────────────────
+    /// Optional MCP host for `MountMcpServer` / `UnmountMcpServer` /
+    /// `ListMcpServers` intents. When unwired, those intents return a
+    /// "not configured" response.
+    mcp_host: Option<std::sync::Arc<dyn mcphost::MCPHost>>,
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

@@ -376,6 +376,28 @@ impl SignalProcessor {
                 self.handle_close_terminal_session(signal_id, session_id, &prepend_nudges)
                     .await
             }
+            thalamus::Intent::MountMcpServer {
+                name,
+                transport,
+                command_or_url,
+            } => {
+                self.handle_mount_mcp_server(
+                    signal_id,
+                    name,
+                    transport,
+                    command_or_url,
+                    &prepend_nudges,
+                )
+                .await
+            }
+            thalamus::Intent::UnmountMcpServer { name } => {
+                self.handle_unmount_mcp_server(signal_id, name, &prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::ListMcpServers => {
+                self.handle_list_mcp_servers(signal_id, &prepend_nudges)
+                    .await
+            }
         }
     }
 
@@ -2011,6 +2033,130 @@ impl SignalProcessor {
             ),
         };
         let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    /// Handle `Intent::MountMcpServer`. Builds a [`mcphost::ServerConfig`]
+    /// from the slash-form payload and asks the wired host to mount it.
+    /// Without a host wired, returns a "not configured" response.
+    pub(super) async fn handle_mount_mcp_server(
+        &self,
+        signal_id: Uuid,
+        name: String,
+        transport: String,
+        command_or_url: String,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let Some(host) = self.mcp_host() else {
+            let resp = prepend_nudges(SignalResponse::ok(
+                signal_id,
+                "MCP host not configured on this instance.",
+            ));
+            return Ok(PipelineResult::Complete(resp));
+        };
+        let cfg = match transport.as_str() {
+            "stdio" => {
+                let parts: Vec<&str> = command_or_url.split_whitespace().collect();
+                let (command, args) = match parts.split_first() {
+                    Some((head, rest)) => (
+                        (*head).to_string(),
+                        rest.iter().map(|s| (*s).to_string()).collect::<Vec<_>>(),
+                    ),
+                    None => (String::new(), Vec::new()),
+                };
+                if command.is_empty() {
+                    let resp = prepend_nudges(SignalResponse::ok(
+                        signal_id,
+                        "MCP mount: stdio transport needs a command.",
+                    ));
+                    return Ok(PipelineResult::Complete(resp));
+                }
+                mcphost::ServerConfig::Stdio {
+                    command,
+                    args,
+                    env: Default::default(),
+                    cwd: None,
+                }
+            }
+            "streamable_http" => mcphost::ServerConfig::StreamableHttp {
+                url: command_or_url.clone(),
+                oauth: None,
+            },
+            "http_sse" => mcphost::ServerConfig::HttpSse {
+                url: command_or_url.clone(),
+                oauth: None,
+            },
+            other => {
+                let resp = prepend_nudges(SignalResponse::ok(
+                    signal_id,
+                    format!(
+                        "MCP mount: unknown transport '{other}' (expected stdio, streamable_http, http_sse).",
+                    ),
+                ));
+                return Ok(PipelineResult::Complete(resp));
+            }
+        };
+        let message = match host.mount(name.clone(), cfg).await {
+            Ok(()) => format!("Mounted MCP server '{name}' over {transport}."),
+            Err(e) => format!("Failed to mount MCP server '{name}': {e}"),
+        };
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    /// Handle `Intent::UnmountMcpServer`. Forwards to the wired host.
+    pub(super) async fn handle_unmount_mcp_server(
+        &self,
+        signal_id: Uuid,
+        name: String,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let Some(host) = self.mcp_host() else {
+            let resp = prepend_nudges(SignalResponse::ok(
+                signal_id,
+                "MCP host not configured on this instance.",
+            ));
+            return Ok(PipelineResult::Complete(resp));
+        };
+        let message = match host.unmount(&name).await {
+            Ok(()) => format!("Unmounted MCP server '{name}'."),
+            Err(e) => format!("Failed to unmount MCP server '{name}': {e}"),
+        };
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    /// Handle `Intent::ListMcpServers`. Renders a compact human summary.
+    pub(super) async fn handle_list_mcp_servers(
+        &self,
+        signal_id: Uuid,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let Some(host) = self.mcp_host() else {
+            let resp = prepend_nudges(SignalResponse::ok(
+                signal_id,
+                "MCP host not configured on this instance.",
+            ));
+            return Ok(PipelineResult::Complete(resp));
+        };
+        let servers = host.list_servers().await;
+        let message = if servers.is_empty() {
+            "No mounted MCP servers.".to_string()
+        } else {
+            let mut buf = format!("{} mounted MCP server(s):\n", servers.len());
+            for s in &servers {
+                use std::fmt::Write;
+                let _ = writeln!(
+                    buf,
+                    "  {} — {} tool(s) (mounted {})",
+                    s.name,
+                    s.tool_count,
+                    s.mounted_at.to_rfc3339(),
+                );
+            }
+            buf
+        };
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message.trim_end()));
         Ok(PipelineResult::Complete(resp))
     }
 
