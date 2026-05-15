@@ -720,3 +720,55 @@ fn to_intent_token_round_trip_via_toolcall_variant() {
     assert_eq!(back.required_capabilities, original.required_capabilities);
     assert_eq!(back.namespace, original.namespace);
 }
+
+#[tokio::test]
+async fn tool_slash_classifies_to_toolcall_with_payload() {
+    let classifier = IntentClassifier::new();
+    let result = classifier.classify(r#"/tool mcp.echo {"text":"hi"}"#).await;
+    match result.intent {
+        Intent::ToolCall(token) => {
+            assert_eq!(token.verb.namespace, "mcp");
+            assert_eq!(token.verb.action, "echo");
+            assert_eq!(token.object.value["text"], "hi");
+            assert!(matches!(token.provenance, intent::Provenance::User { .. }));
+        }
+        other => panic!("expected ToolCall, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn tool_slash_without_payload_uses_null_value() {
+    let classifier = IntentClassifier::new();
+    let result = classifier.classify("/tool fs.read").await;
+    match result.intent {
+        Intent::ToolCall(token) => {
+            assert_eq!(token.verb.namespace, "fs");
+            assert_eq!(token.verb.action, "read");
+            assert!(token.object.value.is_null());
+        }
+        other => panic!("expected ToolCall, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn tool_slash_with_invalid_json_falls_back_to_string_value() {
+    let classifier = IntentClassifier::new();
+    let result = classifier.classify("/tool fs.write not-json").await;
+    match result.intent {
+        Intent::ToolCall(token) => {
+            assert_eq!(token.object.value, serde_json::json!("not-json"));
+        }
+        other => panic!("expected ToolCall, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn tool_slash_with_missing_dot_does_not_match() {
+    let classifier = IntentClassifier::new();
+    let result = classifier.classify("/tool justverb").await;
+    assert!(
+        !matches!(result.intent, Intent::ToolCall(_)),
+        "expected fallback, got {:?}",
+        result.intent
+    );
+}

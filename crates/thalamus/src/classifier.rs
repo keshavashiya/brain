@@ -773,6 +773,52 @@ impl IntentClassifier {
                 });
             }
         }
+
+        // /tool <verb_ns>.<verb_action> [json-args] — raw entrypoint for
+        // the capability router. The verb pair routes against the wired
+        // `intent::ToolRegistry`; optional JSON payload becomes the SIT's
+        // `object.value`. Useful as a tester / power-user path until the
+        // LLM classifier learns to emit `Intent::ToolCall` natively.
+        if let Some(rest) = trimmed.strip_prefix("/tool") {
+            let rest = rest.trim();
+            if !rest.is_empty() {
+                let (verb_str, payload_str) = match rest.split_once(char::is_whitespace) {
+                    Some((v, p)) => (v.trim(), p.trim()),
+                    None => (rest, ""),
+                };
+                if let Some((ns, action)) = verb_str.split_once('.') {
+                    if !ns.is_empty() && !action.is_empty() {
+                        let payload = if payload_str.is_empty() {
+                            serde_json::Value::Null
+                        } else {
+                            match serde_json::from_str::<serde_json::Value>(payload_str) {
+                                Ok(v) => v,
+                                Err(_) => serde_json::Value::String(payload_str.to_string()),
+                            }
+                        };
+                        let token = intent::IntentToken::new(
+                            intent::Verb::new(ns, action),
+                            intent::Object {
+                                kind: "intent_args".into(),
+                                value: payload,
+                            },
+                            intent::Provenance::User {
+                                raw_input: trimmed.to_string(),
+                                ui_origin: None,
+                                ts: chrono::Utc::now(),
+                            },
+                            "personal".into(),
+                        );
+                        return Some(Classification {
+                            intent: Intent::ToolCall(Box::new(token)),
+                            confidence: 1.0,
+                            method: ClassificationMethod::Regex,
+                            extracted_facts: Vec::new(),
+                        });
+                    }
+                }
+            }
+        }
         None
     }
 
