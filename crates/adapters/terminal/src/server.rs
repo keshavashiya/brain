@@ -1,8 +1,10 @@
 //! Tonic implementation of the `brain.terminal.v1.TerminalSession` service.
 //!
-//! PR12 lands `Open` / `Close` / `Attach`. The remaining RPCs (`Send`,
-//! `Resize`, `Signal`, `Interact`) compile but return `Status::unimplemented`
-//! until PR13.
+//! - PR12: `Open` / `Close` / `Attach`.
+//! - **PR13 (current):** `Send` / `Resize` / `Signal` + bidi `Interact`
+//!   perf path. The split RPCs delegate to crate-private helpers
+//!   (`open_inner`, `close_inner`, `write_input_inner`, …) which `Interact`
+//!   also drives directly so the two surfaces share one code path.
 
 use std::{io::Read, sync::Arc, time::SystemTime};
 
@@ -10,16 +12,16 @@ use bytes::Bytes;
 use chrono::Utc;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tokio::sync::{broadcast, mpsc, Mutex};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
     pb::{
-        self, terminal_session_server::TerminalSession, ClientFrame, CloseAck, InputChunk,
-        OpenRequest, OutputChunk, ResizeAck, ResizeRequest, SendAck, ServerFrame, SessionHandle,
-        SignalAck, SignalRequest,
+        self, client_frame, server_frame, terminal_session_server::TerminalSession, ClientFrame,
+        CloseAck, InputChunk, OpenRequest, OutputChunk, ResizeAck, ResizeRequest, SendAck,
+        ServerFrame, SessionHandle, Sig, SignalAck, SignalRequest,
     },
     session::{Session, IN_MPSC_CAPACITY, OUT_BROADCAST_CAPACITY},
     types::{SessionMeta, TermSize},
@@ -31,10 +33,10 @@ use crate::{
 /// pathological many-tiny-chunks behavior on slow producers.
 const PTY_READ_BUFFER_SIZE: usize = 8 * 1024;
 
-/// Channel buffer for the per-attach output stream pump. Independent from
-/// the broadcast capacity — this is just the in-process mpsc that hands
-/// frames to tonic's outbound encoder.
-const ATTACH_STREAM_BUFFER: usize = 64;
+/// Channel buffer for the per-attach / per-interact output stream pump.
+/// Independent from the broadcast capacity — this is just the in-process
+/// mpsc that hands frames to tonic's outbound encoder.
+const STREAM_OUT_BUFFER: usize = 64;
 
 /// Tonic service implementation. Cheap to clone (everything inside is
 /// `Arc`-ed) so tonic can spawn one per concurrent RPC.
@@ -84,16 +86,12 @@ fn timestamp_now() -> Option<prost_types::Timestamp> {
     })
 }
 
-#[tonic::async_trait]
-impl TerminalSession for TerminalSvc {
-    type AttachStream = ReceiverStream<Result<OutputChunk, Status>>;
-    type InteractStream = ReceiverStream<Result<ServerFrame, Status>>;
+// ── Crate-private helpers (used by both split RPCs and Interact) ──────────────
 
-    async fn open(&self, req: Request<OpenRequest>) -> Result<Response<SessionHandle>, Status> {
-        let r = req.into_inner();
+impl TerminalSvc {
+    async fn open_inner(&self, r: OpenRequest) -> Result<SessionHandle, Status> {
         let size = term_size_from_pb(r.initial_size);
 
-        // Spawn the PTY pair + child process.
         let pty = native_pty_system();
         let pair = pty
             .openpty(to_pty_size(size))
@@ -118,29 +116,23 @@ impl TerminalSession for TerminalSvc {
             .slave
             .spawn_command(cmd)
             .map_err(|e| Status::internal(format!("spawn: {e}")))?;
-        // Drop the slave; child owns its end and we don't need the handle.
         drop(pair.slave);
 
         let master = Arc::new(Mutex::new(pair.master));
         let (out_tx, out_anchor) = broadcast::channel::<Bytes>(OUT_BROADCAST_CAPACITY);
         let (in_tx, mut in_rx) = mpsc::channel::<Bytes>(IN_MPSC_CAPACITY);
 
-        // PTY reader → broadcast. portable_pty's reader is blocking, so run
-        // it on a blocking task to keep the tokio runtime healthy.
-        //
-        // The pump owns the *only* `Sender`. The session stores the matched
-        // `Receiver` as a resubscribe anchor (see `Session::out_anchor`).
-        // When the PTY hits EOF, the pump returns and drops the sender —
-        // every subscriber then observes `RecvError::Closed`, which is how
-        // child-exit propagates back to attached clients.
+        // PTY reader → broadcast. The pump owns the *only* `Sender`;
+        // see `Session::out_anchor` for the EOF-propagation rationale.
         {
             let reader_res = master.lock().await.try_clone_reader();
             let reader = reader_res.map_err(|e| Status::internal(format!("clone_reader: {e}")))?;
             tokio::task::spawn_blocking(move || pump_reader(reader, out_tx));
         }
 
-        // mpsc → PTY writer. Same blocking-task pattern. Held alive so PR13
-        // Send/Interact has a writer end immediately on Open. Drops on Close.
+        // mpsc → PTY writer. Lives on a blocking task until `in_rx` closes
+        // (which happens when the last `in_tx` clone is dropped — i.e.
+        // session removal).
         {
             let writer_res = master.lock().await.take_writer();
             let writer = writer_res.map_err(|e| Status::internal(format!("take_writer: {e}")))?;
@@ -180,36 +172,104 @@ impl TerminalSession for TerminalSvc {
         });
         self.registry.insert(session).await;
 
-        Ok(Response::new(SessionHandle { session_id }))
+        Ok(SessionHandle { session_id })
     }
 
-    async fn close(&self, req: Request<SessionHandle>) -> Result<Response<CloseAck>, Status> {
-        let id = req.into_inner().session_id;
+    async fn close_inner(&self, id: &str) -> Result<CloseAck, Status> {
         let session = self
             .registry
-            .remove(&id)
+            .remove(&id.to_string())
             .await
             .ok_or_else(|| Status::not_found(format!("session '{id}'")))?;
 
         let mut child = session.child.lock().await;
-
-        // Was the child already done when we got here? Determines
-        // whether the proto `was_killed` flag should be set.
         let already_exited = matches!(child.try_wait(), Ok(Some(_)));
-
         let was_killed = if already_exited {
             false
         } else {
-            // Best-effort kill — already-dead is fine.
             child.kill().is_ok()
         };
-
         let exit_code = child.wait().map(|s| s.exit_code() as i32).unwrap_or(-1);
 
-        Ok(Response::new(CloseAck {
+        Ok(CloseAck {
             exit_code,
             was_killed,
-        }))
+        })
+    }
+
+    async fn lookup(&self, id: &str) -> Result<Arc<Session>, Status> {
+        self.registry
+            .get(&id.to_string())
+            .await
+            .ok_or_else(|| Status::not_found(format!("session '{id}'")))
+    }
+
+    /// Buffer one input chunk into the session's PTY writer pump. Returns the
+    /// number of bytes that were accepted into the in-process queue. A full
+    /// queue (slow PTY consumer) backpressures the caller.
+    async fn write_input_inner(&self, id: &str, data: Bytes) -> Result<u64, Status> {
+        let session = self.lookup(id).await?;
+        let len = data.len() as u64;
+        session
+            .in_tx
+            .send(data)
+            .await
+            .map_err(|_| Status::aborted("session writer closed"))?;
+        Ok(len)
+    }
+
+    async fn resize_inner(&self, id: &str, size: TermSize) -> Result<(), Status> {
+        let session = self.lookup(id).await?;
+        let result = session.master.lock().await.resize(to_pty_size(size));
+        result.map_err(|e| Status::internal(format!("resize: {e}")))
+    }
+
+    /// Routes a `Sig` to the underlying PTY/child.
+    ///
+    /// - `Sigint` → `\x03` (line discipline interprets, portable on Unix and
+    ///   ConPTY on Windows).
+    /// - `Sigquit` → `\x1c`.
+    /// - `Sigterm` / `Sighup` / `Sigkill` → `child.kill()` (best-effort;
+    ///   true SIGHUP support is not exposed by portable-pty).
+    /// - `Unspecified` → no-op (returns `InvalidArgument`).
+    async fn signal_inner(&self, id: &str, sig: Sig) -> Result<(), Status> {
+        let session = self.lookup(id).await?;
+        match sig {
+            Sig::Sigint => session
+                .in_tx
+                .send(Bytes::from_static(b"\x03"))
+                .await
+                .map_err(|_| Status::aborted("session writer closed")),
+            Sig::Sigquit => session
+                .in_tx
+                .send(Bytes::from_static(b"\x1c"))
+                .await
+                .map_err(|_| Status::aborted("session writer closed")),
+            Sig::Sigterm | Sig::Sighup | Sig::Sigkill => session
+                .child
+                .lock()
+                .await
+                .kill()
+                .map_err(|e| Status::internal(format!("kill: {e}"))),
+            Sig::Unspecified => Err(Status::invalid_argument("signal must not be UNSPECIFIED")),
+        }
+    }
+}
+
+// ── Tonic trait implementation ────────────────────────────────────────────────
+
+#[tonic::async_trait]
+impl TerminalSession for TerminalSvc {
+    type AttachStream = ReceiverStream<Result<OutputChunk, Status>>;
+    type InteractStream = ReceiverStream<Result<ServerFrame, Status>>;
+
+    async fn open(&self, req: Request<OpenRequest>) -> Result<Response<SessionHandle>, Status> {
+        Ok(Response::new(self.open_inner(req.into_inner()).await?))
+    }
+
+    async fn close(&self, req: Request<SessionHandle>) -> Result<Response<CloseAck>, Status> {
+        let id = req.into_inner().session_id;
+        Ok(Response::new(self.close_inner(&id).await?))
     }
 
     async fn attach(
@@ -217,14 +277,10 @@ impl TerminalSession for TerminalSvc {
         req: Request<SessionHandle>,
     ) -> Result<Response<Self::AttachStream>, Status> {
         let id = req.into_inner().session_id;
-        let session = self
-            .registry
-            .get(&id)
-            .await
-            .ok_or_else(|| Status::not_found(format!("session '{id}'")))?;
+        let session = self.lookup(&id).await?;
 
         let mut rx = session.out_anchor.resubscribe();
-        let (tx, out) = mpsc::channel::<Result<OutputChunk, Status>>(ATTACH_STREAM_BUFFER);
+        let (tx, out) = mpsc::channel::<Result<OutputChunk, Status>>(STREAM_OUT_BUFFER);
 
         tokio::spawn(async move {
             let mut seq: u64 = 0;
@@ -243,9 +299,6 @@ impl TerminalSession for TerminalSvc {
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => {
-                        // Producer is gone — PTY reader exited (process
-                        // ended, or session was closed). Signal EOF
-                        // explicitly so the client gets a clean stream end.
                         let _ = tx
                             .send(Ok(OutputChunk {
                                 data: Vec::new(),
@@ -276,48 +329,280 @@ impl TerminalSession for TerminalSvc {
         Ok(Response::new(ReceiverStream::new(out)))
     }
 
-    // ── Deferred to PR13 ──────────────────────────────────────────────────
-
-    async fn send(
-        &self,
-        _req: Request<Streaming<InputChunk>>,
-    ) -> Result<Response<SendAck>, Status> {
-        Err(Status::unimplemented("Send: PR13"))
+    async fn send(&self, req: Request<Streaming<InputChunk>>) -> Result<Response<SendAck>, Status> {
+        let mut stream = req.into_inner();
+        let mut total: u64 = 0;
+        while let Some(chunk_res) = stream.next().await {
+            let chunk = chunk_res?;
+            if chunk.session_id.is_empty() {
+                return Err(Status::invalid_argument("input chunk missing session_id"));
+            }
+            total += self
+                .write_input_inner(&chunk.session_id, Bytes::from(chunk.data))
+                .await?;
+        }
+        Ok(Response::new(SendAck {
+            bytes_written: total,
+        }))
     }
 
-    async fn resize(&self, _req: Request<ResizeRequest>) -> Result<Response<ResizeAck>, Status> {
-        Err(Status::unimplemented("Resize: PR13"))
+    async fn resize(&self, req: Request<ResizeRequest>) -> Result<Response<ResizeAck>, Status> {
+        let r = req.into_inner();
+        let size = term_size_from_pb(r.size);
+        self.resize_inner(&r.session_id, size).await?;
+        Ok(Response::new(ResizeAck {}))
     }
 
-    async fn signal(&self, _req: Request<SignalRequest>) -> Result<Response<SignalAck>, Status> {
-        Err(Status::unimplemented("Signal: PR13"))
+    async fn signal(&self, req: Request<SignalRequest>) -> Result<Response<SignalAck>, Status> {
+        let r = req.into_inner();
+        let sig = Sig::try_from(r.signal).unwrap_or(Sig::Unspecified);
+        self.signal_inner(&r.session_id, sig).await?;
+        Ok(Response::new(SignalAck {}))
     }
 
+    /// Bidirectional perf path: one stream for the whole session lifetime.
+    ///
+    /// Frame contract:
+    /// - First client frame **must** be `Open`. The server replies with
+    ///   `Handle` once the session is created, then begins emitting `Output`
+    ///   frames continuously from the PTY broadcast.
+    /// - Subsequent client frames: `Input`, `Resize`, `Signal`, or `Close`.
+    /// - Server frames are interleaved: `Output` from the PTY, plus `Ack`
+    ///   for inputs, `Closed` on a clean close, and `Error` on any failure.
+    ///   `Error` does not always terminate — only `Close` (or stream end)
+    ///   does — but the output forwarder always emits an `Output{eof=true}`
+    ///   when the PTY broadcast closes, mirroring `Attach`.
     async fn interact(
         &self,
-        _req: Request<Streaming<ClientFrame>>,
+        req: Request<Streaming<ClientFrame>>,
     ) -> Result<Response<Self::InteractStream>, Status> {
-        Err(Status::unimplemented("Interact: PR13"))
+        let mut input = req.into_inner();
+        let (tx, out) = mpsc::channel::<Result<ServerFrame, Status>>(STREAM_OUT_BUFFER);
+        let svc = self.clone();
+
+        tokio::spawn(async move {
+            let mut bound_id: Option<String> = None;
+            let mut output_task: Option<tokio::task::JoinHandle<()>> = None;
+
+            while let Some(frame_res) = input.next().await {
+                let frame = match frame_res {
+                    Ok(f) => f,
+                    Err(_) => break,
+                };
+                let Some(k) = frame.k else {
+                    continue;
+                };
+
+                match k {
+                    client_frame::K::Open(open_req) => {
+                        if bound_id.is_some() {
+                            let _ = tx
+                                .send(Ok(error_frame("Interact: session already opened")))
+                                .await;
+                            continue;
+                        }
+                        match svc.open_inner(open_req).await {
+                            Ok(handle) => {
+                                bound_id = Some(handle.session_id.clone());
+                                output_task = Some(spawn_output_forwarder(
+                                    svc.clone(),
+                                    handle.session_id.clone(),
+                                    tx.clone(),
+                                ));
+                                let _ = tx
+                                    .send(Ok(ServerFrame {
+                                        k: Some(server_frame::K::Handle(handle)),
+                                    }))
+                                    .await;
+                            }
+                            Err(s) => {
+                                let _ = tx.send(Ok(error_frame(s.message()))).await;
+                                break;
+                            }
+                        }
+                    }
+
+                    client_frame::K::Input(chunk) => {
+                        let target = pick_id(&bound_id, &chunk.session_id);
+                        if let Some(id) = target {
+                            match svc.write_input_inner(&id, Bytes::from(chunk.data)).await {
+                                Ok(n) => {
+                                    let _ = tx
+                                        .send(Ok(ServerFrame {
+                                            k: Some(server_frame::K::Ack(SendAck {
+                                                bytes_written: n,
+                                            })),
+                                        }))
+                                        .await;
+                                }
+                                Err(s) => {
+                                    let _ = tx.send(Ok(error_frame(s.message()))).await;
+                                }
+                            }
+                        } else {
+                            let _ = tx
+                                .send(Ok(error_frame("Interact: Input before Open")))
+                                .await;
+                        }
+                    }
+
+                    client_frame::K::Resize(r) => {
+                        let target = pick_id(&bound_id, &r.session_id);
+                        if let Some(id) = target {
+                            let size = term_size_from_pb(r.size);
+                            if let Err(s) = svc.resize_inner(&id, size).await {
+                                let _ = tx.send(Ok(error_frame(s.message()))).await;
+                            }
+                        }
+                    }
+
+                    client_frame::K::Signal(sg) => {
+                        let target = pick_id(&bound_id, &sg.session_id);
+                        if let Some(id) = target {
+                            let sig = Sig::try_from(sg.signal).unwrap_or(Sig::Unspecified);
+                            if let Err(s) = svc.signal_inner(&id, sig).await {
+                                let _ = tx.send(Ok(error_frame(s.message()))).await;
+                            }
+                        }
+                    }
+
+                    client_frame::K::Close(handle) => {
+                        let target = pick_id(&bound_id, &handle.session_id);
+                        if let Some(id) = target {
+                            match svc.close_inner(&id).await {
+                                Ok(ack) => {
+                                    let _ = tx
+                                        .send(Ok(ServerFrame {
+                                            k: Some(server_frame::K::Closed(ack)),
+                                        }))
+                                        .await;
+                                }
+                                Err(s) => {
+                                    let _ = tx.send(Ok(error_frame(s.message()))).await;
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // Client closed the stream without Close. Tear down any
+            // still-running session bound to this Interact so PTYs don't
+            // leak on disconnect (deterministic-teardown contract from §3.1).
+            if let Some(id) = bound_id {
+                if svc.registry.get(&id).await.is_some() {
+                    let _ = svc.close_inner(&id).await;
+                }
+            }
+            if let Some(t) = output_task {
+                t.abort();
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(out)))
     }
+}
+
+fn error_frame(msg: impl Into<String>) -> ServerFrame {
+    ServerFrame {
+        k: Some(server_frame::K::Error(msg.into())),
+    }
+}
+
+/// Prefer the per-frame `session_id` if non-empty (lets clients address
+/// other sessions over one Interact stream, though the typical pattern is
+/// to bind once via Open and leave the field empty thereafter).
+fn pick_id(bound: &Option<String>, per_frame: &str) -> Option<String> {
+    if !per_frame.is_empty() {
+        Some(per_frame.to_string())
+    } else {
+        bound.clone()
+    }
+}
+
+/// Spawn the per-Interact PTY → `ServerFrame::Output` forwarder. Mirrors
+/// the Attach loop but wraps chunks in `ServerFrame` instead of yielding
+/// `OutputChunk` directly.
+fn spawn_output_forwarder(
+    svc: TerminalSvc,
+    session_id: String,
+    tx: mpsc::Sender<Result<ServerFrame, Status>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let Some(session) = svc.registry.get(&session_id).await else {
+            let _ = tx
+                .send(Ok(error_frame(format!(
+                    "Interact: session '{session_id}' vanished"
+                ))))
+                .await;
+            return;
+        };
+        let mut rx = session.out_anchor.resubscribe();
+        let mut seq: u64 = 0;
+        loop {
+            match rx.recv().await {
+                Ok(bytes) => {
+                    seq += 1;
+                    let chunk = OutputChunk {
+                        data: bytes.to_vec(),
+                        ts: timestamp_now(),
+                        seq,
+                        eof: false,
+                    };
+                    let frame = ServerFrame {
+                        k: Some(server_frame::K::Output(chunk)),
+                    };
+                    if tx.send(Ok(frame)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    let _ = tx
+                        .send(Ok(ServerFrame {
+                            k: Some(server_frame::K::Output(OutputChunk {
+                                data: Vec::new(),
+                                ts: timestamp_now(),
+                                seq: seq + 1,
+                                eof: true,
+                            })),
+                        }))
+                        .await;
+                    break;
+                }
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    warn!(
+                        session = %session_id,
+                        dropped = n,
+                        "interact stream lagged — bumped subscriber"
+                    );
+                    let _ = tx
+                        .send(Ok(error_frame(format!(
+                            "interact lagged: {n} chunks dropped"
+                        ))))
+                        .await;
+                    break;
+                }
+            }
+        }
+    })
 }
 
 /// Blocking PTY reader pump. Runs on its own `spawn_blocking` task.
 /// Sends raw bytes into `out_tx` until the reader hits EOF or a fatal
-/// error. Dropping `out_tx` here signals the broadcast `Closed` arm to
-/// every active `Attach` subscriber, which is how EOF propagates to clients.
+/// error. Dropping `out_tx` here is what closes the broadcast for every
+/// subscriber — that's how child-exit propagates to clients.
 fn pump_reader(mut reader: Box<dyn Read + Send>, out_tx: broadcast::Sender<Bytes>) {
     let mut buf = vec![0u8; PTY_READ_BUFFER_SIZE];
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break, // EOF
             Ok(n) => {
-                if out_tx.send(Bytes::copy_from_slice(&buf[..n])).is_err() {
-                    // No subscribers AND nobody holding the channel — fine.
-                    // Broadcast::send returns Err only when there are zero
-                    // active receivers; we keep pumping in case a new
-                    // Attach arrives. But the broadcast keeps the buffered
-                    // tail, so we don't lose data either way.
-                }
+                // `send` returns Err only when there are zero receivers.
+                // We keep pumping in case a new subscriber attaches later;
+                // the broadcast keeps the most recent `OUT_BROADCAST_CAPACITY`
+                // chunks for them either way.
+                let _ = out_tx.send(Bytes::copy_from_slice(&buf[..n]));
             }
             Err(_) => break,
         }

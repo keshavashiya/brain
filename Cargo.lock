@@ -1091,6 +1091,7 @@ dependencies = [
  "brainos-signal",
  "bytes",
  "chrono",
+ "futures",
  "portable-pty",
  "prost",
  "prost-types",

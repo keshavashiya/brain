@@ -38,3 +38,6 @@ protobuf-src = "2.1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+# `futures::stream` for client-streaming RPC tests (Send / Interact run
+# against an in-process gRPC harness over a TCP loopback socket).
+futures = { workspace = true }
