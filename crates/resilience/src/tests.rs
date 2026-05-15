@@ -193,3 +193,187 @@ async fn registry_forwards_observer_to_new_breakers() {
         other => panic!("expected BreakerStateChange, got {other:?}"),
     }
 }
+
+// ─── Retry tests ────────────────────────────────────────────────────────────
+
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use crate::retry::compute_delay;
+
+fn retry_config(attempts: u32, base_ms: u64, jitter: f32) -> RetryConfig {
+    RetryConfig {
+        max_attempts: attempts,
+        base_delay: Duration::from_millis(base_ms),
+        max_delay: Duration::from_millis(base_ms * 8),
+        jitter_factor: jitter,
+    }
+}
+
+#[tokio::test]
+async fn retry_returns_first_success_without_delay() {
+    let calls = Arc::new(AtomicU32::new(0));
+    let cfg = retry_config(5, 0, 0.0);
+    let result: Result<u32, _> = retry(&cfg, None, || {
+        let calls = calls.clone();
+        async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok::<u32, &'static str>(42)
+        }
+    })
+    .await;
+    assert_eq!(result.ok(), Some(42));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn retry_succeeds_after_transient_failures() {
+    let calls = Arc::new(AtomicU32::new(0));
+    let cfg = retry_config(5, 0, 0.0);
+    let result: Result<&'static str, _> = retry(&cfg, None, || {
+        let calls = calls.clone();
+        async move {
+            let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if n < 3 {
+                Err("flake")
+            } else {
+                Ok("ok")
+            }
+        }
+    })
+    .await;
+    assert_eq!(result.ok(), Some("ok"));
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn retry_exhausts_and_returns_last_error() {
+    let calls = Arc::new(AtomicU32::new(0));
+    let cfg = retry_config(3, 0, 0.0);
+    let result: Result<(), _> = retry(&cfg, None, || {
+        let calls = calls.clone();
+        async move {
+            let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            Err::<(), String>(format!("attempt {n}"))
+        }
+    })
+    .await;
+    match result {
+        Err(RetryOutcome::Exhausted(e)) => assert_eq!(e, "attempt 3"),
+        other => panic!("expected Exhausted, got {other:?}"),
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn retry_max_attempts_zero_promoted_to_one() {
+    let calls = Arc::new(AtomicU32::new(0));
+    let mut cfg = retry_config(0, 0, 0.0);
+    cfg.max_attempts = 0; // treated as 1
+    let result: Result<(), _> = retry(&cfg, None, || {
+        let calls = calls.clone();
+        async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err::<(), &'static str>("once")
+        }
+    })
+    .await;
+    assert!(matches!(result, Err(RetryOutcome::Exhausted("once"))));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+struct AlwaysOpen;
+#[async_trait::async_trait]
+impl intent::BreakerCheck for AlwaysOpen {
+    async fn is_open(&self, _tool_id: &str) -> bool {
+        true
+    }
+}
+
+struct OpensAfter(AtomicU32);
+#[async_trait::async_trait]
+impl intent::BreakerCheck for OpensAfter {
+    async fn is_open(&self, _tool_id: &str) -> bool {
+        self.0.fetch_add(1, Ordering::SeqCst) >= 1
+    }
+}
+
+#[tokio::test]
+async fn retry_aborts_when_breaker_opens_mid_cycle() {
+    let calls = Arc::new(AtomicU32::new(0));
+    let cfg = retry_config(5, 1, 0.0);
+    let breaker: Arc<dyn intent::BreakerCheck> = Arc::new(OpensAfter(AtomicU32::new(0)));
+    let result: Result<(), _> = retry(&cfg, Some((breaker, "mcp:t:a")), || {
+        let calls = calls.clone();
+        async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err::<(), &'static str>("transient")
+        }
+    })
+    .await;
+    match result {
+        Err(RetryOutcome::BreakerOpenAbort(abort)) => {
+            assert_eq!(abort.tool_id, "mcp:t:a");
+            assert_eq!(abort.last_error, "transient");
+        }
+        other => panic!("expected BreakerOpenAbort, got {other:?}"),
+    }
+    // Two attempts ran: the first (no breaker check) and the second
+    // (breaker reports closed on first probe, opens on second). On the
+    // third we abort before calling f.
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn retry_breaker_always_open_aborts_after_first_attempt() {
+    let calls = Arc::new(AtomicU32::new(0));
+    let cfg = retry_config(5, 1, 0.0);
+    let breaker: Arc<dyn intent::BreakerCheck> = Arc::new(AlwaysOpen);
+    let result: Result<(), _> = retry(&cfg, Some((breaker, "tool:x")), || {
+        let calls = calls.clone();
+        async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err::<(), &'static str>("e")
+        }
+    })
+    .await;
+    assert!(matches!(result, Err(RetryOutcome::BreakerOpenAbort(_))));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "second attempt aborted by breaker"
+    );
+}
+
+#[test]
+fn compute_delay_caps_at_max_delay() {
+    let cfg = RetryConfig {
+        max_attempts: 10,
+        base_delay: Duration::from_millis(10),
+        max_delay: Duration::from_millis(40),
+        jitter_factor: 0.0,
+    };
+    assert_eq!(compute_delay(&cfg, 1), Duration::from_millis(10));
+    assert_eq!(compute_delay(&cfg, 2), Duration::from_millis(20));
+    assert_eq!(compute_delay(&cfg, 3), Duration::from_millis(40));
+    assert_eq!(compute_delay(&cfg, 4), Duration::from_millis(40), "capped");
+    assert_eq!(
+        compute_delay(&cfg, 8),
+        Duration::from_millis(40),
+        "still capped"
+    );
+}
+
+#[test]
+fn compute_delay_full_jitter_stays_within_range() {
+    let cfg = RetryConfig {
+        max_attempts: 10,
+        base_delay: Duration::from_millis(100),
+        max_delay: Duration::from_secs(1),
+        jitter_factor: 1.0,
+    };
+    for _ in 0..32 {
+        let d = compute_delay(&cfg, 2).as_millis();
+        // attempt 2 → 200ms base; with full jitter, in [0, 200].
+        assert!(d <= 200, "{d}ms exceeded ceiling");
+    }
+}

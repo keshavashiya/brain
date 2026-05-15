@@ -1034,6 +1034,7 @@ dependencies = [
  "brainos-intent",
  "brainos-observe",
  "chrono",
+ "rand 0.8.5",
  "tokio",
  "tracing",
  "uuid",

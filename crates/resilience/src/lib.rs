@@ -318,5 +318,10 @@ impl intent::BreakerCheck for BreakerRegistry {
     }
 }
 
+// ─── Retry primitive ───────────────────────────────────────────────────────
+
+mod retry;
+pub use retry::{retry, BreakerOpenAbort, RetryConfig, RetryOutcome};
+
 #[cfg(test)]
 mod tests;
