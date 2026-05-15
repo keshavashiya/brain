@@ -293,4 +293,18 @@ impl SignalProcessor {
     pub fn identity_store(&self) -> Option<&Arc<dyn identity::IdentityStore>> {
         self.identity_store.as_ref()
     }
+
+    /// Attach a Terminal Bridge so `OpenTerminalSession` /
+    /// `ListTerminalSessions` / `CloseTerminalSession` intents can drive
+    /// real PTY sessions. Without this, the three intents return a
+    /// "Terminal Bridge not configured" response.
+    pub fn with_terminal_bridge(mut self, bridge: Arc<terminal::TerminalBridge>) -> Self {
+        self.terminal_bridge = Some(bridge);
+        self
+    }
+
+    /// Expose the configured terminal bridge, if any.
+    pub fn terminal_bridge(&self) -> Option<&Arc<terminal::TerminalBridge>> {
+        self.terminal_bridge.as_ref()
+    }
 }

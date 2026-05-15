@@ -357,6 +357,25 @@ impl SignalProcessor {
                 self.handle_action(signal_id, signal, intent, &prepend_nudges)
                     .await
             }
+            thalamus::Intent::OpenTerminalSession { program, args, cwd } => {
+                self.handle_open_terminal_session(
+                    signal_id,
+                    signal,
+                    program,
+                    args,
+                    cwd,
+                    &prepend_nudges,
+                )
+                .await
+            }
+            thalamus::Intent::ListTerminalSessions => {
+                self.handle_list_terminal_sessions(signal_id, &prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::CloseTerminalSession { session_id } => {
+                self.handle_close_terminal_session(signal_id, session_id, &prepend_nudges)
+                    .await
+            }
         }
     }
 
@@ -1880,6 +1899,119 @@ impl SignalProcessor {
             memory_context: MemoryContext::default(),
             session_id: None,
         }
+    }
+
+    /// Handle `Intent::OpenTerminalSession`. Requires a wired
+    /// [`terminal::TerminalBridge`]; without one, returns a Complete response
+    /// explaining the bridge isn't configured. The Signal's `Principal` (if
+    /// any) is threaded into the session so audit events and `SessionMeta`
+    /// carry it.
+    pub(super) async fn handle_open_terminal_session(
+        &self,
+        signal_id: Uuid,
+        signal: &Signal,
+        program: String,
+        args: Vec<String>,
+        cwd: Option<String>,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let Some(bridge) = self.terminal_bridge() else {
+            let resp = prepend_nudges(SignalResponse::ok(
+                signal_id,
+                "Terminal Bridge not configured on this instance.",
+            ));
+            return Ok(PipelineResult::Complete(resp));
+        };
+        let request = terminal::pb::OpenRequest {
+            program: program.clone(),
+            args: args.clone(),
+            env: Default::default(),
+            cwd: cwd.unwrap_or_default(),
+            initial_size: None,
+            set_controlling_tty: false,
+            client_id: format!("signal:{signal_id}"),
+        };
+        let svc = bridge.svc();
+        let message = match svc
+            .open_via_pipeline(request, signal.principal.clone())
+            .await
+        {
+            Ok(handle) => format!(
+                "Opened terminal session {} for `{}` ({} args).",
+                handle.session_id,
+                program,
+                args.len(),
+            ),
+            Err(s) => format!("Failed to open terminal: {}", s.message()),
+        };
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    /// Handle `Intent::ListTerminalSessions`. Returns a compact human
+    /// summary of currently-tracked sessions.
+    pub(super) async fn handle_list_terminal_sessions(
+        &self,
+        signal_id: Uuid,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let Some(bridge) = self.terminal_bridge() else {
+            let resp = prepend_nudges(SignalResponse::ok(
+                signal_id,
+                "Terminal Bridge not configured on this instance.",
+            ));
+            return Ok(PipelineResult::Complete(resp));
+        };
+        let metas = bridge.sessions().list().await;
+        let message = if metas.is_empty() {
+            "No active terminal sessions.".to_string()
+        } else {
+            let mut buf = format!("{} active terminal session(s):\n", metas.len());
+            for m in &metas {
+                use std::fmt::Write;
+                let _ = writeln!(
+                    buf,
+                    "  {} — {} {} (opened {})",
+                    m.session_id,
+                    m.program,
+                    m.args.join(" "),
+                    m.opened_at.to_rfc3339(),
+                );
+            }
+            buf
+        };
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message.trim_end()));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    /// Handle `Intent::CloseTerminalSession`. Forwards to the bridge's
+    /// `Close` path and reports the exit code / kill status.
+    pub(super) async fn handle_close_terminal_session(
+        &self,
+        signal_id: Uuid,
+        session_id: String,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let Some(bridge) = self.terminal_bridge() else {
+            let resp = prepend_nudges(SignalResponse::ok(
+                signal_id,
+                "Terminal Bridge not configured on this instance.",
+            ));
+            return Ok(PipelineResult::Complete(resp));
+        };
+        let svc = bridge.svc();
+        let message = match svc.close_via_pipeline(&session_id).await {
+            Ok(ack) => format!(
+                "Closed terminal session {session_id}: exit_code={}, was_killed={}.",
+                ack.exit_code, ack.was_killed,
+            ),
+            Err(s) => format!(
+                "Failed to close terminal session {session_id}: {}",
+                s.message()
+            ),
+        };
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
     }
 
     /// Handle the `CancelSignal { signal_id }` intent. Parses the target id,

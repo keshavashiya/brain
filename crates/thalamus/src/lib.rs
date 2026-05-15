@@ -136,6 +136,17 @@ pub enum Intent {
         weight: f32,
         pinned: bool,
     },
+    /// Open a new terminal session via the Terminal Bridge. Returns the
+    /// session id so the caller can `Attach` or close it later.
+    OpenTerminalSession {
+        program: String,
+        args: Vec<String>,
+        cwd: Option<String>,
+    },
+    /// List currently-active terminal sessions (read-only inspection).
+    ListTerminalSessions,
+    /// Close an active terminal session by id. Kills the child if still running.
+    CloseTerminalSession { session_id: String },
     /// Regular chat/conversation.
     Chat { content: String },
 }

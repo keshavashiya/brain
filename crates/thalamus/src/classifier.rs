@@ -681,15 +681,56 @@ impl IntentClassifier {
         if !input.starts_with('/') {
             return None;
         }
-        match input.trim() {
-            "/status" => Some(Classification {
+        let trimmed = input.trim();
+        if trimmed == "/status" {
+            return Some(Classification {
                 intent: Intent::SystemStatus,
                 confidence: 1.0,
                 method: ClassificationMethod::Regex,
                 extracted_facts: Vec::new(),
-            }),
-            _ => None,
+            });
         }
+
+        // Terminal Bridge commands. The split-RPC shape stays out of natural
+        // language for now — these slash forms are deterministic and easy to
+        // test. LLM-payload paths can route the same intents later.
+        if trimmed == "/terminal-list" {
+            return Some(Classification {
+                intent: Intent::ListTerminalSessions,
+                confidence: 1.0,
+                method: ClassificationMethod::Regex,
+                extracted_facts: Vec::new(),
+            });
+        }
+        if let Some(rest) = trimmed.strip_prefix("/terminal-open") {
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if let Some((program, args)) = parts.split_first() {
+                return Some(Classification {
+                    intent: Intent::OpenTerminalSession {
+                        program: (*program).to_string(),
+                        args: args.iter().map(|s| (*s).to_string()).collect(),
+                        cwd: None,
+                    },
+                    confidence: 1.0,
+                    method: ClassificationMethod::Regex,
+                    extracted_facts: Vec::new(),
+                });
+            }
+        }
+        if let Some(rest) = trimmed.strip_prefix("/terminal-close") {
+            let id = rest.trim();
+            if !id.is_empty() {
+                return Some(Classification {
+                    intent: Intent::CloseTerminalSession {
+                        session_id: id.to_string(),
+                    },
+                    confidence: 1.0,
+                    method: ClassificationMethod::Regex,
+                    extracted_facts: Vec::new(),
+                });
+            }
+        }
+        None
     }
 
     pub async fn classify(&self, input: &str) -> Classification {

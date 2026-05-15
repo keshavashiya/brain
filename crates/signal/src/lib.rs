@@ -111,6 +111,12 @@ pub struct SignalProcessor {
     /// the classified intent through `IdentityStore::check` before
     /// executing it. Unwired = back-compat (no enforcement).
     identity_store: Option<std::sync::Arc<dyn identity::IdentityStore>>,
+
+    // ── Terminal Bridge (Motor cortex) ──────────────────────────────────
+    /// Optional Terminal Bridge for `OpenTerminalSession` /
+    /// `ListTerminalSessions` / `CloseTerminalSession` intents. When
+    /// unwired, those intents return a "not configured" response.
+    terminal_bridge: Option<std::sync::Arc<terminal::TerminalBridge>>,
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

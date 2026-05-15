@@ -170,6 +170,7 @@ impl SignalProcessor {
             observer: None,
             cancel_registry: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             identity_store: None,
+            terminal_bridge: None,
         };
 
         // Warm up the LLM model in the background to avoid first-call timeout

@@ -40,7 +40,8 @@ pub fn intent_to_auth(intent: &Intent) -> Option<(AuthorizationRequest, Tier)> {
         | Intent::QueryAgents { .. }
         | Intent::QueryAudit { .. }
         | Intent::ListChannels
-        | Intent::ChannelPreferences { .. } => None,
+        | Intent::ChannelPreferences { .. }
+        | Intent::ListTerminalSessions => None,
 
         // ── Memory mutations — Write tier under `memory.*` ─────────────
         Intent::StoreFact { .. } => {
@@ -115,6 +116,20 @@ pub fn intent_to_auth(intent: &Intent) -> Option<(AuthorizationRequest, Tier)> {
             AuthorizationRequest::new("fs", "read")
                 .with_modifiers(serde_json::json!({ "path": path })),
             Tier::Read,
+        )),
+
+        // ── Terminal Bridge — same Execute tier as shell.exec ──────────
+        Intent::OpenTerminalSession { program, cwd, .. } => Some((
+            AuthorizationRequest::new("terminal", "open").with_modifiers(serde_json::json!({
+                "program": program,
+                "cwd": cwd,
+            })),
+            Tier::Execute,
+        )),
+        Intent::CloseTerminalSession { session_id } => Some((
+            AuthorizationRequest::new("terminal", "close")
+                .with_modifiers(serde_json::json!({ "session_id": session_id })),
+            Tier::Write,
         )),
     }
 }

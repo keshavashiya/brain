@@ -64,6 +64,24 @@ impl TerminalSvc {
     pub fn registry(&self) -> &Arc<SessionRegistry> {
         &self.registry
     }
+
+    /// Pipeline-friendly Open: same path as the gRPC `Open` RPC but skips
+    /// metadata-based authorization (the caller, typically `SignalProcessor`,
+    /// has already gated via `IdentityStore::check`). The `principal` arg
+    /// flows straight into [`SessionMeta`] and the audit event.
+    pub async fn open_via_pipeline(
+        &self,
+        request: OpenRequest,
+        principal: Option<Principal>,
+    ) -> Result<SessionHandle, Status> {
+        self.open_inner(request, principal).await
+    }
+
+    /// Pipeline-friendly Close: same path as the gRPC `Close` RPC, no
+    /// auth metadata.
+    pub async fn close_via_pipeline(&self, id: &str) -> Result<CloseAck, Status> {
+        self.close_inner(id).await
+    }
 }
 
 fn term_size_from_pb(pb: Option<pb::PtySize>) -> TermSize {
