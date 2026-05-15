@@ -214,3 +214,40 @@ async fn rug_pull_does_not_fire_on_unchanged_catalog() {
     host.unmount("echo").await.unwrap();
     server.cancel.cancel();
 }
+
+#[tokio::test]
+async fn tool_registry_auto_registers_and_drops() {
+    let server = spawn_server().await;
+    let registry: Arc<dyn intent::ToolRegistry> = Arc::new(intent::InMemoryToolRegistry::new());
+    let host = RmcpHost::new().with_tool_registry(registry.clone());
+
+    host.mount(
+        "echo".into(),
+        ServerConfig::StreamableHttp {
+            url: server.url.clone(),
+            oauth: None,
+        },
+    )
+    .await
+    .unwrap();
+
+    let tools = registry.list().await;
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].tool_id, "mcp:echo:echo");
+    assert!(matches!(
+        tools[0].source,
+        intent::ToolSource::McpServer { ref server } if server == "echo"
+    ));
+    assert_eq!(tools[0].verb.namespace, "mcp");
+    assert_eq!(tools[0].verb.action, "echo");
+
+    // Clean refresh leaves registry untouched (hash matches, no resync).
+    let changed = host.refresh_tools("echo").await.unwrap();
+    assert!(!changed);
+    assert_eq!(registry.list().await.len(), 1);
+
+    host.unmount("echo").await.unwrap();
+    assert!(registry.list().await.is_empty());
+
+    server.cancel.cancel();
+}

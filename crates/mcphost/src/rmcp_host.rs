@@ -51,6 +51,7 @@ pub struct RmcpHost {
     observer: Option<Arc<dyn Observer>>,
     vault: Option<Arc<dyn CredentialVault>>,
     capability_index: Option<Arc<dyn CapabilityIndex>>,
+    tool_registry: Option<Arc<dyn intent::ToolRegistry>>,
 }
 
 struct Mounted {
@@ -78,6 +79,7 @@ impl RmcpHost {
             observer: None,
             vault: None,
             capability_index: None,
+            tool_registry: None,
         }
     }
 
@@ -105,6 +107,17 @@ impl RmcpHost {
     /// router queries the same index when resolving a tool route.
     pub fn with_capability_index(mut self, index: Arc<dyn CapabilityIndex>) -> Self {
         self.capability_index = Some(index);
+        self
+    }
+
+    /// Wire an [`intent::ToolRegistry`] so every mounted server's tools
+    /// land in the workspace-wide capability registry the
+    /// [`intent::IntentRouter`] resolves against. Tool ids follow the
+    /// `mcp:{server}:{tool_name}` pattern; unmount deregisters every tool
+    /// whose source matches the unmounted server, and a rug-pull refresh
+    /// re-syncs the registry with the latest catalog.
+    pub fn with_tool_registry(mut self, registry: Arc<dyn intent::ToolRegistry>) -> Self {
+        self.tool_registry = Some(registry);
         self
     }
 
@@ -229,7 +242,12 @@ impl RmcpHost {
         );
         drop(guard);
         if let Some(index) = &self.capability_index {
-            index.upsert(&name, tools);
+            index.upsert(&name, tools.clone());
+        }
+        if let Some(registry) = &self.tool_registry {
+            for t in &tools {
+                let _ = registry.register(tool_to_intent_descriptor(&name, t)).await;
+            }
         }
         Ok(())
     }
@@ -285,10 +303,51 @@ impl RmcpHost {
             }
             drop(guard);
             if let Some(index) = &self.capability_index {
-                index.upsert(server, tools);
+                index.upsert(server, tools.clone());
+            }
+            if let Some(registry) = &self.tool_registry {
+                // Deregister every tool whose source matches this server,
+                // then register the fresh shape. The registry overwrites by
+                // tool_id so renamed tools land cleanly and disappeared
+                // tools are pruned.
+                for existing in registry.list().await {
+                    if let intent::ToolSource::McpServer { server: s } = &existing.source {
+                        if s == server {
+                            let _ = registry.deregister(&existing.tool_id).await;
+                        }
+                    }
+                }
+                for t in &tools {
+                    let _ = registry
+                        .register(tool_to_intent_descriptor(server, t))
+                        .await;
+                }
             }
         }
         Ok(changed)
+    }
+}
+
+/// Convert an [`mcphost::types::ToolDescriptor`] (the MCP wire shape) into
+/// the workspace-wide [`intent::ToolDescriptor`] the capability router
+/// resolves against. Tool ids follow `mcp:{server}:{tool_name}` so the same
+/// id is stable across refreshes and reachable from a `ToolRoute::Mcp`.
+fn tool_to_intent_descriptor(server: &str, t: &ToolDescriptor) -> intent::ToolDescriptor {
+    intent::ToolDescriptor {
+        tool_id: format!("mcp:{server}:{}", t.name),
+        source: intent::ToolSource::McpServer {
+            server: server.to_string(),
+        },
+        // The MCP wire format doesn't carry a verb the way SIT does; until
+        // a server-side annotation lands the host stamps a coarse
+        // `mcp.<tool_name>` pair so router scoring has something to match.
+        verb: intent::Verb::new("mcp", t.name.clone()),
+        description: t.description.clone().unwrap_or_default(),
+        input_schema: t.input_schema.clone(),
+        output_schema: None,
+        capabilities: Vec::new(),
+        annotations: intent::ToolAnnotations::default(),
+        embedding: None,
     }
 }
 
@@ -312,6 +371,15 @@ impl MCPHost for RmcpHost {
         };
         if let Some(index) = &self.capability_index {
             index.remove(name);
+        }
+        if let Some(registry) = &self.tool_registry {
+            for existing in registry.list().await {
+                if let intent::ToolSource::McpServer { server: s } = &existing.source {
+                    if s == name {
+                        let _ = registry.deregister(&existing.tool_id).await;
+                    }
+                }
+            }
         }
         if let Some(svc) = entry.service.take() {
             match svc.cancel().await {

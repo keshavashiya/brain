@@ -964,6 +964,7 @@ dependencies = [
  "axum 0.7.9",
  "brainos-core",
  "brainos-identity",
+ "brainos-intent",
  "brainos-observe",
  "brainos-vault",
  "chrono",
