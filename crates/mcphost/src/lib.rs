@@ -1,0 +1,251 @@
+//! # Brain MCP Host
+//!
+//! Phase 2 of the v1.0.0 plan (`docs/v1.0.0.md` §3.2) — Brain's host-side
+//! integration for **external** Model Context Protocol servers. Today's
+//! `crates/adapters/mcp` is a *server* (Brain exposes its 6 tools); this
+//! crate (`crates/mcphost`, package `brainos-mcphost`) is the *host* side
+//! (Brain mounts other people's tool servers).
+//!
+//! Supported transports (full impl lands across PR17–PR19):
+//! - **stdio** — child process speaking JSON-RPC on stdin/stdout
+//! - **Streamable HTTP** — MCP spec 2025-11-25 transport
+//! - **HTTP+SSE** — legacy transport, still spec-required for compatibility
+//!
+//! ## Scope of this skeleton (PR16)
+//!
+//! - [`MCPHost`] and [`MCPClient`] traits.
+//! - [`ServerConfig`] enum + [`OAuthConfig`].
+//! - [`MountedServer`] / [`ServerStatus`] / [`ToolDescriptor`] / [`CallOutcome`].
+//! - [`McpHostError`] error taxonomy.
+//! - [`InMemoryMcpHost`] — a no-transport stub that holds mounts and
+//!   demonstrates the trait, so downstream wiring (Signal/Thalamus) can be
+//!   built and tested before transports land.
+//!
+//! Stdio transport: PR17. Streamable HTTP + OAuth 2.1 PKCE: PR18.
+//! CapabilityIndex stub + auto-register on mount: PR19.
+//! Thalamus intents (`MountMcpServer` / `UnmountMcpServer` / `ListMcpServers`)
+//! and Phase 2 acceptance: PR20.
+
+use std::{
+    collections::{BTreeMap, HashMap},
+    path::PathBuf,
+    sync::Arc,
+};
+
+use async_trait::async_trait;
+use chrono::Utc;
+use tokio::sync::RwLock;
+
+pub mod error;
+pub mod types;
+
+pub use error::McpHostError;
+pub use types::{
+    CallOutcome, MountedServer, OAuthConfig, ServerConfig, ServerInfo, ServerStatus, ToolDescriptor,
+};
+
+/// MCP protocol version Brain negotiates against. Per spec 2025-11-25.
+pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// The host: manages the lifecycle of mounted servers and routes tool calls.
+#[async_trait]
+pub trait MCPHost: Send + Sync {
+    /// Mount a new server under `name`. Idempotent: a name collision returns
+    /// [`McpHostError::AlreadyMounted`].
+    async fn mount(&self, name: String, cfg: ServerConfig) -> Result<(), McpHostError>;
+
+    /// Gracefully unmount a server (stdin EOF → SIGTERM ladder for stdio,
+    /// DELETE `Mcp-Session-Id` for HTTP transports).
+    async fn unmount(&self, name: &str) -> Result<(), McpHostError>;
+
+    /// Snapshot of currently-mounted servers.
+    async fn list_servers(&self) -> Vec<ServerStatus>;
+
+    /// Flattened tool catalog across all mounts. The full CapabilityIndex
+    /// (with hybrid scoring) lands in Phase 3; this is the raw enumeration.
+    async fn list_all_tools(&self) -> Vec<ToolDescriptor>;
+
+    /// Invoke `tool` on `server` with `args`. Returns a structured outcome
+    /// the caller (typically `SignalProcessor`) renders into an audit event.
+    async fn call(
+        &self,
+        server: &str,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> Result<CallOutcome, McpHostError>;
+}
+
+/// A single transport-bound MCP client (one per mounted server).
+#[async_trait]
+pub trait MCPClient: Send + Sync {
+    async fn initialize(&self) -> Result<ServerInfo, McpHostError>;
+    async fn list_tools(&self) -> Result<Vec<ToolDescriptor>, McpHostError>;
+    async fn call_tool(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<CallOutcome, McpHostError>;
+    async fn shutdown(&self) -> Result<(), McpHostError>;
+    fn server_info(&self) -> Option<ServerInfo>;
+}
+
+/// In-memory `MCPHost` with no transport — records mounts so downstream
+/// wiring (Signal, Thalamus intents, tests) can be built before PR17/18
+/// land the real stdio / HTTP clients.
+#[derive(Default)]
+pub struct InMemoryMcpHost {
+    mounted: RwLock<HashMap<String, MountedServer>>,
+}
+
+impl InMemoryMcpHost {
+    pub fn new() -> Self {
+        Self {
+            mounted: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn shared() -> Arc<dyn MCPHost> {
+        Arc::new(Self::new())
+    }
+}
+
+#[async_trait]
+impl MCPHost for InMemoryMcpHost {
+    async fn mount(&self, name: String, cfg: ServerConfig) -> Result<(), McpHostError> {
+        let mut guard = self.mounted.write().await;
+        if guard.contains_key(&name) {
+            return Err(McpHostError::AlreadyMounted(name));
+        }
+        guard.insert(
+            name.clone(),
+            MountedServer {
+                name,
+                config: cfg,
+                mounted_at: Utc::now(),
+                info: None,
+                tools: Vec::new(),
+            },
+        );
+        Ok(())
+    }
+
+    async fn unmount(&self, name: &str) -> Result<(), McpHostError> {
+        self.mounted
+            .write()
+            .await
+            .remove(name)
+            .map(|_| ())
+            .ok_or_else(|| McpHostError::NotMounted(name.to_string()))
+    }
+
+    async fn list_servers(&self) -> Vec<ServerStatus> {
+        self.mounted
+            .read()
+            .await
+            .values()
+            .map(|m| ServerStatus {
+                name: m.name.clone(),
+                mounted_at: m.mounted_at,
+                tool_count: m.tools.len(),
+                info: m.info.clone(),
+            })
+            .collect()
+    }
+
+    async fn list_all_tools(&self) -> Vec<ToolDescriptor> {
+        self.mounted
+            .read()
+            .await
+            .values()
+            .flat_map(|m| m.tools.clone())
+            .collect()
+    }
+
+    async fn call(
+        &self,
+        server: &str,
+        _tool: &str,
+        _args: serde_json::Value,
+    ) -> Result<CallOutcome, McpHostError> {
+        let guard = self.mounted.read().await;
+        if !guard.contains_key(server) {
+            return Err(McpHostError::NotMounted(server.to_string()));
+        }
+        // No transport yet — real tools/call lands with PR17 (stdio) /
+        // PR18 (HTTP). Surface this so callers can detect the half-built
+        // state during PR16 wiring.
+        Err(McpHostError::Transport(
+            "no transport mounted (PR17+)".to_string(),
+        ))
+    }
+}
+
+/// Helper used by [`ServerConfig::Stdio`] to keep env maps deterministic.
+pub fn empty_env() -> BTreeMap<String, String> {
+    BTreeMap::new()
+}
+
+/// Helper for callers building stdio configs from path+args.
+pub fn stdio_cfg(command: impl Into<String>, args: Vec<String>) -> ServerConfig {
+    ServerConfig::Stdio {
+        command: command.into(),
+        args,
+        env: empty_env(),
+        cwd: None::<PathBuf>,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn mount_and_list() {
+        let host = InMemoryMcpHost::new();
+        host.mount("fs".into(), stdio_cfg("mcp-fs", vec![]))
+            .await
+            .unwrap();
+        let servers = host.list_servers().await;
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].name, "fs");
+        assert_eq!(servers[0].tool_count, 0);
+    }
+
+    #[tokio::test]
+    async fn double_mount_rejected() {
+        let host = InMemoryMcpHost::new();
+        host.mount("fs".into(), stdio_cfg("mcp-fs", vec![]))
+            .await
+            .unwrap();
+        let err = host
+            .mount("fs".into(), stdio_cfg("mcp-fs", vec![]))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, McpHostError::AlreadyMounted(_)));
+    }
+
+    #[tokio::test]
+    async fn unmount_missing_errors() {
+        let host = InMemoryMcpHost::new();
+        let err = host.unmount("nope").await.unwrap_err();
+        assert!(matches!(err, McpHostError::NotMounted(_)));
+    }
+
+    #[tokio::test]
+    async fn call_without_transport_errors() {
+        let host = InMemoryMcpHost::new();
+        host.mount("fs".into(), stdio_cfg("mcp-fs", vec![]))
+            .await
+            .unwrap();
+        let err = host
+            .call("fs", "read_text_file", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, McpHostError::Transport(_)));
+    }
+
+    #[test]
+    fn protocol_version_matches_spec() {
+        assert_eq!(MCP_PROTOCOL_VERSION, "2025-11-25");
+    }
+}

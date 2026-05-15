@@ -1,0 +1,32 @@
+[package]
+name = "brainos-mcphost"
+description = "MCP host — mounts external Model Context Protocol servers (stdio/HTTP/SSE) for Brain OS"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+brain_core   = { workspace = true }
+observe      = { workspace = true }
+identity     = { workspace = true }
+async-trait  = { workspace = true }
+serde        = { workspace = true }
+serde_json   = { workspace = true }
+thiserror    = { workspace = true }
+tokio        = { workspace = true }
+tracing      = { workspace = true }
+chrono       = { workspace = true }
+sha2         = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+# NOTE: rmcp 1.7 is the live SDK (spec called out 1.2 in Mar 2026).
+# Wired with stdio/HTTP transports in PR17–PR18; left out of the skeleton
+# to keep PR11+PR16 compiling cleanly without pulling a 100+ crate tree
+# for types we don't use yet.
