@@ -1,20 +1,12 @@
 //! # Brain Terminal Bridge
 //!
-//! Phase 2 of the v1.0.0 plan (`docs/v1.0.0.md` §3.1) — Brain's motor cortex
-//! for spawning and driving PTY sessions over gRPC.
+//! gRPC PTY motor cortex — Brain's adapter for spawning and driving
+//! pseudo-terminal sessions across platforms (Unix `openpty`/`forkpty`,
+//! Windows ConPTY via `portable-pty`). Each session exposes split RPCs
+//! (`Open` / `Close` / `Attach` / `Send` / `Resize` / `Signal`) plus a bidi
+//! `Interact` stream for latency-critical use.
 //!
-//! Default port: **19793** (sibling of the 19792 Memory/Agent service).
-//!
-//! ## Status
-//!
-//! - PR11: `.proto` + tonic stubs + portable-pty dep + registry shell.
-//! - **PR12 (current):** `Open` / `Close` / `Attach` RPCs implemented
-//!   against `portable-pty 0.9` — PTY reader thread → `broadcast<Bytes>`,
-//!   mpsc → writer thread (writer is wired but unused until PR13).
-//! - PR13: `Send` / `Resize` / `Signal` + bidi `Interact` perf path.
-//! - PR14: Principal threading + per-session audit events.
-//! - PR15: Thalamus intents (`OpenTerminalSession` / `ListTerminalSessions`
-//!   / `CloseTerminalSession`).
+//! Default port: **19793**.
 
 use std::{collections::HashMap, sync::Arc};
 

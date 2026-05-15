@@ -26,7 +26,6 @@ sha2         = { workspace = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
-# NOTE: rmcp 1.7 is the live SDK (spec called out 1.2 in Mar 2026).
-# Wired with stdio/HTTP transports in PR17–PR18; left out of the skeleton
-# to keep PR11+PR16 compiling cleanly without pulling a 100+ crate tree
-# for types we don't use yet.
+# `rmcp` (the Rust SDK for MCP) is added alongside the first transport
+# implementation. Kept out of this trait-only crate to avoid pulling a
+# large dep tree for types that aren't yet exercised.

@@ -1,11 +1,10 @@
-//! PR13 I/O integration tests: Send / Resize / Signal + bidi Interact.
+//! I/O integration tests: Send / Resize / Signal + bidi Interact.
 //!
 //! Resize and Signal are unary, so we drive them through the trait directly.
 //! Send (client-streaming) and Interact (bidi) need a real
 //! `tonic::Streaming<T>`, so those tests stand up an in-process tonic
 //! server/client pair over a localhost TCP loopback (`TcpIncoming` +
-//! `Endpoint::connect`). All cfg(unix) — Windows ConPTY coverage comes
-//! with the Phase 2 acceptance in PR20.
+//! `Endpoint::connect`). cfg(unix) — Windows ConPTY coverage is deferred.
 
 #![cfg(unix)]
 

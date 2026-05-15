@@ -34,7 +34,7 @@ pub enum ServerConfig {
     },
 }
 
-/// OAuth 2.1 + PKCE configuration for HTTP transports. Filled out in PR18.
+/// OAuth 2.1 + PKCE configuration for HTTP transports.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OAuthConfig {
     /// Resource indicator per RFC 8707; reject tokens with mismatched `aud`.
@@ -80,8 +80,9 @@ pub struct CallOutcome {
     pub elapsed_ms: u64,
 }
 
-/// In-memory record of a mounted server. The transport-bound `MCPClient` is
-/// attached in PR17+; for PR16 we just track config + handshake data.
+/// In-memory record of a mounted server. The transport-bound `MCPClient`
+/// is attached when a real transport is configured; the bare record
+/// tracks config + handshake data.
 #[derive(Debug, Clone)]
 pub struct MountedServer {
     pub name: String,

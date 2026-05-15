@@ -2,8 +2,7 @@
 //!
 //! The fields here are implementation detail of the gRPC server — outside
 //! callers only see [`crate::SessionMeta`] via [`crate::SessionRegistry::meta`]
-//! / [`crate::SessionRegistry::list`]. PR13 will start using `in_tx` and
-//! `master` for Send/Resize.
+//! / [`crate::SessionRegistry::list`].
 
 use std::sync::Arc;
 
@@ -35,9 +34,7 @@ pub(crate) const IN_MPSC_CAPACITY: usize = 64;
 pub(crate) struct Session {
     pub(crate) meta: SessionMeta,
     pub(crate) out_anchor: broadcast::Receiver<Bytes>,
-    #[allow(dead_code)] // Used by PR13's Send/Resize/Interact.
     pub(crate) in_tx: mpsc::Sender<Bytes>,
-    #[allow(dead_code)] // Used by PR13's Resize and future signal handling.
     pub(crate) master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     pub(crate) child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
 }

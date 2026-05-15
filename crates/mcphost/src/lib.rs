@@ -1,30 +1,20 @@
 //! # Brain MCP Host
 //!
-//! Phase 2 of the v1.0.0 plan (`docs/v1.0.0.md` §3.2) — Brain's host-side
-//! integration for **external** Model Context Protocol servers. Today's
-//! `crates/adapters/mcp` is a *server* (Brain exposes its 6 tools); this
-//! crate (`crates/mcphost`, package `brainos-mcphost`) is the *host* side
-//! (Brain mounts other people's tool servers).
+//! Host-side integration for **external** Model Context Protocol servers.
+//! The sibling `brainos-mcp` crate is a *server* (Brain exposes its own
+//! tools); this crate is the *host* side — Brain mounts and routes
+//! through other people's tool servers.
 //!
-//! Supported transports (full impl lands across PR17–PR19):
+//! Supported transports (per MCP spec 2025-11-25):
 //! - **stdio** — child process speaking JSON-RPC on stdin/stdout
-//! - **Streamable HTTP** — MCP spec 2025-11-25 transport
+//! - **Streamable HTTP** — current spec transport
 //! - **HTTP+SSE** — legacy transport, still spec-required for compatibility
 //!
-//! ## Scope of this skeleton (PR16)
-//!
-//! - [`MCPHost`] and [`MCPClient`] traits.
-//! - [`ServerConfig`] enum + [`OAuthConfig`].
-//! - [`MountedServer`] / [`ServerStatus`] / [`ToolDescriptor`] / [`CallOutcome`].
-//! - [`McpHostError`] error taxonomy.
-//! - [`InMemoryMcpHost`] — a no-transport stub that holds mounts and
-//!   demonstrates the trait, so downstream wiring (Signal/Thalamus) can be
-//!   built and tested before transports land.
-//!
-//! Stdio transport: PR17. Streamable HTTP + OAuth 2.1 PKCE: PR18.
-//! CapabilityIndex stub + auto-register on mount: PR19.
-//! Thalamus intents (`MountMcpServer` / `UnmountMcpServer` / `ListMcpServers`)
-//! and Phase 2 acceptance: PR20.
+//! This crate currently provides the trait surfaces ([`MCPHost`],
+//! [`MCPClient`]), the [`ServerConfig`] / [`OAuthConfig`] / [`ToolDescriptor`]
+//! / [`CallOutcome`] types, the [`McpHostError`] taxonomy, and an
+//! [`InMemoryMcpHost`] no-transport stub so downstream wiring can be built
+//! against the trait before transports are implemented.
 
 use std::{
     collections::{BTreeMap, HashMap},
@@ -61,8 +51,8 @@ pub trait MCPHost: Send + Sync {
     /// Snapshot of currently-mounted servers.
     async fn list_servers(&self) -> Vec<ServerStatus>;
 
-    /// Flattened tool catalog across all mounts. The full CapabilityIndex
-    /// (with hybrid scoring) lands in Phase 3; this is the raw enumeration.
+    /// Flattened tool catalog across all mounts. Raw enumeration only — a
+    /// scored capability index is the responsibility of the intent router.
     async fn list_all_tools(&self) -> Vec<ToolDescriptor>;
 
     /// Invoke `tool` on `server` with `args`. Returns a structured outcome
@@ -90,8 +80,8 @@ pub trait MCPClient: Send + Sync {
 }
 
 /// In-memory `MCPHost` with no transport — records mounts so downstream
-/// wiring (Signal, Thalamus intents, tests) can be built before PR17/18
-/// land the real stdio / HTTP clients.
+/// wiring (Signal, Thalamus intents, tests) can be built against the trait
+/// before the real stdio / HTTP clients are wired in.
 #[derive(Default)]
 pub struct InMemoryMcpHost {
     mounted: RwLock<HashMap<String, MountedServer>>,
@@ -171,11 +161,11 @@ impl MCPHost for InMemoryMcpHost {
         if !guard.contains_key(server) {
             return Err(McpHostError::NotMounted(server.to_string()));
         }
-        // No transport yet — real tools/call lands with PR17 (stdio) /
-        // PR18 (HTTP). Surface this so callers can detect the half-built
-        // state during PR16 wiring.
+        // The in-memory host has no real transport — `call` is a stub so
+        // callers can detect the no-transport state and downstream wiring
+        // can be built against the trait surface.
         Err(McpHostError::Transport(
-            "no transport mounted (PR17+)".to_string(),
+            "no transport configured for in-memory host".to_string(),
         ))
     }
 }

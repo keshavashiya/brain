@@ -1,7 +1,8 @@
-//! PR12 lifecycle integration tests for `TerminalSvc`.
+//! Lifecycle integration tests for `TerminalSvc`: Open / Close / Attach.
 //!
-//! Exercises the trait directly (bypassing tonic transport) — full gRPC
-//! transport coverage lands with the Phase 2 acceptance test in PR20.
+//! Exercises the trait directly, bypassing the tonic transport. Streaming
+//! RPCs (Send / Interact) are covered in `tests/io.rs` via an in-process
+//! gRPC harness.
 
 use std::time::Duration;
 
@@ -58,7 +59,7 @@ async fn attach_unknown_session_returns_not_found() {
 async fn open_attach_close_full_lifecycle() {
     // Spawns `/bin/sh -c 'printf hello-from-brain && exit 0'`, attaches to
     // the PTY, drains the broadcast until EOF, then closes and verifies
-    // the exit code. Cross-platform tests come with PR13/PR20.
+    // the exit code. Windows ConPTY coverage is deferred.
 
     let bridge = TerminalBridge::new();
     let svc = bridge.svc();

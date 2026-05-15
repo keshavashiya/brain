@@ -1,10 +1,9 @@
 //! Tonic implementation of the `brain.terminal.v1.TerminalSession` service.
 //!
-//! - PR12: `Open` / `Close` / `Attach`.
-//! - **PR13 (current):** `Send` / `Resize` / `Signal` + bidi `Interact`
-//!   perf path. The split RPCs delegate to crate-private helpers
-//!   (`open_inner`, `close_inner`, `write_input_inner`, …) which `Interact`
-//!   also drives directly so the two surfaces share one code path.
+//! Open / Close / Attach / Send / Resize / Signal + bidi `Interact`. The
+//! split RPCs delegate to crate-private helpers (`open_inner`,
+//! `close_inner`, `write_input_inner`, …) which `Interact` also drives
+//! directly, so the two surfaces share one code path per operation.
 
 use std::{io::Read, sync::Arc, time::SystemTime};
 
