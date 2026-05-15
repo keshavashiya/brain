@@ -29,6 +29,7 @@ members = [
     "crates/identity",
     "crates/adapters/terminal",
     "crates/mcphost",
+    "crates/intent",
 ]
 
 [workspace.package]
@@ -145,6 +146,7 @@ observe = { package = "brainos-observe", path = "crates/observe", version = "0.3
 identity = { package = "brainos-identity", path = "crates/identity", version = "0.3.0" }
 terminal = { package = "brainos-terminal", path = "crates/adapters/terminal", version = "0.3.0" }
 mcphost = { package = "brainos-mcphost", path = "crates/mcphost", version = "0.3.0" }
+intent = { package = "brainos-intent", path = "crates/intent", version = "0.3.0" }
 
 # Benchmarks
 criterion = { version = "0.5", features = ["html_reports"] }
