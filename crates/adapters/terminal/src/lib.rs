@@ -10,6 +10,8 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use identity::IdentityStore;
+use observe::Observer;
 use tokio::sync::Mutex;
 
 pub mod error;
@@ -81,19 +83,43 @@ impl SessionRegistry {
     }
 }
 
+/// Authentication wiring for the Terminal Bridge. When attached, every RPC
+/// resolves a [`identity::Principal`] from request metadata (api-key) and
+/// the identity store gates the action. When absent, the bridge runs
+/// without authentication — sessions still get a `None` principal in
+/// [`SessionMeta`] and audit events, and no gate is enforced.
+#[derive(Clone)]
+pub struct TerminalAuth {
+    pub identity: Arc<dyn IdentityStore>,
+    pub api_keys: Arc<Vec<brain_core::ApiKeyConfig>>,
+}
+
+impl TerminalAuth {
+    pub fn new(identity: Arc<dyn IdentityStore>, api_keys: Vec<brain_core::ApiKeyConfig>) -> Self {
+        Self {
+            identity,
+            api_keys: Arc::new(api_keys),
+        }
+    }
+}
+
 /// Terminal Bridge service handle.
 ///
-/// Holds the [`SessionRegistry`] and constructs a [`TerminalSvc`] tonic
-/// server on demand. Cheap to clone (the registry is `Arc`-ed).
+/// Holds the [`SessionRegistry`] plus optional [`TerminalAuth`] and
+/// [`Observer`] wiring. Cheap to clone (everything inside is `Arc`-ed).
 #[derive(Clone)]
 pub struct TerminalBridge {
     sessions: Arc<SessionRegistry>,
+    auth: Option<TerminalAuth>,
+    observer: Option<Arc<dyn Observer>>,
 }
 
 impl TerminalBridge {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(SessionRegistry::new()),
+            auth: None,
+            observer: None,
         }
     }
 
@@ -101,17 +127,41 @@ impl TerminalBridge {
         &self.sessions
     }
 
+    /// Attach identity/api-key wiring. Once set, every RPC requires a
+    /// resolvable api-key in metadata and a passing
+    /// [`IdentityStore::check`] for the corresponding `terminal.*` verb.
+    pub fn with_auth(mut self, auth: TerminalAuth) -> Self {
+        self.auth = Some(auth);
+        self
+    }
+
+    /// Attach an [`Observer`] so the bridge can publish
+    /// `BrainEvent::TerminalSessionOpened` / `TerminalSessionClosed` on
+    /// every session lifecycle transition.
+    pub fn with_observer(mut self, observer: Arc<dyn Observer>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
     /// Build the tonic-generated server wrapping a [`TerminalSvc`] backed by
     /// this bridge's registry. Plug into a `tonic::transport::Server::builder`.
     pub fn into_server(self) -> pb::terminal_session_server::TerminalSessionServer<TerminalSvc> {
-        pb::terminal_session_server::TerminalSessionServer::new(TerminalSvc::new(self.sessions))
+        pb::terminal_session_server::TerminalSessionServer::new(TerminalSvc::new(
+            self.sessions,
+            self.auth,
+            self.observer,
+        ))
     }
 
-    /// Construct a [`TerminalSvc`] sharing this bridge's registry, for tests
+    /// Construct a [`TerminalSvc`] sharing this bridge's wiring, for tests
     /// or callers that want to drive the trait directly without spinning up
     /// a tonic transport.
     pub fn svc(&self) -> TerminalSvc {
-        TerminalSvc::new(self.sessions.clone())
+        TerminalSvc::new(
+            self.sessions.clone(),
+            self.auth.clone(),
+            self.observer.clone(),
+        )
     }
 }
 

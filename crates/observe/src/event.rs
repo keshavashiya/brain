@@ -92,6 +92,23 @@ pub enum BrainEvent {
         message: String,
         ts: DateTime<Utc>,
     },
+    TerminalSessionOpened {
+        id: Uuid,
+        session_id: String,
+        program: String,
+        args: Vec<String>,
+        cwd: Option<String>,
+        principal: Option<PrincipalSummary>,
+        ts: DateTime<Utc>,
+    },
+    TerminalSessionClosed {
+        id: Uuid,
+        session_id: String,
+        exit_code: i32,
+        was_killed: bool,
+        principal: Option<PrincipalSummary>,
+        ts: DateTime<Utc>,
+    },
 }
 
 impl BrainEvent {
@@ -112,6 +129,8 @@ impl BrainEvent {
             BrainEvent::BudgetCrossed { .. } => "budget_crossed",
             BrainEvent::BreakerStateChange { .. } => "breaker_state_change",
             BrainEvent::Error { .. } => "error",
+            BrainEvent::TerminalSessionOpened { .. } => "terminal_session_opened",
+            BrainEvent::TerminalSessionClosed { .. } => "terminal_session_closed",
         }
     }
 
@@ -130,7 +149,9 @@ impl BrainEvent {
             | BrainEvent::AuditAppended { id, .. }
             | BrainEvent::BudgetCrossed { id, .. }
             | BrainEvent::BreakerStateChange { id, .. }
-            | BrainEvent::Error { id, .. } => *id,
+            | BrainEvent::Error { id, .. }
+            | BrainEvent::TerminalSessionOpened { id, .. }
+            | BrainEvent::TerminalSessionClosed { id, .. } => *id,
         }
     }
 

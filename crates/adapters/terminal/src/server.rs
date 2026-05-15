@@ -9,6 +9,8 @@ use std::{io::Read, sync::Arc, time::SystemTime};
 
 use bytes::Bytes;
 use chrono::Utc;
+use identity::{AgentHint, AuthorizationRequest, CheckOutcome, Principal, Tier};
+use observe::{BrainEvent, Observer, PrincipalSummary};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
@@ -24,7 +26,7 @@ use crate::{
     },
     session::{Session, IN_MPSC_CAPACITY, OUT_BROADCAST_CAPACITY},
     types::{SessionMeta, TermSize},
-    SessionRegistry,
+    SessionRegistry, TerminalAuth,
 };
 
 /// Buffer used by the PTY reader thread between `Read` syscalls. 8 KiB
@@ -42,11 +44,21 @@ const STREAM_OUT_BUFFER: usize = 64;
 #[derive(Clone)]
 pub struct TerminalSvc {
     registry: Arc<SessionRegistry>,
+    auth: Option<TerminalAuth>,
+    observer: Option<Arc<dyn Observer>>,
 }
 
 impl TerminalSvc {
-    pub fn new(registry: Arc<SessionRegistry>) -> Self {
-        Self { registry }
+    pub fn new(
+        registry: Arc<SessionRegistry>,
+        auth: Option<TerminalAuth>,
+        observer: Option<Arc<dyn Observer>>,
+    ) -> Self {
+        Self {
+            registry,
+            auth,
+            observer,
+        }
     }
 
     pub fn registry(&self) -> &Arc<SessionRegistry> {
@@ -85,10 +97,96 @@ fn timestamp_now() -> Option<prost_types::Timestamp> {
     })
 }
 
+fn principal_summary(p: &Principal) -> PrincipalSummary {
+    PrincipalSummary {
+        user_id: p.user_id.0.clone(),
+        agent_id: p.agent_id.0.clone(),
+    }
+}
+
+/// Read the api-key from either `x-api-key` or `authorization` (with
+/// optional `Bearer` prefix). Mirrors the pattern in `brainos-grpcadapter`.
+fn api_key_from_metadata<T>(req: &Request<T>) -> Option<String> {
+    let metadata = req.metadata();
+    if let Some(v) = metadata.get("x-api-key").and_then(|v| v.to_str().ok()) {
+        return Some(v.to_string());
+    }
+    let authz = metadata
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())?;
+    let key = brain_core::auth::extract_bearer_from_value(authz).unwrap_or(authz);
+    Some(key.to_string())
+}
+
 // ── Crate-private helpers (used by both split RPCs and Interact) ──────────────
 
 impl TerminalSvc {
-    async fn open_inner(&self, r: OpenRequest) -> Result<SessionHandle, Status> {
+    /// Resolve a [`Principal`] from request metadata (api-key → agent_id →
+    /// `IdentityStore::principal_for`) **and** authorize the action.
+    ///
+    /// - No auth wiring on the bridge → `Ok(None)` (gate skipped, back-compat).
+    /// - Auth wired, no api-key → `Status::unauthenticated`.
+    /// - Auth wired, api-key unknown → `Status::unauthenticated`.
+    /// - Auth wired, principal resolved, check returns `Allow` → `Ok(Some(p))`.
+    /// - Auth wired, principal resolved, check returns `Deny`/`EscalateToUser`
+    ///   → `Status::permission_denied` with the carried reason.
+    ///
+    /// The `verb_action` argument names the RPC (`open`, `attach`, `send`,
+    /// `resize`, `signal`, `close`). The `verb_ns` is always `terminal`.
+    /// Terminal RPCs require `Tier::Execute` — spawning processes / driving
+    /// a running shell is qualitatively the same as `shell.exec`.
+    async fn authorize<T>(
+        &self,
+        req: &Request<T>,
+        verb_action: &str,
+        modifiers: serde_json::Value,
+    ) -> Result<Option<Principal>, Status> {
+        let Some(auth) = self.auth.as_ref() else {
+            return Ok(None);
+        };
+        let key =
+            api_key_from_metadata(req).ok_or_else(|| Status::unauthenticated("missing api-key"))?;
+        let agent_id = auth
+            .api_keys
+            .iter()
+            .find(|k| k.key == key)
+            .and_then(|k| k.agent_id.clone())
+            .ok_or_else(|| Status::unauthenticated("unknown api-key"))?;
+        let principal = auth
+            .identity
+            .principal_for(&AgentHint::AgentId(agent_id.into()))
+            .await
+            .map_err(|e| Status::unauthenticated(format!("principal lookup: {e}")))?;
+        let authz_req =
+            AuthorizationRequest::new("terminal", verb_action).with_modifiers(modifiers);
+        match auth
+            .identity
+            .check(&principal, &authz_req, Tier::Execute)
+            .await
+        {
+            CheckOutcome::Allow => Ok(Some(principal)),
+            CheckOutcome::EscalateToUser { reason } => Err(Status::permission_denied(format!(
+                "terminal.{verb_action} requires user confirmation: {reason}"
+            ))),
+            CheckOutcome::Deny { reason } => Err(Status::permission_denied(format!(
+                "terminal.{verb_action} denied: {reason}"
+            ))),
+        }
+    }
+
+    async fn publish(&self, ev: BrainEvent) {
+        if let Some(obs) = self.observer.as_ref() {
+            // Treat publish failures (closed bus) as informational; the
+            // bridge should not fail an RPC because no one is listening.
+            let _ = obs.publish(ev).await;
+        }
+    }
+
+    async fn open_inner(
+        &self,
+        r: OpenRequest,
+        principal: Option<Principal>,
+    ) -> Result<SessionHandle, Status> {
         let size = term_size_from_pb(r.initial_size);
 
         let pty = native_pty_system();
@@ -147,12 +245,14 @@ impl TerminalSvc {
             });
         }
 
-        let session_id = Uuid::new_v4().to_string();
+        let session_uuid = Uuid::new_v4();
+        let session_id = session_uuid.to_string();
+        let cwd = if r.cwd.is_empty() { None } else { Some(r.cwd) };
         let meta = SessionMeta {
             session_id: session_id.clone(),
             program: r.program,
             args: r.args,
-            cwd: if r.cwd.is_empty() { None } else { Some(r.cwd) },
+            cwd,
             opened_at: Utc::now(),
             client_id: if r.client_id.is_empty() {
                 None
@@ -160,6 +260,19 @@ impl TerminalSvc {
                 Some(r.client_id)
             },
             size,
+            principal: principal.clone(),
+        };
+
+        // Snapshot the audit-event payload before moving `meta` into the
+        // session; this avoids cloning the whole struct on the hot path.
+        let event = BrainEvent::TerminalSessionOpened {
+            id: session_uuid,
+            session_id: session_id.clone(),
+            program: meta.program.clone(),
+            args: meta.args.clone(),
+            cwd: meta.cwd.clone(),
+            principal: principal.as_ref().map(principal_summary),
+            ts: Utc::now(),
         };
 
         let session = Arc::new(Session {
@@ -170,6 +283,7 @@ impl TerminalSvc {
             child: Arc::new(Mutex::new(child)),
         });
         self.registry.insert(session).await;
+        self.publish(event).await;
 
         Ok(SessionHandle { session_id })
     }
@@ -189,6 +303,20 @@ impl TerminalSvc {
             child.kill().is_ok()
         };
         let exit_code = child.wait().map(|s| s.exit_code() as i32).unwrap_or(-1);
+        drop(child);
+
+        // Re-parse the session id so the observe event carries the same
+        // `Uuid` we minted at Open (the registry key is its string form).
+        let session_uuid = Uuid::parse_str(id).unwrap_or_else(|_| Uuid::new_v4());
+        self.publish(BrainEvent::TerminalSessionClosed {
+            id: session_uuid,
+            session_id: id.to_string(),
+            exit_code,
+            was_killed,
+            principal: session.meta.principal.as_ref().map(principal_summary),
+            ts: Utc::now(),
+        })
+        .await;
 
         Ok(CloseAck {
             exit_code,
@@ -263,10 +391,21 @@ impl TerminalSession for TerminalSvc {
     type InteractStream = ReceiverStream<Result<ServerFrame, Status>>;
 
     async fn open(&self, req: Request<OpenRequest>) -> Result<Response<SessionHandle>, Status> {
-        Ok(Response::new(self.open_inner(req.into_inner()).await?))
+        let principal = self
+            .authorize(
+                &req,
+                "open",
+                serde_json::json!({"program": req.get_ref().program.as_str()}),
+            )
+            .await?;
+        Ok(Response::new(
+            self.open_inner(req.into_inner(), principal).await?,
+        ))
     }
 
     async fn close(&self, req: Request<SessionHandle>) -> Result<Response<CloseAck>, Status> {
+        self.authorize(&req, "close", serde_json::Value::Null)
+            .await?;
         let id = req.into_inner().session_id;
         Ok(Response::new(self.close_inner(&id).await?))
     }
@@ -275,6 +414,8 @@ impl TerminalSession for TerminalSvc {
         &self,
         req: Request<SessionHandle>,
     ) -> Result<Response<Self::AttachStream>, Status> {
+        self.authorize(&req, "attach", serde_json::Value::Null)
+            .await?;
         let id = req.into_inner().session_id;
         let session = self.lookup(&id).await?;
 
@@ -329,6 +470,8 @@ impl TerminalSession for TerminalSvc {
     }
 
     async fn send(&self, req: Request<Streaming<InputChunk>>) -> Result<Response<SendAck>, Status> {
+        self.authorize(&req, "send", serde_json::Value::Null)
+            .await?;
         let mut stream = req.into_inner();
         let mut total: u64 = 0;
         while let Some(chunk_res) = stream.next().await {
@@ -346,6 +489,8 @@ impl TerminalSession for TerminalSvc {
     }
 
     async fn resize(&self, req: Request<ResizeRequest>) -> Result<Response<ResizeAck>, Status> {
+        self.authorize(&req, "resize", serde_json::Value::Null)
+            .await?;
         let r = req.into_inner();
         let size = term_size_from_pb(r.size);
         self.resize_inner(&r.session_id, size).await?;
@@ -353,6 +498,8 @@ impl TerminalSession for TerminalSvc {
     }
 
     async fn signal(&self, req: Request<SignalRequest>) -> Result<Response<SignalAck>, Status> {
+        self.authorize(&req, "signal", serde_json::Value::Null)
+            .await?;
         let r = req.into_inner();
         let sig = Sig::try_from(r.signal).unwrap_or(Sig::Unspecified);
         self.signal_inner(&r.session_id, sig).await?;
@@ -375,6 +522,14 @@ impl TerminalSession for TerminalSvc {
         &self,
         req: Request<Streaming<ClientFrame>>,
     ) -> Result<Response<Self::InteractStream>, Status> {
+        // Authorize once at stream start under the umbrella verb
+        // `terminal.interact`. Subsequent Open frames inside this stream
+        // inherit the resolved principal — we don't re-resolve per frame
+        // because the bidi RPC has one set of metadata, set on connect.
+        let principal = self
+            .authorize(&req, "interact", serde_json::Value::Null)
+            .await?;
+
         let mut input = req.into_inner();
         let (tx, out) = mpsc::channel::<Result<ServerFrame, Status>>(STREAM_OUT_BUFFER);
         let svc = self.clone();
@@ -400,7 +555,7 @@ impl TerminalSession for TerminalSvc {
                                 .await;
                             continue;
                         }
-                        match svc.open_inner(open_req).await {
+                        match svc.open_inner(open_req, principal.clone()).await {
                             Ok(handle) => {
                                 bound_id = Some(handle.session_id.clone());
                                 output_task = Some(spawn_output_forwarder(

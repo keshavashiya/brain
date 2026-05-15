@@ -5,6 +5,7 @@
 //! observers). These mirrored types are what flows through Brain.
 
 use chrono::{DateTime, Utc};
+use identity::Principal;
 use serde::{Deserialize, Serialize};
 
 /// Stable string handle for a live PTY session (UUID v4).
@@ -31,7 +32,7 @@ impl Default for TermSize {
     }
 }
 
-/// Lightweight snapshot of a session for `ListTerminalSessions` and audit.
+/// Lightweight snapshot of a session for intent inspection and audit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub session_id: SessionId,
@@ -41,4 +42,9 @@ pub struct SessionMeta {
     pub opened_at: DateTime<Utc>,
     pub client_id: Option<String>,
     pub size: TermSize,
+    /// The authenticated caller that opened this session. `None` when the
+    /// bridge has no identity store configured, or when the caller did not
+    /// present a recognized api-key.
+    #[serde(default)]
+    pub principal: Option<Principal>,
 }
