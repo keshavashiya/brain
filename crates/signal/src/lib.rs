@@ -130,6 +130,11 @@ pub struct SignalProcessor {
     /// registration time. When unwired, `Intent::ToolCall` returns the
     /// router-not-configured placeholder.
     tool_registry: Option<std::sync::Arc<dyn intent::ToolRegistry>>,
+    /// Capability router that resolves [`intent::IntentToken`]s into
+    /// [`intent::ToolRoute`]s. The pipeline's `handle_tool_call` arm calls
+    /// `resolve` and dispatches the returned route. Without a router,
+    /// `Intent::ToolCall` falls back to a deterministic placeholder.
+    intent_router: Option<std::sync::Arc<dyn intent::IntentRouter>>,
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

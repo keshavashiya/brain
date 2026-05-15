@@ -173,6 +173,7 @@ impl SignalProcessor {
             terminal_bridge: None,
             mcp_host: None,
             tool_registry: None,
+            intent_router: None,
         };
 
         // Warm up the LLM model in the background to avoid first-call timeout

@@ -336,4 +336,19 @@ impl SignalProcessor {
     pub fn tool_registry(&self) -> Option<&Arc<dyn intent::ToolRegistry>> {
         self.tool_registry.as_ref()
     }
+
+    /// Attach a capability router. The pipeline's `Intent::ToolCall` arm
+    /// calls `router.resolve(&token)` and dispatches the returned
+    /// `ToolRoute` through the wired MCP host / terminal bridge / native
+    /// backends. Without a router, `Intent::ToolCall` falls back to the
+    /// deterministic placeholder.
+    pub fn with_intent_router(mut self, router: Arc<dyn intent::IntentRouter>) -> Self {
+        self.intent_router = Some(router);
+        self
+    }
+
+    /// Expose the configured intent router, if any.
+    pub fn intent_router(&self) -> Option<&Arc<dyn intent::IntentRouter>> {
+        self.intent_router.as_ref()
+    }
 }
