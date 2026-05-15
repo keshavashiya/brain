@@ -1027,6 +1027,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "brainos-resilience"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "brainos-observe",
+ "chrono",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "brainos-sandbox"
 version = "0.3.0"
 dependencies = [
