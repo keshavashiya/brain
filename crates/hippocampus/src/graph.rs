@@ -148,6 +148,18 @@ pub trait EpisodicGraph: Send + Sync {
     /// Returns the node-id chain (inclusive on both ends) or `None`
     /// if no path exists within the limit.
     fn path(&self, src: &str, dst: &str, max_hops: u32) -> Result<Option<Vec<String>>, GraphError>;
+    /// Enumerate every node — used by the compactor. Real impls may
+    /// stream eventually; v1.0 returns a `Vec` because compaction
+    /// runs on a cron and the graph stays modest.
+    fn list_all_nodes(&self) -> Result<Vec<Node>, GraphError>;
+    /// Update one node's weight in place. The compactor's primary
+    /// write path.
+    fn update_weight(&self, id: &str, weight: f32) -> Result<(), GraphError>;
+    /// Remove one node. Edges cascade via the migration v20 FK.
+    /// Returns `true` if a row was deleted. The associated embedding
+    /// (referenced by `vector_id`) is *not* touched — vector
+    /// reclamation is a separate maintenance task.
+    fn delete_node(&self, id: &str) -> Result<bool, GraphError>;
 }
 
 /// SQLite-backed [`EpisodicGraph`] over the shared pool.
@@ -369,6 +381,45 @@ impl EpisodicGraph for SqliteGraph {
         raw.into_iter()
             .map(|(e, n)| Ok((e.into_edge()?, n.into_node()?)))
             .collect()
+    }
+
+    fn list_all_nodes(&self) -> Result<Vec<Node>, GraphError> {
+        let rows: Vec<NodeRow> = self.db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, session_id, namespace, node_kind, body_json,
+                        vector_id, weight, created_at
+                 FROM nodes",
+            )?;
+            let mut rows = stmt.query([])?;
+            let mut out = Vec::new();
+            while let Some(row) = rows.next()? {
+                out.push(row_to_node(row)?);
+            }
+            Ok(out)
+        })?;
+        rows.into_iter().map(NodeRow::into_node).collect()
+    }
+
+    fn update_weight(&self, id: &str, weight: f32) -> Result<(), GraphError> {
+        self.db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE nodes SET weight = ?1 WHERE id = ?2",
+                rusqlite::params![weight as f64, id],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    fn delete_node(&self, id: &str) -> Result<bool, GraphError> {
+        // Enable FK so edges cascade per migration v20. Pragmas are
+        // per-connection and the pool isn't pinned, so set it inline.
+        let deleted = self.db.with_conn(|conn| {
+            conn.execute("PRAGMA foreign_keys = ON", [])?;
+            let n = conn.execute("DELETE FROM nodes WHERE id = ?1", [id])?;
+            Ok(n > 0)
+        })?;
+        Ok(deleted)
     }
 
     fn path(&self, src: &str, dst: &str, max_hops: u32) -> Result<Option<Vec<String>>, GraphError> {

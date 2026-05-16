@@ -11,6 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
 brain_core = { workspace = true }
 storage = { workspace = true }
 rusqlite = { workspace = true }

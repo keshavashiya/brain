@@ -9,6 +9,7 @@
 //! - Hybrid search (vector ANN + BM25 FTS5 + RRF fusion)
 //! - Memory consolidation (sleep cycle)
 
+pub mod compactor;
 pub mod consolidation;
 pub mod embedding;
 pub mod episodic;
@@ -17,6 +18,7 @@ pub mod importance;
 pub mod search;
 pub mod semantic;
 
+pub use compactor::{CompactConfig, CompactStats, Compactor, DefaultCompactor};
 pub use consolidation::{
     ConsolidationConfig, ConsolidationReport, Consolidator, PromotionCandidate,
 };
