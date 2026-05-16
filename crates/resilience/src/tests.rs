@@ -377,3 +377,68 @@ fn compute_delay_full_jitter_stays_within_range() {
         assert!(d <= 200, "{d}ms exceeded ceiling");
     }
 }
+
+// ─── Timeout tests ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn timeout_returns_ok_when_inner_completes_in_time() {
+    let result: Result<u32, TimeoutError<&'static str>> =
+        timeout(Duration::from_millis(50), async { Ok(7) }).await;
+    assert!(matches!(result, Ok(7)));
+}
+
+#[tokio::test]
+async fn timeout_returns_inner_error_when_inner_fails_in_time() {
+    let result: Result<u32, TimeoutError<&'static str>> =
+        timeout(Duration::from_millis(50), async { Err("boom") }).await;
+    match result {
+        Err(TimeoutError::Inner(e)) => assert_eq!(e, "boom"),
+        other => panic!("expected Inner, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn timeout_returns_elapsed_when_deadline_hits_first() {
+    let result: Result<u32, TimeoutError<&'static str>> =
+        timeout(Duration::from_millis(10), async {
+            sleep(Duration::from_millis(80)).await;
+            Ok(1)
+        })
+        .await;
+    assert!(matches!(result, Err(TimeoutError::Elapsed)));
+}
+
+#[tokio::test]
+async fn timeout_drops_inner_future_on_expiry() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    struct DropFlag(Arc<AtomicBool>);
+    impl Drop for DropFlag {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let dropped = Arc::new(AtomicBool::new(false));
+    let flag = DropFlag(dropped.clone());
+    let result: Result<(), TimeoutError<&'static str>> =
+        timeout(Duration::from_millis(10), async move {
+            let _flag = flag; // moved into the future
+            sleep(Duration::from_millis(80)).await;
+            Ok(())
+        })
+        .await;
+    assert!(matches!(result, Err(TimeoutError::Elapsed)));
+    assert!(
+        dropped.load(Ordering::SeqCst),
+        "inner future must be dropped on expiry"
+    );
+}
+
+#[test]
+fn timeout_error_display_distinguishes_elapsed_and_inner() {
+    let elapsed: TimeoutError<&'static str> = TimeoutError::Elapsed;
+    assert_eq!(elapsed.to_string(), "operation timed out");
+    let inner: TimeoutError<&'static str> = TimeoutError::Inner("nope");
+    assert_eq!(inner.to_string(), "nope");
+}

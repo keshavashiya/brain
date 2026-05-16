@@ -323,5 +323,10 @@ impl intent::BreakerCheck for BreakerRegistry {
 mod retry;
 pub use retry::{retry, BreakerOpenAbort, RetryConfig, RetryOutcome};
 
+// ─── Timeout primitive ─────────────────────────────────────────────────────
+
+mod timeout;
+pub use timeout::{timeout, TimeoutError};
+
 #[cfg(test)]
 mod tests;
