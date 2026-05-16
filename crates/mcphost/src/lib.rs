@@ -29,12 +29,14 @@ use tokio::sync::RwLock;
 pub mod capability_index;
 pub mod error;
 pub mod oauth;
+pub mod resilient;
 pub mod rmcp_host;
 pub mod types;
 
 pub use capability_index::{CapabilityIndex, InMemoryCapabilityIndex};
 pub use error::McpHostError;
 pub use oauth::{manager_from_vault, VaultCredentialStore};
+pub use resilient::{ResilienceConfig, ResilientMcpHost};
 pub use rmcp_host::RmcpHost;
 pub use types::{
     CallOutcome, MountedServer, OAuthConfig, ServerConfig, ServerInfo, ServerStatus, ToolDescriptor,

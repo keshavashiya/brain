@@ -966,6 +966,7 @@ dependencies = [
  "brainos-identity",
  "brainos-intent",
  "brainos-observe",
+ "brainos-resilience",
  "brainos-vault",
  "chrono",
  "http",
