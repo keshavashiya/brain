@@ -257,6 +257,41 @@ impl EpisodicStore {
         })?)
     }
 
+    /// Fetch one episode by id. Returns `None` if no row matches.
+    /// Used by [`crate::dual_memory::DualMemoryReader`] as the
+    /// fallback path when no graph node exists for the id.
+    pub fn get_episode(&self, episode_id: &str) -> Result<Option<Episode>, EpisodicError> {
+        let pool = &self.db;
+        Ok(self.db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, session_id, role, content, timestamp,
+                        namespace, importance, decay_rate, reinforcement_count, last_accessed, agent
+                 FROM episodes
+                 WHERE id = ?1",
+            )?;
+            let mut rows = stmt.query([episode_id])?;
+            if let Some(row) = rows.next()? {
+                let raw: String = row.get(3)?;
+                let content = pool.try_decrypt_content(&raw).unwrap_or(raw);
+                Ok(Some(Episode {
+                    id: row.get(0)?,
+                    session_id: row.get(1)?,
+                    role: row.get(2)?,
+                    content,
+                    timestamp: row.get(4)?,
+                    namespace: row.get(5)?,
+                    importance: row.get(6)?,
+                    decay_rate: row.get(7)?,
+                    reinforcement_count: row.get(8)?,
+                    last_accessed: row.get(9)?,
+                    agent: row.get(10)?,
+                }))
+            } else {
+                Ok(None)
+            }
+        })?)
+    }
+
     /// Reinforce a memory — bumps reinforcement count and updates last_accessed.
     ///
     /// Called each time a memory is recalled, making it resist decay longer.
