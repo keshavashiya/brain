@@ -80,6 +80,16 @@ pub struct Signal {
     /// wired) treats this as anonymous.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal: Option<identity::Principal>,
+    /// How this signal entered the pipeline. Stamped by the originating
+    /// surface: `Provenance::User` for typed input, `Provenance::Llm` for
+    /// agent-emitted intents, `Provenance::Reflex` for trigger firings.
+    /// Audit, recall, and the inline confirmation gate read this to
+    /// distinguish user-typed signals from reflex-driven ones.
+    /// `None` is back-compat for adapters that haven't been updated yet —
+    /// the pipeline treats `None` the same as it did before this field
+    /// existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<intent::Provenance>,
 }
 
 fn default_namespace() -> String {
@@ -106,7 +116,16 @@ impl Signal {
             agent: None,
             session_id: None,
             principal: None,
+            provenance: None,
         }
+    }
+
+    /// Builder: stamp the origin of this signal. Used by the reflex
+    /// runner to mark trigger-fired signals so the pipeline + audit
+    /// can distinguish them from user-typed input.
+    pub fn with_provenance(mut self, provenance: intent::Provenance) -> Self {
+        self.provenance = Some(provenance);
+        self
     }
 
     /// Builder: attach a `Principal` resolved by the adapter from its
@@ -331,5 +350,50 @@ pub fn response_to_text(content: &ResponseContent) -> String {
         ResponseContent::Text(t) => t.clone(),
         ResponseContent::Json(v) => v.to_string(),
         ResponseContent::Error(e) => e.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signal_new_starts_with_no_provenance() {
+        let s = Signal::new(SignalSource::Cli, "ch", "sender", "hello");
+        assert!(s.provenance.is_none());
+    }
+
+    #[test]
+    fn with_provenance_stamps_reflex_origin() {
+        let s = Signal::new(SignalSource::Cli, "ch", "sender", "hello").with_provenance(
+            intent::Provenance::Reflex {
+                trigger: "fs:/tmp/foo".into(),
+                raw_input: None,
+                ts: chrono::Utc::now(),
+            },
+        );
+        match s.provenance {
+            Some(intent::Provenance::Reflex { trigger, .. }) => {
+                assert_eq!(trigger, "fs:/tmp/foo");
+            }
+            other => panic!("expected Reflex provenance, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn provenance_round_trips_through_json() {
+        let s = Signal::new(SignalSource::Cli, "ch", "sender", "hi").with_provenance(
+            intent::Provenance::Reflex {
+                trigger: "sys:battery_below_20".into(),
+                raw_input: Some("{\"battery\":15}".into()),
+                ts: chrono::Utc::now(),
+            },
+        );
+        let wire = serde_json::to_string(&s).expect("serialize");
+        let parsed: Signal = serde_json::from_str(&wire).expect("deserialize");
+        assert!(matches!(
+            parsed.provenance,
+            Some(intent::Provenance::Reflex { .. })
+        ));
     }
 }

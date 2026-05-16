@@ -437,6 +437,7 @@ impl Default for BrainConfig {
             agents: AgentsConfig::default(),
             confirm: ConfirmConfig::default(),
             identity: identity::IdentityConfig::default(),
+            reflex: ReflexConfig::default(),
         }
     }
 }

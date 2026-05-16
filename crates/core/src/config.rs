@@ -37,6 +37,103 @@ pub struct BrainConfig {
     /// `Principal = None` and the identity gate is silently skipped.
     #[serde(default)]
     pub identity: identity::IdentityConfig,
+    /// Reactive signal sources. Each subsection drives one reflex type;
+    /// default is empty/disabled across the board, so a fresh install
+    /// spawns no reflex tasks. `cmd_serve` reads this to construct
+    /// `FsReflex` / `CronReflex` / `SysStateReflex` and bridge their
+    /// streams into the pipeline via `signal::spawn_reflex`.
+    #[serde(default)]
+    pub reflex: ReflexConfig,
+}
+
+/// Top-level reactive-source configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ReflexConfig {
+    /// Filesystem watchers. One entry per `FsReflex` source. Empty list
+    /// means no FS reflex is spawned.
+    #[serde(default)]
+    pub fs: Vec<FsReflexEntry>,
+    /// Cron-style reflex bridging the scheduler. Disabled by default.
+    #[serde(default)]
+    pub cron: CronReflexEntry,
+    /// System-state edge-trigger reflex. Disabled by default. Uses a
+    /// noop sampler until a per-platform implementation is wired.
+    #[serde(default)]
+    pub sys: SysReflexEntry,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsReflexEntry {
+    /// Stable name used in tracing + as the reflex's `name()`. Also
+    /// embedded in the resulting `Provenance::Reflex { trigger }`.
+    pub name: String,
+    /// Filesystem paths to watch (absolute or `~`-relative).
+    pub paths: Vec<String>,
+    #[serde(default)]
+    pub recursive: bool,
+    /// Debounce window in milliseconds. Default 200ms when omitted.
+    #[serde(default = "FsReflexEntry::default_debounce_ms")]
+    pub debounce_ms: u64,
+}
+
+impl FsReflexEntry {
+    pub fn default_debounce_ms() -> u64 {
+        200
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CronReflexEntry {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Poll interval in seconds. Default 60s when omitted (matches the
+    /// historical `cli::serve` ticker).
+    #[serde(default = "CronReflexEntry::default_poll_seconds")]
+    pub poll_interval_seconds: u64,
+    /// Optional namespace filter — only intents in this namespace fire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace_filter: Option<String>,
+}
+
+impl CronReflexEntry {
+    pub fn default_poll_seconds() -> u64 {
+        60
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SysReflexEntry {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Sampler poll cadence in seconds. Default 30s.
+    #[serde(default = "SysReflexEntry::default_poll_seconds")]
+    pub poll_interval_seconds: u64,
+    /// Edge-triggered rules to evaluate on each transition.
+    #[serde(default)]
+    pub rules: Vec<SysReflexRuleEntry>,
+}
+
+impl SysReflexEntry {
+    pub fn default_poll_seconds() -> u64 {
+        30
+    }
+}
+
+/// YAML-bound mirror of `reflex::SysStateRule`. Kept here so `brain_core`
+/// doesn't take a dependency on `reflex` (which depends on `brain_core`
+/// transitively); `cmd_serve` converts each entry to a concrete
+/// `SysStateRule` at spawn time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SysReflexRuleEntry {
+    /// Fires when battery percentage crosses below `threshold`.
+    BatteryBelow { threshold: u8 },
+    /// Fires when `on_ac` flips in either direction.
+    OnAcChanged,
+    /// Fires when network reachability flips between online and offline.
+    NetworkChanged,
+    /// Fires when session lock state flips.
+    LockChanged,
 }
 
 /// Confirmation-engine configuration. Currently only declares standing

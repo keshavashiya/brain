@@ -160,6 +160,31 @@ adapters:
     enabled: true
     port: 19793
 
+# ── Reactive signal sources ────────────────────────────────────────────────────
+# Default is empty — no reflex tasks spawn unless you configure them here.
+# Each firing becomes a Signal with Provenance::Reflex { trigger, ts } and
+# flows through the normal pipeline (identity, confirmation, dispatch).
+reflex:
+  fs: []                              # watchers; one entry per path set
+  # Example:
+  # fs:
+  #   - name: project-watch
+  #     paths: ["~/Developer/workspace/brain"]
+  #     recursive: true
+  #     debounce_ms: 200
+  cron:
+    enabled: false                    # bridge scheduled_intents → reflex stream
+    poll_interval_seconds: 60
+  sys:
+    enabled: false                    # edge-triggered system state
+    poll_interval_seconds: 30
+    rules: []
+    # Example rules (uncomment to enable):
+    # rules:
+    #   - kind: battery_below
+    #     threshold: 20
+    #   - kind: network_changed
+
 # ── Channel Relays ─────────────────────────────────────────────────────────────
 # Bidirectional WebSocket gateways. Unlike webhooks these are long-lived
 # connections — approval responses from any relay are correlated automatically.
