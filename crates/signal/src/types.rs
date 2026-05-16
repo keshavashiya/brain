@@ -74,7 +74,7 @@ pub struct Signal {
     /// When provided, the processor reuses this session instead of creating a new one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
-    /// Who is asking (v1.0.0 Phase 1, `docs/v1.0.0.md` §7). Resolved by the
+    /// Who is asking. Resolved by the
     /// originating adapter from its auth context. `None` means the adapter
     /// did not authenticate the caller; the pipeline's identity gate (if
     /// wired) treats this as anonymous.

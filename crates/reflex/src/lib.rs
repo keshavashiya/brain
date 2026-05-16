@@ -14,21 +14,18 @@
 //! `ConfirmationEngine` or the per-tool breakers because it has no
 //! authority to call tools directly.
 //!
-//! ## Phase 5 plan (per the v1.0 roadmap)
+//! ## Built-in sources
 //!
-//! - **PR-5a (this slice).** Trait + `ReflexEvent` + `NoopReflex` —
-//!   the contract that downstream sources implement.
-//! - **PR-5b.** `FsReflex` — watches a path set via `notify`, debounces.
-//! - **PR-5c.** `CronReflex` — bridges the existing `orchestrate`
-//!   scheduler onto the reflex pipeline.
-//! - **PR-5d.** `SysStateReflex` — battery / network / lock-state
-//!   changes, cfg-gated per platform.
-//! - **PR-5e.** `CompositeReflex` — AND/OR combinator over children.
-//! - **PR-5f.** Standing approvals + migration v21 so reflexes with
-//!   pre-granted (verb, principal) consent can bypass the confirm
-//!   prompt.
-//! - **PR-5g.** Reflex → `ConfirmationEngine` integration; final
-//!   acceptance for Phase 5.
+//! - `NoopReflex` — never fires; useful as a placeholder.
+//! - `FsReflex` — debounced filesystem watcher built on `notify`.
+//! - `CronReflex` — bridges the existing scheduler into the reflex stream.
+//! - `SysStateReflex` — edge-triggered rules over pluggable samplers
+//!   (battery / network / lock-state, cfg-gated per platform).
+//! - `CompositeReflex` — boolean AND/OR combinator over child sources.
+//!
+//! Reflexes integrate with the `ConfirmationEngine` and the standing-approval
+//! store so pre-granted `(verb, principal)` consent can bypass an interactive
+//! prompt while still being audited and revocable.
 
 use std::pin::Pin;
 use std::sync::Arc;

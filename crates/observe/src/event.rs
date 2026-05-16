@@ -4,10 +4,10 @@ use uuid::Uuid;
 
 /// Everything Brain might want to surface to the user, audit log, or remote consumers.
 ///
-/// Variant set per `docs/v1.0.0.md` §8.1. Summary types are deliberately string-shaped
-/// payload bags so Phase 0 doesn't take a hard dependency on later-phase crates
-/// (`brainos-identity` for `Principal`, `brainos-intent` for `IntentToken`, etc.).
-/// Later phases tighten the payloads without changing the variant set.
+/// Summary types are deliberately string-shaped payload bags so this crate
+/// doesn't take a hard dependency on higher-level crates (`brainos-identity`
+/// for `Principal`, `brainos-intent` for `IntentToken`, etc.). Tighter
+/// payload types can be substituted without changing the variant set.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BrainEvent {
@@ -109,11 +109,11 @@ pub enum BrainEvent {
         principal: Option<PrincipalSummary>,
         ts: DateTime<Utc>,
     },
-    /// Orchestrator phase transition (v1.0.0 Phase 6). `from` is
-    /// `"none"` for the initial entry into `Planning`; subsequent
-    /// transitions name the prior phase. The string shape (rather than
-    /// a typed enum) keeps `observe` free of an `orchestrate` dep, just
-    /// like `BreakerStateChange` keeps it free of `resilience`.
+    /// Orchestrator phase transition. `from` is `"none"` for the initial
+    /// entry into `Planning`; subsequent transitions name the prior phase.
+    /// The string shape (rather than a typed enum) keeps `observe` free of
+    /// an `orchestrate` dep, just like `BreakerStateChange` keeps it free
+    /// of `resilience`.
     TaskStateChange {
         id: Uuid,
         task_id: String,
@@ -207,9 +207,9 @@ pub struct OutcomeSummary {
     pub error: Option<String>,
 }
 
-/// Phase-0 placeholder; replaced by `brainos_identity::Principal` in Phase 1
-/// (see `docs/v1.0.0.md` §7). Keeping it summary-shaped here means later wiring
-/// is a payload swap, not a variant rename.
+/// Loose summary view of `brainos_identity::Principal`. Kept summary-shaped
+/// here so a tighter typed payload is a swap, not a variant rename, and so
+/// `observe` doesn't depend on `identity`.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct PrincipalSummary {
     pub user_id: String,

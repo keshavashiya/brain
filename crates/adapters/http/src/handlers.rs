@@ -80,9 +80,9 @@ pub async fn post_signal_handler(
     let t0 = Instant::now();
     state.metrics.signals_total.fetch_add(1, Ordering::Relaxed);
 
-    // v1.0.0 Phase 1: resolve Principal from the API-key → agent_id mapping
-    // before constructing the Signal. None when the key has no agent_id
-    // configured (pre-Phase-1 back-compat) or no IdentityStore is wired.
+    // Resolve Principal from the API-key → agent_id mapping before
+    // constructing the Signal. None when the key has no agent_id configured
+    // (back-compat) or no IdentityStore is wired.
     let principal = auth::resolve_principal(&state, &headers).await;
 
     let source = signal::SignalSource::parse(body.source.as_deref(), signal::SignalSource::Http);
@@ -396,16 +396,15 @@ pub async fn cancel_schedule_handler(
 }
 
 /// Filter parameters for `GET /v1/events`. All fields optional.
-/// Matches the spec in `docs/v1.0.0.md` §8.3.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct EventQuery {
     /// BrainEvent variant discriminant, e.g. `signal_received`, `tool_call_started`.
     pub kind: Option<String>,
     /// Filter to a specific tool_id (only applies to tool-bound BrainEvents).
     pub tool_id: Option<String>,
-    /// Principal filter — accepted for forward compatibility; Phase 0 events
-    /// do not yet carry a principal so this filter currently matches nothing
-    /// when set. Implemented in Phase 1 (`docs/v1.0.0.md` §7).
+    /// Principal filter — accepted for forward compatibility; current events
+    /// do not yet carry a principal on the bus, so this filter matches
+    /// nothing when set.
     pub principal: Option<String>,
     /// RFC3339 timestamp; only events with `ts >= since` are forwarded.
     pub since: Option<chrono::DateTime<chrono::Utc>>,
@@ -430,7 +429,7 @@ impl EventQuery {
                 return false;
             }
         }
-        // Principal filter: Phase 0 events don't carry a principal yet.
+        // Principal filter: bus events don't carry a principal yet.
         if self.principal.is_some() {
             return false;
         }

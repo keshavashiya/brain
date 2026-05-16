@@ -8,8 +8,8 @@
 //! - [`BroadcastObserver`] is the default in-process fanout implementation.
 //! - [`Redactor`] scrubs vault-marked secrets from any event payload before publication.
 //!
-//! Phase 0 of the v1.0.0 plan (see `docs/v1.0.0.md` §8). The crate is intentionally
-//! self-contained — wiring into `crates/signal` and `crates/audit` happens in Tier B.
+//! The crate is intentionally self-contained — it owns no I/O or persistence;
+//! wiring into `crates/signal` and `crates/audit` happens at the processor seam.
 
 pub mod event;
 pub mod observer;

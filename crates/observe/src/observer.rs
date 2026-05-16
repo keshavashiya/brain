@@ -7,7 +7,6 @@ use tokio::sync::broadcast;
 use crate::event::BrainEvent;
 
 /// Bus capacity. Slow consumers see `Lagged(n)` rather than block the pipeline.
-/// Per `docs/v1.0.0.md` §8.6.
 pub const DEFAULT_BROADCAST_CAPACITY: usize = 4096;
 
 #[derive(Debug, Error)]

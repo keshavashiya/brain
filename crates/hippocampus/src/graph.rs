@@ -1,10 +1,10 @@
 //! Episodic graph store — typed nodes + typed edges backed by the
-//! `nodes` / `edges` tables from migration v20.
+//! `nodes` / `edges` tables.
 //!
-//! Coexists with [`crate::EpisodicStore`] (the legacy flat
-//! conversation log) during v1.0; the dual memory model is documented
-//! in PR-4Be. Reads should prefer the graph if a node exists for the
-//! requested id, else fall back to the legacy store.
+//! Coexists with [`crate::EpisodicStore`] (the legacy flat conversation
+//! log); see [`crate::dual_memory`] for the reconciliation layer. Reads
+//! should prefer the graph if a node exists for the requested id, else
+//! fall back to the legacy store.
 
 use std::str::FromStr;
 

@@ -1,10 +1,10 @@
 //! Vault-handle redaction.
 //!
-//! Per `docs/v1.0.0.md` §8.5: secrets pulled from `CredentialVault` are tagged
-//! with a sentinel-wrapped envelope at injection time. The [`Redactor`] walks
-//! any `serde_json::Value` and replaces every marked envelope with the opaque
-//! handle reference `<vault:HANDLE>` — the raw secret value never reaches the
-//! bus, the SQLite audit log, or any user-facing surface.
+//! Secrets pulled from `CredentialVault` are tagged with a sentinel-wrapped
+//! envelope at injection time. The [`Redactor`] walks any `serde_json::Value`
+//! and replaces every marked envelope with the opaque handle reference
+//! `<vault:HANDLE>` — the raw secret value never reaches the bus, the SQLite
+//! audit log, or any user-facing surface.
 //!
 //! The wire shape of a marked secret is:
 //!

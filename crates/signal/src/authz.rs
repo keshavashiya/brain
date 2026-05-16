@@ -1,16 +1,16 @@
-//! Intent → AuthorizationRequest + required Tier mapping (v1.0.0 Phase 1).
+//! Intent → AuthorizationRequest + required Tier mapping.
 //!
 //! Each Thalamus `Intent` variant maps to a verb in the dotted-namespace
-//! taxonomy from `docs/v1.0.0.md` §12 OQ#1 (`fs.*`, `net.*`, `shell.*`,
-//! `memory.*`, etc.) plus the minimum tier the principal must hold.
-//! Returning `None` means the intent is unguarded — pure-conversation
-//! intents (Chat) and inspection intents that touch nothing destructive
-//! (ListChannels, BudgetStatus, SystemStatus).
+//! taxonomy (`fs.*`, `net.*`, `shell.*`, `memory.*`, etc.) plus the
+//! minimum tier the principal must hold. Returning `None` means the
+//! intent is unguarded — pure-conversation intents (Chat) and inspection
+//! intents that touch nothing destructive (ListChannels, BudgetStatus,
+//! SystemStatus).
 //!
-//! Phase 1 keeps the mapping conservative: when in doubt, classify as
-//! `Execute` or higher and let the identity gate escalate to the user.
-//! Phase 3's CapabilityIndex routing will refine this; Phase 5's
-//! standing-approvals stop the prompts where the user has consented.
+//! The mapping is intentionally conservative: when in doubt, classify
+//! as `Execute` or higher and let the identity gate escalate to the user.
+//! CapabilityIndex routing refines verbs at dispatch time; standing
+//! approvals suppress prompts where the user has pre-consented.
 
 use identity::{AuthorizationRequest, Tier};
 use thalamus::Intent;
@@ -22,8 +22,8 @@ use thalamus::Intent;
 ///
 /// Note: this is a coarse mapping. Path-scope modifiers (`path` / `cwd`)
 /// are NOT populated here — they're filled in at the call site once the
-/// concrete path is extracted from the intent payload. Phase 3 will fold
-/// this into the `IntentRouter::abstract_from_signal` step.
+/// concrete path is extracted from the intent payload. The intent router
+/// folds this into its `abstract_from_signal` step at dispatch time.
 pub fn intent_to_auth(intent: &Intent) -> Option<(AuthorizationRequest, Tier)> {
     match intent {
         // ── Pure conversation — no authorization needed ────────────────

@@ -61,7 +61,7 @@ pub struct SignalProcessor {
     /// Cross-subsystem metrics (embedding, consolidation, circuit breaker, intent).
     metrics: std::sync::Arc<brain_core::metrics::SubsystemMetrics>,
 
-    // ── Phase 1: Safety infrastructure (opt-in via builder) ──────────────
+    // ── Safety infrastructure (opt-in via builder) ───────────────────────
     /// Immutable audit trail — records every consequential action.
     audit_trail: Option<std::sync::Arc<dyn audit::AuditTrail>>,
     /// Confirmation engine — human approval gates for destructive/external actions.
@@ -72,7 +72,7 @@ pub struct SignalProcessor {
     sandbox_executor: Option<std::sync::Arc<dyn sandbox::SandboxExecutor>>,
     /// Credential vault — secure credential storage and injection.
     credential_vault: Option<std::sync::Arc<dyn vault::CredentialVault>>,
-    /// Task orchestrator — decomposes requests into executable plans (Phase 2).
+    /// Task orchestrator — decomposes requests into executable plans.
     orchestrator: Option<std::sync::Arc<orchestrate::TaskOrchestrator>>,
 
     // ── Channel intelligence (opt-in via builder) ────────────────────────
@@ -85,33 +85,32 @@ pub struct SignalProcessor {
     /// Channel dispatcher — owns transport handles and performs actual delivery.
     channel_dispatcher: Option<std::sync::Arc<channel::ChannelDispatcher>>,
 
-    // ── Agent delegation (Phase 3) ───────────────────────────────────────
+    // ── Agent delegation ─────────────────────────────────────────────────
     /// Registry of specialist agent delegates (Claude Code, custom subprocess, etc.).
     agent_registry: Option<std::sync::Arc<delegate::AgentRegistry>>,
 
-    // ── Observability (v1.0.0 Phase 0) ───────────────────────────────────
+    // ── Observability ────────────────────────────────────────────────────
     /// Optional event bus. When set, the pipeline publishes structured
     /// `BrainEvent`s for the Live tab, `brain tail`, and remote subscribers.
-    /// Coexists with the legacy `events_tx` `SignalProcessedEvent` bus during
-    /// the Phase-0 → Phase-2 transition; that bus is removed once all
-    /// consumers (httpadapter, grpcadapter) migrate to subscribing through
-    /// `Observer`.
+    /// Coexists with the legacy `events_tx` `SignalProcessedEvent` bus while
+    /// callers migrate over; that bus is removed once all consumers
+    /// (httpadapter, grpcadapter) subscribe through `Observer`.
     observer: Option<std::sync::Arc<dyn observe::Observer>>,
     /// In-flight signal cancellation registry. `process()` registers a
     /// `Notify` keyed by `Signal.id` at entry and removes it on completion
     /// via the `CancelGuard` RAII. `Intent::CancelSignal` looks up the
     /// notify and triggers it; the LLM-generation step listens via
     /// `tokio::select!` and aborts. Structured concurrency at every
-    /// checkpoint lands with the Phase 6 orchestrator rewrite.
+    /// checkpoint is layered on top as the orchestrator evolves.
     cancel_registry: std::sync::Arc<
         tokio::sync::Mutex<
             std::collections::HashMap<uuid::Uuid, std::sync::Arc<tokio::sync::Notify>>,
         >,
     >,
-    /// Authorization store (v1.0.0 Phase 1, `docs/v1.0.0.md` §7). When set
-    /// and the incoming `Signal` carries a `Principal`, the pipeline gates
-    /// the classified intent through `IdentityStore::check` before
-    /// executing it. Unwired = back-compat (no enforcement).
+    /// Authorization store. When set and the incoming `Signal` carries a
+    /// `Principal`, the pipeline gates the classified intent through
+    /// `IdentityStore::check` before executing it. Unwired = back-compat
+    /// (no enforcement).
     identity_store: Option<std::sync::Arc<dyn identity::IdentityStore>>,
 
     // ── Terminal Bridge (Motor cortex) ──────────────────────────────────
@@ -126,7 +125,7 @@ pub struct SignalProcessor {
     /// "not configured" response.
     mcp_host: Option<std::sync::Arc<dyn mcphost::MCPHost>>,
 
-    // ── Capability Kernel (Phase 3) ────────────────────────────────────
+    // ── Capability Kernel ──────────────────────────────────────────────
     /// Tool registry the capability router resolves [`intent::IntentToken`]s
     /// against. Populated by the MCP host and native backends at mount /
     /// registration time. When unwired, `Intent::ToolCall` returns the
@@ -143,7 +142,7 @@ pub struct SignalProcessor {
     /// health.
     breaker_registry: Option<std::sync::Arc<resilience::BreakerRegistry>>,
 
-    // ── Standing approvals (v1.0.0 Phase 5) ─────────────────────────────
+    // ── Standing approvals ──────────────────────────────────────────────
     /// Standing-approval store, exposed to the `/approval-list` and
     /// `/approval-revoke` handlers. The same `Arc` is wired into the
     /// `ConfirmationEngine` at bootstrap time so the bypass check and

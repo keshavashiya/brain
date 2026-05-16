@@ -1,9 +1,9 @@
 //! Resilience-layered `MCPHost` decorator.
 //!
-//! Wraps any inner `MCPHost` with the Phase 4 Track A stack so a
-//! single `call` traverses Timeout → RateLimit → CircuitBreaker →
-//! LoopDetector → Retry → DLQ → real call. Each layer is optional —
-//! a `ResilientMcpHost` with no layers wired is a pass-through.
+//! Wraps any inner `MCPHost` with the resilience stack so a single
+//! `call` traverses Timeout → RateLimit → CircuitBreaker → LoopDetector →
+//! Retry → DLQ → real call. Each layer is optional — a `ResilientMcpHost`
+//! with no layers wired is a pass-through.
 //!
 //! Stack order rationale (outermost → inner):
 //! 1. **LoopDetector** runs first so a runaway agent loop fails fast

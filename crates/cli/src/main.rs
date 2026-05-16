@@ -196,7 +196,7 @@ enum Commands {
         /// Filter to a specific tool_id (matches tool-bound events only).
         #[arg(long = "tool-id")]
         tool_id: Option<String>,
-        /// Principal filter — forward-compatible; Phase 0 events do not yet carry one.
+        /// Principal filter — forward-compatible; bus events do not yet carry one.
         #[arg(long)]
         principal: Option<String>,
         /// RFC3339 timestamp; only events with ts >= since are forwarded.

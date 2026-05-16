@@ -41,7 +41,7 @@ pub(crate) async fn cmd_bridge(
 
                 let (mut sink, mut stream) = ws.split();
 
-                // Phase 1: Send auth frame first, await acknowledgment
+                // Step 1: Send auth frame first, await acknowledgment
                 let auth_frame = serde_json::json!({
                     "api_key": api_key,
                 });
@@ -79,7 +79,7 @@ pub(crate) async fn cmd_bridge(
                     return BridgeMessage::reply(&msg, format!("Bridge auth error: {error}"));
                 }
 
-                // Phase 2: Send signal frame after successful auth
+                // Step 2: Send signal frame after successful auth
                 let signal = serde_json::json!({
                     "content": msg.content,
                     "source": msg.source.clone().unwrap_or_else(|| "bridge".to_string()),

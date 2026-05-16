@@ -113,8 +113,8 @@ pub async fn serve(
 
 /// Drive a single WebSocket connection to completion.
 ///
-/// Phase 1: read the first text frame as an `AuthMessage` and validate it.
-/// Phase 2: process subsequent `ClientMessage` frames as signals.
+/// Step 1: read the first text frame as an `AuthMessage` and validate it.
+/// Step 2: process subsequent `ClientMessage` frames as signals.
 async fn handle_connection(
     ws_stream: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
     conn_id: Uuid,
@@ -123,9 +123,9 @@ async fn handle_connection(
 ) {
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
-    // ── Phase 1: authenticate ────────────────────────────────────────────────
-    // Also resolves the v1.0.0 Phase 1 `Principal` once and binds it to
-    // the connection's lifetime — every subsequent signal frame uses it.
+    // ── Step 1: authenticate ─────────────────────────────────────────────────
+    // Also resolves the `Principal` once and binds it to the connection's
+    // lifetime — every subsequent signal frame uses it.
     let (authed, principal): (bool, Option<identity::Principal>) = match ws_rx.next().await {
         None => return,
         Some(Err(e)) => {
@@ -153,9 +153,9 @@ async fn handle_connection(
                         send_json_frame(&mut ws_tx, &resp, conn_id).await;
                         return;
                     }
-                    // Resolve the v1.0.0 Phase 1 Principal once. None when
-                    // the key has no agent_id mapping or no IdentityStore
-                    // is wired (back-compat).
+                    // Resolve the Principal once. None when the key has no
+                    // agent_id mapping or no IdentityStore is wired
+                    // (back-compat).
                     let principal = resolve_principal(api_keys, &auth.api_key, &processor).await;
                     // Auth OK — send confirmation
                     let resp = AuthResponse {
@@ -184,10 +184,10 @@ async fn handle_connection(
         return;
     }
 
-    // ── Phase 2: process signal frames + proactive push ─────────────────────
+    // ── Step 2: process signal frames + proactive push ──────────────────────
     // Subscribe to proactive notifications (if router is available).
     let mut proactive_rx = processor.notification_router().map(|r| r.subscribe());
-    // Subscribe to the v1.0.0 BrainEvent bus (if observer is wired).
+    // Subscribe to the BrainEvent bus (if observer is wired).
     let mut brain_rx = processor.subscribe_brain_events();
 
     loop {

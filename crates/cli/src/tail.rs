@@ -1,10 +1,9 @@
 //! `brain tail` — observability tap for the daemon's BrainEvent bus.
 //!
 //! Subscribes to the daemon's `GET /v1/events` SSE stream and prints every
-//! `brain_event` payload as a JSON line to stdout. Justified under the
-//! bootstrap-scaffolding exception (`docs/v1.0.0.md` §8.3): observability must
-//! work when the UI is down, when the user is on a headless SSH session, and
-//! when nothing else has access.
+//! `brain_event` payload as a JSON line to stdout. Provided so observability
+//! works when the UI is down, when the user is on a headless SSH session,
+//! and when nothing else has access.
 
 use anyhow::{Context, Result};
 use futures::StreamExt;

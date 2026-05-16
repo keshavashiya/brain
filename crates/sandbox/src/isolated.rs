@@ -1,4 +1,4 @@
-//! Real sandbox executor — Phase 1b.
+//! Real sandbox executor.
 //!
 //! Applies resource limits (`setrlimit`) via a pre-exec hook, enforces the
 //! configured binary allowlist + filesystem allowlist, and kills the child's

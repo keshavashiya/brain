@@ -56,7 +56,7 @@ impl SignalProcessor {
             None => return (0, 0),
         };
 
-        // Phase 1: Generate embeddings concurrently
+        // Step 1: Generate embeddings concurrently
         let texts: Vec<String> = facts
             .iter()
             .map(|f| format!("{} {} {}", f.subject, f.predicate, f.object))
@@ -65,7 +65,7 @@ impl SignalProcessor {
         let embedding_futures: Vec<_> = texts.iter().map(|t| self.embed_text(t)).collect();
         let embeddings: Vec<Vec<f32>> = join_all(embedding_futures).await;
 
-        // Phase 2: Insert vectors sequentially (SQLite is single-writer)
+        // Step 2: Insert vectors sequentially (SQLite is single-writer)
         let mut embedded = 0usize;
         let mut failed = 0usize;
 
@@ -152,7 +152,7 @@ impl SignalProcessor {
             }
         };
 
-        // Phase 1: Generate embeddings concurrently
+        // Step 1: Generate embeddings concurrently
         let texts: Vec<String> = facts
             .iter()
             .map(|f| format!("{} {} {}", f.subject, f.predicate, f.object))
@@ -161,7 +161,7 @@ impl SignalProcessor {
         let embedding_futures: Vec<_> = texts.iter().map(|t| self.embed_text(t)).collect();
         let embeddings: Vec<Vec<f32>> = join_all(embedding_futures).await;
 
-        // Phase 2: Store sequentially (SQLite is single-writer)
+        // Step 2: Store sequentially (SQLite is single-writer)
         let mut stored = Vec::new();
         let mut errors = Vec::new();
 

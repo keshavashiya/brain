@@ -3,36 +3,21 @@
 //!
 //! ## Why this exists
 //!
-//! Phase 5 introduces reflexes — triggers that fire signals unattended
-//! (fs changes, cron entries, system-state transitions). Without
-//! standing approvals, every reflex firing that lands a tier ≥
-//! Destructive would block on a confirm prompt that no one is sitting
-//! at to answer. Standing approvals let the user say once "this
-//! reflex, with this agent identity, is allowed to do this verb" and
-//! the engine auto-approves matching subsequent requests until the
-//! grant is revoked.
+//! Reflexes fire signals unattended (fs changes, cron entries, system-state
+//! transitions). Without standing approvals, every reflex firing that lands
+//! a tier ≥ Destructive would block on a confirm prompt that no one is sitting
+//! at to answer. Standing approvals let the user say once "this reflex,
+//! with this agent identity, is allowed to do this verb" and the engine
+//! auto-approves matching subsequent requests until the grant is revoked.
 //!
 //! ## Audit shape
 //!
-//! A re-grant after revoke creates a **new row** rather than
-//! mutating the old one. This keeps the trail intact: you can answer
-//! "when was this granted, when was it revoked, when did the user
-//! grant it again" by walking the table in time order. The partial
-//! index on `(agent_id, verb_ns, verb_action) WHERE revoked_at IS
-//! NULL` keeps the hot-path lookup O(1).
-//!
-//! ## What this slice does (PR-5f.1)
-//!
-//! - Migration v21 + `SqliteStandingApprovals` impl
-//! - `ApprovalSpec::grant_key` so callers can opt in
-//! - `SqliteConfirmationEngine::with_standing_approvals` to wire the
-//!   check into the existing `request()` flow
-//!
-//! What it deliberately does **not** do (lands in PR-5f.2):
-//!
-//! - YAML config declaration of approvals at startup
-//! - `/approval-revoke` slash command
-//! - Wiring through the reflex pipeline end-to-end
+//! A re-grant after revoke creates a **new row** rather than mutating the
+//! old one. This keeps the trail intact: you can answer "when was this
+//! granted, when was it revoked, when did the user grant it again" by
+//! walking the table in time order. The partial index on
+//! `(agent_id, verb_ns, verb_action) WHERE revoked_at IS NULL` keeps the
+//! hot-path lookup O(1).
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

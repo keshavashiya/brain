@@ -91,7 +91,7 @@ impl SignalProcessor {
         &self.procedures
     }
 
-    // ── Phase 1: Safety infrastructure builder methods ──────────────────
+    // ── Safety infrastructure builder methods ───────────────────────────
 
     /// Attach an audit trail (builder pattern).
     pub fn with_audit_trail(mut self, trail: Arc<dyn audit::AuditTrail>) -> Self {
@@ -162,7 +162,7 @@ impl SignalProcessor {
         self.orchestrator.as_ref()
     }
 
-    // ── Channel intelligence (Phase 4) ───────────────────────────────────
+    // ── Channel intelligence ─────────────────────────────────────────────
 
     /// Attach a channel router (builder pattern).
     pub fn with_channel_router(mut self, router: Arc<dyn channel::ChannelRouter>) -> Self {
@@ -217,7 +217,7 @@ impl SignalProcessor {
         self.channel_dispatcher.as_ref()
     }
 
-    // ── Agent delegation (Phase 3) ────────────────────────────────────────
+    // ── Agent delegation ──────────────────────────────────────────────────
 
     /// Attach an agent registry (builder pattern). Orchestrator-managed
     /// `StepAction::Implement` steps dispatch through this registry.
@@ -261,7 +261,7 @@ impl SignalProcessor {
 
     /// Attach an observability event bus (builder pattern). When set, the
     /// pipeline publishes structured `BrainEvent`s alongside the legacy
-    /// `SignalProcessedEvent` bus. See `docs/v1.0.0.md` §8.
+    /// `SignalProcessedEvent` bus.
     pub fn with_observer(mut self, observer: Arc<dyn observe::Observer>) -> Self {
         self.observer = Some(observer);
         self
@@ -280,10 +280,10 @@ impl SignalProcessor {
         self.observer.as_ref().map(|o| o.subscribe())
     }
 
-    /// Attach an `IdentityStore` (v1.0.0 Phase 1). When wired and a
+    /// Attach an `IdentityStore`. When wired and a
     /// `Signal` carries a `Principal`, the pipeline gates the classified
     /// intent through `IdentityStore::check` before executing.
-    /// See `docs/v1.0.0.md` §7.
+    /// See the identity crate's docs for verb/tier semantics.
     pub fn with_identity_store(mut self, store: Arc<dyn identity::IdentityStore>) -> Self {
         self.identity_store = Some(store);
         self

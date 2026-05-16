@@ -115,7 +115,7 @@ brain service uninstall  # Remove
 
 ## Usage
 
-The CLI covers lifecycle (`init`, `start`, `stop`, `status`, `serve`, `mcp`, `service`, `deps`) and security-sensitive input (`vault`). Everything else — recall, approvals, budgets, schedules, audit queries, task decomposition, export/import — goes through `brain chat`.
+The CLI covers lifecycle (`init`, `start`, `stop`, `status`, `serve`, `mcp`, `service`, `deps`, `tail`) and security-sensitive input (`vault`). Everything else — recall, approvals, budgets, schedules, audit queries, task decomposition, export/import — goes through `brain chat`.
 
 ### Lifecycle commands
 
@@ -123,6 +123,8 @@ The CLI covers lifecycle (`init`, `start`, `stop`, `status`, `serve`, `mcp`, `se
 brain start                          # Start daemon (or via service if installed)
 brain stop                           # Stop daemon (also stops service if installed)
 brain status                         # Check daemon status via HTTP health probe
+brain tail                           # Stream BrainEvent bus (observability tap for headless/SSH)
+brain tail --tool-id mcp:fs:read     #   filter by tool, kind, or --since timestamp
 ```
 
 **Recommended setup order:**
@@ -256,6 +258,7 @@ curl -N http://localhost:19789/v1/events \
 | WebSocket | 19790 | Bidirectional streaming, real-time |
 | MCP HTTP | 19791 | MCP over HTTP transport |
 | gRPC | 19792 | Protobuf RPC + server streaming |
+| Terminal gRPC | 19793 | PTY motor cortex — Open/Close/Attach/Send/Resize/Signal/Interact |
 | MCP stdio | stdin/stdout | `brain mcp` for subprocess MCP clients |
 
 </details>
@@ -664,7 +667,7 @@ cargo run -p brainos -- serve --http --mcp
 <details>
 <summary><strong>Workspace Structure</strong></summary>
 
-The project is a Cargo workspace with 24 crates. All internal dependencies use both `path` (for local development) and `version` (for crates.io), so no Cargo.toml changes are needed to switch between local and published builds.
+The project is a Cargo workspace with 31 crates. All internal dependencies use both `path` (for local development) and `version` (for crates.io), so no Cargo.toml changes are needed to switch between local and published builds.
 
 ```
 crates/
@@ -687,11 +690,18 @@ crates/
 ├── orchestrate/    # brainos-orchestrate — Task decomposition + execution DAG
 ├── delegate/       # brainos-delegate    — Agent discovery, registry, delegation, escalation
 ├── channel/        # brainos-channel     — Channel routing + learned preferences
+├── observe/        # brainos-observe     — Event bus + Observer trait + redaction
+├── identity/       # brainos-identity    — Principal, tier, and authorization for signals
+├── intent/         # brainos-intent      — Standardized Intent Token + capability routing
+├── mcphost/        # brainos-mcphost     — External MCP server host (stdio/HTTP/SSE)
+├── reflex/         # brainos-reflex      — Reactive signal sources (fs, cron, sysstate, composite)
+├── resilience/     # brainos-resilience  — Circuit breaker, retry, rate-limit, DLQ, loop detector
 ├── adapters/
 │   ├── http/       # brainos-httpadapter — Axum REST API
 │   ├── ws/         # brainos-wsadapter   — WebSocket adapter
 │   ├── grpc/       # brainos-grpcadapter — gRPC adapter
-│   └── mcp/        # brainos-mcp         — MCP adapter
+│   ├── mcp/        # brainos-mcp         — MCP adapter
+│   └── terminal/   # brainos-terminal    — Terminal Bridge gRPC (PTY motor cortex)
 └── cli/            # brainos (binary: brain) — CLI entry point
 ```
 

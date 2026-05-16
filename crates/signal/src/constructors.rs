@@ -133,7 +133,7 @@ impl SignalProcessor {
             search_cfg.decay_rate,
             config.memory.semantic.similarity_threshold,
         ));
-        // Capacity raised to 4096 with lag-drop semantics per docs/v1.0.0.md §8.6.
+        // Capacity raised to 4096 with lag-drop semantics.
         let (events_tx, _) = tokio::sync::broadcast::channel(4096);
 
         let classifier = thalamus::IntentClassifier::new()
@@ -155,7 +155,7 @@ impl SignalProcessor {
             notification_router: None,
             action_dispatcher: None,
             metrics: Arc::new(brain_core::metrics::SubsystemMetrics::new()),
-            // Phase 1: Safety infrastructure — all opt-in
+            // Safety infrastructure — all opt-in
             audit_trail: None,
             confirmation_engine: None,
             cost_budget: None,

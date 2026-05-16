@@ -1,4 +1,4 @@
-//! Phase 3 result aggregation + context injection.
+//! Result aggregation + context injection across orchestrated steps.
 //!
 //! Two responsibilities live here:
 //!
@@ -27,8 +27,8 @@ pub(crate) const DELEGATE_CONTEXT_RECENT_LIMIT: usize = 10;
 pub(crate) const DELEGATE_EPISODE_IMPORTANCE: f64 = 0.6;
 
 impl TaskOrchestrator {
-    /// Phase 3: build the task spec for a delegate, optionally enriched
-    /// with relevant facts from semantic memory under a soft token budget.
+    /// Build the task spec for a delegate, optionally enriched with
+    /// relevant facts from semantic memory under a soft token budget.
     /// When no context source is wired, returns the spec unchanged so the
     /// delegate behaves as before.
     pub(super) async fn build_delegate_task_spec(&self, spec: &str) -> String {
@@ -64,7 +64,7 @@ impl TaskOrchestrator {
         )
     }
 
-    /// Phase 3: record a delegate completion in episodic memory so the
+    /// Record a delegate completion in episodic memory so the
     /// orchestration history is queryable across sessions.
     pub(super) async fn record_delegate_episode(
         &self,

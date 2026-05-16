@@ -76,8 +76,8 @@ impl fmt::Display for Tier {
     }
 }
 
-/// Who is asking. Threaded through `Signal` (Phase 1 Tier B) so every
-/// downstream component (audit, confirmation, capability index) can read it.
+/// Who is asking. Threaded through `Signal` so every downstream component
+/// (audit, confirmation, capability index) can read it.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Principal {
     pub user_id: UserId,
@@ -125,8 +125,8 @@ pub enum AgentHint {
 
 /// Authorization context for `IdentityStore::check`. Carries the verb plus
 /// a free-form `modifiers` JSON object so scope checks can read fields like
-/// `path` / `cwd` (per `docs/v1.0.0.md` §12 OQ#2). Phase 3's `IntentToken`
-/// carries the same fields and reduces to this struct at the call site.
+/// `path` / `cwd`. The intent-routing `IntentToken` carries the same fields
+/// and reduces to this struct at the call site.
 #[derive(Clone, Debug)]
 pub struct AuthorizationRequest {
     pub verb_ns: String,
@@ -157,10 +157,9 @@ impl AuthorizationRequest {
 
 /// Result of an authorization check.
 ///
-/// `EscalateToUser` is the v1.0.0 stance: missing scope is never a silent
+/// `EscalateToUser` is the default stance: missing scope is never a silent
 /// fail. The `ConfirmationEngine` shows the user a prompt with the carried
-/// reason; the user can approve once, grant a standing approval (Phase 5),
-/// or reject.
+/// reason; the user can approve once, grant a standing approval, or reject.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CheckOutcome {
     Allow,

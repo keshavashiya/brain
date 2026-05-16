@@ -34,9 +34,23 @@ brain/
 │   │
 │   ├── thalamus/       # Intent classification — the primary user-facing surface
 │   │                     Regex fast-path (compiled at startup) + async LLM fallback with timeout
-│   │                     11 intent types: StoreFact, Recall, Forget, Chat, SystemStatus,
-│   │                     WebSearch, Schedule, SendMessage, ExecuteCommand, DecomposeTask,
-│   │                     QueryAgents
+│   │                     Intent surface (grouped, ~39 variants — see `crates/thalamus/src/lib.rs`):
+│   │                       memory:    StoreFact, Recall, Forget, MemorySummary, ProjectInspect
+│   │                       chat:      Chat, SystemStatus, ProactivityStatus, SetProactivity
+│   │                       actions:   WebSearch, ExecuteCommand, SendMessage,
+│   │                                  Schedule, ListSchedules, CancelSchedule
+│   │                       audit:     QueryAudit, PruneAudit
+│   │                       approvals: ListApprovals, RespondToApproval,
+│   │                                  ListStandingApprovals, RevokeStandingApproval
+│   │                       budget:    BudgetStatus
+│   │                       tasks:     DecomposeTask, ListTasks, TaskStatus,
+│   │                                  CancelTask, CancelSignal
+│   │                       agents:    QueryAgents, DelegateTask
+│   │                       mcp:       MountMcpServer, UnmountMcpServer, ListMcpServers,
+│   │                                  ToolCall(IntentToken)
+│   │                       terminal:  OpenTerminalSession, CloseTerminalSession,
+│   │                                  ListTerminalSessions
+│   │                       channels:  ChannelPreferences, SetChannelPreference, ListChannels
 │   │                     (New user-facing features add intents here, not CLI subcommands.)
 │   │
 │   ├── amygdala/       # Importance scoring with per-process novelty detection → [0.0, 1.0]
@@ -124,10 +138,47 @@ brain/
 │   │                     `channel.transports[]` is first-class; webhook-inbound
 │   │                     route `POST /v1/webhooks/:id` is wired in the HTTP adapter.
 │   │
+│   ├── observe/        # Observability bus + Observer trait
+│   │                     BrainEvent enum, BroadcastObserver, Redactor.
+│   │                     Audit-bus unity: every audited action emits a
+│   │                     BrainEvent::AuditAppended. Drained by SSE/WS/gRPC and
+│   │                     `brain tail`.
+│   │
+│   ├── identity/       # Principal, tier, authorization for signals
+│   │                     IdentityStore trait + ConfigIdentityStore.
+│   │                     Principal threaded through Signal; pipeline's
+│   │                     enforce_identity gate runs after classification.
+│   │                     authz::intent_to_auth maps Intent → AuthorizationRequest.
+│   │
+│   ├── intent/         # Standardized Intent Token (SIT) + capability routing
+│   │                     IntentToken schema, ToolRegistry + IntentRouter traits,
+│   │                     CapabilityIndex with hybrid scoring.
+│   │
+│   ├── mcphost/        # MCP host — mounts external MCP servers
+│   │                     MCPHost/MCPClient traits, ServerConfig
+│   │                     (Stdio/StreamableHttp/HttpSse), InMemoryMcpHost stub,
+│   │                     rmcp_host (real client), CapabilityIndex, OAuth helper,
+│   │                     ResilientMcpHost wrapper.
+│   │
+│   ├── reflex/         # Reactive signal sources
+│   │                     ReflexSource trait + FsReflex, CronReflex, SysStateReflex,
+│   │                     CompositeReflex, NoopReflex. Triggers emit Signals;
+│   │                     they never execute. Standing approvals declared,
+│   │                     visible, revocable.
+│   │
+│   ├── resilience/     # Resilience primitives
+│   │                     Hystrix circuit breaker (Closed/Open/HalfOpen),
+│   │                     retry with exponential backoff, rate limit, timeout,
+│   │                     loop detector, DLQ. BreakerRegistry for per-tool
+│   │                     breakers wired by intent router.
+│   │
 │   ├── storage/        # Storage abstraction layer
-│   │   ├── sqlite      # SqlitePool: 18 migrations (v1–v18), WAL mode, thread-safe Mutex<Connection>
+│   │   ├── sqlite      # SqlitePool: 20 migrations through v22, WAL mode,
+│   │   │                 thread-safe Mutex<Connection>
 │   │   │                 Tables: semantic_facts, episodes, procedures, scheduled_intents,
-│   │   │                 _migrations, FTS5 virtual tables (episodes_fts)
+│   │   │                 _migrations, FTS5 virtual tables (episodes_fts),
+│   │   │                 dlq_entries (v19), graph nodes/edges (v20),
+│   │   │                 standing_approvals (v21), task_states (v22).
 │   │   ├── ruvector    # RuVectorStore: wraps ruvector-core (external crate, crates.io)
 │   │   │                 Multi-table interface: facts_vec.db, episodes_vec.db
 │   │   │                 Vector sanitization, deterministic jitter on insert,
@@ -148,10 +199,15 @@ brain/
 │       │                 MemoryService (Search, Store, GetFacts, StreamSignals)
 │       │                 AgentService (Connect, SendSignal, ReceiveSignals fan-out)
 │       │                 Auth interceptor, namespace propagation
-│       └── mcp/        # MCP adapter (stdio transport + HTTP transport, port 19791)
-│                         6 tools: memory_search, memory_store, memory_facts,
-│                         memory_episodes, user_profile, memory_procedures
-│                         JSON-RPC 2.0, meta-key auth
+│       ├── mcp/        # MCP adapter (stdio transport + HTTP transport, port 19791)
+│       │                 6 tools: memory_search, memory_store, memory_facts,
+│       │                 memory_episodes, user_profile, memory_procedures
+│       │                 JSON-RPC 2.0, meta-key auth
+│       └── terminal/   # Terminal Bridge gRPC adapter (port 19793, tonic)
+│                         TerminalBridge + SessionRegistry, portable-pty backed.
+│                         TerminalSvc Open/Close/Attach/Send/Resize/Signal/Interact.
+│                         PTY reader pump → broadcast<Bytes>(256); Attach emits
+│                         OutputChunk{eof=true} on RecvError::Closed.
 │
 ├── crates/cli/         # `brain` binary — deliberately minimal surface.
 │                         Two legitimate purposes only:
@@ -182,42 +238,49 @@ brain/
 
 ### Workspace Members
 
-24 crates total:
+31 crates total:
 
 ```
 core  storage  hippocampus  cortex  thalamus  amygdala  signal
-adapters/http  adapters/ws  adapters/grpc  adapters/mcp
+adapters/http  adapters/ws  adapters/grpc  adapters/mcp  adapters/terminal
 cerebellum  ganglia  bridge  backends
 audit  confirm  budget  sandbox  vault
 orchestrate  delegate  channel
+observe  identity  intent  mcphost  reflex  resilience
 cli
 ```
 
 ### Dependency Graph
 
 ```
-cli ──► signal::SignalProcessor (Arc<SignalProcessor>)
-            │
-            ├── thalamus        (intent classification)
-            ├── amygdala        (importance scoring)
-            ├── hippocampus     (memory read / write / consolidation)
-            │       └── storage (SQLite + ruvector-core HNSW + AES-GCM encryption)
-            ├── cortex          (LLM providers + context assembly + action dispatch)
-            ├── cerebellum      (procedure store + trigger matching)
-            ├── ganglia         (proactivity / habit engine)
-            ├── orchestrate     (task planning / execution)
-            ├── delegate        (external agent discovery / delegation / escalation)
-            └── channel         (routing / preferences / transports / correlator)
+reflex (cron/fs/sysstate/composite) ─► emits Signal{provenance: Reflex}
+                                             │
+adapters/http  ──┐                           │
+adapters/ws    ──┼─► Arc<SignalProcessor> ◄──┘
+adapters/grpc  ──┤        │
+adapters/mcp   ──┤        │
+adapters/terminal ┘       │
+                          │
+                          ├── identity        (Principal gate after classification)
+                          ├── thalamus        (intent classification — regex fast-path + LLM)
+                          ├── intent          (SIT schema + IntentRouter + CapabilityIndex)
+                          ├── mcphost         (external MCP servers — stdio/HTTP/SSE)
+                          ├── amygdala        (importance scoring)
+                          ├── hippocampus     (memory read / write / consolidation + graph)
+                          │       └── storage (SQLite + ruvector-core HNSW + AES-GCM)
+                          ├── cortex          (LLM providers + context assembly + actions)
+                          ├── cerebellum      (procedure store + trigger matching)
+                          ├── ganglia         (proactivity / habit engine)
+                          ├── orchestrate     (task planning / execution / state machine)
+                          ├── delegate        (external agent discovery / delegation)
+                          ├── channel         (routing / preferences / transports)
+                          ├── resilience      (breakers / retry / DLQ — wraps backends)
+                          └── observe         (BrainEvent bus — taps every checkpoint)
 
-adapters/http  ──► Arc<SignalProcessor>
-adapters/ws    ──► Arc<SignalProcessor>
-adapters/grpc  ──► Arc<SignalProcessor>
-adapters/mcp   ──► Arc<SignalProcessor>
-
-External apps  ──► Brain's HTTP / WS / MCP / gRPC API   (live outside this repo)
+External apps  ──► Brain's HTTP / WS / MCP / gRPC / Terminal API
 ```
 
-All adapters share **one** `Arc<SignalProcessor>`. There are no per-adapter memory stores. A fact stored via MCP is immediately visible via HTTP or gRPC.
+All adapters share **one** `Arc<SignalProcessor>`. There are no per-adapter memory stores. A fact stored via MCP is immediately visible via HTTP or gRPC. The Terminal adapter is a motor-cortex adapter — it executes PTY sessions and mirrors lifecycle events back into the episodic graph via `signal::terminal_graph_mirror`.
 
 ---
 
@@ -284,14 +347,18 @@ The `SignalResponse` is returned directly to the calling adapter, which sends it
 ```rust
 pub struct Signal {
     pub id: Uuid,
-    pub source: SignalSource,    // Cli | Http | WebSocket | Mcp | Grpc
+    pub source: SignalSource,            // Cli | Http | WebSocket | Mcp | Grpc | Terminal | Reflex
     pub channel: String,
     pub sender: String,
     pub content: String,
     pub metadata: HashMap<String, String>,
     pub timestamp: DateTime<Utc>,
-    pub namespace: String,       // default: "personal"
-    pub agent: Option<String>,   // originating AI agent id, when known
+    pub namespace: String,               // default: "personal"
+    pub agent: Option<String>,           // originating AI agent id, when known
+    pub session_id: Option<String>,      // when provided, reuse this session
+    pub principal: Option<Principal>,    // resolved by the adapter from its auth
+                                         // context; consulted by the pipeline's
+                                         // identity gate after intent classification
 }
 ```
 
@@ -367,6 +434,18 @@ impl SignalProcessor {
     pub fn with_channel_router(self, router: Arc<dyn channel::ChannelRouter>) -> Self;
     pub fn with_channel_preferences(self, preferences: Arc<dyn channel::ChannelPreferenceStore>) -> Self;
     pub fn with_confirmation_correlator(self, correlator: Arc<channel::ConfirmationCorrelator>) -> Self;
+    pub fn with_channel_dispatcher(self, dispatcher: Arc<channel::ChannelDispatcher>) -> Self;
+
+    // Observability, identity, motor cortex, capability routing, resilience
+    pub fn with_observer(self, observer: Arc<dyn observe::Observer>) -> Self;
+    pub fn with_identity_store(self, store: Arc<dyn identity::IdentityStore>) -> Self;
+    pub fn with_terminal_bridge(self, bridge: Arc<terminal::TerminalBridge>) -> Self;
+    pub fn with_mcp_host(self, host: Arc<dyn mcphost::MCPHost>) -> Self;
+    pub fn with_tool_registry(self, registry: Arc<dyn intent::ToolRegistry>) -> Self;
+    pub fn with_intent_router(self, router: Arc<dyn intent::IntentRouter>) -> Self;
+    pub fn with_breaker_registry(self, registry: Arc<resilience::BreakerRegistry>) -> Self;
+    pub fn with_standing_approvals(self, approvals: Arc<confirm::StandingApprovalStore>) -> Self;
+    pub fn with_confirmation_timeout(self, t: std::time::Duration) -> Self;
 
     pub fn audit_trail(&self) -> Option<&Arc<dyn audit::AuditTrail>>;
     pub fn confirmation_engine(&self) -> Option<&Arc<dyn confirm::ConfirmationEngine>>;
@@ -396,25 +475,32 @@ impl SignalProcessor {
 
 ### SQLite
 
-Migration-based schema (18 migrations, v1–v18). WAL mode enabled. Thread safety via `Mutex<Connection>`.
+Migration-based schema — 20 migrations through v22. WAL mode enabled. Thread safety via `Mutex<Connection>`. Individual crates that own private tables (e.g. `audit`, `confirm`, `ganglia`) provision them via their own `ensure_tables()` rather than through the shared migrations file; the version numbers below refer to the central `crates/storage/src/sqlite/migrations.rs` log only.
 
 <details>
 <summary><strong>Tables</strong></summary>
 
-| Table | Purpose |
-|-------|---------|
-| `sessions` | Chat session tracking (id, channel, namespace, timestamps) |
-| `semantic_facts` | S-P-O triples with namespace, importance, source_episode_id |
-| `episodes` | Conversation history with role, importance, decay_rate, reinforcement_count |
-| `episodes_fts` | FTS5 virtual table (BM25 full-text search over episode content) |
-| `user_profile` | Key-value store for user preferences |
-| `procedures` | trigger_pattern → steps_json automation rules |
-| `audit_log` | Action audit trail (action type, input, output, timestamps) |
-| `scheduled_intents` | Persisted scheduling intents |
-| `episode_promotions` | Idempotency log for episode → semantic-fact promotions |
-| `notification_outbox` | Proactive notification queue with priority and delivery status |
-| `habit_state` | Rate-limit state for proactivity engine |
-| `_migrations` | Applied migration version log |
+| Table | Purpose | Source |
+|-------|---------|--------|
+| `sessions` | Chat session tracking (id, channel, namespace, timestamps) | v1 |
+| `episodes` | Conversation history with role, importance, decay_rate, reinforcement_count | v2 |
+| `episodes_fts` | FTS5 virtual table (BM25 full-text search over episode content) | v3 |
+| `semantic_facts` | S-P-O triples with namespace, importance, source_episode_id | v4–v6 |
+| `user_profile` | Key-value store for user preferences | v7 |
+| `procedures` | trigger_pattern → steps_json automation rules | v10–v12 |
+| `scheduled_intents` | Persisted scheduling intents | v13–v15 |
+| `notification_outbox` | Proactive notification queue with priority and delivery status | v16 |
+| `episode_promotions` | Idempotency log for episode → semantic-fact promotions | v17 |
+| `audit_log` | Action audit trail (action type, input, output, timestamps) | v18 |
+| `dlq_entries` | Dead-letter queue for failed/permanently-broken actions | **v19** |
+| `nodes`, `edges` | Episodic graph — recursive provenance trace, half-life decay | **v20** |
+| `standing_approvals` | Declared, revocable bypass rules for the confirmation engine | **v21** |
+| `task_states` | TaskOrchestrator state-machine history | **v22** |
+| `habit_state` | Rate-limit state for proactivity engine | crate-managed (`ganglia::ensure_tables`) |
+| `audit_entries` | Append-only entries with `principal_json` (identity round-trip) | crate-managed (`audit::ensure_tables`) |
+| `_migrations` | Applied migration version log | always present |
+
+Versions 8 and 9 were retired during early development; the migrator skips them. Schema reads are idempotent (`IF NOT EXISTS` throughout).
 
 </details>
 

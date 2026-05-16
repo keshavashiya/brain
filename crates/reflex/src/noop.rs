@@ -1,7 +1,6 @@
 //! No-op reflex source — emits one canned event on subscribe and
-//! ends the stream. Used by Phase 5 acceptance tests and downstream
-//! consumers that want to verify their wiring without spinning up a
-//! real trigger.
+//! ends the stream. Used by acceptance tests and downstream consumers
+//! that want to verify their wiring without spinning up a real trigger.
 
 use std::sync::Arc;
 

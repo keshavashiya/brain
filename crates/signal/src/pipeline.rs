@@ -177,10 +177,10 @@ impl SignalProcessor {
             .await;
         let procedure_context = self.match_procedures(&signal.content);
 
-        // v1.0.0 Phase 1 identity gate. Runs after classification (so we
-        // know the intent) and before any handler executes. Three short-
-        // circuit outcomes: EscalateToUser → text response pointing to the
-        // pending approval; Deny → error response; otherwise proceed.
+        // Identity gate. Runs after classification (so we know the intent)
+        // and before any handler executes. Three short-circuit outcomes:
+        // EscalateToUser → text response pointing to the pending approval;
+        // Deny → error response; otherwise proceed.
         if let Some(early) = self
             .enforce_identity(signal, signal_id, &classification.intent)
             .await
@@ -188,11 +188,11 @@ impl SignalProcessor {
             return Ok(PipelineResult::Complete(early));
         }
 
-        // v1.0.0 Phase 5 inline confirmation gate. Identity says "this
-        // principal may attempt this verb"; the confirmation gate says
-        // "but for tiers ≥ Destructive, a human (or a standing approval)
-        // must consent." Reflex firings travel the same path — they have
-        // no way to bypass this checkpoint.
+        // Inline confirmation gate. Identity says "this principal may
+        // attempt this verb"; the confirmation gate says "but for tiers
+        // ≥ Destructive, a human (or a standing approval) must consent."
+        // Reflex firings travel the same path — they have no way to
+        // bypass this checkpoint.
         if let Some(early) = self
             .confirmation_gate(signal, signal_id, &classification.intent)
             .await
@@ -1834,7 +1834,7 @@ impl SignalProcessor {
     ///
     /// All string fields are passed through [`observe::Redactor`] first so a
     /// vault-marked secret embedded in `Signal.content` cannot leak onto the
-    /// bus (docs/v1.0.0.md §8.5).
+    /// bus.
     pub async fn publish_signal_received(&self, signal: &Signal) {
         let Some(observer) = &self.observer else {
             return;
@@ -1886,7 +1886,7 @@ impl SignalProcessor {
         let _ = self.events_tx.send(event);
     }
 
-    // ── Identity gate (v1.0.0 Phase 1 §7) ────────────────────────────────
+    // ── Identity gate ────────────────────────────────────────────────────
 
     /// Run the configured `IdentityStore::check` against the classified
     /// intent. Returns `Some(resp)` if the pipeline should short-circuit
@@ -1939,11 +1939,11 @@ impl SignalProcessor {
         }
     }
 
-    /// Inline confirmation gate (v1.0.0 Phase 5). Runs after the identity
-    /// check. When a confirmation engine is wired and the intent lands a
-    /// tier that `requires_confirmation`, builds an [`ApprovalSpec`] with
-    /// the principal-bound [`GrantKey`] (so [`StandingApprovalStore`]
-    /// matches bypass any user prompt) and blocks on `engine.request`.
+    /// Inline confirmation gate. Runs after the identity check. When a
+    /// confirmation engine is wired and the intent lands a tier that
+    /// `requires_confirmation`, builds an [`ApprovalSpec`] with the
+    /// principal-bound [`GrantKey`] (so [`StandingApprovalStore`] matches
+    /// bypass any user prompt) and blocks on `engine.request`.
     ///
     /// Returns `Some(resp)` to short-circuit:
     /// - `ApprovalOutcome::Approved` → `None` (proceed to dispatch)
@@ -1953,7 +1953,7 @@ impl SignalProcessor {
     ///
     /// Skipped when no engine is wired, the intent is unguarded, or the
     /// tier doesn't require confirmation. This is the single inline
-    /// checkpoint that closes Phase 5's cardinal rule: every action that
+    /// checkpoint that enforces the cardinal rule: every action that
     /// reaches a Destructive/External tier passes through the same gate
     /// regardless of provenance (user typing, LLM, reflex firing).
     pub(super) async fn confirmation_gate(
@@ -2018,7 +2018,7 @@ impl SignalProcessor {
         }
     }
 
-    // ── Signal cancellation (v1.0.0 Phase 0 §8.4) ────────────────────────
+    // ── Signal cancellation ──────────────────────────────────────────────
 
     /// Register a cancellation notify for an in-flight signal and return a
     /// handle the pipeline can await. Idempotent — if a notify already exists

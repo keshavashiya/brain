@@ -92,9 +92,9 @@ pub enum Intent {
     /// Cancel a running task.
     CancelTask { task_id: String },
     /// Cancel an in-flight signal by its id. Wires the Live-tab cancel
-    /// button (v1.0.0 Phase 0, docs/v1.0.0.md §8.4). Distinct from
-    /// `CancelTask` — that aborts an orchestrated multi-step plan;
-    /// this aborts a single Signal's pipeline.
+    /// button in the observability UI. Distinct from `CancelTask` —
+    /// that aborts an orchestrated multi-step plan; this aborts a
+    /// single Signal's pipeline.
     CancelSignal { signal_id: String },
     /// Ask about available specialist agents (delegates). Optional
     /// `filter` narrows the answer: e.g. "rust", "aider", or "".
@@ -119,7 +119,7 @@ pub enum Intent {
     /// Cheaper, more reliable, and far more honest than running this
     /// through `DecomposeTask` → sandboxed shell scripts.
     ProjectInspect { path: String, focus: Option<String> },
-    /// List registered channels (router-known descriptors). Phase 4
+    /// List registered channels (router-known descriptors). The
     /// natural-language replacement for inspection CLIs.
     ListChannels,
     /// Show learned channel preferences for a (namespace, category).

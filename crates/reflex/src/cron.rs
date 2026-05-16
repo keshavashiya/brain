@@ -1,10 +1,10 @@
 //! Cron reflex — bridges the existing scheduled-intent table onto the
 //! reflex pipeline.
 //!
-//! Brain's pre-Phase-5 "scheduler" was a 60s poller in `cli::serve`
-//! that read `SqlitePool::due_scheduled_intents()` and fired
-//! `ProactiveNotification`s directly. That bypasses identity,
-//! confirmation, and per-tool breakers — exactly what Phase 5's
+//! Brain's earlier "scheduler" was a 60s poller in `cli::serve` that
+//! read `SqlitePool::due_scheduled_intents()` and fired
+//! `ProactiveNotification`s directly. That bypassed identity,
+//! confirmation, and per-tool breakers — exactly what the reflex
 //! cardinal rule forbids ("triggers emit signals, never execute").
 //!
 //! `CronReflex` replaces that direct-execution path with a

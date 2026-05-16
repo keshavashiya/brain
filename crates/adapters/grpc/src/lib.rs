@@ -74,8 +74,8 @@ impl MemoryServiceImpl {
         }
     }
 
-    /// Resolve the Phase 1 `Principal` from the request metadata.
-    /// Returns `None` for keys without `agent_id` (back-compat).
+    /// Resolve the `Principal` from the request metadata. Returns `None`
+    /// for keys without `agent_id` (back-compat).
     async fn resolve_principal<T>(&self, req: &Request<T>) -> Option<identity::Principal> {
         resolve_principal_from_metadata(req, &self.api_keys, self.processor.as_ref()).await
     }
@@ -274,8 +274,8 @@ fn brain_event_matches(ev: &observe::BrainEvent, filter: &BrainEventsRequest) ->
         return false;
     }
     if !filter.principal.is_empty() {
-        // Phase 0 events do not carry a principal; the filter rejects everything
-        // when set. Phase 1 (docs/v1.0.0.md §7) populates the field.
+        // Bus events do not yet carry a principal; the filter rejects
+        // everything when set.
         return false;
     }
     if !filter.since.is_empty() {
@@ -571,9 +571,9 @@ fn auth_interceptor(
     }
 }
 
-/// Resolve the v1.0.0 Phase 1 `Principal` for a gRPC request by reading
-/// the key from `x-api-key` / `authorization` metadata, looking up its
-/// configured `agent_id`, and asking the `IdentityStore` for the principal.
+/// Resolve the `Principal` for a gRPC request by reading the key from
+/// `x-api-key` / `authorization` metadata, looking up its configured
+/// `agent_id`, and asking the `IdentityStore` for the principal.
 /// Returns `None` when any step is missing — Signal.principal then stays
 /// `None` and the pipeline's identity gate is skipped (back-compat).
 async fn resolve_principal_from_metadata<T>(

@@ -148,9 +148,8 @@ pub trait SandboxExecutor: Send + Sync {
     ) -> Result<SandboxOutcome, SandboxError>;
 }
 
-/// Stub sandbox executor — Phase 1a.
-/// Runs commands directly with no isolation. Same privileges as daemon.
-/// Clearly labeled as un-sandboxed.
+/// Stub sandbox executor. Runs commands directly with no isolation —
+/// same privileges as daemon. Clearly labeled as un-sandboxed.
 pub struct StubSandbox {
     allowed_paths: HashSet<PathBuf>,
     forbidden_commands: HashSet<String>,
@@ -207,8 +206,8 @@ impl StubSandbox {
     }
 
     fn is_path_allowed(&self, workdir: &PathBuf) -> Result<(), String> {
-        // For Phase 1a stub, we allow all paths but log warnings
-        // Real sandbox in 1b enforces strict allowlists
+        // Stub allows all paths but logs warnings.
+        // The real sandbox (`IsolatedSandbox`) enforces strict allowlists.
         if !self.allowed_paths.iter().any(|p| workdir.starts_with(p)) {
             tracing::warn!(path = ?workdir, "path not in allowlist (stub permits)");
         }
@@ -313,8 +312,8 @@ impl SandboxExecutor for StubSandbox {
         command: SandboxCommand,
         _creds: Vec<CredentialRef>,
     ) -> Result<SandboxOutcome, SandboxError> {
-        // Phase 1a stub doesn't inject credentials
-        // Real vault implementation in 1b handles this
+        // Stub doesn't inject credentials.
+        // The real vault-backed sandbox handles this.
         tracing::warn!("stub sandbox: credential injection not implemented");
         self.run(command).await
     }

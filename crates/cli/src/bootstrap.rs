@@ -22,7 +22,7 @@ use confirm::StandingApprovalStore;
 /// - Web search backend (searxng / tavily / custom)
 /// - Scheduling backend
 /// - Messaging backend (webhooks)
-/// - Phase 1 safety infrastructure (audit, confirm, budget, sandbox)
+/// - Safety infrastructure (audit, confirm, budget, sandbox)
 ///
 /// What is NOT wired here (caller-specific):
 /// - Notification router (only needed for `brain serve`)
@@ -42,13 +42,13 @@ pub async fn build_processor(
     let action_dispatcher = build_action_dispatcher(config, &processor)?;
     processor = processor.with_action_dispatcher(action_dispatcher);
 
-    // ── Phase 1: Safety infrastructure ──────────────────────────────────
+    // ── Safety infrastructure ───────────────────────────────────────────
     processor = wire_safety_infrastructure(processor, config).await?;
 
     Ok(processor)
 }
 
-/// Wire Phase 1 safety infrastructure into the processor.
+/// Wire safety infrastructure into the processor.
 ///
 /// Components: audit trail, confirmation engine, cost budget, sandbox executor.
 /// All share the same SQLite pool as the episodic store for simplicity.
@@ -60,7 +60,7 @@ async fn wire_safety_infrastructure(
 ) -> anyhow::Result<signal::SignalProcessor> {
     let db = processor.episodic().pool().clone();
 
-    // Audit trail — always wired (foundation for all other Phase 1 components)
+    // Audit trail — always wired (foundation for everything below)
     let audit_trail = audit::SqliteAuditTrail::new(db.clone());
     audit_trail
         .ensure_tables()
@@ -170,7 +170,7 @@ async fn wire_safety_infrastructure(
         .with_cost_budget(cost_budget)
         .with_sandbox_executor(sandbox_executor.clone());
 
-    // ── Agent registry (Phase 3) ────────────────────────────────────────
+    // ── Agent registry ──────────────────────────────────────────────────
     // Built before the orchestrator so `Implement` steps can dispatch to
     // registered specialist agents. Discovery scans `$PATH` for known
     // CLI agents at boot; manual `agents.delegates[]` entries still

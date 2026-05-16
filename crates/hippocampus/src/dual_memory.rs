@@ -1,43 +1,40 @@
-//! Dual memory model — the v1.0 reconciliation layer between the
-//! legacy `episodes` table and the new episodic graph.
+//! Dual memory model — reconciliation layer between the legacy `episodes`
+//! table and the newer episodic graph.
 //!
 //! ## What this is for
 //!
-//! Phase 4 Track B introduced an episodic graph ([`crate::graph`])
-//! with typed `Node`/`Edge` records. The original conversation log
-//! (`episodes` table + [`crate::EpisodicStore`]) still ships in
-//! v1.0 — too many production code paths read from it for an
-//! all-at-once cutover. During the v1.0 lifecycle both stores
-//! coexist, **writes target the graph going forward**, and reads
-//! reconcile through the [`DualMemoryReader`] helper here.
+//! The episodic graph ([`crate::graph`]) carries typed `Node`/`Edge` records.
+//! The original conversation log (`episodes` table + [`crate::EpisodicStore`])
+//! still ships — too many production code paths read from it for an
+//! all-at-once cutover. Both stores coexist, **writes target the graph
+//! going forward**, and reads reconcile through the [`DualMemoryReader`]
+//! helper here.
 //!
 //! ## Read semantics
 //!
 //! `DualMemoryReader::read_by_id(id)`:
-//! - tries `graph.get_node(id)` first — graph nodes are the
-//!   authoritative shape for everything written after PR-4Bb;
-//! - falls back to `legacy.get_episode(id)` so historic content from
-//!   before Track B lands stays reachable.
+//! - tries `graph.get_node(id)` first — graph nodes are the authoritative
+//!   shape for everything written after the graph schema landed;
+//! - falls back to `legacy.get_episode(id)` so historic content stays
+//!   reachable.
 //!
 //! The returned [`MemoryEntry`] keeps the underlying shape so callers
-//! that need either field set can still discriminate (graph nodes
-//! carry typed bodies; episodes carry role/content/decay metadata).
+//! that need either field set can still discriminate (graph nodes carry
+//! typed bodies; episodes carry role/content/decay metadata).
 //!
-//! ## v1.1 migration plan
+//! ## Forward migration plan
 //!
-//! 1. **v1.1 prep release.** Ship a backfill task that converts every
-//!    row in `episodes` / `semantic_facts` into graph nodes
-//!    (`node_kind: "episode"` / `"fact"`), preserving id so consumers
-//!    don't break. Run the backfill once at upgrade.
-//! 2. **Switch reads.** [`DualMemoryReader`] flips its default to
-//!    graph-only; the legacy code path emits a deprecation warning.
-//! 3. **Migration v23 (planned).** Drop the legacy tables
-//!    (`episodes`, `semantic_facts`, `episodes_fts`,
-//!    `episode_promotions`, related indexes). FTS5 over the graph
-//!    is the new search path — body_json field-restricted MATCH.
-//! 4. **Crate cleanup.** Remove `EpisodicStore` /
-//!    [`crate::semantic::SemanticStore`] surfaces or hide them
-//!    behind a `legacy` feature for two more minor releases.
+//! 1. **Backfill release.** A backfill task converts every row in
+//!    `episodes` / `semantic_facts` into graph nodes (`node_kind: "episode"`
+//!    / `"fact"`), preserving id so consumers don't break. Run once at upgrade.
+//! 2. **Switch reads.** [`DualMemoryReader`] flips its default to graph-only;
+//!    the legacy code path emits a deprecation warning.
+//! 3. **Cleanup migration.** Drop the legacy tables (`episodes`,
+//!    `semantic_facts`, `episodes_fts`, `episode_promotions`, related
+//!    indexes). FTS5 over the graph becomes the new search path —
+//!    body_json field-restricted MATCH.
+//! 4. **Crate cleanup.** Remove `EpisodicStore` / [`crate::semantic::SemanticStore`]
+//!    surfaces or hide them behind a `legacy` feature for two more minor releases.
 
 use std::sync::Arc;
 

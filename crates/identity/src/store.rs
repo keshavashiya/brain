@@ -154,7 +154,7 @@ impl ConfigIdentityStore {
         if allowlist.is_empty() {
             return false;
         }
-        // Match by prefix on a normalised string. Phase 1 doesn't do full
+        // Match by prefix on a normalised string. Does not do full
         // canonicalisation (we'd need to `std::fs::canonicalize` which
         // requires the path to exist) — instead we strip a trailing `/`
         // from allowlist entries and require the path to start with the

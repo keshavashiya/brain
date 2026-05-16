@@ -64,7 +64,7 @@ pub struct StepOutcome {
 
 /// Overall phase of the task.
 ///
-/// Phase 6 formalized the canonical state machine as
+/// The canonical state machine is
 /// `Planning → Executing → Reconciling → (Completed | Failed)`.
 /// `AwaitingApproval` is a side-channel state entered before `Executing`
 /// when the plan needs human consent; `Cancelled` is a terminal state
@@ -79,10 +79,9 @@ pub enum TaskPhase {
     /// Steps are being executed.
     Executing,
     /// All steps complete; verifying the world matches what was planned
-    /// before committing to a terminal phase. Phase 6 introduced this as
-    /// the explicit "world-drift detection" hook; today it's a brief
-    /// no-op transition that lands on `Completed` or `Failed` based on
-    /// step outcomes.
+    /// before committing to a terminal phase. The explicit "world-drift
+    /// detection" hook; today it's a brief no-op transition that lands
+    /// on `Completed` or `Failed` based on step outcomes.
     Reconciling,
     /// All steps completed successfully.
     Completed,

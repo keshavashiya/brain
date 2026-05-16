@@ -302,9 +302,9 @@ impl SqlitePool {
                 20,
                 "create_graph_nodes_edges",
                 "
-                -- Phase 4 Track B (Hippocampus Graph Memory). Nodes are
-                -- typed entries in the episodic graph; edges link them
-                -- with a typed relationship and a weight (drives both
+                -- Hippocampus graph memory. Nodes are typed entries in
+                -- the episodic graph; edges link them with a typed
+                -- relationship and a weight (drives both
                 -- retrieval ranking and the compactor's half-life decay).
                 -- Coexists with the legacy `episodes` / `semantic_facts`
                 -- tables during v1.0; v1.1 deprecates the legacy store.
@@ -343,7 +343,7 @@ impl SqlitePool {
                 21,
                 "create_standing_approvals",
                 "
-                -- Phase 5 standing approvals. A row authorizes a
+                -- Standing approvals. A row authorizes a
                 -- specific (agent_id, verb_ns, verb_action) triple to
                 -- auto-approve through the ConfirmationEngine without
                 -- prompting the user. A re-grant after revoke creates
@@ -371,7 +371,7 @@ impl SqlitePool {
                 22,
                 "create_task_states",
                 "
-                -- Phase 6 orchestrator state-machine history. One row
+                -- Orchestrator state-machine history. One row
                 -- per phase transition; the AUTOINCREMENT id doubles as
                 -- a monotonic sequence so a task that re-enters a state
                 -- (e.g. Executing after a replan) leaves a faithful

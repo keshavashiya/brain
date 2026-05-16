@@ -1,8 +1,8 @@
 //! # Brain Channel Intelligence
 //!
-//! Phase 4 foundation — routes confirmations, nudges, and reports to the
-//! right user-facing channel, learns preferences from behavior, and
-//! correlates user responses back to pending approvals across channels.
+//! Routes confirmations, nudges, and reports to the right user-facing channel,
+//! learns preferences from behavior, and correlates user responses back to
+//! pending approvals across channels.
 //!
 //! ## Layers
 //! - [`types`]   — `ChannelKind`, `UrgencyLevel`, `DeliveryIntent`, `DeliveryOutcome`,

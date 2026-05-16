@@ -1,4 +1,4 @@
-//! Reflex → Signal runner (Phase 5 closeout, PR-5g).
+//! Reflex → Signal runner.
 //!
 //! Bridges any [`reflex::ReflexSource`] into the signal pipeline so a
 //! firing trigger produces a `Signal` that flows through identity,

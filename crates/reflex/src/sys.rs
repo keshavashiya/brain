@@ -7,10 +7,9 @@
 //! Real battery / network / lock-state APIs are platform-specific
 //! (macOS IOKit, Linux `/sys`, Windows WMI) and most published Rust
 //! crates that wrap them either pull heavy native deps or behave
-//! flakily under CI. Rather than pin one set, this slice ships the
-//! [`SysStateSampler`] trait + [`NoopSampler`] default. Consumers (or
-//! a later PR-5d.x slice) can plug a real per-OS sampler in without
-//! changing the reflex surface.
+//! flakily under CI. Rather than pin one set, this module ships the
+//! [`SysStateSampler`] trait + [`NoopSampler`] default. Consumers can
+//! plug a real per-OS sampler in without changing the reflex surface.
 //!
 //! ## Edge-triggered semantics
 //!

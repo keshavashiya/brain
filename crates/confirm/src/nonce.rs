@@ -718,7 +718,7 @@ mod tests {
         let outcome = engine.request(spec).await.unwrap();
         assert!(
             matches!(outcome, ApprovalOutcome::TimedOut),
-            "Phase 1a stub must NEVER auto-approve destructive actions"
+            "stub engine must NEVER auto-approve destructive actions"
         );
 
         // After timeout the entry is resolved.

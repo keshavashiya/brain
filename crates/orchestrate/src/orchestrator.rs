@@ -54,7 +54,7 @@ pub struct TaskOrchestrator {
     /// Channel dispatcher for `Notify` step types.
     pub(crate) dispatcher: Option<Arc<channel::ChannelDispatcher>>,
     /// Episodic memory store — captures delegation outcomes so future
-    /// runs can recall them. Phase 3 result aggregation.
+    /// runs can recall them.
     pub(crate) episodic: Option<Arc<hippocampus::EpisodicStore>>,
     /// Default fallback chain applied to every delegation. Individual
     /// step failures follow this chain unless overridden in the future.
@@ -66,10 +66,10 @@ pub struct TaskOrchestrator {
     pub(crate) available_tools: Vec<String>,
     /// Active tasks indexed by task ID.
     pub(crate) tasks: RwLock<HashMap<String, TaskState>>,
-    /// Observer bus for `BrainEvent::TaskStateChange` emissions
-    /// (v1.0.0 Phase 6). When unwired, transitions still update the
-    /// in-memory state and the optional persistence pool, but no event
-    /// goes out — existing tests can keep building bare orchestrators.
+    /// Observer bus for `BrainEvent::TaskStateChange` emissions. When
+    /// unwired, transitions still update the in-memory state and the
+    /// optional persistence pool, but no event goes out — existing tests
+    /// can keep building bare orchestrators.
     pub(crate) observer: Option<Arc<dyn observe::Observer>>,
     /// SQLite pool used to append rows to the `task_states` audit table
     /// (migration v22). When unwired, the state-machine history lives
@@ -250,7 +250,7 @@ impl TaskOrchestrator {
             .await
             .insert(task_id.clone(), CancellationToken::new());
 
-        // Phase 6 state-machine: emit the initial `planning` entry, then
+        // State-machine: emit the initial `planning` entry, then
         // transition to AwaitingApproval. Both events are visible to the
         // observer and persisted to `task_states` (if a pool is wired).
         self.record_initial_planning(&task_id).await;
@@ -855,7 +855,7 @@ impl TaskOrchestrator {
         Ok(())
     }
 
-    /// Phase 6 state-machine helper. The single canonical mutator of
+    /// State-machine helper. The single canonical mutator of
     /// [`TaskState::phase`]: takes the write lock just long enough to
     /// flip the in-memory field, then releases it before doing
     /// I/O-bound work (audit row write + observer publish). Idempotent
@@ -1043,7 +1043,7 @@ mod tests {
         ]
     }
 
-    // ── Phase 6 state-machine acceptance ────────────────────────────────
+    // ── State-machine acceptance ────────────────────────────────────────
 
     #[tokio::test]
     async fn phase6_state_machine_emits_canonical_transitions_and_persists_rows() {
@@ -1600,7 +1600,7 @@ mod tests {
             "s3 should be transitively Skipped, got {:?}",
             task.step_states.get("s3")
         );
-        // Phase 6 state-machine: a task with any non-succeeded step
+        // State-machine: a task with any non-succeeded step
         // lands in `Failed`, not `Completed`.
         assert_eq!(task.phase, TaskPhase::Failed);
     }
@@ -1750,7 +1750,7 @@ mod tests {
             task.step_states.get("replan-1"),
             Some(StepState::Completed { .. })
         ));
-        // Phase 6: mixed-outcome task lands in `Failed` — the
+        // Mixed-outcome task lands in `Failed` — the
         // original failure is recorded even though the replan
         // succeeded. (The user can still see the replanned-step
         // success in the per-step states.)

@@ -559,10 +559,10 @@ pub struct ApiKeyConfig {
     pub name: String,
     /// Granted permissions: `"read"` and/or `"write"`.
     pub permissions: Vec<String>,
-    /// Agent identity bound to this key (v1.0.0 Phase 1). Used by
-    /// adapters to resolve a `Principal` from the `identity:` config.
-    /// Backwards-compatible default: `None` — adapters then send
-    /// `Signal.principal = None` and the identity gate is skipped.
+    /// Agent identity bound to this key. Used by adapters to resolve a
+    /// `Principal` from the `identity:` config. Backwards-compatible
+    /// default: `None` — adapters then send `Signal.principal = None`
+    /// and the identity gate is skipped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
 }

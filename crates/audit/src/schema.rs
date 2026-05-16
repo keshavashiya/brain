@@ -58,8 +58,7 @@ pub struct AuditEntry {
     pub outcome: AuditOutcome,
     pub rollback: Option<String>, // Rollback coordinates (JSON)
     pub metadata: Option<String>, // Additional context (JSON)
-    /// Requesting principal (v1.0.0 Phase 1, `docs/v1.0.0.md` §7.3).
-    /// `None` on pre-Phase-1 rows — the spec's deliberate
+    /// Requesting principal. `None` on legacy rows — the deliberate
     /// "<unknown principal>" sentinel; not back-filled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal: Option<identity::Principal>,
@@ -98,7 +97,7 @@ impl AuditEntry {
         self
     }
 
-    /// Builder: attach the requesting principal (v1.0.0 Phase 1).
+    /// Builder: attach the requesting principal.
     pub fn with_principal(mut self, principal: identity::Principal) -> Self {
         self.principal = Some(principal);
         self
@@ -196,7 +195,7 @@ pub struct SqliteAuditTrail {
     /// Optional observability bus. When set, `record` fires a
     /// [`observe::BrainEvent::AuditAppended`] after the row is committed —
     /// the SQLite insert and the event publication share one ingestion path
-    /// so the two cannot drift (docs/v1.0.0.md §8.2 audit-bus unity).
+    /// so the two cannot drift (audit-bus unity).
     observer: Option<Arc<dyn observe::Observer>>,
 }
 
@@ -249,8 +248,8 @@ impl SqliteAuditTrail {
                     END;
                 "#,
             )?;
-            // v1.0.0 Phase 1 v19 upgrade: add principal_json to existing
-            // installs. Idempotent — silently no-op on duplicate-column.
+            // Add principal_json to existing installs. Idempotent —
+            // silently no-op on duplicate-column.
             let _ = conn.execute(
                 "ALTER TABLE audit_entries ADD COLUMN principal_json TEXT",
                 [],
@@ -288,11 +287,10 @@ impl SqliteAuditTrail {
             }
         };
 
-        // Column 16 is principal_json (v1.0.0 Phase 1, v19 upgrade). Pre-v19
-        // rows have NULL here → AuditEntry.principal stays None, which the
-        // UI renders as "<unknown principal>" per docs/v1.0.0.md §7.3.
-        // The column may also be missing entirely from older SELECT shapes
-        // — guard with try_get + ok().
+        // Column 16 is principal_json. Legacy rows have NULL here →
+        // AuditEntry.principal stays None, which the UI renders as
+        // "<unknown principal>". The column may also be missing entirely
+        // from older SELECT shapes — guard with try_get + ok().
         let principal = row
             .get::<_, Option<String>>(16)
             .ok()
@@ -574,7 +572,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// v1.0.0 Phase 0 — audit-bus unity: a successful `record` publishes a
+    /// Audit-bus unity: a successful `record` publishes a
     /// `BrainEvent::AuditAppended` carrying the same UUID as the persisted row.
     #[tokio::test]
     async fn record_publishes_audit_appended_event() {
@@ -607,7 +605,10 @@ mod tests {
                 ..
             } => {
                 assert_eq!(audit_entry_id, expected_id);
-                assert!(principal.is_none(), "Phase 0: principal not yet threaded");
+                assert!(
+                    principal.is_none(),
+                    "this entry should not carry a principal"
+                );
             }
             other => panic!("expected AuditAppended, got {other:?}"),
         }
@@ -627,7 +628,7 @@ mod tests {
         assert!(!id.is_empty());
     }
 
-    // ── v1.0.0 Phase 1 Tier D: principal_json round-trip ───────────────────
+    // ── principal_json round-trip ──────────────────────────────────────────
 
     fn test_principal() -> identity::Principal {
         identity::Principal {
@@ -683,11 +684,10 @@ mod tests {
         }
     }
 
-    /// Pre-Phase-1 entries (no principal) still record and publish cleanly.
-    /// Their event carries `principal: None` — the spec's "<unknown principal>"
-    /// sentinel (docs/v1.0.0.md §7.3).
+    /// Legacy entries (no principal) still record and publish cleanly. Their
+    /// event carries `principal: None` — the "<unknown principal>" sentinel.
     #[tokio::test]
-    async fn audit_appended_event_principal_none_for_pre_phase_1_entries() {
+    async fn audit_appended_event_principal_none_for_legacy_entries() {
         use observe::Observer as _;
         let pool = storage::SqlitePool::open_memory().unwrap();
         let observer = observe::BroadcastObserver::new();

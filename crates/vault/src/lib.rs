@@ -4,8 +4,6 @@
 //! encrypted-file fallback. Raw values are injected at execution time and
 //! never passed through BrainOS memory in plaintext form outside the vault
 //! call site.
-//!
-//! See `docs/AUTONOMOUS_IMPLEMENTATION.md §1.2` for the Phase 1b MVP spec.
 
 pub mod backend;
 pub mod file;

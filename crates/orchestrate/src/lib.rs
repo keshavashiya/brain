@@ -4,7 +4,7 @@
 //! a dependency DAG, coordinates execution with approval gates at the right
 //! moments, and synthesizes outcomes into user-facing summaries.
 //!
-//! This is the Phase 2 "prefrontal cortex" of Brain OS — the planning and
+//! This is the "prefrontal cortex" of Brain OS — the planning and
 //! coordination layer that turns "build a feature" into a sequence of
 //! researched, planned, implemented, tested, and delivered steps.
 
