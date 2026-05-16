@@ -38,11 +38,13 @@ use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod composite;
 pub mod cron;
 pub mod fs;
 mod noop;
 pub mod sys;
 
+pub use composite::{CompositeOp, CompositeReflex, CompositeReflexConfig};
 pub use cron::{CronReflex, CronReflexConfig};
 pub use fs::{FsChange, FsReflex, FsReflexConfig};
 pub use noop::NoopReflex;
