@@ -216,13 +216,24 @@ pub(crate) async fn cmd_serve(
     // `adapters.terminal.enabled` (so config can disable it globally
     // even with `--terminal`) and a wired bridge on the processor.
     if (run_all || terminal) && config.adapters.terminal.enabled {
-        match processor.terminal_bridge().cloned() {
-            Some(bridge) => {
+        match (
+            processor.terminal_bridge().cloned(),
+            processor.identity_store().cloned(),
+        ) {
+            (Some(bridge), Some(identity_store)) => {
                 let h = host.clone();
                 let port = config.adapters.terminal.port;
                 match tokio::net::TcpListener::bind(format!("{h}:{port}")).await {
                     Ok(_listener) => {
                         println!("  Synapse Term  → {}:{}", h, port);
+                        // Pair the wired identity store with this adapter's
+                        // api-key clone at spawn time — same shape as the
+                        // HTTP/WS/gRPC/MCP serve sites.
+                        let auth = terminal::TerminalAuth::new(
+                            identity_store,
+                            config.access.api_keys.clone(),
+                        );
+                        let bridge_for_spawn = bridge.as_ref().clone().with_auth(auth);
                         let h = h.clone();
                         set.spawn(async move {
                             let addr = match format!("{h}:{port}").parse() {
@@ -233,9 +244,8 @@ pub(crate) async fn cmd_serve(
                                     ));
                                 }
                             };
-                            let svc = bridge.as_ref().clone().into_server();
                             tonic::transport::Server::builder()
-                                .add_service(svc)
+                                .add_service(bridge_for_spawn.into_server())
                                 .serve(addr)
                                 .await
                                 .map_err(|e| anyhow::anyhow!("Terminal Bridge serve: {e}"))
@@ -248,9 +258,14 @@ pub(crate) async fn cmd_serve(
                     }
                 }
             }
-            None => {
+            (None, _) => {
                 failed_adapters.push(
                     "Terminal: bridge not wired in bootstrap (build_processor regression)".into(),
+                );
+            }
+            (Some(_), None) => {
+                failed_adapters.push(
+                    "Terminal: identity store not wired — refusing to expose unauthenticated bridge".into(),
                 );
             }
         }

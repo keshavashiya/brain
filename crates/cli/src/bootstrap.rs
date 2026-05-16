@@ -58,23 +58,23 @@ pub async fn build_processor(
     let identity_store: Arc<dyn identity::IdentityStore> = Arc::new(
         identity::ConfigIdentityStore::from_config(config.identity.clone()),
     );
-    processor = processor.with_identity_store(identity_store.clone());
+    processor = processor.with_identity_store(identity_store);
     tracing::info!(
         principals = config.identity.principals.len(),
         "Identity store wired (ConfigIdentityStore)"
     );
 
-    // Terminal Bridge — registry + auth + observer wiring for
+    // Terminal Bridge — registry + observer wiring for
     // `Intent::OpenTerminalSession` / `ListTerminalSessions` /
     // `CloseTerminalSession`. Always wired so the intent handlers have a
-    // real backend; the gRPC server that exposes the bridge over the wire
-    // is spawned by `cmd_serve` when `adapters.terminal.enabled`.
-    let terminal_auth = terminal::TerminalAuth::new(identity_store, config.access.api_keys.clone());
-    let terminal_bridge = terminal::TerminalBridge::new()
-        .with_auth(terminal_auth)
-        .with_observer(observer.clone());
+    // real backend; in-process callers go through the pipeline's identity
+    // gate just like HTTP/WS/gRPC/MCP signal handlers. Network-side
+    // `TerminalAuth` (api-key → agent_id → principal) is attached in
+    // `cmd_serve` at gRPC-server spawn, matching how every other adapter
+    // wires its per-request authentication.
+    let terminal_bridge = terminal::TerminalBridge::new().with_observer(observer.clone());
     processor = processor.with_terminal_bridge(Arc::new(terminal_bridge));
-    tracing::info!("Terminal Bridge wired (auth + observer)");
+    tracing::info!("Terminal Bridge wired (registry + observer)");
 
     // MCP host — always wired so `Intent::MountMcpServer` /
     // `ListMcpServers` / `UnmountMcpServer` and the `mcp:{server}:{tool}`
