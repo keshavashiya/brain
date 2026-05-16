@@ -592,6 +592,7 @@ dependencies = [
  "brainos-sandbox",
  "brainos-signal",
  "brainos-storage",
+ "brainos-terminal",
  "brainos-thalamus",
  "brainos-vault",
  "brainos-wsadapter",

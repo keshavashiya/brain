@@ -423,6 +423,7 @@ impl Default for BrainConfig {
                     enabled: true,
                     port: 19792,
                 },
+                terminal: TerminalAdapterConfig::default_enabled(),
             },
             access: AccessConfig {
                 api_keys: vec![ApiKeyConfig {

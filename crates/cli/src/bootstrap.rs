@@ -58,11 +58,23 @@ pub async fn build_processor(
     let identity_store: Arc<dyn identity::IdentityStore> = Arc::new(
         identity::ConfigIdentityStore::from_config(config.identity.clone()),
     );
-    processor = processor.with_identity_store(identity_store);
+    processor = processor.with_identity_store(identity_store.clone());
     tracing::info!(
         principals = config.identity.principals.len(),
         "Identity store wired (ConfigIdentityStore)"
     );
+
+    // Terminal Bridge — registry + auth + observer wiring for
+    // `Intent::OpenTerminalSession` / `ListTerminalSessions` /
+    // `CloseTerminalSession`. Always wired so the intent handlers have a
+    // real backend; the gRPC server that exposes the bridge over the wire
+    // is spawned by `cmd_serve` when `adapters.terminal.enabled`.
+    let terminal_auth = terminal::TerminalAuth::new(identity_store, config.access.api_keys.clone());
+    let terminal_bridge = terminal::TerminalBridge::new()
+        .with_auth(terminal_auth)
+        .with_observer(observer.clone());
+    processor = processor.with_terminal_bridge(Arc::new(terminal_bridge));
+    tracing::info!("Terminal Bridge wired (auth + observer)");
 
     // MCP host — always wired so `Intent::MountMcpServer` /
     // `ListMcpServers` / `UnmountMcpServer` and the `mcp:{server}:{tool}`
@@ -808,6 +820,28 @@ mod tests {
             .await
             .expect_err("unknown agent fails closed");
         assert!(matches!(err, identity::IdentityError::UnknownAgent(_)));
+    }
+
+    // Confirms `build_processor` wires a `TerminalBridge` so
+    // `Intent::OpenTerminalSession` / `ListTerminalSessions` /
+    // `CloseTerminalSession` have a real backend. Without this, every
+    // terminal intent handler returned "Terminal Bridge not configured"
+    // and the bridge's gRPC server (when spawned by cmd_serve) had no
+    // shared registry to serve.
+    #[tokio::test]
+    async fn terminal_bridge_wired() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = brain_core::BrainConfig::default();
+        cfg.brain.data_dir = tmp.path().to_str().unwrap().to_string();
+        cfg.agents.auto_discovery = false;
+
+        let processor = build_processor(&cfg).await.expect("processor builds");
+        let bridge = processor
+            .terminal_bridge()
+            .expect("terminal bridge wired by build_processor")
+            .clone();
+        // Sessions registry starts empty out of the box.
+        assert!(bridge.sessions().is_empty().await);
     }
 
     // Confirms `build_processor` wires an `MCPHost` so MCP intents and the

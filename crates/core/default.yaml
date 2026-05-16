@@ -156,6 +156,9 @@ adapters:
   grpc:
     enabled: true
     port: 19792
+  terminal:
+    enabled: true
+    port: 19793
 
 # ── Channel Relays ─────────────────────────────────────────────────────────────
 # Bidirectional WebSocket gateways. Unlike webhooks these are long-lived

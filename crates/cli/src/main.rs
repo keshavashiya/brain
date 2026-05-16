@@ -95,6 +95,9 @@ enum Commands {
         /// Activate the MCP HTTP synapse
         #[arg(long)]
         mcp: bool,
+        /// Activate the Terminal Bridge gRPC synapse (PTY sessions for agents)
+        #[arg(long)]
+        terminal: bool,
         /// Host to bind all synapses to
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
@@ -565,9 +568,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             ws,
             grpc,
             mcp,
+            terminal,
             host,
         } => {
-            serve::cmd_serve(&config, http, ws, grpc, mcp, host).await?;
+            serve::cmd_serve(&config, http, ws, grpc, mcp, terminal, host).await?;
         }
 
         // ── mcp stdio ─────────────────────────────────────────────────────────

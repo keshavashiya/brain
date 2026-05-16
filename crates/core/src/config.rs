@@ -598,6 +598,11 @@ pub struct AdaptersConfig {
     pub ws: WebSocketAdapterConfig,
     pub mcp: McpAdapterConfig,
     pub grpc: GrpcAdapterConfig,
+    /// Terminal Bridge gRPC server — backs `Intent::OpenTerminalSession`
+    /// and friends. Default enabled so AI agents can drive PTY sessions
+    /// out of the box.
+    #[serde(default = "TerminalAdapterConfig::default_enabled")]
+    pub terminal: TerminalAdapterConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -626,6 +631,31 @@ pub struct McpAdapterConfig {
 pub struct GrpcAdapterConfig {
     pub enabled: bool,
     pub port: u16,
+}
+
+/// Terminal Bridge gRPC server configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalAdapterConfig {
+    pub enabled: bool,
+    pub port: u16,
+}
+
+impl TerminalAdapterConfig {
+    /// Default for `#[serde(default)]` on `AdaptersConfig.terminal` — keeps
+    /// the bridge available out of the box for fresh installs whose YAML
+    /// pre-dates this field.
+    pub fn default_enabled() -> Self {
+        Self {
+            enabled: true,
+            port: 19793,
+        }
+    }
+}
+
+impl Default for TerminalAdapterConfig {
+    fn default() -> Self {
+        Self::default_enabled()
+    }
 }
 
 impl BrainConfig {}

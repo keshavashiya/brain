@@ -41,6 +41,7 @@ pub(crate) async fn cmd_serve(
     ws: bool,
     grpc: bool,
     mcp: bool,
+    terminal: bool,
     host: String,
 ) -> anyhow::Result<()> {
     // Validate config before starting
@@ -54,7 +55,7 @@ pub(crate) async fn cmd_serve(
         }
     }
 
-    let run_all = !http && !ws && !grpc && !mcp;
+    let run_all = !http && !ws && !grpc && !mcp && !terminal;
 
     // Build the fully-wired processor via the shared bootstrap path.
     let mut processor = crate::bootstrap::build_processor(config).await?;
@@ -206,6 +207,51 @@ pub(crate) async fn cmd_serve(
             Err(e) => {
                 failed_adapters.push(format!("MCP ({h}:{port}): {e}"));
                 tracing::warn!(port, "MCP synapse bind failed: {e}");
+            }
+        }
+    }
+
+    // Terminal Bridge gRPC server — exposes the wired
+    // `processor.terminal_bridge()` over the wire. Requires
+    // `adapters.terminal.enabled` (so config can disable it globally
+    // even with `--terminal`) and a wired bridge on the processor.
+    if (run_all || terminal) && config.adapters.terminal.enabled {
+        match processor.terminal_bridge().cloned() {
+            Some(bridge) => {
+                let h = host.clone();
+                let port = config.adapters.terminal.port;
+                match tokio::net::TcpListener::bind(format!("{h}:{port}")).await {
+                    Ok(_listener) => {
+                        println!("  Synapse Term  → {}:{}", h, port);
+                        let h = h.clone();
+                        set.spawn(async move {
+                            let addr = match format!("{h}:{port}").parse() {
+                                Ok(a) => a,
+                                Err(e) => {
+                                    return Err(anyhow::anyhow!(
+                                        "Terminal Bridge: invalid bind addr {h}:{port}: {e}"
+                                    ));
+                                }
+                            };
+                            let svc = bridge.as_ref().clone().into_server();
+                            tonic::transport::Server::builder()
+                                .add_service(svc)
+                                .serve(addr)
+                                .await
+                                .map_err(|e| anyhow::anyhow!("Terminal Bridge serve: {e}"))
+                        });
+                        bound_adapters.push("Terminal");
+                    }
+                    Err(e) => {
+                        failed_adapters.push(format!("Terminal ({h}:{port}): {e}"));
+                        tracing::warn!(port, "Terminal synapse bind failed: {e}");
+                    }
+                }
+            }
+            None => {
+                failed_adapters.push(
+                    "Terminal: bridge not wired in bootstrap (build_processor regression)".into(),
+                );
             }
         }
     }
