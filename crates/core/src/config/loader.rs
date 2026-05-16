@@ -434,6 +434,7 @@ impl Default for BrainConfig {
             },
             channel: ChannelIntelligenceConfig::default(),
             agents: AgentsConfig::default(),
+            confirm: ConfirmConfig::default(),
         }
     }
 }

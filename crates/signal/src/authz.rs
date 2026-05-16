@@ -42,7 +42,8 @@ pub fn intent_to_auth(intent: &Intent) -> Option<(AuthorizationRequest, Tier)> {
         | Intent::ListChannels
         | Intent::ChannelPreferences { .. }
         | Intent::ListTerminalSessions
-        | Intent::ListMcpServers => None,
+        | Intent::ListMcpServers
+        | Intent::ListStandingApprovals => None,
 
         // ── Memory mutations — Write tier under `memory.*` ─────────────
         Intent::StoreFact { .. } => {
@@ -152,6 +153,15 @@ pub fn intent_to_auth(intent: &Intent) -> Option<(AuthorizationRequest, Tier)> {
         Intent::UnmountMcpServer { name } => Some((
             AuthorizationRequest::new("mcp", "unmount")
                 .with_modifiers(serde_json::json!({ "name": name })),
+            Tier::Write,
+        )),
+
+        // ── Standing-approval revoke — Write tier. Granting is config-
+        // declared at startup, not slash-driven; only revoke is exposed
+        // as a runtime intent.
+        Intent::RevokeStandingApproval { id } => Some((
+            AuthorizationRequest::new("approval", "revoke")
+                .with_modifiers(serde_json::json!({ "id": id })),
             Tier::Write,
         )),
 
@@ -283,6 +293,23 @@ mod tests {
     #[test]
     fn list_mcp_servers_unguarded() {
         assert!(intent_to_auth(&Intent::ListMcpServers).is_none());
+    }
+
+    #[test]
+    fn list_standing_approvals_is_unguarded() {
+        assert!(intent_to_auth(&Intent::ListStandingApprovals).is_none());
+    }
+
+    #[test]
+    fn revoke_standing_approval_is_write_tier_with_id_modifier() {
+        let intent = Intent::RevokeStandingApproval {
+            id: "grant-42".into(),
+        };
+        let (req, tier) = intent_to_auth(&intent).unwrap();
+        assert_eq!(req.verb_ns, "approval");
+        assert_eq!(req.verb_action, "revoke");
+        assert_eq!(tier, Tier::Write);
+        assert_eq!(req.modifier_str("id"), Some("grant-42"));
     }
 
     #[test]

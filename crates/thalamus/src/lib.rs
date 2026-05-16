@@ -162,6 +162,15 @@ pub enum Intent {
     UnmountMcpServer { name: String },
     /// List currently-mounted MCP servers (read-only inspection).
     ListMcpServers,
+    /// List active standing approvals — every `(agent_id, verb_ns,
+    /// verb_action)` triple currently pre-granted to bypass the
+    /// human-confirm prompt. Read-only inspection so the user can
+    /// audit what their reflexes are allowed to do unattended.
+    ListStandingApprovals,
+    /// Revoke a previously-granted standing approval by id. Idempotent —
+    /// revoking an unknown or already-revoked id returns a friendly
+    /// "not found" rather than failing.
+    RevokeStandingApproval { id: String },
     /// Abstract tool invocation expressed as a Standardized Intent Token.
     /// Emitted by the classifier when the requested action can't be served by
     /// any of the typed variants above and must instead be resolved against

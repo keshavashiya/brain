@@ -271,6 +271,14 @@ impl SignalProcessor {
                 self.handle_respond_to_approval(signal_id, nonce, decision, &prepend_nudges)
                     .await
             }
+            thalamus::Intent::ListStandingApprovals => {
+                self.handle_list_standing_approvals(signal_id, &prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::RevokeStandingApproval { id } => {
+                self.handle_revoke_standing_approval(signal_id, id, &prepend_nudges)
+                    .await
+            }
             thalamus::Intent::BudgetStatus { window } => {
                 self.handle_budget_status(signal_id, window, &prepend_nudges)
                     .await
@@ -1068,6 +1076,64 @@ impl SignalProcessor {
             None => "Audit trail is not wired.".to_string(),
         };
 
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    pub(super) async fn handle_list_standing_approvals(
+        &self,
+        signal_id: Uuid,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let message = match &self.standing_approvals {
+            Some(store) => {
+                let grants = store.list_active().await.map_err(|e| {
+                    SignalError::Processing(format!("Failed to list standing approvals: {e}"))
+                })?;
+                if grants.is_empty() {
+                    "No active standing approvals.".to_string()
+                } else {
+                    let mut md = crate::render::Markdown::new();
+                    md.push_heading(3, "Active standing approvals");
+                    for g in grants {
+                        let note = g.note.as_deref().unwrap_or("");
+                        let suffix = if note.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" — {note}")
+                        };
+                        md.push_bullet(
+                            0,
+                            format!(
+                                "`{}` — {} for `{}.{}`{}",
+                                g.id, g.agent_id, g.verb_ns, g.verb_action, suffix
+                            ),
+                        );
+                    }
+                    md.push_line("Revoke with `/approval-revoke <id>`.");
+                    md.build()
+                }
+            }
+            None => "Standing-approval store is not wired.".to_string(),
+        };
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    pub(super) async fn handle_revoke_standing_approval(
+        &self,
+        signal_id: Uuid,
+        id: String,
+        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+    ) -> Result<PipelineResult, SignalError> {
+        let message = match &self.standing_approvals {
+            Some(store) => match store.revoke(&id).await {
+                Ok(true) => format!("Revoked standing approval `{id}`."),
+                Ok(false) => format!("Standing approval `{id}` not found or already revoked."),
+                Err(e) => format!("Failed to revoke `{id}`: {e}"),
+            },
+            None => "Standing-approval store is not wired.".to_string(),
+        };
         let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
         Ok(PipelineResult::Complete(resp))
     }

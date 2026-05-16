@@ -774,6 +774,29 @@ impl IntentClassifier {
             }
         }
 
+        // Standing-approval inspection and revocation. The list path is
+        // unguarded (read-only) and the revoke path is Tier::Write —
+        // both wired in signal::authz.
+        if trimmed == "/approval-list" || trimmed.starts_with("/approval-list ") {
+            return Some(Classification {
+                intent: Intent::ListStandingApprovals,
+                confidence: 1.0,
+                method: ClassificationMethod::Regex,
+                extracted_facts: Vec::new(),
+            });
+        }
+        if let Some(rest) = trimmed.strip_prefix("/approval-revoke") {
+            let id = rest.trim();
+            if !id.is_empty() {
+                return Some(Classification {
+                    intent: Intent::RevokeStandingApproval { id: id.to_string() },
+                    confidence: 1.0,
+                    method: ClassificationMethod::Regex,
+                    extracted_facts: Vec::new(),
+                });
+            }
+        }
+
         // /tool <verb_ns>.<verb_action> [json-args] — raw entrypoint for
         // the capability router. The verb pair routes against the wired
         // `intent::ToolRegistry`; optional JSON payload becomes the SIT's

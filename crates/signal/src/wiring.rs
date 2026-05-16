@@ -366,4 +366,20 @@ impl SignalProcessor {
     pub fn breaker_registry(&self) -> Option<&Arc<resilience::BreakerRegistry>> {
         self.breaker_registry.as_ref()
     }
+
+    /// Attach a standing-approval store. Wire the same `Arc` into the
+    /// `ConfirmationEngine` so the bypass check and the slash commands
+    /// see one consistent table.
+    pub fn with_standing_approvals(
+        mut self,
+        store: Arc<dyn confirm::StandingApprovalStore>,
+    ) -> Self {
+        self.standing_approvals = Some(store);
+        self
+    }
+
+    /// Expose the configured standing-approval store, if any.
+    pub fn standing_approvals(&self) -> Option<&Arc<dyn confirm::StandingApprovalStore>> {
+        self.standing_approvals.as_ref()
+    }
 }

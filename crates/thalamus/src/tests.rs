@@ -772,3 +772,34 @@ async fn tool_slash_with_missing_dot_does_not_match() {
         result.intent
     );
 }
+
+#[tokio::test]
+async fn approval_list_slash_classifies_to_list_standing_approvals() {
+    let classifier = IntentClassifier::new();
+    let result = classifier.classify("/approval-list").await;
+    assert!(
+        matches!(result.intent, Intent::ListStandingApprovals),
+        "expected ListStandingApprovals, got {:?}",
+        result.intent
+    );
+}
+
+#[tokio::test]
+async fn approval_revoke_slash_carries_id() {
+    let classifier = IntentClassifier::new();
+    let result = classifier.classify("/approval-revoke abc-123").await;
+    match result.intent {
+        Intent::RevokeStandingApproval { id } => assert_eq!(id, "abc-123"),
+        other => panic!("expected RevokeStandingApproval, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn approval_revoke_slash_without_id_falls_through() {
+    let classifier = IntentClassifier::new();
+    let result = classifier.classify("/approval-revoke").await;
+    assert!(
+        !matches!(result.intent, Intent::RevokeStandingApproval { .. }),
+        "bare /approval-revoke must not classify (id is required)"
+    );
+}

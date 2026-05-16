@@ -141,6 +141,15 @@ pub struct SignalProcessor {
     /// failure after each MCP call). Unwired processors don't track tool
     /// health.
     breaker_registry: Option<std::sync::Arc<resilience::BreakerRegistry>>,
+
+    // ── Standing approvals (v1.0.0 Phase 5) ─────────────────────────────
+    /// Standing-approval store, exposed to the `/approval-list` and
+    /// `/approval-revoke` handlers. The same `Arc` is wired into the
+    /// `ConfirmationEngine` at bootstrap time so the bypass check and
+    /// the slash commands see one consistent table. Unwired processors
+    /// return a deterministic "not configured" message from the slash
+    /// handlers.
+    standing_approvals: Option<std::sync::Arc<dyn confirm::StandingApprovalStore>>,
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

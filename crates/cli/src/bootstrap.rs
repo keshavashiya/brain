@@ -9,6 +9,7 @@ use std::sync::Arc;
 use crate::encryption::resolve_encryptor;
 use crate::encryption::resolve_llm_api_key;
 use backends::*;
+use confirm::StandingApprovalStore;
 
 /// Build a fully-wired `SignalProcessor` from config.
 ///
@@ -80,17 +81,61 @@ async fn wire_safety_infrastructure(
         Arc::new(channel::DefaultChannelRouter::new(preferences.clone()));
     let dispatcher = Arc::new(channel::ChannelDispatcher::new(router.clone()));
 
+    // Standing-approval store — same DB as the confirm engine. Migration
+    // v21 creates the table; we populate any YAML-declared grants here
+    // (idempotent: skip rows already active under the same triple, so
+    // restarts don't pile up duplicate grants).
+    let standing_concrete = confirm::SqliteStandingApprovals::new(db.clone());
+    for decl in &config.confirm.standing_approvals {
+        let key = confirm::GrantKey::new(&decl.agent_id, &decl.verb_ns, &decl.verb_action);
+        match standing_concrete.is_granted(&key).await {
+            Ok(true) => {
+                tracing::debug!(
+                    agent = %decl.agent_id,
+                    verb_ns = %decl.verb_ns,
+                    verb_action = %decl.verb_action,
+                    "standing approval already active; skipping config grant"
+                );
+            }
+            Ok(false) => match standing_concrete.grant(&key, decl.note.as_deref()).await {
+                Ok(id) => tracing::info!(
+                    id = %id,
+                    agent = %decl.agent_id,
+                    verb_ns = %decl.verb_ns,
+                    verb_action = %decl.verb_action,
+                    "standing approval granted from config"
+                ),
+                Err(e) => tracing::warn!(
+                    agent = %decl.agent_id,
+                    verb_ns = %decl.verb_ns,
+                    verb_action = %decl.verb_action,
+                    error = %e,
+                    "config-declared standing approval failed to insert"
+                ),
+            },
+            Err(e) => tracing::warn!(
+                agent = %decl.agent_id,
+                error = %e,
+                "standing-approval lookup failed during config load"
+            ),
+        }
+    }
+    let standing_store: Arc<dyn confirm::StandingApprovalStore> = Arc::new(standing_concrete);
+
     // Confirmation engine — always wired, with notifier hook so approval
     // prompts actually reach the user instead of deadlocking on timeout.
+    // The standing-approval store is wired here so `request()` can
+    // bypass the prompt for pre-granted (agent, verb) tuples.
     let approval_notifier: Arc<dyn confirm::ApprovalNotifier> =
         Arc::new(signal::ChannelApprovalNotifier::new(dispatcher.clone()));
-    let confirm_engine =
-        confirm::SqliteConfirmationEngine::new(db.clone()).with_notifier(approval_notifier);
+    let confirm_engine = confirm::SqliteConfirmationEngine::new(db.clone())
+        .with_notifier(approval_notifier)
+        .with_standing_approvals(standing_store.clone());
     confirm_engine
         .ensure_tables()
         .map_err(|e| anyhow::anyhow!("Confirmation engine table init failed: {e}"))?;
     let confirm_engine: Arc<dyn confirm::ConfirmationEngine> = Arc::new(confirm_engine);
-    tracing::info!("Confirmation engine wired (with channel-backed approval notifier)");
+    tracing::info!("Confirmation engine wired (notifier + standing approvals)");
 
     // Cost budget — always wired, with audit coupling
     let budget_policy = budget::BudgetPolicy::default();
@@ -121,6 +166,7 @@ async fn wire_safety_infrastructure(
     let processor = processor
         .with_audit_trail(audit_trail.clone())
         .with_confirmation_engine(confirm_engine.clone())
+        .with_standing_approvals(standing_store.clone())
         .with_cost_budget(cost_budget)
         .with_sandbox_executor(sandbox_executor.clone());
 

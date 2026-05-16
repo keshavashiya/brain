@@ -30,6 +30,29 @@ pub struct BrainConfig {
     pub channel: ChannelIntelligenceConfig,
     #[serde(default)]
     pub agents: AgentsConfig,
+    #[serde(default)]
+    pub confirm: ConfirmConfig,
+}
+
+/// Confirmation-engine configuration. Currently only declares standing
+/// approvals — pre-granted (agent, verb) consent that bypasses the
+/// human-confirm prompt. Empty defaults preserve pre-Phase-5 behavior.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConfirmConfig {
+    #[serde(default)]
+    pub standing_approvals: Vec<StandingApprovalDecl>,
+}
+
+/// One standing-approval declaration. Loaded at startup into the
+/// `StandingApprovalStore`; idempotent across launches (an existing
+/// active grant for the same triple is left alone).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StandingApprovalDecl {
+    pub agent_id: String,
+    pub verb_ns: String,
+    pub verb_action: String,
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
