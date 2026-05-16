@@ -1033,6 +1033,7 @@ name = "brainos-reflex"
 version = "0.3.0"
 dependencies = [
  "async-trait",
+ "brainos-storage",
  "chrono",
  "futures",
  "notify",

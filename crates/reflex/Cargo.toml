@@ -18,6 +18,7 @@ notify = "8"
 notify-debouncer-full = "0.6"
 serde = { workspace = true }
 serde_json = { workspace = true }
+storage = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt", "time"] }
 tokio-stream = "0.1"

@@ -38,9 +38,11 @@ use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod cron;
 pub mod fs;
 mod noop;
 
+pub use cron::{CronReflex, CronReflexConfig};
 pub use fs::{FsChange, FsReflex, FsReflexConfig};
 pub use noop::NoopReflex;
 
