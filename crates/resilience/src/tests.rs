@@ -442,3 +442,106 @@ fn timeout_error_display_distinguishes_elapsed_and_inner() {
     let inner: TimeoutError<&'static str> = TimeoutError::Inner("nope");
     assert_eq!(inner.to_string(), "nope");
 }
+
+// ─── RateLimit tests ────────────────────────────────────────────────────────
+
+fn rl_config(tokens_per_refill: u32, refill_ms: u64, burst: u32) -> RateLimitConfig {
+    RateLimitConfig {
+        tokens_per_refill,
+        refill_interval: Duration::from_millis(refill_ms),
+        burst_capacity: burst,
+    }
+}
+
+#[tokio::test]
+async fn rate_limiter_allows_burst_up_to_capacity() {
+    // 1 token/sec refill, burst 5 — five instant acquires should
+    // complete well under a refill interval.
+    let rl = RateLimiter::new("t", rl_config(1, 1000, 5));
+    let start = std::time::Instant::now();
+    for _ in 0..5 {
+        rl.acquire().await;
+    }
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(50),
+        "burst of 5 should be ~instant, took {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn rate_limiter_blocks_when_drained() {
+    // 100 tokens/sec → ~10ms per token, burst 1.
+    let rl = RateLimiter::new("t", rl_config(100, 1000, 1));
+    rl.acquire().await; // drains
+    let start = std::time::Instant::now();
+    rl.acquire().await;
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed >= Duration::from_millis(8),
+        "second acquire should have waited ~10ms, got {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(60),
+        "second acquire should not have waited a full second, got {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn rate_limiter_refills_over_time() {
+    let rl = RateLimiter::new("t", rl_config(50, 1000, 2)); // 50 tok/s, burst 2
+    rl.acquire().await;
+    rl.acquire().await; // drains
+    assert!(!rl.try_acquire().await, "should be drained");
+    sleep(Duration::from_millis(60)).await; // ≥ 3 tokens accrue, capped at burst=2
+    assert!(
+        rl.try_acquire().await,
+        "first refill token should be present"
+    );
+    assert!(
+        rl.try_acquire().await,
+        "second refill token should be present (capped at burst)"
+    );
+    assert!(!rl.try_acquire().await, "third try should miss — capped");
+}
+
+#[tokio::test]
+async fn rate_limiter_try_acquire_does_not_block() {
+    let rl = RateLimiter::new("t", rl_config(1, 10_000, 1)); // 0.1 tok/s
+    assert!(rl.try_acquire().await, "first token should be present");
+    assert!(
+        !rl.try_acquire().await,
+        "second try should fail without sleeping"
+    );
+}
+
+#[tokio::test]
+async fn rate_limit_registry_creates_limiters_lazily() {
+    let reg = RateLimitRegistry::new(rl_config(10, 1000, 10));
+    assert!(reg.is_empty().await);
+    assert!(reg.get("missing").await.is_none());
+    let rl = reg.get_or_create("mcp:echo:echo").await;
+    assert_eq!(rl.tool_id(), "mcp:echo:echo");
+    assert_eq!(reg.len().await, 1);
+    let again = reg.get_or_create("mcp:echo:echo").await;
+    assert!(Arc::ptr_eq(&rl, &again), "same Arc on second call");
+}
+
+#[tokio::test]
+async fn rate_limit_registry_isolates_per_tool() {
+    let reg = RateLimitRegistry::new(rl_config(1, 10_000, 1));
+    reg.acquire("a").await;
+    // 'a' is drained; 'b' should still have its own full bucket.
+    let rl_b = reg.get_or_create("b").await;
+    assert!(
+        rl_b.try_acquire().await,
+        "tool b should not be affected by tool a's drain"
+    );
+}
+
+#[test]
+fn rate_limit_config_default_is_sane() {
+    let c = RateLimitConfig::default();
+    assert!(c.burst_capacity >= c.tokens_per_refill);
+    assert!(c.refill_interval > Duration::ZERO);
+}

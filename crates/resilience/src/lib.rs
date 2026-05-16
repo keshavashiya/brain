@@ -328,5 +328,10 @@ pub use retry::{retry, BreakerOpenAbort, RetryConfig, RetryOutcome};
 mod timeout;
 pub use timeout::{timeout, TimeoutError};
 
+// ─── RateLimit primitive ───────────────────────────────────────────────────
+
+mod rate_limit;
+pub use rate_limit::{RateLimitConfig, RateLimitRegistry, RateLimiter};
+
 #[cfg(test)]
 mod tests;
