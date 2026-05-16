@@ -15,11 +15,13 @@ use observe::Observer;
 use tokio::sync::Mutex;
 
 pub mod error;
+pub mod graph;
 pub mod server;
 pub(crate) mod session;
 pub mod types;
 
 pub use error::TerminalError;
+pub use graph::{MirrorError, TerminalGraphHandles, TerminalGraphSink};
 pub use server::TerminalSvc;
 pub use types::{SessionId, SessionMeta, TermSize};
 
@@ -105,13 +107,15 @@ impl TerminalAuth {
 
 /// Terminal Bridge service handle.
 ///
-/// Holds the [`SessionRegistry`] plus optional [`TerminalAuth`] and
-/// [`Observer`] wiring. Cheap to clone (everything inside is `Arc`-ed).
+/// Holds the [`SessionRegistry`] plus optional [`TerminalAuth`],
+/// [`Observer`], and [`TerminalGraphSink`] wiring. Cheap to clone
+/// (everything inside is `Arc`-ed).
 #[derive(Clone)]
 pub struct TerminalBridge {
     sessions: Arc<SessionRegistry>,
     auth: Option<TerminalAuth>,
     observer: Option<Arc<dyn Observer>>,
+    graph_sink: Option<Arc<dyn TerminalGraphSink>>,
 }
 
 impl TerminalBridge {
@@ -120,6 +124,7 @@ impl TerminalBridge {
             sessions: Arc::new(SessionRegistry::new()),
             auth: None,
             observer: None,
+            graph_sink: None,
         }
     }
 
@@ -143,6 +148,14 @@ impl TerminalBridge {
         self
     }
 
+    /// Attach a [`TerminalGraphSink`] so every session lifecycle also
+    /// lands `tool_call → terminal_event(open) → terminal_event(close)`
+    /// nodes/edges in the episodic graph.
+    pub fn with_graph_sink(mut self, sink: Arc<dyn TerminalGraphSink>) -> Self {
+        self.graph_sink = Some(sink);
+        self
+    }
+
     /// Build the tonic-generated server wrapping a [`TerminalSvc`] backed by
     /// this bridge's registry. Plug into a `tonic::transport::Server::builder`.
     pub fn into_server(self) -> pb::terminal_session_server::TerminalSessionServer<TerminalSvc> {
@@ -150,6 +163,7 @@ impl TerminalBridge {
             self.sessions,
             self.auth,
             self.observer,
+            self.graph_sink,
         ))
     }
 
@@ -161,6 +175,7 @@ impl TerminalBridge {
             self.sessions.clone(),
             self.auth.clone(),
             self.observer.clone(),
+            self.graph_sink.clone(),
         )
     }
 }

@@ -13,6 +13,7 @@
 pub mod approval;
 pub mod authz;
 pub mod notification;
+pub mod terminal_graph_mirror;
 pub mod types;
 
 mod budget_guard;

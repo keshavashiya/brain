@@ -19,6 +19,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::{
+    graph::TerminalGraphSink,
     pb::{
         self, client_frame, server_frame, terminal_session_server::TerminalSession, ClientFrame,
         CloseAck, InputChunk, OpenRequest, OutputChunk, ResizeAck, ResizeRequest, SendAck,
@@ -46,6 +47,7 @@ pub struct TerminalSvc {
     registry: Arc<SessionRegistry>,
     auth: Option<TerminalAuth>,
     observer: Option<Arc<dyn Observer>>,
+    graph_sink: Option<Arc<dyn TerminalGraphSink>>,
 }
 
 impl TerminalSvc {
@@ -53,11 +55,13 @@ impl TerminalSvc {
         registry: Arc<SessionRegistry>,
         auth: Option<TerminalAuth>,
         observer: Option<Arc<dyn Observer>>,
+        graph_sink: Option<Arc<dyn TerminalGraphSink>>,
     ) -> Self {
         Self {
             registry,
             auth,
             observer,
+            graph_sink,
         }
     }
 
@@ -293,12 +297,39 @@ impl TerminalSvc {
             ts: Utc::now(),
         };
 
+        // Graph mirror: write the two open-side nodes and the
+        // `tool_call → terminal_event(open)` edge. Failures are logged
+        // and the lifecycle proceeds — a missing graph row must never
+        // block a live PTY.
+        let graph_handles = if let Some(sink) = &self.graph_sink {
+            let principal_ref = principal.as_ref();
+            match sink
+                .record_open(
+                    &session_id,
+                    &meta.program,
+                    &meta.args,
+                    meta.cwd.as_deref(),
+                    principal_ref,
+                )
+                .await
+            {
+                Ok(h) => Some(h),
+                Err(e) => {
+                    warn!(session_id = %session_id, error = %e, "graph mirror record_open failed");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let session = Arc::new(Session {
             meta,
             out_anchor,
             in_tx,
             master,
             child: Arc::new(Mutex::new(child)),
+            graph_handles,
         });
         self.registry.insert(session).await;
         self.publish(event).await;
@@ -335,6 +366,15 @@ impl TerminalSvc {
             ts: Utc::now(),
         })
         .await;
+
+        // Graph mirror: write the close-side node + the second
+        // `causal_produced` edge. Same fail-soft posture as
+        // `record_open`.
+        if let (Some(sink), Some(handles)) = (&self.graph_sink, &session.graph_handles) {
+            if let Err(e) = sink.record_close(handles, id, exit_code, was_killed).await {
+                warn!(session_id = %id, error = %e, "graph mirror record_close failed");
+            }
+        }
 
         Ok(CloseAck {
             exit_code,

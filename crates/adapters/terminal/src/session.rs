@@ -10,6 +10,7 @@ use bytes::Bytes;
 use portable_pty::{Child, MasterPty};
 use tokio::sync::{broadcast, mpsc, Mutex};
 
+use crate::graph::TerminalGraphHandles;
 use crate::types::SessionMeta;
 
 /// Capacity for the per-session output broadcast channel. Late subscribers
@@ -37,4 +38,8 @@ pub(crate) struct Session {
     pub(crate) in_tx: mpsc::Sender<Bytes>,
     pub(crate) master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     pub(crate) child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
+    /// Graph node handles produced at session open; consulted by
+    /// `close_inner` to wire the close-side edge back to the open
+    /// event. `None` when the bridge runs without a graph sink.
+    pub(crate) graph_handles: Option<TerminalGraphHandles>,
 }
