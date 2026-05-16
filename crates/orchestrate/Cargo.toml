@@ -13,6 +13,7 @@ categories.workspace = true
 [dependencies]
 brain_core = { workspace = true }
 storage = { workspace = true }
+observe = { workspace = true }
 audit = { workspace = true }
 confirm = { workspace = true }
 budget = { workspace = true }

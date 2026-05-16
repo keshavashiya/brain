@@ -18,8 +18,17 @@ pub fn summarize_task(state: &TaskState) -> String {
             )
         }
         crate::state::TaskPhase::Executing => format_executing(&state.request, &counts, total),
+        crate::state::TaskPhase::Reconciling => {
+            format!("Reconciling: \"{}\" — verifying outcomes", state.request)
+        }
         crate::state::TaskPhase::Completed => {
             format_completed(&state.request, state, &counts, total)
+        }
+        crate::state::TaskPhase::Failed => {
+            format!(
+                "Failed: \"{}\" — {} of {total} steps failed",
+                state.request, counts.failed
+            )
         }
         crate::state::TaskPhase::Cancelled => {
             format!("Cancelled: \"{}\"", state.request)

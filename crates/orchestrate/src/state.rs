@@ -63,6 +63,12 @@ pub struct StepOutcome {
 }
 
 /// Overall phase of the task.
+///
+/// Phase 6 formalized the canonical state machine as
+/// `Planning → Executing → Reconciling → (Completed | Failed)`.
+/// `AwaitingApproval` is a side-channel state entered before `Executing`
+/// when the plan needs human consent; `Cancelled` is a terminal state
+/// reachable from anywhere via [`crate::TaskOrchestrator::cancel`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskPhase {
@@ -72,10 +78,44 @@ pub enum TaskPhase {
     AwaitingApproval,
     /// Steps are being executed.
     Executing,
-    /// All steps completed (some may have failed).
+    /// All steps complete; verifying the world matches what was planned
+    /// before committing to a terminal phase. Phase 6 introduced this as
+    /// the explicit "world-drift detection" hook; today it's a brief
+    /// no-op transition that lands on `Completed` or `Failed` based on
+    /// step outcomes.
+    Reconciling,
+    /// All steps completed successfully.
     Completed,
+    /// At least one step failed and the orchestrator gave up
+    /// (replan budget exhausted or non-retryable error).
+    Failed,
     /// Task was cancelled.
     Cancelled,
+}
+
+impl TaskPhase {
+    /// Stable wire string used by [`observe::BrainEvent::TaskStateChange`]
+    /// and the `task_states` audit table. Snake-case matches the serde
+    /// representation; keep them in sync if either changes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskPhase::Planning => "planning",
+            TaskPhase::AwaitingApproval => "awaiting_approval",
+            TaskPhase::Executing => "executing",
+            TaskPhase::Reconciling => "reconciling",
+            TaskPhase::Completed => "completed",
+            TaskPhase::Failed => "failed",
+            TaskPhase::Cancelled => "cancelled",
+        }
+    }
+
+    /// True for phases the orchestrator never transitions out of.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            TaskPhase::Completed | TaskPhase::Failed | TaskPhase::Cancelled
+        )
+    }
 }
 
 /// Complete state of a task — graph + per-step states.

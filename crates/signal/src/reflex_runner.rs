@@ -100,7 +100,12 @@ mod tests {
             // returns without hitting the LLM or the confirmation gate.
             // Confirms only that the runner subscribes, builds a signal,
             // and dispatches it through `process()`.
-            Signal::new(SignalSource::Cli, "reflex", "reflex-agent", "/approval-list")
+            Signal::new(
+                SignalSource::Cli,
+                "reflex",
+                "reflex-agent",
+                "/approval-list",
+            )
         })
         .await
         .expect("spawn");

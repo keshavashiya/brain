@@ -4,14 +4,14 @@ use super::*;
 fn test_open_memory() {
     let pool = SqlitePool::open_memory().unwrap();
     let version = pool.schema_version().unwrap();
-    assert_eq!(version, 21);
+    assert_eq!(version, 22);
 }
 
 #[test]
 fn test_migrations_idempotent() {
     let pool = SqlitePool::open_memory().unwrap();
     pool.migrate().unwrap();
-    assert_eq!(pool.schema_version().unwrap(), 21);
+    assert_eq!(pool.schema_version().unwrap(), 22);
 }
 
 #[test]

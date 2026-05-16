@@ -367,6 +367,27 @@ impl SqlitePool {
                     ON standing_approvals(granted_at DESC);
             ",
             ),
+            (
+                22,
+                "create_task_states",
+                "
+                -- Phase 6 orchestrator state-machine history. One row
+                -- per phase transition; the AUTOINCREMENT id doubles as
+                -- a monotonic sequence so a task that re-enters a state
+                -- (e.g. Executing after a replan) leaves a faithful
+                -- audit trail. Replay = `ORDER BY id ASC WHERE task_id
+                -- = ?`. Indexed on task_id so per-task lookups stay
+                -- cheap as the table grows across many tasks.
+                CREATE TABLE IF NOT EXISTS task_states (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    entered_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_task_states_task
+                    ON task_states(task_id, id);
+            ",
+            ),
         ]
     }
 

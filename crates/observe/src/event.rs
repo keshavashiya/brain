@@ -109,6 +109,18 @@ pub enum BrainEvent {
         principal: Option<PrincipalSummary>,
         ts: DateTime<Utc>,
     },
+    /// Orchestrator phase transition (v1.0.0 Phase 6). `from` is
+    /// `"none"` for the initial entry into `Planning`; subsequent
+    /// transitions name the prior phase. The string shape (rather than
+    /// a typed enum) keeps `observe` free of an `orchestrate` dep, just
+    /// like `BreakerStateChange` keeps it free of `resilience`.
+    TaskStateChange {
+        id: Uuid,
+        task_id: String,
+        from: String,
+        to: String,
+        ts: DateTime<Utc>,
+    },
 }
 
 impl BrainEvent {
@@ -131,6 +143,7 @@ impl BrainEvent {
             BrainEvent::Error { .. } => "error",
             BrainEvent::TerminalSessionOpened { .. } => "terminal_session_opened",
             BrainEvent::TerminalSessionClosed { .. } => "terminal_session_closed",
+            BrainEvent::TaskStateChange { .. } => "task_state_change",
         }
     }
 
@@ -151,7 +164,8 @@ impl BrainEvent {
             | BrainEvent::BreakerStateChange { id, .. }
             | BrainEvent::Error { id, .. }
             | BrainEvent::TerminalSessionOpened { id, .. }
-            | BrainEvent::TerminalSessionClosed { id, .. } => *id,
+            | BrainEvent::TerminalSessionClosed { id, .. }
+            | BrainEvent::TaskStateChange { id, .. } => *id,
         }
     }
 

@@ -65,6 +65,15 @@ pub struct TaskOrchestrator {
     pub(crate) available_tools: Vec<String>,
     /// Active tasks indexed by task ID.
     pub(crate) tasks: RwLock<HashMap<String, TaskState>>,
+    /// Observer bus for `BrainEvent::TaskStateChange` emissions
+    /// (v1.0.0 Phase 6). When unwired, transitions still update the
+    /// in-memory state and the optional persistence pool, but no event
+    /// goes out — existing tests can keep building bare orchestrators.
+    pub(crate) observer: Option<Arc<dyn observe::Observer>>,
+    /// SQLite pool used to append rows to the `task_states` audit table
+    /// (migration v22). When unwired, the state-machine history lives
+    /// only in memory.
+    pub(crate) state_pool: Option<storage::SqlitePool>,
 }
 
 /// Maximum number of replan-on-failure attempts per task. Bounds LLM
@@ -86,6 +95,8 @@ impl TaskOrchestrator {
             delegation_policy: delegate::EscalationPolicy::default(),
             available_tools: Vec::new(),
             tasks: RwLock::new(HashMap::new()),
+            observer: None,
+            state_pool: None,
         }
     }
 
@@ -146,6 +157,21 @@ impl TaskOrchestrator {
         self
     }
 
+    /// Attach an observer bus so phase transitions emit
+    /// [`observe::BrainEvent::TaskStateChange`]. Unwired = silent.
+    pub fn with_observer(mut self, observer: Arc<dyn observe::Observer>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
+    /// Attach a SQLite pool so phase transitions append rows to the
+    /// `task_states` audit table (migration v22). Unwired = in-memory
+    /// history only.
+    pub fn with_state_pool(mut self, pool: storage::SqlitePool) -> Self {
+        self.state_pool = Some(pool);
+        self
+    }
+
     /// Override the default delegation escalation policy.
     pub fn with_delegation_policy(mut self, policy: delegate::EscalationPolicy) -> Self {
         self.delegation_policy = policy;
@@ -165,8 +191,7 @@ impl TaskOrchestrator {
         let graph = TaskGraph::from_steps(steps)?;
 
         let task_id = uuid::Uuid::new_v4().to_string();
-        let mut task_state = TaskState::new(task_id.clone(), request.to_string(), graph);
-        task_state.phase = TaskPhase::AwaitingApproval;
+        let task_state = TaskState::new(task_id.clone(), request.to_string(), graph);
 
         let plan_text = synthesize::format_plan_for_approval(&task_state);
 
@@ -186,20 +211,28 @@ impl TaskOrchestrator {
 
         self.tasks.write().await.insert(task_id.clone(), task_state);
 
+        // Phase 6 state-machine: emit the initial `planning` entry, then
+        // transition to AwaitingApproval. Both events are visible to the
+        // observer and persisted to `task_states` (if a pool is wired).
+        self.record_initial_planning(&task_id).await;
+        self.transition_phase(&task_id, TaskPhase::AwaitingApproval)
+            .await;
+
         tracing::info!(task_id = %task_id, "Task plan created");
         Ok((task_id, plan_text))
     }
 
     /// Execute a previously planned task (after user approval).
     pub async fn execute(&self, task_id: &str) -> Result<String, OrchestrateError> {
-        // Transition to executing phase
+        // Confirm the task exists before any state work so a wrong
+        // task_id never produces a phantom transition event.
         {
-            let mut tasks = self.tasks.write().await;
-            let task = tasks
-                .get_mut(task_id)
-                .ok_or_else(|| OrchestrateError::TaskNotFound(task_id.to_string()))?;
-            task.phase = TaskPhase::Executing;
+            let tasks = self.tasks.read().await;
+            if !tasks.contains_key(task_id) {
+                return Err(OrchestrateError::TaskNotFound(task_id.to_string()));
+            }
         }
+        self.transition_phase(task_id, TaskPhase::Executing).await;
 
         tracing::info!(task_id = %task_id, "Starting task execution");
 
@@ -482,25 +515,51 @@ impl TaskOrchestrator {
                 self.try_replan_after_failure(task_id, step_id, &description, &error)
                     .await;
 
-                // Re-acquire the lock to mark the task complete (or not).
-                let mut tasks = self.tasks.write().await;
-                let task = tasks
-                    .get_mut(task_id)
-                    .expect("invariant: task_id always corresponds to a planned task");
-                if task.is_complete() {
-                    task.phase = TaskPhase::Completed;
-                    task.completed_at = Some(Utc::now());
-                    tracing::info!(task_id = %task_id, "Task completed");
+                // Re-check completion + drive the canonical
+                // Reconciling → (Completed | Failed) shape under the
+                // state-machine helper.
+                let (done, all_succeeded) = {
+                    let tasks = self.tasks.read().await;
+                    let task = tasks
+                        .get(task_id)
+                        .expect("invariant: task_id always corresponds to a planned task");
+                    (task.is_complete(), task.all_succeeded())
+                };
+                if done {
+                    self.transition_phase(task_id, TaskPhase::Reconciling).await;
+                    let terminal = if all_succeeded {
+                        TaskPhase::Completed
+                    } else {
+                        TaskPhase::Failed
+                    };
+                    self.transition_phase(task_id, terminal).await;
+                    tracing::info!(task_id = %task_id, terminal = %terminal.as_str(), "Task complete");
                 }
                 return Ok(());
             }
         }
 
-        // Check if task is complete (success path).
-        if task.is_complete() {
-            task.phase = TaskPhase::Completed;
-            task.completed_at = Some(Utc::now());
-            tracing::info!(task_id = %task_id, "Task completed");
+        // Drop the write lock before the I/O-bound transition_phase
+        // calls below — they take their own lock for the brief in-mem
+        // flip and we don't want to hold the executor's lock through
+        // the audit-row write and observer publish.
+        drop(tasks);
+        let (done, all_succeeded) = {
+            let tasks = self.tasks.read().await;
+            let task = tasks
+                .get(task_id)
+                .expect("invariant: task_id always corresponds to a planned task");
+            (task.is_complete(), task.all_succeeded())
+        };
+        if done {
+            self.transition_phase(task_id, TaskPhase::Reconciling).await;
+            let terminal = if all_succeeded {
+                TaskPhase::Completed
+            } else {
+                TaskPhase::Failed
+            };
+            self.transition_phase(task_id, terminal).await;
+            tracing::info!(task_id = %task_id, terminal = %terminal.as_str(), "Task complete");
         }
 
         Ok(())
@@ -656,17 +715,135 @@ impl TaskOrchestrator {
 
     /// Cancel a task.
     pub async fn cancel(&self, task_id: &str) -> Result<(), OrchestrateError> {
-        let mut tasks = self.tasks.write().await;
-        let task = tasks
-            .get_mut(task_id)
-            .ok_or_else(|| OrchestrateError::TaskNotFound(task_id.to_string()))?;
-        task.phase = TaskPhase::Cancelled;
-        for (_, state) in task.step_states.iter_mut() {
-            if !state.is_terminal() {
-                *state = StepState::Cancelled;
+        {
+            let mut tasks = self.tasks.write().await;
+            let task = tasks
+                .get_mut(task_id)
+                .ok_or_else(|| OrchestrateError::TaskNotFound(task_id.to_string()))?;
+            for (_, state) in task.step_states.iter_mut() {
+                if !state.is_terminal() {
+                    *state = StepState::Cancelled;
+                }
             }
         }
+        self.transition_phase(task_id, TaskPhase::Cancelled).await;
         Ok(())
+    }
+
+    /// Phase 6 state-machine helper. The single canonical mutator of
+    /// [`TaskState::phase`]: takes the write lock just long enough to
+    /// flip the in-memory field, then releases it before doing
+    /// I/O-bound work (audit row write + observer publish). Idempotent
+    /// for terminal transitions — if a task is already in a terminal
+    /// phase, the helper is a no-op so cancel-then-complete races stay
+    /// well-defined.
+    pub(crate) async fn transition_phase(&self, task_id: &str, to: TaskPhase) {
+        // Read prior phase + write the new one under one lock. The
+        // bound block guarantees the guard drops before the async I/O
+        // below so other handlers aren't blocked on the disk write.
+        let from = {
+            let mut tasks = self.tasks.write().await;
+            let task = match tasks.get_mut(task_id) {
+                Some(t) => t,
+                None => return,
+            };
+            if task.phase.is_terminal() && task.phase != to {
+                // Already done — refuse to flip out of a terminal
+                // state so a late completion doesn't overwrite a
+                // cancellation.
+                tracing::debug!(
+                    task_id = %task_id,
+                    from = %task.phase.as_str(),
+                    to = %to.as_str(),
+                    "ignoring transition out of terminal state"
+                );
+                return;
+            }
+            if task.phase == to {
+                return;
+            }
+            let from = task.phase;
+            task.phase = to;
+            if to.is_terminal() {
+                task.completed_at = Some(Utc::now());
+            }
+            from
+        };
+
+        // Audit table append (best-effort — a write failure is logged
+        // and we proceed so the in-memory phase update isn't undone).
+        if let Some(pool) = &self.state_pool {
+            let task_id_owned = task_id.to_string();
+            let state_str = to.as_str();
+            let res = pool.with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO task_states (task_id, state) VALUES (?1, ?2)",
+                    rusqlite::params![task_id_owned, state_str],
+                )?;
+                Ok(())
+            });
+            if let Err(e) = res {
+                tracing::warn!(
+                    task_id = %task_id,
+                    state = %to.as_str(),
+                    error = %e,
+                    "task_states row append failed"
+                );
+            }
+        }
+
+        // Observer publish (best-effort, same rationale).
+        if let Some(observer) = &self.observer {
+            let event = observe::BrainEvent::TaskStateChange {
+                id: uuid::Uuid::new_v4(),
+                task_id: task_id.to_string(),
+                from: from.as_str().to_string(),
+                to: to.as_str().to_string(),
+                ts: Utc::now(),
+            };
+            let _ = observer.publish(event).await;
+        }
+
+        tracing::info!(
+            task_id = %task_id,
+            from = %from.as_str(),
+            to = %to.as_str(),
+            "task phase transition"
+        );
+    }
+
+    /// Convenience: emit the initial Planning transition (`from = "none"`).
+    /// Called from [`plan`] right after the task is inserted into the
+    /// active map, so the audit table records the task's birth before
+    /// any subsequent state moves.
+    pub(crate) async fn record_initial_planning(&self, task_id: &str) {
+        if let Some(pool) = &self.state_pool {
+            let task_id_owned = task_id.to_string();
+            let res = pool.with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO task_states (task_id, state) VALUES (?1, 'planning')",
+                    rusqlite::params![task_id_owned],
+                )?;
+                Ok(())
+            });
+            if let Err(e) = res {
+                tracing::warn!(
+                    task_id = %task_id,
+                    error = %e,
+                    "initial planning state append failed"
+                );
+            }
+        }
+        if let Some(observer) = &self.observer {
+            let event = observe::BrainEvent::TaskStateChange {
+                id: uuid::Uuid::new_v4(),
+                task_id: task_id.to_string(),
+                from: "none".into(),
+                to: "planning".into(),
+                ts: Utc::now(),
+            };
+            let _ = observer.publish(event).await;
+        }
     }
 }
 
@@ -739,6 +916,191 @@ mod tests {
                 estimated_tokens: 0,
             },
         ]
+    }
+
+    // ── Phase 6 state-machine acceptance ────────────────────────────────
+
+    #[tokio::test]
+    async fn phase6_state_machine_emits_canonical_transitions_and_persists_rows() {
+        use observe::{BrainEvent, BroadcastObserver, Observer};
+
+        let pool = storage::SqlitePool::open_memory().unwrap();
+        let observer_arc = BroadcastObserver::new();
+        // Subscribe BEFORE the orchestrator runs so the broadcast
+        // channel has a live receiver — without a subscriber,
+        // `BroadcastObserver::publish` returns `Err(BusClosed)` and
+        // the orchestrator's best-effort send swallows it.
+        let mut rx = observer_arc.subscribe();
+        let observer: Arc<dyn Observer> = observer_arc.clone();
+
+        // One no-op Plan step is the cheapest path through execute()
+        // that exercises is_complete() + all_succeeded() → Reconciling
+        // → Completed without dragging in the sandbox / LLM / agent
+        // registry. Plan-with-non-empty-output succeeds cleanly.
+        let decomposer = Arc::new(MockDecomposer {
+            steps: vec![TaskStep {
+                id: "s1".to_string(),
+                description: "no-op step".to_string(),
+                action: StepAction::Plan {
+                    output: "did nothing observable".to_string(),
+                },
+                depends_on: vec![],
+                tier: audit::ActionTier::Read,
+                estimated_tokens: 0,
+            }],
+        });
+        let orchestrator = TaskOrchestrator::new(decomposer)
+            .with_observer(observer)
+            .with_state_pool(pool.clone());
+
+        let (task_id, _plan) = orchestrator
+            .plan("phase6 smoke", DecompositionContext::default())
+            .await
+            .unwrap();
+        orchestrator.execute(&task_id).await.unwrap();
+
+        // Drain observed transitions.
+        let mut transitions: Vec<(String, String)> = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let BrainEvent::TaskStateChange { from, to, .. } = ev {
+                transitions.push((from, to));
+            }
+        }
+
+        let expected: Vec<(&str, &str)> = vec![
+            ("none", "planning"),
+            ("planning", "awaiting_approval"),
+            ("awaiting_approval", "executing"),
+            ("executing", "reconciling"),
+            ("reconciling", "completed"),
+        ];
+        let observed: Vec<(&str, &str)> = transitions
+            .iter()
+            .map(|(f, t)| (f.as_str(), t.as_str()))
+            .collect();
+        assert_eq!(observed, expected, "transition sequence mismatch");
+
+        // The `task_states` audit table should mirror the events,
+        // newest-last. ORDER BY id ASC preserves insertion order even
+        // if two transitions land in the same wall-clock second.
+        let states_in_db = pool
+            .with_conn(|conn| {
+                let mut stmt = conn
+                    .prepare("SELECT state FROM task_states WHERE task_id = ?1 ORDER BY id ASC")?;
+                let states: Vec<String> = stmt
+                    .query_map([&task_id], |r| r.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(states)
+            })
+            .unwrap();
+        assert_eq!(
+            states_in_db,
+            vec![
+                "planning".to_string(),
+                "awaiting_approval".to_string(),
+                "executing".to_string(),
+                "reconciling".to_string(),
+                "completed".to_string(),
+            ],
+            "task_states audit rows must mirror the emitted events"
+        );
+
+        // Final in-memory phase agrees with the table.
+        let task = orchestrator.get_task(&task_id).await.unwrap();
+        assert_eq!(task.phase, TaskPhase::Completed);
+        assert!(task.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn phase6_failed_step_lands_in_failed_terminal_state() {
+        // Empty-output Plan step is the deterministic failure path —
+        // the executor treats it as "honest failure" so we don't need
+        // to mock a flaky sandbox.
+        use observe::{BroadcastObserver, Observer};
+
+        let pool = storage::SqlitePool::open_memory().unwrap();
+        let observer_arc = BroadcastObserver::new();
+        let _rx = observer_arc.subscribe();
+        let observer: Arc<dyn Observer> = observer_arc.clone();
+
+        let decomposer = Arc::new(MockDecomposer {
+            steps: vec![TaskStep {
+                id: "s1".to_string(),
+                description: "failing step".to_string(),
+                action: StepAction::Plan {
+                    output: String::new(), // empty → fail
+                },
+                depends_on: vec![],
+                tier: audit::ActionTier::Read,
+                estimated_tokens: 0,
+            }],
+        });
+        let orchestrator = TaskOrchestrator::new(decomposer)
+            .with_observer(observer)
+            .with_state_pool(pool.clone());
+
+        let (task_id, _) = orchestrator
+            .plan("phase6 fail", DecompositionContext::default())
+            .await
+            .unwrap();
+        orchestrator.execute(&task_id).await.unwrap();
+
+        let task = orchestrator.get_task(&task_id).await.unwrap();
+        assert_eq!(
+            task.phase,
+            TaskPhase::Failed,
+            "task with a failed step must land in Failed, not Completed"
+        );
+
+        // Sanity: the final row in task_states is `failed`.
+        let last_state: String = pool
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT state FROM task_states WHERE task_id = ?1 ORDER BY id DESC LIMIT 1",
+                    [&task_id],
+                    |r| r.get(0),
+                )
+                .map_err(Into::into)
+            })
+            .unwrap();
+        assert_eq!(last_state, "failed");
+    }
+
+    #[tokio::test]
+    async fn phase6_terminal_transitions_are_idempotent() {
+        // After Cancelled, a stray Completed transition must not flip
+        // the phase back. Protects against a slow-completing step that
+        // returns after the user has already cancelled.
+        let decomposer = Arc::new(MockDecomposer {
+            steps: vec![TaskStep {
+                id: "s1".to_string(),
+                description: "any".to_string(),
+                action: StepAction::Plan {
+                    output: "ok".to_string(),
+                },
+                depends_on: vec![],
+                tier: audit::ActionTier::Read,
+                estimated_tokens: 0,
+            }],
+        });
+        let orchestrator = TaskOrchestrator::new(decomposer);
+        let (task_id, _) = orchestrator
+            .plan(
+                "phase6 cancel-then-late-completion",
+                DecompositionContext::default(),
+            )
+            .await
+            .unwrap();
+        orchestrator.cancel(&task_id).await.unwrap();
+        orchestrator
+            .transition_phase(&task_id, TaskPhase::Completed)
+            .await;
+        let task = orchestrator.get_task(&task_id).await.unwrap();
+        assert_eq!(
+            task.phase,
+            TaskPhase::Cancelled,
+            "late Completed transition must not overwrite Cancelled"
+        );
     }
 
     #[tokio::test]
@@ -950,7 +1312,9 @@ mod tests {
             "s3 should be transitively Skipped, got {:?}",
             task.step_states.get("s3")
         );
-        assert_eq!(task.phase, TaskPhase::Completed);
+        // Phase 6 state-machine: a task with any non-succeeded step
+        // lands in `Failed`, not `Completed`.
+        assert_eq!(task.phase, TaskPhase::Failed);
     }
 
     #[tokio::test]
@@ -1098,8 +1462,11 @@ mod tests {
             task.step_states.get("replan-1"),
             Some(StepState::Completed { .. })
         ));
-        // Task is now complete with mixed outcomes.
-        assert_eq!(task.phase, TaskPhase::Completed);
+        // Phase 6: mixed-outcome task lands in `Failed` — the
+        // original failure is recorded even though the replan
+        // succeeded. (The user can still see the replanned-step
+        // success in the per-step states.)
+        assert_eq!(task.phase, TaskPhase::Failed);
     }
 
     #[tokio::test]

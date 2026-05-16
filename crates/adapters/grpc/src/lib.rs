@@ -307,7 +307,8 @@ fn brain_event_ts(ev: &observe::BrainEvent) -> chrono::DateTime<chrono::Utc> {
         | BreakerStateChange { ts, .. }
         | Error { ts, .. }
         | TerminalSessionOpened { ts, .. }
-        | TerminalSessionClosed { ts, .. } => *ts,
+        | TerminalSessionClosed { ts, .. }
+        | TaskStateChange { ts, .. } => *ts,
     }
 }
 

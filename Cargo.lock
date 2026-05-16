@@ -1014,6 +1014,7 @@ dependencies = [
  "brainos-cortex",
  "brainos-delegate",
  "brainos-hippocampus",
+ "brainos-observe",
  "brainos-sandbox",
  "brainos-storage",
  "chrono",
