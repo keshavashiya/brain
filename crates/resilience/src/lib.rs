@@ -333,5 +333,10 @@ pub use timeout::{timeout, TimeoutError};
 mod rate_limit;
 pub use rate_limit::{RateLimitConfig, RateLimitRegistry, RateLimiter};
 
+// ─── LoopDetector primitive ────────────────────────────────────────────────
+
+mod loop_detector;
+pub use loop_detector::{LoopDetector, LoopDetectorConfig, LoopDetectorError};
+
 #[cfg(test)]
 mod tests;

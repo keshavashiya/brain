@@ -16,6 +16,8 @@ chrono = { workspace = true }
 intent = { workspace = true }
 observe = { workspace = true }
 rand = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time"] }
 tracing = { workspace = true }
 uuid = { workspace = true }

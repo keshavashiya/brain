@@ -545,3 +545,142 @@ fn rate_limit_config_default_is_sane() {
     assert!(c.burst_capacity >= c.tokens_per_refill);
     assert!(c.refill_interval > Duration::ZERO);
 }
+
+// ─── LoopDetector tests ─────────────────────────────────────────────────────
+
+use crate::loop_detector::canonical_json_for_test;
+use serde_json::json;
+
+fn ld_config(window: usize, threshold: u32) -> LoopDetectorConfig {
+    LoopDetectorConfig { window, threshold }
+}
+
+#[tokio::test]
+async fn loop_detector_passes_under_threshold() {
+    let det = LoopDetector::new(ld_config(8, 4));
+    let args = json!({"x": 1});
+    for _ in 0..4 {
+        det.check("p1", "mcp:t:a", &args).await.unwrap();
+    }
+    assert_eq!(det.window_len("p1").await, 4);
+}
+
+#[tokio::test]
+async fn loop_detector_trips_past_threshold() {
+    let det = LoopDetector::new(ld_config(8, 4));
+    let args = json!({"x": 1});
+    for _ in 0..4 {
+        det.check("p1", "mcp:t:a", &args).await.unwrap();
+    }
+    let err = det.check("p1", "mcp:t:a", &args).await.unwrap_err();
+    match err {
+        LoopDetectorError::LoopDetected {
+            tool_id,
+            count,
+            window,
+        } => {
+            assert_eq!(tool_id, "mcp:t:a");
+            assert_eq!(count, 5);
+            assert_eq!(window, 8);
+        }
+    }
+}
+
+#[tokio::test]
+async fn loop_detector_distinguishes_different_args() {
+    let det = LoopDetector::new(ld_config(8, 2));
+    // Same tool, distinct args — each hash count stays at 1, never trips.
+    for i in 0..6 {
+        det.check("p1", "mcp:t:a", &json!({"x": i})).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn loop_detector_is_scoped_per_principal() {
+    let det = LoopDetector::new(ld_config(8, 2));
+    let args = json!({"x": 1});
+    // p1 maxes out three times → would trip on the 3rd.
+    det.check("p1", "mcp:t:a", &args).await.unwrap();
+    det.check("p1", "mcp:t:a", &args).await.unwrap();
+    // p2 shares the tool but has its own window — should not be affected.
+    det.check("p2", "mcp:t:a", &args).await.unwrap();
+    det.check("p2", "mcp:t:a", &args).await.unwrap();
+    // p2's third still passes (count == 3, threshold 2 → trips on >2 means 3rd is err).
+    let p2_third = det.check("p2", "mcp:t:a", &args).await;
+    assert!(p2_third.is_err(), "p2 should trip on its own 3rd");
+    // And p1's window state did not affect p2's count.
+    assert_eq!(det.window_len("p1").await, 2);
+}
+
+#[tokio::test]
+async fn loop_detector_window_evicts_old_entries() {
+    // window=3, threshold=3. Sequence a,a,b,a,a totals 4 a's; without
+    // eviction count(a)=4>3 would trip. With window=3 the trailing
+    // window is [a,b,a,a]→[b,a,a], window-scoped count(a)=2 → no trip.
+    let det = LoopDetector::new(ld_config(3, 3));
+    let a = json!({"x": 1});
+    let b = json!({"x": 2});
+    det.check("p", "t", &a).await.unwrap(); // [a]
+    det.check("p", "t", &a).await.unwrap(); // [a,a]
+    det.check("p", "t", &b).await.unwrap(); // [a,a,b]
+    det.check("p", "t", &a).await.unwrap(); // [a,b,a]   count(a)=2
+    det.check("p", "t", &a).await.unwrap(); // [b,a,a]   count(a)=2
+    assert_eq!(det.window_len("p").await, 3);
+}
+
+#[tokio::test]
+async fn loop_detector_canonicalizes_object_key_order() {
+    let det = LoopDetector::new(ld_config(8, 2));
+    let v1 = json!({"a": 1, "b": 2});
+    let v2 = json!({"b": 2, "a": 1});
+    // Same canonical shape — three calls should trip on the third.
+    det.check("p", "t", &v1).await.unwrap();
+    det.check("p", "t", &v2).await.unwrap();
+    let err = det.check("p", "t", &v1).await.unwrap_err();
+    assert!(matches!(
+        err,
+        LoopDetectorError::LoopDetected { count: 3, .. }
+    ));
+}
+
+#[tokio::test]
+async fn loop_detector_reset_clears_principal_state() {
+    let det = LoopDetector::new(ld_config(4, 2));
+    let args = json!({"x": 1});
+    det.check("p", "t", &args).await.unwrap();
+    det.check("p", "t", &args).await.unwrap();
+    det.reset("p").await;
+    // Counter starts over — even though three total calls have happened.
+    det.check("p", "t", &args).await.unwrap();
+    det.check("p", "t", &args).await.unwrap();
+    assert_eq!(det.window_len("p").await, 2);
+}
+
+#[tokio::test]
+async fn loop_detector_observer_sees_error_on_trip() {
+    let broadcast = BroadcastObserver::new();
+    let mut rx = broadcast.subscribe();
+    let det = LoopDetector::new(ld_config(4, 2)).with_observer(broadcast as Arc<dyn Observer>);
+    let args = json!({"x": 1});
+    det.check("p", "mcp:t:a", &args).await.unwrap();
+    det.check("p", "mcp:t:a", &args).await.unwrap();
+    let _ = det.check("p", "mcp:t:a", &args).await.unwrap_err();
+    match tokio::time::timeout(Duration::from_millis(50), rx.recv()).await {
+        Ok(Ok(BrainEvent::Error {
+            source, message, ..
+        })) => {
+            assert_eq!(source, "loop_detector");
+            assert!(message.contains("mcp:t:a"));
+            assert!(message.contains("repeated 3"));
+            assert!(message.contains("window 4"));
+        }
+        other => panic!("expected loop_detector Error, got {other:?}"),
+    }
+}
+
+#[test]
+fn loop_detector_canonical_json_sorts_keys_recursively() {
+    let v = json!({"b": {"y": 1, "x": 2}, "a": [3, {"d": 4, "c": 5}]});
+    let canon = canonical_json_for_test(&v);
+    assert_eq!(canon, r#"{"a":[3,{"c":5,"d":4}],"b":{"x":2,"y":1}}"#);
+}
