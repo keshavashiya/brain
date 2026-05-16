@@ -188,6 +188,18 @@ impl SignalProcessor {
             return Ok(PipelineResult::Complete(early));
         }
 
+        // v1.0.0 Phase 5 inline confirmation gate. Identity says "this
+        // principal may attempt this verb"; the confirmation gate says
+        // "but for tiers ≥ Destructive, a human (or a standing approval)
+        // must consent." Reflex firings travel the same path — they have
+        // no way to bypass this checkpoint.
+        if let Some(early) = self
+            .confirmation_gate(signal, signal_id, &classification.intent)
+            .await
+        {
+            return Ok(PipelineResult::Complete(early));
+        }
+
         // Helper: prepend notification nudges to a response
         let prepend_nudges = |mut resp: SignalResponse| -> SignalResponse {
             if !pending_notifications.is_empty() {
@@ -1924,6 +1936,85 @@ impl SignalProcessor {
                 }
                 Some(SignalResponse::error(signal_id, reason))
             }
+        }
+    }
+
+    /// Inline confirmation gate (v1.0.0 Phase 5). Runs after the identity
+    /// check. When a confirmation engine is wired and the intent lands a
+    /// tier that `requires_confirmation`, builds an [`ApprovalSpec`] with
+    /// the principal-bound [`GrantKey`] (so [`StandingApprovalStore`]
+    /// matches bypass any user prompt) and blocks on `engine.request`.
+    ///
+    /// Returns `Some(resp)` to short-circuit:
+    /// - `ApprovalOutcome::Approved` → `None` (proceed to dispatch)
+    /// - `Rejected` / `TimedOut` / `Aborted` → text response explaining
+    ///   the outcome
+    /// - `engine.request` error → error response
+    ///
+    /// Skipped when no engine is wired, the intent is unguarded, or the
+    /// tier doesn't require confirmation. This is the single inline
+    /// checkpoint that closes Phase 5's cardinal rule: every action that
+    /// reaches a Destructive/External tier passes through the same gate
+    /// regardless of provenance (user typing, LLM, reflex firing).
+    pub(super) async fn confirmation_gate(
+        &self,
+        signal: &Signal,
+        signal_id: Uuid,
+        intent: &thalamus::Intent,
+    ) -> Option<SignalResponse> {
+        // identity::Tier and brain_core::security::ActionTier carry
+        // identical variants; the converter keeps the cross-crate
+        // boundary explicit rather than relying on shared serialization.
+        fn convert_tier(t: identity::Tier) -> brain_core::security::ActionTier {
+            use brain_core::security::ActionTier;
+            match t {
+                identity::Tier::Read => ActionTier::Read,
+                identity::Tier::Write => ActionTier::Write,
+                identity::Tier::Execute => ActionTier::Execute,
+                identity::Tier::Destructive => ActionTier::Destructive,
+                identity::Tier::External => ActionTier::External,
+            }
+        }
+
+        let engine = self.confirmation_engine.as_ref()?;
+        let (req, identity_tier) = crate::authz::intent_to_auth(intent)?;
+        let action_tier = convert_tier(identity_tier);
+        if !action_tier.requires_confirmation() {
+            return None;
+        }
+
+        let description = format!("{}.{}", req.verb_ns, req.verb_action);
+        let timeout = self
+            .confirmation_timeout
+            .unwrap_or_else(|| action_tier.default_timeout());
+        let mut spec =
+            confirm::ApprovalSpec::new(description.clone(), action_tier).with_timeout(timeout);
+        if let Some(principal) = &signal.principal {
+            spec = spec.with_grant_key(confirm::GrantKey::new(
+                principal.agent_id.0.clone(),
+                &req.verb_ns,
+                &req.verb_action,
+            ));
+        }
+
+        match engine.request(spec).await {
+            Ok(confirm::ApprovalOutcome::Approved) => None,
+            Ok(confirm::ApprovalOutcome::Rejected { reason }) => Some(SignalResponse::error(
+                signal_id,
+                format!("Approval rejected for `{description}`: {reason}"),
+            )),
+            Ok(confirm::ApprovalOutcome::TimedOut) => Some(SignalResponse::error(
+                signal_id,
+                format!("Approval timed out waiting for confirmation on `{description}`"),
+            )),
+            Ok(confirm::ApprovalOutcome::Aborted { reason }) => Some(SignalResponse::error(
+                signal_id,
+                format!("Approval aborted for `{description}`: {reason}"),
+            )),
+            Err(e) => Some(SignalResponse::error(
+                signal_id,
+                format!("Confirmation engine error on `{description}`: {e}"),
+            )),
         }
     }
 

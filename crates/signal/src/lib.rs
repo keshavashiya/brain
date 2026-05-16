@@ -13,6 +13,7 @@
 pub mod approval;
 pub mod authz;
 pub mod notification;
+pub mod reflex_runner;
 pub mod terminal_graph_mirror;
 pub mod types;
 
@@ -150,6 +151,11 @@ pub struct SignalProcessor {
     /// return a deterministic "not configured" message from the slash
     /// handlers.
     standing_approvals: Option<std::sync::Arc<dyn confirm::StandingApprovalStore>>,
+    /// Optional override for the inline confirmation gate's per-request
+    /// timeout. Defaults to the tier-driven value
+    /// ([`brain_core::security::ActionTier::default_timeout`]). Tests
+    /// shorten this so the no-bypass path doesn't take 60s+.
+    confirmation_timeout: Option<std::time::Duration>,
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

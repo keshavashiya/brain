@@ -1101,6 +1101,7 @@ dependencies = [
  "brainos-mcphost",
  "brainos-observe",
  "brainos-orchestrate",
+ "brainos-reflex",
  "brainos-resilience",
  "brainos-sandbox",
  "brainos-storage",

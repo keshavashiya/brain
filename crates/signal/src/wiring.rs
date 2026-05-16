@@ -382,4 +382,12 @@ impl SignalProcessor {
     pub fn standing_approvals(&self) -> Option<&Arc<dyn confirm::StandingApprovalStore>> {
         self.standing_approvals.as_ref()
     }
+
+    /// Override the inline confirmation gate's per-request timeout.
+    /// Production leaves this `None`, deferring to the tier's default;
+    /// tests pin a short value so the no-bypass path returns promptly.
+    pub fn with_confirmation_timeout(mut self, t: std::time::Duration) -> Self {
+        self.confirmation_timeout = Some(t);
+        self
+    }
 }
