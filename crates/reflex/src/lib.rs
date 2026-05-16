@@ -38,7 +38,10 @@ use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub mod fs;
 mod noop;
+
+pub use fs::{FsChange, FsReflex, FsReflexConfig};
 pub use noop::NoopReflex;
 
 /// Errors a [`ReflexSource`] can surface at subscribe time. Per-event
