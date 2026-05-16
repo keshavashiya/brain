@@ -9,6 +9,7 @@ use thiserror::Error;
 use tracing;
 use uuid::Uuid;
 
+use super::standing::{GrantKey, StandingApprovalStore};
 use super::tier::ActionTier;
 use super::timeout::EscalationPolicy;
 
@@ -22,6 +23,13 @@ pub struct ApprovalSpec {
     pub escalation: EscalationPolicy,
     pub preferred_channel: Option<String>,
     pub alternatives: Vec<String>,
+    /// Optional standing-approval key — when set and the engine has a
+    /// [`StandingApprovalStore`] wired with a matching non-revoked
+    /// grant, the request auto-approves without prompting. `None`
+    /// preserves existing behavior (every tier ≥ Destructive blocks
+    /// on user input).
+    #[serde(default)]
+    pub grant_key: Option<GrantKey>,
 }
 
 impl ApprovalSpec {
@@ -34,7 +42,13 @@ impl ApprovalSpec {
             escalation: EscalationPolicy::Abort,
             preferred_channel: None,
             alternatives: Vec::new(),
+            grant_key: None,
         }
+    }
+
+    pub fn with_grant_key(mut self, key: GrantKey) -> Self {
+        self.grant_key = Some(key);
+        self
     }
 
     pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
@@ -142,11 +156,16 @@ struct PendingApproval {
 pub struct SqliteConfirmationEngine {
     db: SqlitePool,
     notifier: Option<std::sync::Arc<dyn crate::notifier::ApprovalNotifier>>,
+    standing: Option<std::sync::Arc<dyn StandingApprovalStore>>,
 }
 
 impl SqliteConfirmationEngine {
     pub fn new(db: SqlitePool) -> Self {
-        Self { db, notifier: None }
+        Self {
+            db,
+            notifier: None,
+            standing: None,
+        }
     }
 
     /// Attach an approval notifier — the engine will fire `notify()` once
@@ -160,6 +179,44 @@ impl SqliteConfirmationEngine {
     ) -> Self {
         self.notifier = Some(notifier);
         self
+    }
+
+    /// Attach a standing-approval store. When set, every request whose
+    /// `spec.grant_key` matches an active grant auto-approves without
+    /// notifying the user. Without a store, behavior is identical to
+    /// the pre-Phase-5 engine.
+    pub fn with_standing_approvals(
+        mut self,
+        store: std::sync::Arc<dyn StandingApprovalStore>,
+    ) -> Self {
+        self.standing = Some(store);
+        self
+    }
+
+    /// True when the spec carries a `grant_key`, a store is wired, and
+    /// the store reports a matching active grant. Storage errors are
+    /// logged and treated as "not granted" — failing closed is safer
+    /// than auto-approving on a flaky read.
+    async fn standing_grants_request(&self, spec: &ApprovalSpec) -> bool {
+        let Some(store) = &self.standing else {
+            return false;
+        };
+        let Some(key) = &spec.grant_key else {
+            return false;
+        };
+        match store.is_granted(key).await {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    agent_id = %key.agent_id,
+                    verb_ns = %key.verb_ns,
+                    verb_action = %key.verb_action,
+                    "standing-approval lookup failed; failing closed (no bypass)"
+                );
+                false
+            }
+        }
     }
 
     pub fn ensure_tables(&self) -> Result<(), ConfirmError> {
@@ -215,12 +272,17 @@ impl ConfirmationEngine for SqliteConfirmationEngine {
 
         tracing::info!(nonce = %nonce, tier = %spec.tier, "approval request created");
 
-        // Push the prompt out through the channel layer (if wired). This
-        // is best-effort — a delivery failure is logged but does not
-        // change request semantics. Without this hook the user has no
-        // way to know an approval is waiting and Destructive/External
-        // requests deadlock until timeout.
-        if spec.tier.requires_confirmation() {
+        // Standing-approval bypass: if this spec carries a grant_key
+        // and we have a store with a matching active grant, treat as
+        // pre-approved. We still keep the row in the audit table — it
+        // just resolves immediately rather than waiting for a human.
+        let standing_bypass = self.standing_grants_request(&spec).await;
+
+        // Push the prompt out through the channel layer (if wired) —
+        // skipped when a standing approval already covers the request,
+        // since no human action is required. Best-effort: a delivery
+        // failure is logged but does not change request semantics.
+        if spec.tier.requires_confirmation() && !standing_bypass {
             if let Some(notifier) = &self.notifier {
                 if let Err(e) = notifier.notify(&spec).await {
                     tracing::warn!(
@@ -239,13 +301,20 @@ impl ConfirmationEngine for SqliteConfirmationEngine {
             }
         }
 
-        // Non-confirmatory tiers (Read/Write/Execute) are auto-approved.
-        // Destructive/External block here, polling until `respond()` is called
-        // via the CLI (`brain confirm approve|reject <nonce>`) or the timeout
-        // expires. Phase 1a stub NEVER auto-approves a tier that requires
-        // explicit confirmation.
-        if !spec.tier.requires_confirmation() {
-            tracing::info!(nonce = %nonce, "auto-approving non-confirmatory action");
+        // Non-confirmatory tiers (Read/Write/Execute) auto-approve, as
+        // do tiers covered by a standing approval. Destructive/External
+        // without a standing bypass block here, polling until
+        // `respond()` is called via the CLI or the timeout expires.
+        if !spec.tier.requires_confirmation() || standing_bypass {
+            if standing_bypass {
+                tracing::info!(
+                    nonce = %nonce,
+                    tier = %spec.tier,
+                    "auto-approving via standing approval"
+                );
+            } else {
+                tracing::info!(nonce = %nonce, "auto-approving non-confirmatory action");
+            }
             self.respond(&nonce, ApprovalDecision::Approve).await?;
         }
 
@@ -459,6 +528,11 @@ impl ConfirmationEngine for SqliteConfirmationEngine {
                         escalation: EscalationPolicy::Abort,
                         preferred_channel: channel,
                         alternatives,
+                        // grant_key isn't persisted on approval_requests
+                        // — the bypass decision is made at request-time
+                        // from the standing_approvals table, not
+                        // reconstructed from history.
+                        grant_key: None,
                     });
                 }
                 Ok(pending)
@@ -532,6 +606,106 @@ mod tests {
         let outcome = engine.request(spec).await.unwrap();
         responder.await.unwrap();
         assert!(matches!(outcome, ApprovalOutcome::Rejected { .. }));
+    }
+
+    #[tokio::test]
+    async fn standing_approval_bypasses_destructive_prompt() {
+        use crate::standing::{GrantKey, SqliteStandingApprovals};
+        use std::sync::Arc;
+
+        let pool = storage::SqlitePool::open_memory().unwrap();
+        let store = Arc::new(SqliteStandingApprovals::new(pool.clone()));
+        let key = GrantKey::new("agent-a", "fs", "write");
+        store.grant(&key, Some("test")).await.unwrap();
+
+        let engine = SqliteConfirmationEngine::new(pool).with_standing_approvals(store);
+        engine.ensure_tables().unwrap();
+
+        let spec = ApprovalSpec::new("write file", ActionTier::Destructive)
+            .with_timeout(std::time::Duration::from_secs(1))
+            .with_grant_key(key);
+
+        let outcome = engine.request(spec).await.unwrap();
+        assert!(
+            matches!(outcome, ApprovalOutcome::Approved),
+            "standing approval must bypass the destructive prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn standing_store_without_matching_grant_falls_through_to_timeout() {
+        use crate::standing::{GrantKey, SqliteStandingApprovals};
+        use std::sync::Arc;
+
+        let pool = storage::SqlitePool::open_memory().unwrap();
+        let store = Arc::new(SqliteStandingApprovals::new(pool.clone()));
+        // Grant a *different* verb so the lookup misses.
+        store
+            .grant(&GrantKey::new("agent-a", "fs", "read"), None)
+            .await
+            .unwrap();
+
+        let engine = SqliteConfirmationEngine::new(pool).with_standing_approvals(store);
+        engine.ensure_tables().unwrap();
+
+        let spec = ApprovalSpec::new("write file", ActionTier::Destructive)
+            .with_timeout(std::time::Duration::from_millis(300))
+            .with_grant_key(GrantKey::new("agent-a", "fs", "write"));
+
+        let outcome = engine.request(spec).await.unwrap();
+        assert!(
+            matches!(outcome, ApprovalOutcome::TimedOut),
+            "missing grant must not bypass — destructive falls through to today's flow"
+        );
+    }
+
+    #[tokio::test]
+    async fn spec_without_grant_key_ignores_store() {
+        use crate::standing::SqliteStandingApprovals;
+        use std::sync::Arc;
+
+        let pool = storage::SqlitePool::open_memory().unwrap();
+        let store = Arc::new(SqliteStandingApprovals::new(pool.clone()));
+        // Even a wildcard-shaped grant can't match if the spec has no key.
+        store
+            .grant(
+                &crate::standing::GrantKey::new("agent-a", "fs", "write"),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let engine = SqliteConfirmationEngine::new(pool).with_standing_approvals(store);
+        engine.ensure_tables().unwrap();
+
+        let spec = ApprovalSpec::new("write file", ActionTier::Destructive)
+            .with_timeout(std::time::Duration::from_millis(300));
+        // No `.with_grant_key(...)` — back-compat path.
+
+        let outcome = engine.request(spec).await.unwrap();
+        assert!(matches!(outcome, ApprovalOutcome::TimedOut));
+    }
+
+    #[tokio::test]
+    async fn revoked_grant_does_not_bypass() {
+        use crate::standing::{GrantKey, SqliteStandingApprovals};
+        use std::sync::Arc;
+
+        let pool = storage::SqlitePool::open_memory().unwrap();
+        let store = Arc::new(SqliteStandingApprovals::new(pool.clone()));
+        let key = GrantKey::new("agent-a", "fs", "write");
+        let id = store.grant(&key, None).await.unwrap();
+        store.revoke(&id).await.unwrap();
+
+        let engine = SqliteConfirmationEngine::new(pool).with_standing_approvals(store);
+        engine.ensure_tables().unwrap();
+
+        let spec = ApprovalSpec::new("write file", ActionTier::Destructive)
+            .with_timeout(std::time::Duration::from_millis(300))
+            .with_grant_key(key);
+
+        let outcome = engine.request(spec).await.unwrap();
+        assert!(matches!(outcome, ApprovalOutcome::TimedOut));
     }
 
     #[tokio::test]

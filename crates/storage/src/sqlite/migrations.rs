@@ -339,6 +339,34 @@ impl SqlitePool {
                 CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst_id, edge_kind);
             ",
             ),
+            (
+                21,
+                "create_standing_approvals",
+                "
+                -- Phase 5 standing approvals. A row authorizes a
+                -- specific (agent_id, verb_ns, verb_action) triple to
+                -- auto-approve through the ConfirmationEngine without
+                -- prompting the user. A re-grant after revoke creates
+                -- a new row rather than mutating the old one — keeps
+                -- the audit trail intact. The partial index on
+                -- (agent_id, verb_ns, verb_action) WHERE revoked_at
+                -- IS NULL is the hot lookup path for `is_granted`.
+                CREATE TABLE IF NOT EXISTS standing_approvals (
+                    id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    verb_ns TEXT NOT NULL,
+                    verb_action TEXT NOT NULL,
+                    granted_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    revoked_at TEXT,
+                    note TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_standing_approvals_lookup
+                    ON standing_approvals(agent_id, verb_ns, verb_action)
+                    WHERE revoked_at IS NULL;
+                CREATE INDEX IF NOT EXISTS idx_standing_approvals_recent
+                    ON standing_approvals(granted_at DESC);
+            ",
+            ),
         ]
     }
 
