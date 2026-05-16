@@ -65,6 +65,7 @@ observe = { workspace = true }
 identity = { workspace = true }
 mcphost = { workspace = true }
 terminal = { workspace = true }
+intent = { workspace = true }
 tonic = { version = "0.14", features = ["transport"] }
 
 [dev-dependencies]

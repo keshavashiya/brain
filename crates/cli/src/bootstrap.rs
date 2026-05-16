@@ -76,6 +76,24 @@ pub async fn build_processor(
     processor = processor.with_terminal_bridge(Arc::new(terminal_bridge));
     tracing::info!("Terminal Bridge wired (registry + observer)");
 
+    // Capability kernel — workspace-wide registry of every tool the host
+    // can dispatch to, plus the intent router that resolves a classified
+    // `IntentToken` to a concrete `ToolRoute`. The same `ToolRegistry`
+    // is threaded into the MCP host below so every server mount
+    // auto-populates it; the mcphost-side `CapabilityIndex` keeps the
+    // host's own per-server lookup hot. Breaker registry (so `Open` tools
+    // are excluded from scoring) is wired in a later slice.
+    let tool_registry: Arc<dyn intent::ToolRegistry> =
+        Arc::new(intent::InMemoryToolRegistry::new());
+    let intent_router: Arc<dyn intent::IntentRouter> =
+        Arc::new(intent::DefaultIntentRouter::new(tool_registry.clone()));
+    let mcp_capability_index: Arc<dyn mcphost::CapabilityIndex> =
+        Arc::new(mcphost::InMemoryCapabilityIndex::new());
+    processor = processor
+        .with_tool_registry(tool_registry.clone())
+        .with_intent_router(intent_router);
+    tracing::info!("Capability kernel wired (registry + DefaultIntentRouter)");
+
     // MCP host — always wired so `Intent::MountMcpServer` /
     // `ListMcpServers` / `UnmountMcpServer` and the `mcp:{server}:{tool}`
     // route resolver have a real backend instead of the
@@ -84,9 +102,15 @@ pub async fn build_processor(
     // arm dropped tool calls. Empty until callers mount a server at
     // runtime; the observer is threaded in so the host's rug-pull
     // (`tools/list` hash change) and refresh-failure events land on the
-    // same bus the SSE stream subscribes to.
-    let mcp_host: Arc<dyn mcphost::MCPHost> =
-        Arc::new(mcphost::RmcpHost::new().with_observer(observer.clone()));
+    // same bus the SSE stream subscribes to. The tool registry +
+    // capability index let mounts populate the workspace-wide and
+    // host-local catalogs the router queries.
+    let mcp_host: Arc<dyn mcphost::MCPHost> = Arc::new(
+        mcphost::RmcpHost::new()
+            .with_observer(observer.clone())
+            .with_tool_registry(tool_registry)
+            .with_capability_index(mcp_capability_index),
+    );
     processor = processor.with_mcp_host(mcp_host);
     tracing::info!("MCP host wired (RmcpHost; mount servers via Intent::MountMcpServer)");
 
@@ -842,6 +866,30 @@ mod tests {
             .clone();
         // Sessions registry starts empty out of the box.
         assert!(bridge.sessions().is_empty().await);
+    }
+
+    // Confirms `build_processor` wires the capability kernel — a
+    // `ToolRegistry` and a `DefaultIntentRouter` on top of it. Without
+    // both wired, every `Intent::ToolCall` fell through to the
+    // deterministic placeholder and no MCP mount could publish its
+    // catalog into a routable surface.
+    #[tokio::test]
+    async fn capability_kernel_wired_and_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = brain_core::BrainConfig::default();
+        cfg.brain.data_dir = tmp.path().to_str().unwrap().to_string();
+        cfg.agents.auto_discovery = false;
+
+        let processor = build_processor(&cfg).await.expect("processor builds");
+        let registry = processor
+            .tool_registry()
+            .expect("tool registry wired by build_processor")
+            .clone();
+        assert!(processor.intent_router().is_some(), "intent router wired");
+        assert!(
+            registry.list().await.is_empty(),
+            "default install has no tools registered yet"
+        );
     }
 
     // Confirms `build_processor` wires an `MCPHost` so MCP intents and the
