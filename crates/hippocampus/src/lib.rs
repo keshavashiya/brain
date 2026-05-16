@@ -12,6 +12,7 @@
 pub mod consolidation;
 pub mod embedding;
 pub mod episodic;
+pub mod graph;
 pub mod importance;
 pub mod search;
 pub mod semantic;
@@ -21,6 +22,7 @@ pub use consolidation::{
 };
 pub use embedding::{Embedder, EmbeddingError};
 pub use episodic::{Episode, EpisodicStore, Session};
+pub use graph::{Edge, EdgeKind, EpisodicGraph, GraphError, Node, NodeKind, SqliteGraph};
 pub use importance::{ImportanceScorer, ImportanceSignals};
 pub use search::{Memory, MemorySource, RecallConfig, RecallEngine};
 pub use semantic::{Fact, NamespaceStats, SemanticResult, SemanticStore};
