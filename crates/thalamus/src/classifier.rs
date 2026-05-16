@@ -797,6 +797,45 @@ impl IntentClassifier {
             }
         }
 
+        // Task lifecycle slash forms. Natural-language paths
+        // (`cancel task <id>`, `list tasks`, `task status <id>`) still
+        // work; these slashes are the deterministic UI / scripting hook,
+        // matching the /terminal-* / /mcp-* / /approval-* shapes.
+        if trimmed == "/task-list" {
+            return Some(Classification {
+                intent: Intent::ListTasks,
+                confidence: 1.0,
+                method: ClassificationMethod::Regex,
+                extracted_facts: Vec::new(),
+            });
+        }
+        if let Some(rest) = trimmed.strip_prefix("/task-status") {
+            let id = rest.trim();
+            if !id.is_empty() {
+                return Some(Classification {
+                    intent: Intent::TaskStatus {
+                        task_id: id.to_string(),
+                    },
+                    confidence: 1.0,
+                    method: ClassificationMethod::Regex,
+                    extracted_facts: Vec::new(),
+                });
+            }
+        }
+        if let Some(rest) = trimmed.strip_prefix("/task-cancel") {
+            let id = rest.trim();
+            if !id.is_empty() {
+                return Some(Classification {
+                    intent: Intent::CancelTask {
+                        task_id: id.to_string(),
+                    },
+                    confidence: 1.0,
+                    method: ClassificationMethod::Regex,
+                    extracted_facts: Vec::new(),
+                });
+            }
+        }
+
         // /tool <verb_ns>.<verb_action> [json-args] — raw entrypoint for
         // the capability router. The verb pair routes against the wired
         // `intent::ToolRegistry`; optional JSON payload becomes the SIT's

@@ -803,3 +803,44 @@ async fn approval_revoke_slash_without_id_falls_through() {
         "bare /approval-revoke must not classify (id is required)"
     );
 }
+
+#[tokio::test]
+async fn task_list_slash_classifies_to_list_tasks() {
+    let classifier = IntentClassifier::new();
+    let result = classifier.classify("/task-list").await;
+    assert!(
+        matches!(result.intent, Intent::ListTasks),
+        "expected ListTasks, got {:?}",
+        result.intent
+    );
+}
+
+#[tokio::test]
+async fn task_status_slash_carries_id() {
+    let classifier = IntentClassifier::new();
+    let result = classifier.classify("/task-status t-42").await;
+    match result.intent {
+        Intent::TaskStatus { task_id } => assert_eq!(task_id, "t-42"),
+        other => panic!("expected TaskStatus, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn task_cancel_slash_carries_id() {
+    let classifier = IntentClassifier::new();
+    let result = classifier.classify("/task-cancel abc-123").await;
+    match result.intent {
+        Intent::CancelTask { task_id } => assert_eq!(task_id, "abc-123"),
+        other => panic!("expected CancelTask, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn task_cancel_slash_without_id_falls_through() {
+    let classifier = IntentClassifier::new();
+    let result = classifier.classify("/task-cancel").await;
+    assert!(
+        !matches!(result.intent, Intent::CancelTask { .. }),
+        "bare /task-cancel must not classify (id is required)"
+    );
+}
