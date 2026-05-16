@@ -41,10 +41,15 @@ use thiserror::Error;
 pub mod cron;
 pub mod fs;
 mod noop;
+pub mod sys;
 
 pub use cron::{CronReflex, CronReflexConfig};
 pub use fs::{FsChange, FsReflex, FsReflexConfig};
 pub use noop::NoopReflex;
+pub use sys::{
+    NetworkState, NoopSampler, SysSnapshot, SysStateReflex, SysStateReflexConfig, SysStateRule,
+    SysStateSampler,
+};
 
 /// Errors a [`ReflexSource`] can surface at subscribe time. Per-event
 /// errors live inside the stream as `ReflexEvent::error_message` so
