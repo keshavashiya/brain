@@ -280,6 +280,24 @@ impl SqlitePool {
                     WHERE superseded_by IS NULL;
             ",
             ),
+            (
+                19,
+                "create_dlq_entries",
+                "
+                CREATE TABLE IF NOT EXISTS dlq_entries (
+                    id TEXT PRIMARY KEY,
+                    tool_id TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
+                    error_message TEXT NOT NULL,
+                    attempts INTEGER NOT NULL,
+                    dlq_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                CREATE INDEX IF NOT EXISTS idx_dlq_entries_tool
+                    ON dlq_entries(tool_id, dlq_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_dlq_entries_recent
+                    ON dlq_entries(dlq_at DESC);
+            ",
+            ),
         ]
     }
 

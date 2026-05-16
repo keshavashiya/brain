@@ -684,3 +684,57 @@ fn loop_detector_canonical_json_sorts_keys_recursively() {
     let canon = canonical_json_for_test(&v);
     assert_eq!(canon, r#"{"a":[3,{"c":5,"d":4}],"b":{"x":2,"y":1}}"#);
 }
+
+// ─── InMemoryDlq tests ──────────────────────────────────────────────────────
+
+use chrono::Utc;
+
+fn dlq_entry(tool: &str, msg: &str, attempts: u32) -> DlqEntry {
+    DlqEntry {
+        id: uuid::Uuid::new_v4().to_string(),
+        tool_id: tool.to_string(),
+        request_json: r#"{"x":1}"#.to_string(),
+        error_message: msg.to_string(),
+        attempts,
+        dlq_at: Utc::now(),
+    }
+}
+
+#[tokio::test]
+async fn in_memory_dlq_starts_empty() {
+    let q = InMemoryDlq::new();
+    assert_eq!(q.len().await.unwrap(), 0);
+    assert!(q.list_recent(10).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn in_memory_dlq_enqueue_orders_newest_first() {
+    let q = InMemoryDlq::new();
+    q.enqueue(dlq_entry("a", "first", 3)).await.unwrap();
+    q.enqueue(dlq_entry("b", "second", 5)).await.unwrap();
+    let recent = q.list_recent(10).await.unwrap();
+    assert_eq!(recent.len(), 2);
+    assert_eq!(recent[0].error_message, "second");
+    assert_eq!(recent[1].error_message, "first");
+}
+
+#[tokio::test]
+async fn in_memory_dlq_list_recent_respects_limit() {
+    let q = InMemoryDlq::new();
+    for i in 0..5 {
+        q.enqueue(dlq_entry("t", &format!("e{i}"), 1))
+            .await
+            .unwrap();
+    }
+    let recent = q.list_recent(3).await.unwrap();
+    assert_eq!(recent.len(), 3);
+    assert_eq!(recent[0].error_message, "e4");
+    assert_eq!(recent[2].error_message, "e2");
+}
+
+#[tokio::test]
+async fn in_memory_dlq_can_be_used_via_trait_object() {
+    let q: Arc<dyn DeadLetterQueue> = Arc::new(InMemoryDlq::new());
+    q.enqueue(dlq_entry("t", "boom", 2)).await.unwrap();
+    assert_eq!(q.len().await.unwrap(), 1);
+}

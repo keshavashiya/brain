@@ -6,11 +6,13 @@
 //! - Encryption at rest (AES-256-GCM + Argon2id)
 //! - Schema migrations
 
+pub mod dlq;
 #[cfg(feature = "encryption")]
 pub mod encryption;
 pub mod ruvector;
 pub mod sqlite;
 
+pub use dlq::SqliteDlq;
 #[cfg(feature = "encryption")]
 pub use encryption::Encryptor;
 pub use ruvector::{RuVectorStore, VectorResult};

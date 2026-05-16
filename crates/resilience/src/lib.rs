@@ -338,5 +338,10 @@ pub use rate_limit::{RateLimitConfig, RateLimitRegistry, RateLimiter};
 mod loop_detector;
 pub use loop_detector::{LoopDetector, LoopDetectorConfig, LoopDetectorError};
 
+// ─── Dead-letter queue ─────────────────────────────────────────────────────
+
+mod dlq;
+pub use dlq::{DeadLetterQueue, DlqEntry, DlqError, InMemoryDlq};
+
 #[cfg(test)]
 mod tests;
