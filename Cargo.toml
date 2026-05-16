@@ -30,6 +30,7 @@ members = [
     "crates/adapters/terminal",
     "crates/mcphost",
     "crates/intent",
+    "crates/reflex",
     "crates/resilience",
 ]
 
@@ -148,6 +149,7 @@ identity = { package = "brainos-identity", path = "crates/identity", version = "
 terminal = { package = "brainos-terminal", path = "crates/adapters/terminal", version = "0.3.0" }
 mcphost = { package = "brainos-mcphost", path = "crates/mcphost", version = "0.3.0" }
 intent = { package = "brainos-intent", path = "crates/intent", version = "0.3.0" }
+reflex = { package = "brainos-reflex", path = "crates/reflex", version = "0.3.0" }
 resilience = { package = "brainos-resilience", path = "crates/resilience", version = "0.3.0" }
 
 # Benchmarks
