@@ -586,6 +586,7 @@ dependencies = [
  "brainos-httpadapter",
  "brainos-identity",
  "brainos-mcp",
+ "brainos-mcphost",
  "brainos-observe",
  "brainos-orchestrate",
  "brainos-sandbox",

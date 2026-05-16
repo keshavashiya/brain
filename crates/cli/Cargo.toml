@@ -63,6 +63,7 @@ channel = { workspace = true }
 delegate = { workspace = true }
 observe = { workspace = true }
 identity = { workspace = true }
+mcphost = { workspace = true }
 
 [dev-dependencies]
 tokio-tungstenite = { workspace = true }

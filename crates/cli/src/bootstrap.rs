@@ -46,7 +46,7 @@ pub async fn build_processor(
     // skipped publication. Default capacity (4096) has lag-drop semantics so
     // slow subscribers can't backpressure the pipeline.
     let observer: Arc<dyn observe::Observer> = observe::BroadcastObserver::new();
-    processor = processor.with_observer(observer);
+    processor = processor.with_observer(observer.clone());
     tracing::info!("Observability bus wired (BroadcastObserver, capacity=4096)");
 
     // Principal & identity — adapters resolve a `Principal` from their auth
@@ -63,6 +63,20 @@ pub async fn build_processor(
         principals = config.identity.principals.len(),
         "Identity store wired (ConfigIdentityStore)"
     );
+
+    // MCP host — always wired so `Intent::MountMcpServer` /
+    // `ListMcpServers` / `UnmountMcpServer` and the `mcp:{server}:{tool}`
+    // route resolver have a real backend instead of the
+    // "MCP host not configured" placeholder. Without this, every MCP
+    // intent handler short-circuited and the capability router's `Mcp`
+    // arm dropped tool calls. Empty until callers mount a server at
+    // runtime; the observer is threaded in so the host's rug-pull
+    // (`tools/list` hash change) and refresh-failure events land on the
+    // same bus the SSE stream subscribes to.
+    let mcp_host: Arc<dyn mcphost::MCPHost> =
+        Arc::new(mcphost::RmcpHost::new().with_observer(observer.clone()));
+    processor = processor.with_mcp_host(mcp_host);
+    tracing::info!("MCP host wired (RmcpHost; mount servers via Intent::MountMcpServer)");
 
     let action_dispatcher = build_action_dispatcher(config, &processor)?;
     processor = processor.with_action_dispatcher(action_dispatcher);
@@ -794,5 +808,28 @@ mod tests {
             .await
             .expect_err("unknown agent fails closed");
         assert!(matches!(err, identity::IdentityError::UnknownAgent(_)));
+    }
+
+    // Confirms `build_processor` wires an `MCPHost` so MCP intents and the
+    // capability router's `Mcp` route resolver have a real backend. Without
+    // this, every `Intent::MountMcpServer` / `ListMcpServers` /
+    // `UnmountMcpServer` returned "MCP host not configured" regardless of
+    // YAML or runtime input.
+    #[tokio::test]
+    async fn mcp_host_wired_and_empty_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = brain_core::BrainConfig::default();
+        cfg.brain.data_dir = tmp.path().to_str().unwrap().to_string();
+        cfg.agents.auto_discovery = false;
+
+        let processor = build_processor(&cfg).await.expect("processor builds");
+        let host = processor
+            .mcp_host()
+            .expect("mcp host wired by build_processor")
+            .clone();
+        assert!(
+            host.list_servers().await.is_empty(),
+            "default install mounts no MCP servers"
+        );
     }
 }
