@@ -585,6 +585,7 @@ dependencies = [
  "brainos-hippocampus",
  "brainos-httpadapter",
  "brainos-mcp",
+ "brainos-observe",
  "brainos-orchestrate",
  "brainos-sandbox",
  "brainos-signal",

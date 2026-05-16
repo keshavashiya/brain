@@ -61,6 +61,7 @@ vault = { workspace = true }
 orchestrate = { workspace = true }
 channel = { workspace = true }
 delegate = { workspace = true }
+observe = { workspace = true }
 
 [dev-dependencies]
 tokio-tungstenite = { workspace = true }

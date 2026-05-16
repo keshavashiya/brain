@@ -39,6 +39,16 @@ pub async fn build_processor(
     #[cfg(not(feature = "encryption"))]
     let mut processor = signal::SignalProcessor::new(config.clone()).await?;
 
+    // Observability bus — every consequential pipeline event publishes through
+    // this observer. Wired here so HTTP/WS/gRPC adapter SSE/event streams can
+    // subscribe via `processor.subscribe_brain_events()`. Until this is wired,
+    // every `if let Some(observer) = ...` guard inside the pipeline silently
+    // skipped publication. Default capacity (4096) has lag-drop semantics so
+    // slow subscribers can't backpressure the pipeline.
+    let observer: Arc<dyn observe::Observer> = observe::BroadcastObserver::new();
+    processor = processor.with_observer(observer);
+    tracing::info!("Observability bus wired (BroadcastObserver, capacity=4096)");
+
     let action_dispatcher = build_action_dispatcher(config, &processor)?;
     processor = processor.with_action_dispatcher(action_dispatcher);
 
@@ -690,5 +700,40 @@ mod tests {
         let reg = build_agent_registry(&cfg).await.expect("registry builds");
         assert!(reg.is_empty());
         assert!(reg.known_agents().is_empty());
+    }
+
+    // Wave A.1 smoke: confirms `build_processor` constructs and injects a
+    // `BroadcastObserver` so the pipeline's `publish_signal_received`
+    // actually reaches subscribers. Before this slice, every `with_*`
+    // observability path was dead — `subscribe_brain_events` returned
+    // `None` in production.
+    #[tokio::test]
+    async fn observer_publishes_on_signal() {
+        use signal::types::{Signal, SignalSource};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = brain_core::BrainConfig::default();
+        cfg.brain.data_dir = tmp.path().to_str().unwrap().to_string();
+        cfg.agents.auto_discovery = false;
+
+        let processor = build_processor(&cfg).await.expect("processor builds");
+        let mut rx = processor
+            .subscribe_brain_events()
+            .expect("observer wired by build_processor");
+
+        let signal = Signal::new(SignalSource::Cli, "test", "tester", "hello");
+        let proc = std::sync::Arc::new(processor);
+        let proc_for_task = proc.clone();
+        // Drive the pipeline in a task; we only need the first SignalReceived
+        // publish, which fires before any classification/LLM work.
+        tokio::spawn(async move {
+            let _ = proc_for_task.process(signal).await;
+        });
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("observer event arrived within timeout")
+            .expect("broadcast recv");
+        assert_eq!(event.kind(), "signal_received");
     }
 }
