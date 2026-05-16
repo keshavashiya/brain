@@ -4,14 +4,54 @@ use super::*;
 fn test_open_memory() {
     let pool = SqlitePool::open_memory().unwrap();
     let version = pool.schema_version().unwrap();
-    assert_eq!(version, 19);
+    assert_eq!(version, 20);
 }
 
 #[test]
 fn test_migrations_idempotent() {
     let pool = SqlitePool::open_memory().unwrap();
     pool.migrate().unwrap();
-    assert_eq!(pool.schema_version().unwrap(), 19);
+    assert_eq!(pool.schema_version().unwrap(), 20);
+}
+
+#[test]
+fn test_v20_graph_tables_created() {
+    let pool = SqlitePool::open_memory().unwrap();
+    let (nodes_n, edges_n) = pool
+        .with_conn(|conn| {
+            let n: i64 = conn.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))?;
+            let e: i64 = conn.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))?;
+            Ok((n, e))
+        })
+        .unwrap();
+    assert_eq!(nodes_n, 0);
+    assert_eq!(edges_n, 0);
+}
+
+#[test]
+fn test_v20_edge_cascades_when_node_deleted() {
+    let pool = SqlitePool::open_memory().unwrap();
+    pool.with_conn(|conn| {
+        conn.execute("PRAGMA foreign_keys = ON", [])?;
+        conn.execute("INSERT INTO sessions(id) VALUES ('s1')", [])?;
+        conn.execute(
+            "INSERT INTO nodes(id, session_id, node_kind, body_json) VALUES ('a','s1','k','{}')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO nodes(id, session_id, node_kind, body_json) VALUES ('b','s1','k','{}')",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO edges(src_id, dst_id, edge_kind) VALUES ('a','b','rel')",
+            [],
+        )?;
+        conn.execute("DELETE FROM nodes WHERE id='a'", [])?;
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM edges", [], |r| r.get(0))?;
+        assert_eq!(n, 0, "edge must cascade-delete with its src node");
+        Ok(())
+    })
+    .unwrap();
 }
 
 #[test]

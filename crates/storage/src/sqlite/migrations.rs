@@ -298,6 +298,47 @@ impl SqlitePool {
                     ON dlq_entries(dlq_at DESC);
             ",
             ),
+            (
+                20,
+                "create_graph_nodes_edges",
+                "
+                -- Phase 4 Track B (Hippocampus Graph Memory). Nodes are
+                -- typed entries in the episodic graph; edges link them
+                -- with a typed relationship and a weight (drives both
+                -- retrieval ranking and the compactor's half-life decay).
+                -- Coexists with the legacy `episodes` / `semantic_facts`
+                -- tables during v1.0; v1.1 deprecates the legacy store.
+                CREATE TABLE IF NOT EXISTS nodes (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT REFERENCES sessions(id),
+                    namespace TEXT NOT NULL DEFAULT 'personal',
+                    node_kind TEXT NOT NULL,
+                    body_json TEXT NOT NULL,
+                    vector_id TEXT,
+                    weight REAL NOT NULL DEFAULT 1.0,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                );
+                -- Primary read path: scoped by (session, namespace, kind).
+                CREATE INDEX IF NOT EXISTS idx_nodes_session_ns_kind
+                    ON nodes(session_id, namespace, node_kind);
+                CREATE INDEX IF NOT EXISTS idx_nodes_namespace_kind
+                    ON nodes(namespace, node_kind);
+                CREATE INDEX IF NOT EXISTS idx_nodes_created
+                    ON nodes(created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS edges (
+                    src_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+                    dst_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+                    edge_kind TEXT NOT NULL,
+                    weight REAL NOT NULL DEFAULT 1.0,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (src_id, dst_id, edge_kind)
+                );
+                -- Traversals start from either endpoint.
+                CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src_id, edge_kind);
+                CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst_id, edge_kind);
+            ",
+            ),
         ]
     }
 
