@@ -32,6 +32,11 @@ pub struct BrainConfig {
     pub agents: AgentsConfig,
     #[serde(default)]
     pub confirm: ConfirmConfig,
+    /// Principal & identity configuration consumed by
+    /// `identity::ConfigIdentityStore`. Default is empty — signals carry
+    /// `Principal = None` and the identity gate is silently skipped.
+    #[serde(default)]
+    pub identity: identity::IdentityConfig,
 }
 
 /// Confirmation-engine configuration. Currently only declares standing

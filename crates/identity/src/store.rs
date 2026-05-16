@@ -45,8 +45,14 @@ use crate::types::{
 };
 
 /// Top-level YAML structure under the `identity:` key.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// `Default` yields an empty store (`user_id = ""`, no principals).
+/// Adapters that resolve a `Principal` will find none and skip the
+/// identity gate — equivalent to pre-wiring behavior. This lets a
+/// fresh install run without an `identity:` block.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct IdentityConfig {
+    #[serde(default)]
     pub user_id: String,
     #[serde(default)]
     pub principals: Vec<PrincipalConfig>,

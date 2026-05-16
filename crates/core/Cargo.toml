@@ -13,6 +13,7 @@ categories.workspace = true
 [dependencies]
 figment = { workspace = true }
 getrandom = "0.2"
+identity = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 subtle = { workspace = true }

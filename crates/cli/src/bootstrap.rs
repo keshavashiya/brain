@@ -49,6 +49,21 @@ pub async fn build_processor(
     processor = processor.with_observer(observer);
     tracing::info!("Observability bus wired (BroadcastObserver, capacity=4096)");
 
+    // Principal & identity — adapters resolve a `Principal` from their auth
+    // context (api-key → agent_id → `IdentityStore::principal_for`). Without
+    // the store wired, every `processor.identity_store()` call returns `None`
+    // and the authorization gate is a no-op. An empty `identity:` config is
+    // the explicit-anonymous default: signals carry no principal and the
+    // gate is skipped.
+    let identity_store: Arc<dyn identity::IdentityStore> = Arc::new(
+        identity::ConfigIdentityStore::from_config(config.identity.clone()),
+    );
+    processor = processor.with_identity_store(identity_store);
+    tracing::info!(
+        principals = config.identity.principals.len(),
+        "Identity store wired (ConfigIdentityStore)"
+    );
+
     let action_dispatcher = build_action_dispatcher(config, &processor)?;
     processor = processor.with_action_dispatcher(action_dispatcher);
 
@@ -702,11 +717,11 @@ mod tests {
         assert!(reg.known_agents().is_empty());
     }
 
-    // Wave A.1 smoke: confirms `build_processor` constructs and injects a
+    // Confirms `build_processor` constructs and injects a
     // `BroadcastObserver` so the pipeline's `publish_signal_received`
-    // actually reaches subscribers. Before this slice, every `with_*`
-    // observability path was dead — `subscribe_brain_events` returned
-    // `None` in production.
+    // actually reaches subscribers. Without this wiring,
+    // `subscribe_brain_events` returns `None` and every pipeline
+    // observability path is dead.
     #[tokio::test]
     async fn observer_publishes_on_signal() {
         use signal::types::{Signal, SignalSource};
@@ -735,5 +750,49 @@ mod tests {
             .expect("observer event arrived within timeout")
             .expect("broadcast recv");
         assert_eq!(event.kind(), "signal_received");
+    }
+
+    // Confirms `build_processor` wires `ConfigIdentityStore` and that a
+    // YAML-declared principal materialises through `principal_for`. Without
+    // this wiring, `processor.identity_store()` returns `None`, so every
+    // adapter's `auth::resolve_principal` short-circuits to `None` and the
+    // pipeline's identity gate is a no-op — even when adapters hold a valid
+    // `(api-key → agent_id)` mapping.
+    #[tokio::test]
+    async fn identity_store_wired_with_configured_principal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = brain_core::BrainConfig::default();
+        cfg.brain.data_dir = tmp.path().to_str().unwrap().to_string();
+        cfg.agents.auto_discovery = false;
+        cfg.identity = identity::IdentityConfig {
+            user_id: "keshav".into(),
+            principals: vec![identity::PrincipalConfig {
+                agent_id: "claude-code".into(),
+                scopes: vec!["shell.exec".into()],
+                tier: identity::Tier::Execute,
+                path_allowlist: vec![],
+            }],
+        };
+
+        let processor = build_processor(&cfg).await.expect("processor builds");
+        let store = processor
+            .identity_store()
+            .expect("identity store wired by build_processor")
+            .clone();
+
+        let principal = store
+            .principal_for(&identity::AgentHint::AgentId("claude-code".into()))
+            .await
+            .expect("configured agent resolves");
+        assert_eq!(principal.tier, identity::Tier::Execute);
+        assert!(principal.scopes.iter().any(|s| s == "shell.exec"));
+
+        // Unknown agents must surface as `UnknownAgent` so adapters fall
+        // back to anonymous — not silently pass with a fabricated principal.
+        let err = store
+            .principal_for(&identity::AgentHint::AgentId("ghost".into()))
+            .await
+            .expect_err("unknown agent fails closed");
+        assert!(matches!(err, identity::IdentityError::UnknownAgent(_)));
     }
 }
