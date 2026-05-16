@@ -7,6 +7,7 @@ use std::sync::Arc;
 use chrono::Utc;
 use thiserror::Error;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use tracing;
 
 use crate::decompose::{DecompositionContext, DecompositionError, TaskDecomposer};
@@ -74,6 +75,13 @@ pub struct TaskOrchestrator {
     /// (migration v22). When unwired, the state-machine history lives
     /// only in memory.
     pub(crate) state_pool: Option<storage::SqlitePool>,
+    /// Per-task cancellation tokens (PR-6b). Created on `plan()`,
+    /// observed at every orchestrator checkpoint (the execute loop, the
+    /// confirmation wait, the per-action future, the replan LLM call),
+    /// and fired by `cancel()` so in-flight child futures abort within
+    /// one polling cycle instead of waiting for the current step to
+    /// finish.
+    pub(crate) cancel_tokens: RwLock<HashMap<String, CancellationToken>>,
 }
 
 /// Maximum number of replan-on-failure attempts per task. Bounds LLM
@@ -97,6 +105,33 @@ impl TaskOrchestrator {
             tasks: RwLock::new(HashMap::new()),
             observer: None,
             state_pool: None,
+            cancel_tokens: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Look up the per-task cancellation token. Returns a fresh
+    /// (never-cancelled) token for unknown task IDs so callers that pre-
+    /// date the cancel-token map (e.g. tasks constructed by tests that
+    /// inject directly into `self.tasks`) keep their old behavior — they
+    /// just never observe a cancel signal.
+    pub(crate) async fn cancel_token_for(&self, task_id: &str) -> CancellationToken {
+        self.cancel_tokens
+            .read()
+            .await
+            .get(task_id)
+            .cloned()
+            .unwrap_or_else(CancellationToken::new)
+    }
+
+    /// Mark a single step `Cancelled` under a brief write lock. Used by
+    /// the cancellation arms of `execute_step` so the per-step state
+    /// reflects the abort even when `cancel()` raced ahead (which would
+    /// have flipped it to Cancelled already — overwriting Cancelled with
+    /// Cancelled is a no-op).
+    pub(crate) async fn mark_step_cancelled(&self, task_id: &str, step_id: &str) {
+        let mut tasks = self.tasks.write().await;
+        if let Some(task) = tasks.get_mut(task_id) {
+            task.set_step_state(step_id, StepState::Cancelled);
         }
     }
 
@@ -210,6 +245,10 @@ impl TaskOrchestrator {
         }
 
         self.tasks.write().await.insert(task_id.clone(), task_state);
+        self.cancel_tokens
+            .write()
+            .await
+            .insert(task_id.clone(), CancellationToken::new());
 
         // Phase 6 state-machine: emit the initial `planning` entry, then
         // transition to AwaitingApproval. Both events are visible to the
@@ -232,6 +271,22 @@ impl TaskOrchestrator {
                 return Err(OrchestrateError::TaskNotFound(task_id.to_string()));
             }
         }
+        // PR-6b: clone the task's cancellation token up-front. Every
+        // checkpoint below — top of loop, per-step dispatch, the per-
+        // action future, the confirmation wait, the replan LLM call —
+        // races against `token.cancelled()` so a `cancel()` call mid-
+        // step aborts within one polling cycle.
+        let token = self.cancel_token_for(task_id).await;
+        if token.is_cancelled() {
+            // Cancel fired before execute() even started; honor it.
+            return Ok(synthesize::summarize_task(
+                self.tasks
+                    .read()
+                    .await
+                    .get(task_id)
+                    .expect("invariant: task_id is present (checked above)"),
+            ));
+        }
         self.transition_phase(task_id, TaskPhase::Executing).await;
 
         tracing::info!(task_id = %task_id, "Starting task execution");
@@ -243,6 +298,10 @@ impl TaskOrchestrator {
         // Failure cascades are handled below by marking dependents
         // `Skipped` so the loop still terminates without busy-looping.
         loop {
+            if token.is_cancelled() {
+                tracing::info!(task_id = %task_id, "execute loop observed cancellation");
+                break;
+            }
             let ready_steps = {
                 let tasks = self.tasks.read().await;
                 let task = tasks
@@ -286,7 +345,10 @@ impl TaskOrchestrator {
 
             // Execute ready steps (sequentially for now; parallel in future)
             for step_id in &ready_steps {
-                self.execute_step(task_id, step_id).await?;
+                if token.is_cancelled() {
+                    break;
+                }
+                self.execute_step(task_id, step_id, &token).await?;
             }
         }
 
@@ -301,7 +363,19 @@ impl TaskOrchestrator {
     }
 
     /// Execute a single step.
-    async fn execute_step(&self, task_id: &str, step_id: &str) -> Result<(), OrchestrateError> {
+    async fn execute_step(
+        &self,
+        task_id: &str,
+        step_id: &str,
+        token: &CancellationToken,
+    ) -> Result<(), OrchestrateError> {
+        // Pre-flight: if cancellation already fired (e.g. between the
+        // outer loop's check and us entering this fn), mark the step
+        // cancelled and bail without touching the action handlers.
+        if token.is_cancelled() {
+            self.mark_step_cancelled(task_id, step_id).await;
+            return Ok(());
+        }
         let (action, tier, description) = {
             let tasks = self.tasks.read().await;
             let task = tasks
@@ -352,7 +426,19 @@ impl TaskOrchestrator {
                     );
                 }
 
-                match confirm.request(spec).await {
+                // PR-6b: race the confirmation wait against the task
+                // token. A `cancel()` mid-prompt aborts the wait so the
+                // step doesn't block forever on a confirmation that will
+                // never come.
+                let confirm_outcome = tokio::select! {
+                    biased;
+                    _ = token.cancelled() => {
+                        self.mark_step_cancelled(task_id, step_id).await;
+                        return Ok(());
+                    }
+                    r = confirm.request(spec) => r,
+                };
+                match confirm_outcome {
                     Ok(confirm::ApprovalOutcome::Approved) => {
                         tracing::info!(step = %description, "Step approved");
                     }
@@ -385,8 +471,17 @@ impl TaskOrchestrator {
             }
         }
 
-        // Execute the action
-        let result = match &action {
+        // Execute the action. PR-6b: race against `token.cancelled()`
+        // so an in-flight sandbox/LLM/delegate call aborts mid-flight.
+        // Dropping the action future is cancel-safe — none of the
+        // handlers hold mutable global state past an await.
+        let result = tokio::select! {
+            biased;
+            _ = token.cancelled() => {
+                self.mark_step_cancelled(task_id, step_id).await;
+                return Ok(());
+            }
+            r = async { match &action {
             StepAction::Execute { command, workdir } | StepAction::Test { command, workdir } => {
                 self.execute_sandbox_step(command, workdir).await
             }
@@ -425,6 +520,7 @@ impl TaskOrchestrator {
             StepAction::Notify { channel, message } => {
                 self.execute_notify_step(channel, message).await
             }
+        } } => r,
         };
 
         // Update step state
@@ -512,7 +608,7 @@ impl TaskOrchestrator {
                 // Try to repair the plan if we still have replan budget.
                 // Best-effort: a replan failure leaves the task in the
                 // standard "failed step + skipped dependents" state.
-                self.try_replan_after_failure(task_id, step_id, &description, &error)
+                self.try_replan_after_failure(task_id, step_id, &description, &error, token)
                     .await;
 
                 // Re-check completion + drive the canonical
@@ -576,7 +672,15 @@ impl TaskOrchestrator {
         failed_step_id: &str,
         failed_step_description: &str,
         error: &str,
+        token: &CancellationToken,
     ) {
+        // PR-6b: don't burn an LLM call on a task that just got
+        // cancelled. The execute loop's next iteration will see the
+        // cancellation and break anyway, but skipping the replan saves
+        // the round-trip.
+        if token.is_cancelled() {
+            return;
+        }
         // Snapshot the fields we need under a short read lock.
         let (request, completed, attempts) = {
             let tasks = self.tasks.read().await;
@@ -641,16 +745,24 @@ impl TaskOrchestrator {
             "attempting replan after step failure"
         );
 
-        let new_steps = match self.decomposer.replan_after_failure(repair, context).await {
-            Ok(steps) if !steps.is_empty() => steps,
-            Ok(_) => {
-                tracing::info!(task_id = %task_id, "replan returned empty plan; skipping");
+        let replan_call = self.decomposer.replan_after_failure(repair, context);
+        let new_steps = tokio::select! {
+            biased;
+            _ = token.cancelled() => {
+                tracing::info!(task_id = %task_id, "replan aborted by cancellation");
                 return;
             }
-            Err(e) => {
-                tracing::warn!(task_id = %task_id, error = %e, "replan failed; leaving plan as-is");
-                return;
-            }
+            r = replan_call => match r {
+                Ok(steps) if !steps.is_empty() => steps,
+                Ok(_) => {
+                    tracing::info!(task_id = %task_id, "replan returned empty plan; skipping");
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(task_id = %task_id, error = %e, "replan failed; leaving plan as-is");
+                    return;
+                }
+            },
         };
 
         // Splice the new steps in. Each new step's depends_on already
@@ -713,7 +825,12 @@ impl TaskOrchestrator {
             .collect()
     }
 
-    /// Cancel a task.
+    /// Cancel a task. Flips all non-terminal step states to `Cancelled`,
+    /// transitions the task phase to `Cancelled`, and (PR-6b) fires the
+    /// per-task [`CancellationToken`] so any in-flight step future
+    /// observing the token aborts within one polling cycle — without
+    /// PR-6b, cancellation would have to wait for the current step to
+    /// finish on its own.
     pub async fn cancel(&self, task_id: &str) -> Result<(), OrchestrateError> {
         {
             let mut tasks = self.tasks.write().await;
@@ -727,6 +844,14 @@ impl TaskOrchestrator {
             }
         }
         self.transition_phase(task_id, TaskPhase::Cancelled).await;
+        // Fire the cancellation token AFTER state has already been
+        // flipped to Cancelled — that way a select-loser that races to
+        // overwrite step state with Cancelled is a no-op, not a write
+        // that could clobber a Completed/Failed transition that
+        // legitimately landed first.
+        if let Some(t) = self.cancel_tokens.read().await.get(task_id) {
+            t.cancel();
+        }
         Ok(())
     }
 
@@ -1100,6 +1225,169 @@ mod tests {
             task.phase,
             TaskPhase::Cancelled,
             "late Completed transition must not overwrite Cancelled"
+        );
+    }
+
+    // ── PR-6b: CancellationToken propagation ────────────────────────────
+
+    #[tokio::test]
+    async fn pr6b_cancel_aborts_in_flight_step_within_one_polling_cycle() {
+        // A step that would otherwise sleep for an hour must abort
+        // promptly once `cancel()` fires. Acceptance criterion:
+        // execute() returns within a bounded wall-clock window
+        // after cancel() — we use 2s to give CI breathing room.
+        use async_trait::async_trait;
+        use chrono::Utc;
+        use delegate::{
+            AgentCapabilities, AgentDelegate, AgentError, AgentRegistry, AgentResult, AgentTask,
+            AgentTaskStatus,
+        };
+        use std::time::{Duration, Instant};
+
+        struct SlowAgent;
+        #[async_trait]
+        impl AgentDelegate for SlowAgent {
+            fn name(&self) -> &str {
+                "slow"
+            }
+            fn capabilities(&self) -> AgentCapabilities {
+                AgentCapabilities::default()
+            }
+            async fn delegate(&self, task: AgentTask) -> Result<AgentResult, AgentError> {
+                // Sleep for an hour — well beyond any reasonable test
+                // timeout. Drop-on-cancel from tokio::select! must
+                // interrupt this so execute() can return.
+                tokio::time::sleep(Duration::from_secs(3600)).await;
+                let now = Utc::now();
+                Ok(AgentResult {
+                    task_id: task.id,
+                    status: AgentTaskStatus::Succeeded,
+                    summary: "unreachable".to_string(),
+                    artifacts: vec![],
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code: Some(0),
+                    started_at: now,
+                    completed_at: now,
+                })
+            }
+        }
+
+        let mut registry = AgentRegistry::new();
+        registry.register(Arc::new(SlowAgent));
+        let registry = Arc::new(registry);
+
+        let decomposer = Arc::new(MockDecomposer {
+            steps: vec![TaskStep {
+                id: "slow".to_string(),
+                description: "long-running step".to_string(),
+                action: StepAction::Implement {
+                    spec: "do nothing forever".to_string(),
+                    agent: "slow".to_string(),
+                },
+                depends_on: vec![],
+                tier: audit::ActionTier::Read,
+                estimated_tokens: 0,
+            }],
+        });
+        let orchestrator = Arc::new(TaskOrchestrator::new(decomposer).with_agents(registry));
+
+        let (task_id, _) = orchestrator
+            .plan("pr6b mid-step cancel", DecompositionContext::default())
+            .await
+            .unwrap();
+
+        let exec_orch = orchestrator.clone();
+        let exec_task_id = task_id.clone();
+        let exec_handle =
+            tokio::spawn(async move { exec_orch.execute(&exec_task_id).await.unwrap() });
+
+        // Let execute() actually enter the slow step before we cancel —
+        // otherwise the cancel could race ahead of the spawn and just
+        // hit the outer-loop pre-check, which wouldn't exercise the
+        // mid-step abort path we're testing.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let cancel_at = Instant::now();
+        orchestrator.cancel(&task_id).await.unwrap();
+
+        // execute() must return shortly after cancel — well under the
+        // 3600s the SlowAgent would otherwise sleep for.
+        let _summary = tokio::time::timeout(Duration::from_secs(2), exec_handle)
+            .await
+            .expect("execute() must return within 2s of cancel; did the token thread through?")
+            .expect("execute task panicked");
+        let elapsed = cancel_at.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "execute() returned but took {elapsed:?} after cancel — cancellation should be near-instant"
+        );
+
+        let task = orchestrator.get_task(&task_id).await.unwrap();
+        assert_eq!(
+            task.phase,
+            TaskPhase::Cancelled,
+            "task must land in Cancelled after mid-step cancel"
+        );
+        // The slow step itself should be Cancelled, not lingering in
+        // Running. cancel() flips state, and the select-loser's
+        // mark_step_cancelled overwrite is a no-op — either way the
+        // observed state is Cancelled.
+        assert!(
+            matches!(task.step_states.get("slow"), Some(StepState::Cancelled)),
+            "in-flight step must be Cancelled, got {:?}",
+            task.step_states.get("slow")
+        );
+    }
+
+    #[tokio::test]
+    async fn pr6b_cancel_before_execute_exits_without_running_steps() {
+        // If cancel() fires after plan() but before execute() starts,
+        // execute() should observe the cancellation and exit without
+        // touching any step handlers. The task lands Cancelled.
+        let decomposer = Arc::new(MockDecomposer {
+            steps: test_steps(),
+        });
+        let orchestrator = TaskOrchestrator::new(decomposer);
+
+        let (task_id, _) = orchestrator
+            .plan("pr6b pre-execute cancel", DecompositionContext::default())
+            .await
+            .unwrap();
+        orchestrator.cancel(&task_id).await.unwrap();
+
+        let _summary = orchestrator.execute(&task_id).await.unwrap();
+        let task = orchestrator.get_task(&task_id).await.unwrap();
+        assert_eq!(task.phase, TaskPhase::Cancelled);
+        // No step should have advanced past Cancelled — set by cancel()
+        // before execute() ran.
+        for (id, state) in &task.step_states {
+            assert!(
+                matches!(state, StepState::Cancelled),
+                "step {id} should be Cancelled, got {state:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn pr6b_cancel_token_fires_when_cancel_called() {
+        // Lower-level invariant: cancel() must actually fire the
+        // per-task token so future select! consumers (e.g. an external
+        // bridge that wires its own cancel-aware future) observe it.
+        let decomposer = Arc::new(MockDecomposer {
+            steps: test_steps(),
+        });
+        let orchestrator = TaskOrchestrator::new(decomposer);
+        let (task_id, _) = orchestrator
+            .plan("pr6b token fires", DecompositionContext::default())
+            .await
+            .unwrap();
+        let token = orchestrator.cancel_token_for(&task_id).await;
+        assert!(!token.is_cancelled(), "token must start uncancelled");
+        orchestrator.cancel(&task_id).await.unwrap();
+        assert!(
+            token.is_cancelled(),
+            "cancel() must fire the per-task token"
         );
     }
 
