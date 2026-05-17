@@ -1133,4 +1133,132 @@ mod tests {
             "default install mounts no MCP servers"
         );
     }
+
+    // Umbrella check: a single `build_processor` call must populate
+    // every optional injection slot the processor exposes. The
+    // per-subsystem tests above each verify one slot in isolation;
+    // this one fails fast when a new `with_*` lands without a
+    // corresponding bootstrap call, or when an existing wiring
+    // regresses to `None`. Drives one signal through the pipeline so
+    // the observer side is exercised end-to-end too.
+    #[tokio::test]
+    async fn build_processor_populates_every_injection_slot() {
+        use signal::types::{Signal, SignalSource};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = brain_core::BrainConfig::default();
+        cfg.brain.data_dir = tmp.path().to_str().unwrap().to_string();
+        cfg.agents.auto_discovery = false;
+        cfg.identity = identity::IdentityConfig {
+            user_id: "keshav".into(),
+            principals: vec![identity::PrincipalConfig {
+                agent_id: "claude-code".into(),
+                scopes: vec!["shell.exec".into()],
+                tier: identity::Tier::Execute,
+                path_allowlist: vec![],
+            }],
+        };
+
+        let processor = build_processor(&cfg).await.expect("processor builds");
+
+        // Subscribe BEFORE driving the signal so the SignalReceived
+        // event the pipeline publishes is reliably observed.
+        let mut events = processor
+            .subscribe_brain_events()
+            .expect("observer wired and exposing a brain-event stream");
+
+        // Every wired subsystem must be reachable through its accessor.
+        assert!(
+            processor.identity_store().is_some(),
+            "identity store must be wired"
+        );
+        assert!(
+            processor.terminal_bridge().is_some(),
+            "terminal bridge must be wired"
+        );
+        assert!(
+            processor.tool_registry().is_some(),
+            "tool registry must be wired"
+        );
+        assert!(
+            processor.intent_router().is_some(),
+            "intent router must be wired"
+        );
+        assert!(processor.mcp_host().is_some(), "mcp host must be wired");
+        assert!(
+            processor.breaker_registry().is_some(),
+            "breaker registry must be wired"
+        );
+        assert!(
+            processor.dual_memory_reader().is_some(),
+            "dual-memory reader must be wired"
+        );
+        assert!(processor.dlq().is_some(), "DLQ must be wired");
+        assert!(
+            processor.audit_trail().is_some(),
+            "audit trail must be wired"
+        );
+        assert!(
+            processor.confirmation_engine().is_some(),
+            "confirmation engine must be wired"
+        );
+        assert!(
+            processor.cost_budget().is_some(),
+            "cost budget must be wired"
+        );
+        assert!(
+            processor.orchestrator().is_some(),
+            "task orchestrator must be wired"
+        );
+        assert!(
+            processor.channel_router().is_some(),
+            "channel router must be wired"
+        );
+        assert!(
+            processor.channel_dispatcher().is_some(),
+            "channel dispatcher must be wired"
+        );
+        assert!(
+            processor.standing_approvals().is_some(),
+            "standing-approval store must be wired"
+        );
+
+        // Identity resolves the configured agent (proves the store is
+        // not just instantiated but populated from `config.identity`).
+        let store = processor.identity_store().unwrap().clone();
+        let principal = store
+            .principal_for(&identity::AgentHint::AgentId("claude-code".into()))
+            .await
+            .expect("configured principal resolves");
+        assert_eq!(principal.tier, identity::Tier::Execute);
+
+        // MCP host is queryable even with no mounts (proves the inner
+        // `RmcpHost` is reachable through the `ResilientMcpHost`
+        // decorator that's now in front of it).
+        assert!(
+            processor
+                .mcp_host()
+                .unwrap()
+                .list_servers()
+                .await
+                .is_empty(),
+            "no MCP servers should be mounted by default"
+        );
+
+        // Drive a signal end-to-end and confirm the observer sees the
+        // pipeline publish — this is the integration check that the
+        // observer hand-off survives the full processing path.
+        let proc = std::sync::Arc::new(processor);
+        let driver = proc.clone();
+        tokio::spawn(async move {
+            let signal = Signal::new(SignalSource::Cli, "wiring", "tester", "hello");
+            let _ = driver.process(signal).await;
+        });
+
+        let event = tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+            .await
+            .expect("observer event must arrive within timeout")
+            .expect("broadcast recv");
+        assert_eq!(event.kind(), "signal_received");
+    }
 }
