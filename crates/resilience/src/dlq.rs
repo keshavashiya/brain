@@ -38,6 +38,11 @@ pub trait DeadLetterQueue: Send + Sync {
     async fn enqueue(&self, entry: DlqEntry) -> Result<(), DlqError>;
     /// Return the `limit` most recent entries, newest first.
     async fn list_recent(&self, limit: usize) -> Result<Vec<DlqEntry>, DlqError>;
+    /// Remove the entries with the given ids. Returns the number of
+    /// rows actually deleted — ids that don't exist are silently
+    /// skipped so the drain loop can run idempotently against a
+    /// concurrent purge / startup-replay scenario.
+    async fn purge(&self, ids: &[String]) -> Result<usize, DlqError>;
     /// Total entries currently held.
     async fn len(&self) -> Result<usize, DlqError>;
     /// Convenience derived from [`Self::len`]. Backends may override
@@ -78,6 +83,16 @@ impl DeadLetterQueue for InMemoryDlq {
     async fn list_recent(&self, limit: usize) -> Result<Vec<DlqEntry>, DlqError> {
         let g = self.entries.lock().expect("dlq mutex poisoned");
         Ok(g.iter().take(limit).cloned().collect())
+    }
+
+    async fn purge(&self, ids: &[String]) -> Result<usize, DlqError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let mut g = self.entries.lock().expect("dlq mutex poisoned");
+        let before = g.len();
+        g.retain(|e| !ids.iter().any(|id| id == &e.id));
+        Ok(before - g.len())
     }
 
     async fn len(&self) -> Result<usize, DlqError> {

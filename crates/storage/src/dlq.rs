@@ -87,6 +87,23 @@ impl DeadLetterQueue for SqliteDlq {
             .collect()
     }
 
+    async fn purge(&self, ids: &[String]) -> Result<usize, DlqError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let owned: Vec<String> = ids.to_vec();
+        self.pool
+            .with_conn(move |conn| {
+                let mut removed = 0usize;
+                let mut stmt = conn.prepare("DELETE FROM dlq_entries WHERE id = ?1")?;
+                for id in &owned {
+                    removed += stmt.execute(rusqlite::params![id])?;
+                }
+                Ok(removed)
+            })
+            .map_err(|e| DlqError::Backend(e.to_string()))
+    }
+
     async fn len(&self) -> Result<usize, DlqError> {
         self.pool
             .with_conn(|conn| {
@@ -163,6 +180,50 @@ mod tests {
         // Newest-first ordering: e4, e3, e2.
         assert_eq!(recent[0].error_message, "e4");
         assert_eq!(recent[2].error_message, "e2");
+    }
+
+    #[tokio::test]
+    async fn sqlite_dlq_purge_removes_only_named_ids() {
+        let pool = Arc::new(SqlitePool::open_memory().expect("memory pool"));
+        let dlq = SqliteDlq::new(pool);
+        let a = entry("mcp:a:x", "alpha", 1);
+        let b = entry("mcp:b:y", "beta", 1);
+        let c = entry("mcp:c:z", "gamma", 1);
+        let target = b.id.clone();
+        dlq.enqueue(a).await.unwrap();
+        dlq.enqueue(b).await.unwrap();
+        dlq.enqueue(c).await.unwrap();
+        assert_eq!(dlq.len().await.unwrap(), 3);
+
+        let removed = dlq.purge(&[target]).await.unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(dlq.len().await.unwrap(), 2);
+
+        let recent = dlq.list_recent(10).await.unwrap();
+        let messages: Vec<_> = recent.iter().map(|e| e.error_message.as_str()).collect();
+        assert!(messages.contains(&"alpha"));
+        assert!(messages.contains(&"gamma"));
+        assert!(!messages.contains(&"beta"));
+    }
+
+    #[tokio::test]
+    async fn sqlite_dlq_purge_empty_input_is_no_op() {
+        let pool = Arc::new(SqlitePool::open_memory().expect("memory pool"));
+        let dlq = SqliteDlq::new(pool);
+        dlq.enqueue(entry("t", "x", 1)).await.unwrap();
+        let removed = dlq.purge(&[]).await.unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(dlq.len().await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn sqlite_dlq_purge_unknown_id_is_no_op() {
+        let pool = Arc::new(SqlitePool::open_memory().expect("memory pool"));
+        let dlq = SqliteDlq::new(pool);
+        dlq.enqueue(entry("t", "x", 1)).await.unwrap();
+        let removed = dlq.purge(&["ghost".to_string()]).await.unwrap();
+        assert_eq!(removed, 0);
+        assert_eq!(dlq.len().await.unwrap(), 1);
     }
 
     #[tokio::test]

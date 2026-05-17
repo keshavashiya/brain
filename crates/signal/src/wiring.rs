@@ -148,6 +148,20 @@ impl SignalProcessor {
         self.dual_memory_reader.as_ref()
     }
 
+    /// Attach a dead-letter queue (builder pattern). The same `Arc` is
+    /// expected to be wired into the `ResilientMcpHost` decorator so
+    /// the host's enqueue path and the serve loop's drain task see one
+    /// consistent backlog.
+    pub fn with_dlq(mut self, dlq: Arc<dyn resilience::DeadLetterQueue>) -> Self {
+        self.dlq = Some(dlq);
+        self
+    }
+
+    /// Expose the dead-letter queue.
+    pub fn dlq(&self) -> Option<&Arc<dyn resilience::DeadLetterQueue>> {
+        self.dlq.as_ref()
+    }
+
     /// Attach a task orchestrator (builder pattern).
     pub fn with_orchestrator(mut self, orch: Arc<orchestrate::TaskOrchestrator>) -> Self {
         self.orchestrator = Some(orch);

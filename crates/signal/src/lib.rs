@@ -75,6 +75,10 @@ pub struct SignalProcessor {
     /// episodic graph without bypassing the legacy `episodes` table for
     /// content written before the graph schema landed.
     dual_memory_reader: Option<hippocampus::DualMemoryReader>,
+    /// Dead-letter queue — exhausted tool-call retries land here. Held
+    /// on the processor so the serve loop's drain task and the MCP
+    /// host's decorator share one queue instance.
+    dlq: Option<std::sync::Arc<dyn resilience::DeadLetterQueue>>,
     /// Task orchestrator — decomposes requests into executable plans.
     orchestrator: Option<std::sync::Arc<orchestrate::TaskOrchestrator>>,
 

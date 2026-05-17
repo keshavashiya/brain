@@ -161,6 +161,7 @@ impl SignalProcessor {
             cost_budget: None,
             sandbox_executor: None,
             dual_memory_reader: None,
+            dlq: None,
             orchestrator: None,
             channel_router: None,
             channel_preferences: None,

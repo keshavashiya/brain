@@ -166,12 +166,25 @@ pub async fn build_processor(
             .with_tool_registry(tool_registry)
             .with_capability_index(mcp_capability_index),
     );
-    let mcp_host: Arc<dyn mcphost::MCPHost> =
-        Arc::new(mcphost::ResilientMcpHost::new(rmcp_inner).with_breakers(breakers.clone()));
+    // Persistent dead-letter queue — exhausted MCP retries land here
+    // so the serve loop's drain task (cli::serve::spawn_dlq_drain) can
+    // replay them later. The same `Arc` is threaded through the
+    // resilient decorator (writer) and onto the processor (reader for
+    // the drainer) so both surfaces see one consistent backlog.
+    let dlq: Arc<dyn ::resilience::DeadLetterQueue> = Arc::new(storage::SqliteDlq::new(Arc::new(
+        processor.episodic().pool().clone(),
+    )));
+
+    let mcp_host: Arc<dyn mcphost::MCPHost> = Arc::new(
+        mcphost::ResilientMcpHost::new(rmcp_inner)
+            .with_breakers(breakers.clone())
+            .with_dlq(dlq.clone()),
+    );
     processor = processor
         .with_mcp_host(mcp_host)
-        .with_breaker_registry(breakers);
-    tracing::info!("MCP host wired (RmcpHost + ResilientMcpHost decorator with breakers)");
+        .with_breaker_registry(breakers)
+        .with_dlq(dlq);
+    tracing::info!("MCP host wired (RmcpHost + ResilientMcpHost decorator with breakers + DLQ)");
 
     let action_dispatcher = build_action_dispatcher(config, &processor)?;
     processor = processor.with_action_dispatcher(action_dispatcher);

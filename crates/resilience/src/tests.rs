@@ -738,3 +738,47 @@ async fn in_memory_dlq_can_be_used_via_trait_object() {
     q.enqueue(dlq_entry("t", "boom", 2)).await.unwrap();
     assert_eq!(q.len().await.unwrap(), 1);
 }
+
+#[tokio::test]
+async fn in_memory_dlq_purge_removes_only_named_ids() {
+    let q = InMemoryDlq::new();
+    let a = dlq_entry("a", "alpha", 1);
+    let b = dlq_entry("b", "beta", 1);
+    let c = dlq_entry("c", "gamma", 1);
+    let target = b.id.clone();
+    q.enqueue(a).await.unwrap();
+    q.enqueue(b).await.unwrap();
+    q.enqueue(c).await.unwrap();
+
+    let removed = q.purge(std::slice::from_ref(&target)).await.unwrap();
+    assert_eq!(removed, 1);
+    assert_eq!(q.len().await.unwrap(), 2);
+    let remaining: Vec<_> = q
+        .list_recent(10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.error_message)
+        .collect();
+    assert!(remaining.iter().any(|m| m == "alpha"));
+    assert!(remaining.iter().any(|m| m == "gamma"));
+    assert!(!remaining.iter().any(|m| m == "beta"));
+}
+
+#[tokio::test]
+async fn in_memory_dlq_purge_unknown_id_is_no_op() {
+    let q = InMemoryDlq::new();
+    q.enqueue(dlq_entry("a", "alpha", 1)).await.unwrap();
+    let removed = q.purge(&["does-not-exist".to_string()]).await.unwrap();
+    assert_eq!(removed, 0);
+    assert_eq!(q.len().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn in_memory_dlq_purge_empty_input_is_no_op() {
+    let q = InMemoryDlq::new();
+    q.enqueue(dlq_entry("a", "alpha", 1)).await.unwrap();
+    let removed = q.purge(&[]).await.unwrap();
+    assert_eq!(removed, 0);
+    assert_eq!(q.len().await.unwrap(), 1);
+}
