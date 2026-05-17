@@ -97,8 +97,22 @@ impl SignalProcessor {
         // Create semantic store (optional — fails gracefully if RuVector unavailable).
         // Pass the probed embedding_dim so VectorDB is sized to match the provider.
         // Note: ruvector-core stores only IDs; content encryption is handled by SQLite.
-        let semantic = match storage::RuVectorStore::open(&config.ruvector_path(), embedding_dim)
-            .await
+        // Issue 37: HNSW tuning comes from `storage.hnsw` in config
+        // instead of the hardcoded values that used to live inside the
+        // storage crate. Convert the user-facing `brain_core::HnswConfig`
+        // to the storage-crate type at the boundary.
+        let hnsw = storage::HnswConfig {
+            m: config.storage.hnsw.m,
+            ef_construction: config.storage.hnsw.ef_construction,
+            ef_search: config.storage.hnsw.ef_search,
+            max_elements: config.storage.hnsw.max_elements,
+        };
+        let semantic = match storage::RuVectorStore::open_with_config(
+            &config.ruvector_path(),
+            embedding_dim,
+            hnsw,
+        )
+        .await
         {
             Ok(ruv) => {
                 #[cfg(feature = "encryption")]

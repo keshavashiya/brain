@@ -243,3 +243,4 @@ storage:
     ef_construction: 200
     m: 16
     ef_search: 50
+    max_elements: 10000000

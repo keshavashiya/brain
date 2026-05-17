@@ -175,6 +175,17 @@ pub struct HnswConfig {
     pub ef_construction: u32,
     pub m: u32,
     pub ef_search: u32,
+    /// Maximum number of vectors a single HNSW table can hold. Threaded
+    /// into the underlying ruvector database at `open` time (Issue 37);
+    /// previously hardcoded at 10_000_000 inside the storage crate.
+    #[serde(default = "HnswConfig::default_max_elements")]
+    pub max_elements: u32,
+}
+
+impl HnswConfig {
+    pub fn default_max_elements() -> u32 {
+        10_000_000
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

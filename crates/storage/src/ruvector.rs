@@ -65,6 +65,29 @@ pub struct VectorResult {
     pub distance: f32,
 }
 
+/// Tuning knobs for the underlying ruvector HNSW index. Mirrors the
+/// fields in `brain_core::HnswConfig` but lives here so the storage
+/// crate can stay independent of `brain_core`. Callers convert at the
+/// boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HnswConfig {
+    pub m: u32,
+    pub ef_construction: u32,
+    pub ef_search: u32,
+    pub max_elements: u32,
+}
+
+impl Default for HnswConfig {
+    fn default() -> Self {
+        Self {
+            m: 16,
+            ef_construction: 200,
+            ef_search: 50,
+            max_elements: 10_000_000,
+        }
+    }
+}
+
 // ─── Store ───────────────────────────────────────────────────────────────────
 
 /// RuVector store — manages multiple per-table `VectorDB` instances.
@@ -73,6 +96,7 @@ pub struct RuVectorStore {
     root: PathBuf,
     /// Dimension of the embedding vectors (must match the active embedding model).
     dimensions: usize,
+    hnsw: HnswConfig,
     tables: Arc<RwLock<HashMap<String, VectorDB>>>,
 }
 
@@ -84,8 +108,24 @@ impl RuVectorStore {
     /// Use [`VECTOR_DIM`] as the default (384) when the embedding provider is not
     /// yet known, and prefer probing the actual embedder output at startup.
     pub async fn open(path: &Path, dimensions: usize) -> Result<Self, RuVectorError> {
+        Self::open_with_config(path, dimensions, HnswConfig::default()).await
+    }
+
+    /// Open with explicit HNSW tuning (Issue 37). Threading the knobs
+    /// through here lets `brain serve` honour `storage.hnsw.*` from
+    /// config instead of locking every install to the hardcoded
+    /// defaults baked into this crate.
+    pub async fn open_with_config(
+        path: &Path,
+        dimensions: usize,
+        hnsw: HnswConfig,
+    ) -> Result<Self, RuVectorError> {
         std::fs::create_dir_all(path)?;
         info!(
+            m = hnsw.m,
+            ef_construction = hnsw.ef_construction,
+            ef_search = hnsw.ef_search,
+            max_elements = hnsw.max_elements,
             "RuVector store opened at {} (dim={})",
             path.display(),
             dimensions
@@ -93,6 +133,7 @@ impl RuVectorStore {
         Ok(Self {
             root: path.to_path_buf(),
             dimensions,
+            hnsw,
             tables: Arc::new(RwLock::new(HashMap::new())),
         })
     }
@@ -104,10 +145,10 @@ impl RuVectorStore {
             distance_metric: DistanceMetric::Cosine,
             storage_path: db_path.to_string_lossy().into_owned(),
             hnsw_config: Some(RuvHnswConfig {
-                m: 16,
-                ef_construction: 200,
-                ef_search: 50,
-                max_elements: 10_000_000,
+                m: self.hnsw.m as usize,
+                ef_construction: self.hnsw.ef_construction as usize,
+                ef_search: self.hnsw.ef_search as usize,
+                max_elements: self.hnsw.max_elements as usize,
             }),
             quantization: None,
         };
@@ -406,6 +447,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = RuVectorStore::open(dir.path(), VECTOR_DIM).await.unwrap();
         (store, dir)
+    }
+
+    /// Issue 37 regression: `open_with_config` preserves the supplied
+    /// tuning, and `open` falls back to defaults. We don't probe the
+    /// underlying ruvector internals (no public accessor) — but the
+    /// stored `hnsw` field is the source of truth that `make_db` reads.
+    #[tokio::test]
+    async fn open_with_config_persists_tuning() {
+        let dir = tempfile::tempdir().unwrap();
+        let custom = HnswConfig {
+            m: 32,
+            ef_construction: 400,
+            ef_search: 100,
+            max_elements: 5_000_000,
+        };
+        let store = RuVectorStore::open_with_config(dir.path(), VECTOR_DIM, custom)
+            .await
+            .unwrap();
+        assert_eq!(store.hnsw, custom);
+
+        let default_store = RuVectorStore::open(dir.path(), VECTOR_DIM).await.unwrap();
+        assert_eq!(default_store.hnsw, HnswConfig::default());
     }
 
     fn unit_vec(axis: usize) -> Vec<f32> {

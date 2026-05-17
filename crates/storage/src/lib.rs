@@ -15,5 +15,5 @@ pub mod sqlite;
 pub use dlq::SqliteDlq;
 #[cfg(feature = "encryption")]
 pub use encryption::Encryptor;
-pub use ruvector::{RuVectorStore, VectorResult};
+pub use ruvector::{HnswConfig, RuVectorStore, VectorResult};
 pub use sqlite::{ExportedEpisode, ExportedFact, ScheduledIntent, SqlitePool};
