@@ -17,8 +17,44 @@ fn test_default_config() {
         WebSearchProvider::DuckDuckGo
     );
     assert_eq!(config.actions.scheduling.mode, SchedulingMode::PersistOnly);
-    assert!(!config.proactivity.enabled);
+    // Proactivity defaults are synced to `default.yaml` (Issue 36).
+    assert!(config.proactivity.enabled);
+    assert_eq!(config.proactivity.max_per_day, 2);
+    assert_eq!(config.proactivity.quiet_hours.start, "20:00");
+    assert_eq!(config.proactivity.quiet_hours.end, "10:00");
     assert!(config.adapters.http.enabled);
+}
+
+/// Issue 36 regression: the four `proactivity` fields the audit
+/// flagged (enabled / max_per_day / quiet_hours.{start,end}) must
+/// stay in sync between `BrainConfig::default()` and the embedded
+/// `default.yaml`. The full-config round-trip currently surfaces
+/// unrelated drift in `agents.*`, `llm.providers`, and `reflex.*`
+/// — out of scope for this slice; pick those up in a follow-up
+/// before any test widens to the whole shape.
+#[test]
+fn default_matches_yaml_for_proactivity() {
+    let yaml_source = include_str!("../../default.yaml");
+    let yaml_loaded: BrainConfig =
+        serde_yaml::from_str(yaml_source).expect("embedded default.yaml must deserialize");
+    let struct_default = BrainConfig::default();
+
+    assert_eq!(
+        yaml_loaded.proactivity.enabled, struct_default.proactivity.enabled,
+        "proactivity.enabled drifted"
+    );
+    assert_eq!(
+        yaml_loaded.proactivity.max_per_day, struct_default.proactivity.max_per_day,
+        "proactivity.max_per_day drifted"
+    );
+    assert_eq!(
+        yaml_loaded.proactivity.quiet_hours.start, struct_default.proactivity.quiet_hours.start,
+        "proactivity.quiet_hours.start drifted"
+    );
+    assert_eq!(
+        yaml_loaded.proactivity.quiet_hours.end, struct_default.proactivity.quiet_hours.end,
+        "proactivity.quiet_hours.end drifted"
+    );
 }
 
 #[test]

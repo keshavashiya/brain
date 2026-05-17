@@ -395,12 +395,15 @@ impl Default for BrainConfig {
                 resilience: ResilienceConfig::default(),
             },
             proactivity: ProactivityConfig {
-                enabled: false,
-                max_per_day: 5,
+                // Synced to `default.yaml`: programmatic `BrainConfig::default()`
+                // must match the embedded YAML so the loader and the struct
+                // produce the same shape (Issue 36).
+                enabled: true,
+                max_per_day: 2,
                 min_interval_minutes: 60,
                 quiet_hours: QuietHoursConfig {
-                    start: "22:00".to_string(),
-                    end: "08:00".to_string(),
+                    start: "20:00".to_string(),
+                    end: "10:00".to_string(),
                     timezone: "UTC".to_string(),
                 },
                 delivery: DeliveryConfig::default(),

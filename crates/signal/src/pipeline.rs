@@ -3217,6 +3217,10 @@ mod proactivity_tests {
         let temp = tempfile::tempdir().unwrap();
         let mut config = brain_core::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        // Pin proactivity disabled — these tests exercise the disabled→
+        // enabled toggle path and must not inherit whichever value the
+        // shipped default carries (Issue 36 made the YAML default true).
+        config.proactivity.enabled = false;
         let processor = SignalProcessor::new(config).await.unwrap();
         std::mem::forget(temp);
         processor
