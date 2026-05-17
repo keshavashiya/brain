@@ -265,6 +265,14 @@ impl WebhookInboundTransport {
         &self.config.channel_id
     }
 
+    /// True when this transport ships its own request authentication
+    /// (HMAC signature, Ed25519, etc.). The HTTP server uses this to
+    /// decide whether `POST /v1/webhooks/:id` may run anonymously or
+    /// must additionally require a Brain API key — see Issue 52.
+    pub fn has_verifier(&self) -> bool {
+        !matches!(self.verifier, PreparedVerifier::None)
+    }
+
     async fn set_health(&self, h: TransportHealth) {
         *self.health.write().await = h;
     }

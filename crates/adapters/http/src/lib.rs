@@ -204,6 +204,97 @@ mod tests {
         assert_eq!(health.status(), http::StatusCode::OK);
     }
 
+    /// POST /v1/webhooks/:id on a verifier-less transport must require a
+    /// Brain API key (Issue 52). Anonymous POST → 401, Bearer → 200.
+    #[tokio::test]
+    async fn test_post_webhook_without_verifier_requires_bearer_auth() {
+        use channel::transport::{
+            inbound::{WebhookInboundConfig, WebhookInboundTransport},
+            preset::{
+                FieldExtractors, HttpMethod, PresetDefinition, PresetKind, SendSpec,
+                WebhookInboundSpec,
+            },
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let api_key = config.access.api_keys.first().unwrap().key.clone();
+        let api_keys = config.access.api_keys.clone();
+
+        let preset = PresetDefinition {
+            id: "test-webhook".into(),
+            kind: PresetKind::WebhookInbound,
+            label: Some("test".into()),
+            poll: None,
+            send: Some(SendSpec {
+                url_template: "http://example.invalid/{reply_to}".into(),
+                method: HttpMethod::Post,
+                body_template: "{}".into(),
+                content_type: "application/json".into(),
+                headers: std::collections::HashMap::new(),
+            }),
+            webhook: Some(WebhookInboundSpec {
+                messages_path: "$".into(),
+                extract: FieldExtractors {
+                    id: Some("$.id".into()),
+                    text: "$.text".into(),
+                    user_ref: None,
+                    reply_to: None,
+                    extra: std::collections::HashMap::new(),
+                },
+                ack_body: None,
+                ack_content_type: "application/json".into(),
+                ack_extract: std::collections::HashMap::new(),
+                ack_only_when: None,
+            }),
+            verifier: None, // ← key: no signature verification
+        };
+        let transport = std::sync::Arc::new(
+            WebhookInboundTransport::new(WebhookInboundConfig::new("w", "w", preset)).unwrap(),
+        );
+        assert!(
+            !transport.has_verifier(),
+            "test fixture should be verifier-less"
+        );
+
+        let processor = signal::SignalProcessor::new(config).await.unwrap();
+        let mut webhooks = std::collections::HashMap::new();
+        webhooks.insert("ingest".to_string(), transport);
+
+        let router = crate::create_router(Arc::new(processor), webhooks, api_keys, true);
+
+        // Anonymous → 401.
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(http::Method::POST)
+                    .uri("/v1/webhooks/ingest")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"id":"m1","text":"hi"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), http::StatusCode::UNAUTHORIZED);
+
+        // With Bearer → 200.
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method(http::Method::POST)
+                    .uri("/v1/webhooks/ingest")
+                    .header("authorization", format!("Bearer {api_key}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"id":"m1","text":"hi"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), http::StatusCode::OK);
+    }
+
     /// POST /v1/webhooks/:id with an unknown id returns 404 (regression for Issue 43 — used to panic via `Response::builder().unwrap()`).
     #[tokio::test]
     async fn test_post_webhook_unknown_id_returns_404() {

@@ -579,6 +579,13 @@ pub async fn sse_events_handler(
 ///
 /// This endpoint finds the registered `WebhookInboundTransport` for the given
 /// ID and delegates signature verification and message extraction to it.
+///
+/// Per Issue 52: when the transport has no signature verifier configured
+/// (`PreparedVerifier::None`), we additionally require a Brain
+/// `Authorization: Bearer <api-key>` with `write` permission so the
+/// endpoint can't be abused as an open inbound message queue. Verified
+/// transports (HMAC, Ed25519) keep their existing flow — the verifier
+/// itself is the auth gate.
 pub async fn post_webhook_handler(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -596,6 +603,17 @@ pub async fn post_webhook_handler(
             .into_response();
         }
     };
+
+    if !transport.has_verifier() {
+        if let Err((status, msg)) = auth::check_auth(&state, &headers, "write") {
+            tracing::warn!(
+                transport = %id,
+                status = %status,
+                "webhook rejected — verifier-less transport requires Bearer auth"
+            );
+            return build_webhook_response(status, None, msg).into_response();
+        }
+    }
 
     let resp = transport.handle_request(&headers, &body).await;
     let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
