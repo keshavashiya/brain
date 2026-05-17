@@ -119,12 +119,6 @@ impl Markdown {
         tmp = tmp.line(text);
         *self = tmp;
     }
-    #[allow(dead_code)]
-    pub(crate) fn push_blank(&mut self) {
-        let mut tmp = std::mem::take(self);
-        tmp = tmp.blank();
-        *self = tmp;
-    }
     pub(crate) fn push_heading(&mut self, level: usize, text: impl AsRef<str>) {
         let mut tmp = std::mem::take(self);
         tmp = tmp.heading(level, text);

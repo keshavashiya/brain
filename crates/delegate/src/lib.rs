@@ -28,5 +28,5 @@ pub use registry::{
 pub use subprocess::{SubprocessAgentConfig, SubprocessAgentDelegate};
 pub use traits::{
     AgentCapabilities, AgentContext, AgentDelegate, AgentError, AgentResult, AgentTask,
-    AgentTaskStatus, Artifact, CredentialRef,
+    AgentTaskStatus, Artifact,
 };

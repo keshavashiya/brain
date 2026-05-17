@@ -62,18 +62,6 @@ fn extract_pdf(path: &Path) -> Result<String, ExtractError> {
     pdf_extract::extract_text(path).map_err(|e| ExtractError::Pdf(e.to_string()))
 }
 
-/// True iff this module knows how to convert the given path to text
-/// (regardless of whether the file actually exists). Used by callers
-/// that want to advertise the formats they accept.
-#[allow(dead_code)]
-pub(crate) fn is_supported(path: &Path) -> bool {
-    let extension = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|s| s.to_ascii_lowercase());
-    matches!(extension.as_deref(), Some("pdf") | None | Some(_))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

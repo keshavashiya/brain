@@ -7,17 +7,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// Reference to a credential that should be injected at execution time.
-/// The delegate resolves this against the vault — raw values never
-/// appear in `AgentTask`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CredentialRef {
-    /// Vault key (e.g. `"github_token"`).
-    pub key: String,
-    /// Environment variable to expose the value under, if any.
-    pub env: Option<String>,
-}
-
 /// Token-budgeted context passed to the delegate alongside the task spec.
 /// Free-form fields so different agents can lift what they need — keys
 /// like `"memory_facts"`, `"recent_episodes"`, `"project_conventions"`.
@@ -66,9 +55,6 @@ pub struct AgentTask {
     pub context: AgentContext,
     /// Working directory; the delegate should cd here before executing.
     pub workdir: Option<PathBuf>,
-    /// Credentials to inject (never raw values — vault refs only).
-    #[serde(default)]
-    pub credentials: Vec<CredentialRef>,
     /// Hard ceiling in seconds. The delegate kills the underlying
     /// process/request at or before this mark.
     pub timeout_secs: u64,
@@ -81,7 +67,6 @@ impl AgentTask {
             description: description.into(),
             context: AgentContext::default(),
             workdir: None,
-            credentials: Vec::new(),
             timeout_secs: 300,
         }
     }
