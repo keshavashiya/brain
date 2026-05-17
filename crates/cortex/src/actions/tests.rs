@@ -137,7 +137,8 @@ fn test_action_config_default() {
 
 #[tokio::test]
 async fn test_execute_allowed_command() {
-    let dispatcher = ActionDispatcher::with_defaults();
+    let sandbox: Arc<dyn sandbox::SandboxExecutor> = Arc::new(sandbox::StubSandbox::new());
+    let dispatcher = ActionDispatcher::with_defaults().with_sandbox_executor(sandbox);
     let action = Action::ExecuteCommand {
         command: "ls".to_string(),
         args: vec!["-la".to_string()],
@@ -145,6 +146,25 @@ async fn test_execute_allowed_command() {
 
     let result = dispatcher.dispatch(&action).await;
     assert!(result.success);
+}
+
+#[tokio::test]
+async fn test_execute_command_refuses_without_sandbox() {
+    let dispatcher = ActionDispatcher::with_defaults();
+    let action = Action::ExecuteCommand {
+        command: "ls".to_string(),
+        args: vec![],
+    };
+    let result = dispatcher.dispatch(&action).await;
+    assert!(!result.success);
+    assert!(
+        result
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("Sandbox not configured"),
+        "expected sandbox-not-configured refusal: {result:?}"
+    );
 }
 
 #[tokio::test]

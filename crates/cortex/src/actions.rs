@@ -245,6 +245,10 @@ pub struct ActionDispatcher {
     url_fetch_backend: Option<Arc<dyn UrlFetchBackend>>,
     scheduling_backend: Option<Arc<dyn SchedulingBackend>>,
     message_backend: Option<Arc<dyn MessageBackend>>,
+    /// Sandbox executor that backs `Action::ExecuteCommand` (Issue 121).
+    /// When unset the action refuses with an explicit error rather than
+    /// silently shelling out via raw `tokio::process::Command`.
+    sandbox_executor: Option<Arc<dyn sandbox::SandboxExecutor>>,
     namespace: String,
 }
 
@@ -258,6 +262,7 @@ impl ActionDispatcher {
             url_fetch_backend: None,
             scheduling_backend: None,
             message_backend: None,
+            sandbox_executor: None,
             namespace: "personal".to_string(),
         }
     }
@@ -308,6 +313,14 @@ impl ActionDispatcher {
         self
     }
 
+    /// Attach the sandbox executor used by `Action::ExecuteCommand`.
+    /// Without one wired, the action returns an explicit error instead
+    /// of executing — this is the production hardening from Issue 121.
+    pub fn with_sandbox_executor(mut self, executor: Arc<dyn sandbox::SandboxExecutor>) -> Self {
+        self.sandbox_executor = Some(executor);
+        self
+    }
+
     /// Set the default namespace used by action backends.
     pub fn set_namespace(&mut self, namespace: impl Into<String>) {
         self.namespace = namespace.into();
@@ -344,47 +357,61 @@ impl ActionDispatcher {
         }
     }
 
-    /// Execute a sandboxed command.
+    /// Execute a sandboxed command (Issue 121).
+    ///
+    /// Two layers of defense:
+    /// 1. Dispatcher-level allowlist + argument deny-list (cheap, runs
+    ///    before we touch the sandbox).
+    /// 2. The wired [`sandbox::SandboxExecutor`] which enforces rlimits,
+    ///    platform isolation (macOS Seatbelt / Linux namespaces), and a
+    ///    second binary allowlist. Without a sandbox wired we refuse —
+    ///    the previous raw `tokio::process::Command` path is gone, so a
+    ///    misconfigured dispatcher can no longer shell out unbounded.
     async fn execute_command(&self, command: &str, args: &[String]) -> ActionResult {
-        // Check allowlist
         if !self.config.command_allowlist.iter().any(|c| c == command) {
             return ActionResult::failure(format!("Command '{command}' is not in the allowlist"));
         }
 
-        // Validate arguments against deny-lists
         if let Err(reason) = validation::validate_args(command, args) {
             return ActionResult::failure(format!("Blocked: {}", reason));
         }
 
-        // Build command
-        let mut cmd = tokio::process::Command::new(command);
-        cmd.args(args)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+        let Some(executor) = self.sandbox_executor.as_ref() else {
+            tracing::warn!(
+                command,
+                "execute_command refused — no sandbox executor wired"
+            );
+            return ActionResult::failure(
+                "Sandbox not configured — refusing to execute commands without isolation",
+            );
+        };
 
-        // Execute with timeout
-        match tokio::time::timeout(
-            tokio::time::Duration::from_secs(self.config.command_timeout_secs),
-            cmd.output(),
-        )
-        .await
-        {
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
+        let timeout = std::time::Duration::from_secs(self.config.command_timeout_secs);
+        let sandbox_command = sandbox::SandboxCommand::new(command, args.to_vec())
+            .with_workdir(std::env::current_dir().unwrap_or_default())
+            .with_timeout(timeout);
 
-                if output.status.success() {
-                    ActionResult::success(stdout.to_string())
+        match executor.run(sandbox_command).await {
+            Ok(outcome) => {
+                if outcome.exit_code == 0 {
+                    ActionResult::success(outcome.stdout)
                 } else {
                     ActionResult::failure(format!(
-                        "Exit code: {:?}\nstderr: {}",
-                        output.status.code(),
-                        stderr
+                        "Exit code: {}\nstderr: {}",
+                        outcome.exit_code, outcome.stderr
                     ))
                 }
             }
-            Ok(Err(e)) => ActionResult::failure(format!("Failed to execute: {}", e)),
-            Err(_) => ActionResult::failure("Command timed out"),
+            Err(sandbox::SandboxError::Timeout(d)) => {
+                ActionResult::failure(format!("Command timed out after {:?}", d))
+            }
+            Err(sandbox::SandboxError::Forbidden(reason)) => {
+                ActionResult::failure(format!("Blocked by sandbox: {reason}"))
+            }
+            Err(sandbox::SandboxError::PathNotAllowed(p)) => {
+                ActionResult::failure(format!("Blocked by sandbox (path not allowed): {p}"))
+            }
+            Err(e) => ActionResult::failure(format!("Sandbox execution failed: {e}")),
         }
     }
 

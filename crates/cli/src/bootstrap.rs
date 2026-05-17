@@ -208,11 +208,30 @@ pub async fn build_processor(
         .with_dlq(dlq);
     tracing::info!("MCP host wired (RmcpHost + ResilientMcpHost decorator with breakers + DLQ)");
 
-    let action_dispatcher = build_action_dispatcher(config, &processor)?;
+    // Sandbox executor — hoisted up here (was inside
+    // `wire_safety_infrastructure`) so the action dispatcher can route
+    // `Action::ExecuteCommand` through the same executor instead of
+    // falling back to raw `tokio::process::Command` (Issue 121).
+    let exec_timeout = std::time::Duration::from_secs(config.security.exec_timeout_seconds as u64);
+    let sandbox =
+        sandbox::IsolatedSandbox::new(config.security.exec_allowlist.clone(), exec_timeout)
+            .with_allowed_paths(vec![
+                std::path::PathBuf::from(&config.brain.data_dir),
+                std::env::current_dir().unwrap_or_default(),
+            ]);
+    let sandbox_executor: Arc<dyn sandbox::SandboxExecutor> = Arc::new(sandbox);
+    tracing::info!(
+        allowlist_size = config.security.exec_allowlist.len(),
+        timeout_s = config.security.exec_timeout_seconds,
+        "Sandbox executor wired (isolated: rlimits + allowlist)"
+    );
+
+    let action_dispatcher = build_action_dispatcher(config, &processor)?
+        .with_sandbox_executor(sandbox_executor.clone());
     processor = processor.with_action_dispatcher(action_dispatcher);
 
     // ── Safety infrastructure ───────────────────────────────────────────
-    processor = wire_safety_infrastructure(processor, config).await?;
+    processor = wire_safety_infrastructure(processor, config, sandbox_executor).await?;
 
     Ok(processor)
 }
@@ -226,6 +245,7 @@ pub async fn build_processor(
 async fn wire_safety_infrastructure(
     processor: signal::SignalProcessor,
     config: &brain_core::BrainConfig,
+    sandbox_executor: Arc<dyn sandbox::SandboxExecutor>,
 ) -> anyhow::Result<signal::SignalProcessor> {
     let db = processor.episodic().pool().clone();
 
@@ -315,22 +335,6 @@ async fn wire_safety_infrastructure(
     let sqlite_budget = sqlite_budget.with_audit(audit_trail.clone());
     let cost_budget: Arc<dyn budget::CostBudget> = Arc::new(sqlite_budget);
     tracing::info!("Cost budget wired (with audit coupling)");
-
-    // Sandbox executor — isolated invocation with rlimits, allowlist, and
-    // platform layers (macOS sandbox-exec / Linux namespaces).
-    let exec_timeout = std::time::Duration::from_secs(config.security.exec_timeout_seconds as u64);
-    let sandbox =
-        sandbox::IsolatedSandbox::new(config.security.exec_allowlist.clone(), exec_timeout)
-            .with_allowed_paths(vec![
-                std::path::PathBuf::from(&config.brain.data_dir),
-                std::env::current_dir().unwrap_or_default(),
-            ]);
-    let sandbox_executor: Arc<dyn sandbox::SandboxExecutor> = Arc::new(sandbox);
-    tracing::info!(
-        allowlist_size = config.security.exec_allowlist.len(),
-        timeout_s = config.security.exec_timeout_seconds,
-        "Sandbox executor wired (isolated: rlimits + allowlist)"
-    );
 
     let processor = processor
         .with_audit_trail(audit_trail.clone())
