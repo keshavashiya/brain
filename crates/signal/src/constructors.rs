@@ -160,6 +160,7 @@ impl SignalProcessor {
             confirmation_engine: None,
             cost_budget: None,
             sandbox_executor: None,
+            dual_memory_reader: None,
             orchestrator: None,
             channel_router: None,
             channel_preferences: None,

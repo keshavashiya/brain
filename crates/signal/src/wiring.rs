@@ -135,6 +135,19 @@ impl SignalProcessor {
         self
     }
 
+    /// Attach a dual-memory reader (builder pattern). Reads prefer the
+    /// graph and fall back to the legacy `episodes` table so callers
+    /// can resolve a memory id without caring which side it lives on.
+    pub fn with_dual_memory_reader(mut self, reader: hippocampus::DualMemoryReader) -> Self {
+        self.dual_memory_reader = Some(reader);
+        self
+    }
+
+    /// Expose the dual-memory reader.
+    pub fn dual_memory_reader(&self) -> Option<&hippocampus::DualMemoryReader> {
+        self.dual_memory_reader.as_ref()
+    }
+
     /// Attach a task orchestrator (builder pattern).
     pub fn with_orchestrator(mut self, orch: Arc<orchestrate::TaskOrchestrator>) -> Self {
         self.orchestrator = Some(orch);

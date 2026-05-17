@@ -70,6 +70,11 @@ pub struct SignalProcessor {
     cost_budget: Option<std::sync::Arc<dyn budget::CostBudget>>,
     /// Sandbox executor — isolated command execution with resource limits.
     sandbox_executor: Option<std::sync::Arc<dyn sandbox::SandboxExecutor>>,
+    /// Dual-memory reader — graph-first, legacy-fallback point lookups.
+    /// Wired so future read paths can resolve an id against the
+    /// episodic graph without bypassing the legacy `episodes` table for
+    /// content written before the graph schema landed.
+    dual_memory_reader: Option<hippocampus::DualMemoryReader>,
     /// Task orchestrator — decomposes requests into executable plans.
     orchestrator: Option<std::sync::Arc<orchestrate::TaskOrchestrator>>,
 

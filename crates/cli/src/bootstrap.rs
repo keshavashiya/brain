@@ -84,13 +84,26 @@ pub async fn build_processor(
         processor.episodic().pool().clone(),
     ));
     let graph_sink: Arc<dyn terminal::TerminalGraphSink> = Arc::new(
-        signal::terminal_graph_mirror::HippocampusTerminalSink::new(graph),
+        signal::terminal_graph_mirror::HippocampusTerminalSink::new(graph.clone()),
     );
     let terminal_bridge = terminal::TerminalBridge::new()
         .with_observer(observer.clone())
         .with_graph_sink(graph_sink);
     processor = processor.with_terminal_bridge(Arc::new(terminal_bridge));
     tracing::info!("Terminal Bridge wired (registry + observer + graph sink)");
+
+    // Dual-memory reader — graph-first, legacy-fallback point lookup
+    // facade. Wired so callers reading a memory by id get the graph
+    // version when present and the legacy `episodes` row otherwise,
+    // without having to know where the row lives. Both inner handles
+    // share the processor's SQLite pool, so writes from either side
+    // become visible to subsequent reads.
+    let legacy = Arc::new(hippocampus::EpisodicStore::new(
+        processor.episodic().pool().clone(),
+    ));
+    let dual_reader = hippocampus::DualMemoryReader::dual(legacy, graph);
+    processor = processor.with_dual_memory_reader(dual_reader);
+    tracing::info!("Dual-memory reader wired (graph first, legacy fallback)");
 
     // Per-tool circuit breaker registry — minted before the router and
     // the MCP host so both share one source of truth. The router
@@ -972,6 +985,53 @@ mod tests {
             nodes.len(),
             nodes.iter().map(|n| n.kind.as_str()).collect::<Vec<_>>()
         );
+    }
+
+    // Confirms `build_processor` wires a `DualMemoryReader` that
+    // resolves an id against the same SQLite pool the processor owns,
+    // preferring the graph. Without this wiring, callers asking for a
+    // memory by id would have to know whether it lives in the legacy
+    // `episodes` table or the graph nodes/edges schema, and graph-only
+    // content would be unreachable through the reader facade.
+    #[tokio::test]
+    async fn dual_memory_reader_wired_with_graph_first_lookup() {
+        use hippocampus::EpisodicGraph;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = brain_core::BrainConfig::default();
+        cfg.brain.data_dir = tmp.path().to_str().unwrap().to_string();
+        cfg.agents.auto_discovery = false;
+
+        let processor = build_processor(&cfg).await.expect("processor builds");
+        let reader = processor
+            .dual_memory_reader()
+            .expect("dual-memory reader wired by build_processor");
+
+        // Inject a graph node directly via the shared pool and confirm
+        // the reader resolves it as a Graph entry, not a Legacy one.
+        let graph = hippocampus::SqliteGraph::new(processor.episodic().pool().clone());
+        let node = hippocampus::Node::new(
+            hippocampus::NodeKind::new("fact"),
+            serde_json::json!({"sample": true}),
+            "personal",
+            None,
+        );
+        graph.add_node(&node).expect("graph insert");
+
+        let entry = reader
+            .read_by_id(&node.id)
+            .expect("dual read succeeds")
+            .expect("inserted node is reachable");
+        assert!(
+            entry.is_graph(),
+            "graph-first lookup should return MemoryEntry::Graph, got {entry:?}"
+        );
+
+        // Unknown ids resolve to `None` — neither side has the row.
+        assert!(reader
+            .read_by_id("ghost-id-not-in-any-table")
+            .expect("dual read on missing id")
+            .is_none());
     }
 
     // Confirms `build_processor` wires the capability kernel — a
