@@ -476,6 +476,39 @@ pub(crate) async fn cmd_serve(
         tracing::info!(interval_hours, "Memory consolidation scheduled");
     }
 
+    // ── Episodic graph compactor ──────────────────────────────────────
+    // 24h reflection cycle: half-life decays every node's weight and
+    // prunes the ones that fall below the eviction cutoff. The graph
+    // is opened lazily per tick against the episodic pool so we don't
+    // hold a `SqliteGraph` across ticks — the pool is the shared
+    // resource, the wrapper is cheap.
+    {
+        use hippocampus::Compactor as _;
+        let p = processor.clone();
+        set.spawn(async move {
+            let compactor =
+                hippocampus::DefaultCompactor::new(hippocampus::CompactConfig::default());
+            let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(24 * 3600));
+            // Skip the immediate first tick — `interval` fires once at
+            // start; we want the first compaction 24h after boot.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                let graph = hippocampus::SqliteGraph::new(p.episodic().pool().clone());
+                match compactor.compact(&graph).await {
+                    Ok(stats) => tracing::info!(
+                        scanned = stats.scanned,
+                        decayed = stats.decayed,
+                        evicted = stats.evicted,
+                        "Graph compactor cycle complete"
+                    ),
+                    Err(e) => tracing::warn!(error = %e, "Graph compactor cycle failed"),
+                }
+            }
+        });
+        tracing::info!("Graph compactor scheduled (every 24h, default half-life 7d)");
+    }
+
     // ── Channel relay adapters ────────────────────────────────────────
     if !config.channel.relays.is_empty() {
         let router = processor.channel_router().cloned();
