@@ -92,6 +92,7 @@ argon2 = "0.5"
 
 # Hashing (audit log, PKCE)
 sha2 = "0.10"
+blake3 = "1"
 
 # Random (PKCE code verifier, vault salt)
 rand = "0.8"

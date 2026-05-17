@@ -11,7 +11,6 @@
 //! through serde and key order isn't stable.
 
 use std::collections::{HashMap, VecDeque};
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -154,11 +153,25 @@ impl LoopDetector {
     }
 }
 
+/// Hash a `(tool_id, canonical-args)` shape into a 64-bit key for the
+/// rolling window. Uses BLAKE3 — cryptographic strength matters less
+/// than the determinism guarantee: `DefaultHasher`'s SipHash seed
+/// varies per process, which is fine for *this* process's window but
+/// makes any future cross-process / on-disk persistence of the window
+/// silently invalidate after a restart. BLAKE3 is keyless and stable.
+/// Taking the first 8 bytes of the 32-byte digest is sound — BLAKE3 is
+/// an extensible-output function and every prefix is independently
+/// uniform.
 fn hash_call(tool_id: &str, args: &serde_json::Value) -> u64 {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    tool_id.hash(&mut hasher);
-    canonical_json(args).hash(&mut hasher);
-    hasher.finish()
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(tool_id.as_bytes());
+    hasher.update(b"\x1f"); // unit separator to keep the two fields disjoint
+    hasher.update(canonical_json(args).as_bytes());
+    let digest = hasher.finalize();
+    let bytes = digest.as_bytes();
+    u64::from_le_bytes([
+        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+    ])
 }
 
 /// Recursive canonicalizer — objects with sorted keys; arrays

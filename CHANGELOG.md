@@ -24,7 +24,14 @@ between v0.3.0 and tagging.)_
 
 ### Changed
 
-_(filled per-fix)_
+- **Loop-detector hash switched to BLAKE3** (Issue 160, v1.0.0 RFC
+  §4). `resilience::loop_detector::hash_call` previously used
+  `std::collections::hash_map::DefaultHasher` (SipHash with per-process
+  seed). Same field separator (`\x1f`), same `(tool_id, canonical_json)`
+  inputs, same `u64` storage shape — the change is keyless determinism
+  across process restarts, which is the prerequisite for any future
+  on-disk window persistence. Functionally equivalent within a single
+  process. Adds `blake3 = "1"` to workspace dependencies.
 
 ### Fixed
 

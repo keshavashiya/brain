@@ -12,6 +12,7 @@ categories.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
+blake3 = { workspace = true }
 chrono = { workspace = true }
 intent = { workspace = true }
 observe = { workspace = true }
