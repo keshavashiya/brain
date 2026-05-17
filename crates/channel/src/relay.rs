@@ -96,18 +96,6 @@ pub trait SignalHandler: Send + Sync {
     async fn handle(&self, msg: &BridgeMessage) -> String;
 }
 
-/// Default `SignalHandler` that acknowledges receipt — useful when no
-/// higher-level pipeline is wired yet.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct AckSignalHandler;
-
-#[async_trait]
-impl SignalHandler for AckSignalHandler {
-    async fn handle(&self, _msg: &BridgeMessage) -> String {
-        "Received.".to_string()
-    }
-}
-
 /// Relay adapter — one gateway, one WebSocket, bidirectional.
 pub struct RelayAdapter {
     config: RelayConfig,
@@ -384,6 +372,20 @@ mod tests {
         ConfirmationEngine,
     };
     use std::sync::Mutex;
+
+    /// Test-only `SignalHandler` that just acknowledges receipt. Production
+    /// callers wire a real pipeline handler; this exists purely so the
+    /// relay tests have a fixture (Issue 20 — was previously `pub` with
+    /// no production users).
+    #[derive(Debug, Default, Clone, Copy)]
+    struct AckSignalHandler;
+
+    #[async_trait]
+    impl SignalHandler for AckSignalHandler {
+        async fn handle(&self, _msg: &BridgeMessage) -> String {
+            "Received.".to_string()
+        }
+    }
 
     const NONCE: &str = "550e8400-e29b-41d4-a716-446655440000";
 
