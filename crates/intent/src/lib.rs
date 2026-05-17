@@ -195,6 +195,17 @@ pub struct ToolDescriptor {
     pub tool_id: String,
     pub source: ToolSource,
     pub verb: Verb,
+    /// **UNTRUSTED.** When sourced from an MCP server this string is
+    /// attacker-controllable (CVE-2025-54136 / "MCPoison" class — a
+    /// hostile server can ship a description crafted to inject
+    /// instructions into the user's LLM context). Never inline this
+    /// directly into a system prompt; route it through
+    /// [`sanitization::render_tool_description_for_prompt`] which
+    /// strips control bytes, caps length, and fences the body inside
+    /// a labeled untrusted block. The hash-pin layer in
+    /// `brainos-mcphost` detects rug-pull *changes* to this field;
+    /// the sanitizer is what stops a single hostile description from
+    /// landing as live system instructions.
     pub description: String,
     pub input_schema: serde_json::Value,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -447,6 +458,8 @@ impl ToolRegistry for InMemoryToolRegistry {
             .cloned()
     }
 }
+
+pub mod sanitization;
 
 #[cfg(test)]
 mod tests;

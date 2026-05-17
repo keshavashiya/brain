@@ -62,6 +62,12 @@ pub struct ServerInfo {
 pub struct ToolDescriptor {
     pub server: String,
     pub name: String,
+    /// **UNTRUSTED.** Attacker-controllable text shipped by the remote
+    /// MCP server. The hash-pin layer in [`crate::rmcp_host`] detects
+    /// rug-pull *changes* to this field; callers that surface it to
+    /// the LLM must additionally route it through
+    /// [`intent::sanitization::render_tool_description_for_prompt`]
+    /// before inlining.
     #[serde(default)]
     pub description: Option<String>,
     /// JSON Schema for `arguments`. Rendered as **untrusted** content

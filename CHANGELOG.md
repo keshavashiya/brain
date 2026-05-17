@@ -32,7 +32,18 @@ _(filled per-fix)_
 
 ### Security
 
-_(filled per-fix)_
+- **MCP tool descriptions treated as untrusted at the LLM boundary**
+  (Issue 162). New `intent::sanitization::render_tool_description_for_prompt`
+  fences every attacker-controllable description inside a labelled
+  `~~~`-delimited block, strips C0 control bytes + ANSI CSI escapes,
+  defangs any literal fence sentinel inside the body, and caps length
+  at 2 KiB on a UTF-8 char boundary. `intent::ToolDescriptor.description`
+  and `mcphost::ToolDescriptor.description` carry doc-comments marking
+  them untrusted; callers wiring descriptions into prompts must use
+  the sanitizer. Complements the hash-pin rug-pull detector in
+  `mcphost::RmcpHost` (which catches *changes* to descriptions);
+  the sanitizer is what stops a single hostile first-mount description
+  from landing as live system instructions.
 
 ### Deferred
 
