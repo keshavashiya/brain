@@ -129,6 +129,29 @@ mod tests {
         assert!(json.contains("\"distance\":0.05"));
     }
 
+    /// POST /v1/webhooks/:id with an unknown id returns 404 (regression for Issue 43 — used to panic via `Response::builder().unwrap()`).
+    #[tokio::test]
+    async fn test_post_webhook_unknown_id_returns_404() {
+        let (router, _tmp, _api_key) = make_router().await;
+
+        let request = Request::builder()
+            .method(http::Method::POST)
+            .uri("/v1/webhooks/does-not-exist")
+            .body(Body::from(""))
+            .unwrap();
+
+        let response = router.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            text.contains("does-not-exist"),
+            "expected 404 body to identify the missing transport: {text}"
+        );
+    }
+
     /// GET /openapi.json — no auth required, returns valid OpenAPI spec.
     #[tokio::test]
     async fn test_openapi_endpoint() {

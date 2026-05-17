@@ -587,20 +587,35 @@ pub async fn post_webhook_handler(
     let transport = match state.webhook_handlers.get(&id) {
         Some(t) => t,
         None => {
-            return Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(format!("Unknown transport ID: {id}"))
-                .unwrap()
-                .into_response();
+            return build_webhook_response(
+                StatusCode::NOT_FOUND,
+                None,
+                format!("Unknown transport ID: {id}"),
+            )
+            .into_response();
         }
     };
 
     let resp = transport.handle_request(&headers, &body).await;
+    let status = StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK);
+    build_webhook_response(status, Some(resp.content_type), resp.body).into_response()
+}
 
-    Response::builder()
-        .status(StatusCode::from_u16(resp.status).unwrap_or(StatusCode::OK))
-        .header("content-type", resp.content_type)
-        .body(resp.body)
-        .unwrap()
-        .into_response()
+/// Build a webhook response, falling back to a 500 if the supplied
+/// status/headers/body are unrepresentable (e.g. invalid `Content-Type` value).
+fn build_webhook_response(
+    status: StatusCode,
+    content_type: Option<String>,
+    body: String,
+) -> Response<String> {
+    let mut builder = Response::builder().status(status);
+    if let Some(ct) = content_type {
+        builder = builder.header("content-type", ct);
+    }
+    builder.body(body).unwrap_or_else(|err| {
+        tracing::error!(error = %err, "failed to build webhook response");
+        let mut fallback = Response::new("Internal Server Error".to_string());
+        *fallback.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+        fallback
+    })
 }
