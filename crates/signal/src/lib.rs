@@ -70,8 +70,6 @@ pub struct SignalProcessor {
     cost_budget: Option<std::sync::Arc<dyn budget::CostBudget>>,
     /// Sandbox executor — isolated command execution with resource limits.
     sandbox_executor: Option<std::sync::Arc<dyn sandbox::SandboxExecutor>>,
-    /// Credential vault — secure credential storage and injection.
-    credential_vault: Option<std::sync::Arc<dyn vault::CredentialVault>>,
     /// Task orchestrator — decomposes requests into executable plans.
     orchestrator: Option<std::sync::Arc<orchestrate::TaskOrchestrator>>,
 

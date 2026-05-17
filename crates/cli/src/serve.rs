@@ -489,13 +489,9 @@ pub(crate) async fn cmd_serve(
                         max_backoff_ms: entry.max_backoff_ms,
                         max_reconnect_attempts: None,
                     };
-                    let mut relay_cfg =
-                        channel::RelayConfig::new(&entry.id, &entry.label, &entry.url)
-                            .with_namespace(&entry.namespace)
-                            .with_bridge(bridge_cfg);
-                    if !entry.api_key.is_empty() {
-                        relay_cfg = relay_cfg.with_api_key(&entry.api_key);
-                    }
+                    let relay_cfg = channel::RelayConfig::new(&entry.id, &entry.label, &entry.url)
+                        .with_namespace(&entry.namespace)
+                        .with_bridge(bridge_cfg);
                     let fallback: Arc<dyn SignalHandler> = Arc::new(RelayPipelineHandler {
                         processor: processor.clone(),
                         channel_id: entry.id.clone(),

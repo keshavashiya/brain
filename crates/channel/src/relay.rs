@@ -58,10 +58,6 @@ pub struct RelayConfig {
     pub namespace: String,
     /// Reconnection tuning for the underlying `BridgeClient`.
     pub bridge: BridgeConfig,
-    /// Optional bearer token — the current `BridgeClient` does not add an
-    /// auth header itself, but the field is kept so the config schema is
-    /// stable and gateways that tunnel auth via URL/metadata have a slot.
-    pub api_key: Option<String>,
 }
 
 impl RelayConfig {
@@ -76,17 +72,11 @@ impl RelayConfig {
             url: url.into(),
             namespace: "personal".to_string(),
             bridge: BridgeConfig::default(),
-            api_key: None,
         }
     }
 
     pub fn with_namespace(mut self, ns: impl Into<String>) -> Self {
         self.namespace = ns.into();
-        self
-    }
-
-    pub fn with_api_key(mut self, key: impl Into<String>) -> Self {
-        self.api_key = Some(key.into());
         self
     }
 
@@ -585,10 +575,7 @@ mod tests {
 
     #[test]
     fn relay_config_builders() {
-        let cfg = RelayConfig::new("ch", "Channel", "ws://example/")
-            .with_namespace("work")
-            .with_api_key("secret");
+        let cfg = RelayConfig::new("ch", "Channel", "ws://example/").with_namespace("work");
         assert_eq!(cfg.namespace, "work");
-        assert_eq!(cfg.api_key.as_deref(), Some("secret"));
     }
 }

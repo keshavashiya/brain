@@ -29,7 +29,6 @@ audit = { workspace = true }
 confirm = { workspace = true }
 budget = { workspace = true }
 sandbox = { workspace = true }
-vault = { workspace = true }
 orchestrate = { workspace = true }
 channel = { workspace = true }
 delegate = { workspace = true }

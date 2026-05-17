@@ -135,22 +135,6 @@ impl SignalProcessor {
         self
     }
 
-    /// Expose the sandbox executor.
-    pub fn sandbox_executor(&self) -> Option<&Arc<dyn sandbox::SandboxExecutor>> {
-        self.sandbox_executor.as_ref()
-    }
-
-    /// Attach a credential vault (builder pattern).
-    pub fn with_credential_vault(mut self, vault: Arc<dyn vault::CredentialVault>) -> Self {
-        self.credential_vault = Some(vault);
-        self
-    }
-
-    /// Expose the credential vault.
-    pub fn credential_vault(&self) -> Option<&Arc<dyn vault::CredentialVault>> {
-        self.credential_vault.as_ref()
-    }
-
     /// Attach a task orchestrator (builder pattern).
     pub fn with_orchestrator(mut self, orch: Arc<orchestrate::TaskOrchestrator>) -> Self {
         self.orchestrator = Some(orch);

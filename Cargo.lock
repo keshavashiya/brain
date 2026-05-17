@@ -1117,7 +1117,6 @@ dependencies = [
  "brainos-storage",
  "brainos-terminal",
  "brainos-thalamus",
- "brainos-vault",
  "chrono",
  "futures",
  "pdf-extract",
