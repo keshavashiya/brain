@@ -26,8 +26,12 @@ use confirm::{ApprovalDecision, ApprovalStatus, ConfirmError, ConfirmationEngine
 use crate::error::ChannelError;
 
 /// A parsed approval command, before it has been dispatched.
+///
+/// Crate-internal: parsing and dispatch happen inside
+/// [`ConfirmationCorrelator`]; no external surface needs to look at the
+/// intermediate command shape (audit Issue 33).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CorrelatedCommand {
+pub(crate) enum CorrelatedCommand {
     Approve {
         nonce: String,
     },
@@ -38,7 +42,7 @@ pub enum CorrelatedCommand {
 }
 
 impl CorrelatedCommand {
-    pub fn nonce(&self) -> &str {
+    pub(crate) fn nonce(&self) -> &str {
         match self {
             Self::Approve { nonce } | Self::Reject { nonce, .. } => nonce,
         }

@@ -25,14 +25,22 @@ pub mod router;
 pub mod transport;
 pub mod types;
 
-pub use correlate::{ConfirmationCorrelator, CorrelatedCommand, CorrelationOutcome};
+// `CorrelatedCommand` is intentionally not re-exported — it's an
+// internal step inside `ConfirmationCorrelator::process`; callers see
+// `CorrelationOutcome` only (audit Issue 33).
+pub use correlate::{ConfirmationCorrelator, CorrelationOutcome};
 pub use dispatch::{ChannelDispatcher, DeliveryReceipt};
 pub use error::ChannelError;
 pub use preference::{
     ChannelPreference, ChannelPreferenceStore, RecordedInteraction, SqlitePreferenceStore,
 };
 pub use relay::{RelayAdapter, RelayConfig};
-pub use router::{ChannelRouter, DefaultChannelRouter, RoutingContext, RoutingDecision};
+// `RoutingDecision` is the return type of the public `ChannelRouter`
+// trait so it must stay `pub` in `router.rs`, but no external caller
+// destructures it — drop the top-level re-export so the surface
+// `channel::*` advertises (audit Issue 34) shrinks. Inside the crate
+// it's still reachable via `channel::router::RoutingDecision`.
+pub use router::{ChannelRouter, DefaultChannelRouter, RoutingContext};
 pub use transport::{ChannelTransport, InboundMessage, MessageHandle, TransportHealth};
 pub use types::{
     ChannelDescriptor, ChannelKind, DeliveryCategory, DeliveryIntent, DeliveryOutcome, UrgencyLevel,
