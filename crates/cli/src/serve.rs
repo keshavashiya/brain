@@ -80,6 +80,33 @@ pub(crate) async fn cmd_serve(
 
     let run_all = !http && !ws && !grpc && !mcp && !terminal;
 
+    // Issue 38: `adapters.<x>.enabled` is a hard gate applied AFTER the
+    // CLI flag. `brain serve --http` with `adapters.http.enabled: false`
+    // in config skips HTTP (with a loud warning) rather than starting
+    // it anyway. `run_all` honours the same gate silently — operators
+    // who disabled an adapter in YAML want it off, not on by default.
+    let want_http = (run_all || http) && config.adapters.http.enabled;
+    let want_ws = (run_all || ws) && config.adapters.ws.enabled;
+    #[cfg(feature = "grpc")]
+    let want_grpc = (run_all || grpc) && config.adapters.grpc.enabled;
+    let want_mcp = (run_all || mcp) && config.adapters.mcp.enabled;
+    for (flag, enabled, name) in [
+        (http, config.adapters.http.enabled, "http"),
+        (ws, config.adapters.ws.enabled, "ws"),
+        (grpc, config.adapters.grpc.enabled, "grpc"),
+        (mcp, config.adapters.mcp.enabled, "mcp"),
+    ] {
+        if flag && !enabled {
+            tracing::warn!(
+                adapter = name,
+                "--{name} requested but adapters.{name}.enabled = false in config — skipping"
+            );
+            eprintln!(
+                "WARNING: --{name} requested but adapters.{name}.enabled = false in config — skipping"
+            );
+        }
+    }
+
     // Build the fully-wired processor via the shared bootstrap path.
     let mut processor = crate::bootstrap::build_processor(config).await?;
 
@@ -157,7 +184,7 @@ pub(crate) async fn cmd_serve(
 
     // Bind adapters sequentially — HTTP is critical (health check endpoint).
     // If HTTP fails, abort entirely. Other adapters fail gracefully.
-    if run_all || http {
+    if want_http {
         let p = processor.clone();
         let h = host.clone();
         let port = config.adapters.http.port;
@@ -181,7 +208,7 @@ pub(crate) async fn cmd_serve(
         }
     }
 
-    if run_all || ws {
+    if want_ws {
         let p = processor.clone();
         let h = host.clone();
         let port = config.adapters.ws.port;
@@ -201,7 +228,7 @@ pub(crate) async fn cmd_serve(
     }
 
     #[cfg(feature = "grpc")]
-    if run_all || grpc {
+    if want_grpc {
         let p = processor.clone();
         let h = host.clone();
         let port = config.adapters.grpc.port;
@@ -224,7 +251,7 @@ pub(crate) async fn cmd_serve(
         eprintln!("WARNING: brain was built without the `grpc` feature — gRPC synapse disabled");
     }
 
-    if run_all || mcp {
+    if want_mcp {
         let p = processor.clone();
         let h = host.clone();
         let port = config.adapters.mcp.port;
