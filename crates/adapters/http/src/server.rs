@@ -22,6 +22,7 @@ pub fn create_router(
     api_keys: Vec<brain_core::ApiKeyConfig>,
     cors_enabled: bool,
 ) -> Router {
+    let rate_limits = processor.client_rate_limits().cloned();
     let state = Arc::new(AppState {
         processor,
         webhook_handlers,
@@ -34,7 +35,7 @@ pub fn create_router(
 
     // Limit concurrent /v1/* requests (100 in-flight per instance)
     // Limit request body size to 1 MB to prevent memory exhaustion
-    let v1_routes = Router::new()
+    let mut v1_routes = Router::new()
         .route("/v1/signals", post(post_signal_handler))
         .route("/v1/signals/:id", get(get_signal_handler))
         .route("/v1/memory/search", post(search_memory_handler))
@@ -48,6 +49,12 @@ pub fn create_router(
         .route("/v1/webhooks/:id", post(post_webhook_handler))
         .layer(axum::extract::DefaultBodyLimit::max(1_048_576))
         .layer(tower::limit::ConcurrencyLimitLayer::new(100));
+    if let Some(registry) = rate_limits {
+        v1_routes = v1_routes.layer(axum::middleware::from_fn(move |req, next| {
+            let registry = registry.clone();
+            async move { crate::middleware::rate_limit(registry, req, next).await }
+        }));
+    }
 
     let router = Router::new()
         .route("/", get(root_handler))

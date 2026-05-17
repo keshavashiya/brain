@@ -148,6 +148,10 @@ pub struct SignalProcessor {
     /// failure after each MCP call). Unwired processors don't track tool
     /// health.
     breaker_registry: Option<std::sync::Arc<resilience::BreakerRegistry>>,
+    /// Per-client rate limiter registry (Issue 51). Wired through adapters
+    /// (HTTP/WS/gRPC) to throttle abusive callers without changing
+    /// identity resolution. Unwired processors disable rate limiting.
+    client_rate_limits: Option<std::sync::Arc<resilience::RateLimitRegistry>>,
 
     // ── Standing approvals ──────────────────────────────────────────────
     /// Standing-approval store, exposed to the `/approval-list` and

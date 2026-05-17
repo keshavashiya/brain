@@ -21,6 +21,7 @@
 pub mod auth;
 pub mod handlers;
 pub mod metrics;
+pub mod middleware;
 pub mod server;
 pub mod state;
 pub mod types;
@@ -127,6 +128,80 @@ mod tests {
         assert!(json.contains("\"subject\":\"user\""));
         assert!(json.contains("\"namespace\":\"personal\""));
         assert!(json.contains("\"distance\":0.05"));
+    }
+
+    /// Per-client rate limit (Issue 51): after the burst is drained, the
+    /// next `/v1/*` request from the same key gets 429. Anonymous routes
+    /// (`/health`) remain unthrottled.
+    #[tokio::test]
+    async fn test_rate_limit_returns_429_after_burst() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        // Tiny bucket so the test is fast and deterministic.
+        config.access.rate_limit = brain_core::ClientRateLimitConfig {
+            enabled: true,
+            tokens_per_refill: 1,
+            refill_interval_ms: 60_000,
+            burst_capacity: 2,
+        };
+        let api_key = config.access.api_keys.first().unwrap().key.clone();
+        let api_keys = config.access.api_keys.clone();
+        let processor = signal::SignalProcessor::new(config).await.unwrap();
+        let registry = std::sync::Arc::new(resilience::RateLimitRegistry::new(
+            resilience::RateLimitConfig {
+                tokens_per_refill: 1,
+                refill_interval: std::time::Duration::from_millis(60_000),
+                burst_capacity: 2,
+            },
+        ));
+        let processor = processor.with_client_rate_limits(registry);
+        let router = crate::create_router(
+            Arc::new(processor),
+            std::collections::HashMap::new(),
+            api_keys,
+            true,
+        );
+
+        let make_req = || {
+            Request::builder()
+                .method(http::Method::GET)
+                .uri("/v1/memory/facts")
+                .header("authorization", format!("Bearer {api_key}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        // Burst of 2 should succeed (auth passes — 200 with empty list).
+        for _ in 0..2 {
+            let resp = router.clone().oneshot(make_req()).await.unwrap();
+            assert!(
+                resp.status() != http::StatusCode::TOO_MANY_REQUESTS,
+                "burst should not 429: got {}",
+                resp.status()
+            );
+        }
+        // Third should 429.
+        let resp = router.clone().oneshot(make_req()).await.unwrap();
+        assert_eq!(resp.status(), http::StatusCode::TOO_MANY_REQUESTS);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(payload["error"], "rate_limited");
+
+        // /health is anonymous → still served, never 429.
+        let health = router
+            .oneshot(
+                Request::builder()
+                    .method(http::Method::GET)
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), http::StatusCode::OK);
     }
 
     /// POST /v1/webhooks/:id with an unknown id returns 404 (regression for Issue 43 — used to panic via `Response::builder().unwrap()`).

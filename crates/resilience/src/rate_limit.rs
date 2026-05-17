@@ -10,10 +10,9 @@
 //! handles spurious concurrent drains).
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use tokio::sync::{Mutex, RwLock};
 use tracing::debug;
 
 /// Tuning knobs for a [`RateLimiter`].
@@ -97,7 +96,7 @@ impl RateLimiter {
         let burst = self.config.burst_capacity as f64;
         loop {
             let wait = {
-                let mut bucket = self.inner.lock().await;
+                let mut bucket = self.inner.lock().expect("rate-limit bucket poisoned");
                 let now = Instant::now();
                 let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
                 let refilled = (bucket.tokens + elapsed * rate).min(burst);
@@ -106,16 +105,11 @@ impl RateLimiter {
                     bucket.tokens = refilled - 1.0;
                     return;
                 }
-                // Otherwise: drop fractional progress back in and sleep
-                // the exact gap until the next whole token would land.
                 bucket.tokens = refilled;
                 let needed = 1.0 - refilled;
                 let secs = if rate.is_finite() && rate > 0.0 {
                     needed / rate
                 } else {
-                    // Unreachable in practice — infinite rate would
-                    // have refilled to burst on the first tick — but
-                    // stay defensive.
                     0.0
                 };
                 Duration::from_secs_f64(secs)
@@ -126,11 +120,13 @@ impl RateLimiter {
     }
 
     /// Non-blocking acquire: returns `true` if a token was consumed,
-    /// `false` if the bucket is empty.
-    pub async fn try_acquire(&self) -> bool {
+    /// `false` if the bucket is empty. Sync — the critical section is
+    /// pure arithmetic and never crosses an await point, so a `std`
+    /// mutex is the right primitive.
+    pub fn try_acquire(&self) -> bool {
         let rate = self.config.refill_rate_per_sec();
         let burst = self.config.burst_capacity as f64;
-        let mut bucket = self.inner.lock().await;
+        let mut bucket = self.inner.lock().expect("rate-limit bucket poisoned");
         let now = Instant::now();
         let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
         let refilled = (bucket.tokens + elapsed * rate).min(burst);
@@ -146,10 +142,10 @@ impl RateLimiter {
 
     /// Inspect available tokens (refill is applied first). Test helper
     /// — production code should use [`Self::acquire`] / [`Self::try_acquire`].
-    pub async fn available(&self) -> f64 {
+    pub fn available(&self) -> f64 {
         let rate = self.config.refill_rate_per_sec();
         let burst = self.config.burst_capacity as f64;
-        let mut bucket = self.inner.lock().await;
+        let mut bucket = self.inner.lock().expect("rate-limit bucket poisoned");
         let now = Instant::now();
         let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
         let refilled = (bucket.tokens + elapsed * rate).min(burst);
@@ -176,11 +172,16 @@ impl RateLimitRegistry {
     }
 
     /// Look up the limiter for `tool_id`, creating one on first access.
-    pub async fn get_or_create(&self, tool_id: &str) -> Arc<RateLimiter> {
-        if let Some(existing) = self.limiters.read().await.get(tool_id) {
+    pub fn get_or_create(&self, tool_id: &str) -> Arc<RateLimiter> {
+        if let Some(existing) = self
+            .limiters
+            .read()
+            .expect("rate-limit registry poisoned")
+            .get(tool_id)
+        {
             return existing.clone();
         }
-        let mut guard = self.limiters.write().await;
+        let mut guard = self.limiters.write().expect("rate-limit registry poisoned");
         if let Some(existing) = guard.get(tool_id) {
             return existing.clone();
         }
@@ -190,21 +191,31 @@ impl RateLimitRegistry {
     }
 
     /// Snapshot lookup — `None` if no limiter has been minted yet.
-    pub async fn get(&self, tool_id: &str) -> Option<Arc<RateLimiter>> {
-        self.limiters.read().await.get(tool_id).cloned()
+    pub fn get(&self, tool_id: &str) -> Option<Arc<RateLimiter>> {
+        self.limiters
+            .read()
+            .expect("rate-limit registry poisoned")
+            .get(tool_id)
+            .cloned()
     }
 
     /// Convenience: mint the limiter for `tool_id` if needed and block
     /// for a token.
     pub async fn acquire(&self, tool_id: &str) {
-        self.get_or_create(tool_id).await.acquire().await;
+        self.get_or_create(tool_id).acquire().await;
     }
 
-    pub async fn len(&self) -> usize {
-        self.limiters.read().await.len()
+    pub fn len(&self) -> usize {
+        self.limiters
+            .read()
+            .expect("rate-limit registry poisoned")
+            .len()
     }
 
-    pub async fn is_empty(&self) -> bool {
-        self.limiters.read().await.is_empty()
+    pub fn is_empty(&self) -> bool {
+        self.limiters
+            .read()
+            .expect("rate-limit registry poisoned")
+            .is_empty()
     }
 }

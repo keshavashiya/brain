@@ -126,6 +126,28 @@ pub async fn build_processor(
         "Breaker registry wired"
     );
 
+    // Per-client rate-limit registry (Issue 51). Wired here so HTTP / WS /
+    // gRPC adapters can read it off the processor and apply throttling at
+    // the edge.
+    let rl_cfg = &config.access.rate_limit;
+    if rl_cfg.enabled {
+        let rate_cfg = ::resilience::RateLimitConfig {
+            tokens_per_refill: rl_cfg.tokens_per_refill,
+            refill_interval: std::time::Duration::from_millis(rl_cfg.refill_interval_ms),
+            burst_capacity: rl_cfg.burst_capacity,
+        };
+        let limits = Arc::new(::resilience::RateLimitRegistry::new(rate_cfg));
+        processor = processor.with_client_rate_limits(limits);
+        tracing::info!(
+            tokens_per_refill = rl_cfg.tokens_per_refill,
+            refill_interval_ms = rl_cfg.refill_interval_ms,
+            burst_capacity = rl_cfg.burst_capacity,
+            "Client rate limiter wired"
+        );
+    } else {
+        tracing::info!("Client rate limiter disabled by config");
+    }
+
     // Capability kernel — workspace-wide registry of every tool the host
     // can dispatch to, plus the intent router that resolves a classified
     // `IntentToken` to a concrete `ToolRoute`. The same `ToolRegistry`
@@ -1188,6 +1210,10 @@ mod tests {
         assert!(
             processor.breaker_registry().is_some(),
             "breaker registry must be wired"
+        );
+        assert!(
+            processor.client_rate_limits().is_some(),
+            "client rate-limit registry must be wired"
         );
         assert!(
             processor.dual_memory_reader().is_some(),

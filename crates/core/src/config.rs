@@ -680,12 +680,64 @@ impl ApiKeyConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessConfig {
     pub api_keys: Vec<ApiKeyConfig>,
+    /// Per-client (per-API-key) rate limiting applied across HTTP / WS /
+    /// gRPC adapters. Disabled by default so a fresh install behaves like
+    /// older versions; enable in `default.yaml` to throttle abusive
+    /// clients without changing identity wiring.
+    #[serde(default)]
+    pub rate_limit: ClientRateLimitConfig,
 }
 
 impl AccessConfig {
     /// Find a key entry by its raw key string.
     pub fn find_key(&self, key: &str) -> Option<&ApiKeyConfig> {
         self.api_keys.iter().find(|k| k.key == key)
+    }
+}
+
+/// Tuning surface for adapter-level rate limiting (Issue 51).
+///
+/// Defaults are conservative: 60 tokens/min with a burst of 20, so a
+/// well-behaved client sees no impact while a tight loop is rejected
+/// after the burst is drained.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClientRateLimitConfig {
+    #[serde(default = "ClientRateLimitConfig::default_enabled")]
+    pub enabled: bool,
+    /// Token grant per `refill_interval_ms`. Steady-state rate is
+    /// `tokens_per_refill / refill_interval_ms * 1000` per second.
+    #[serde(default = "ClientRateLimitConfig::default_tokens_per_refill")]
+    pub tokens_per_refill: u32,
+    #[serde(default = "ClientRateLimitConfig::default_refill_interval_ms")]
+    pub refill_interval_ms: u64,
+    /// Maximum tokens the bucket holds — the burst ceiling.
+    #[serde(default = "ClientRateLimitConfig::default_burst_capacity")]
+    pub burst_capacity: u32,
+}
+
+impl Default for ClientRateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            tokens_per_refill: Self::default_tokens_per_refill(),
+            refill_interval_ms: Self::default_refill_interval_ms(),
+            burst_capacity: Self::default_burst_capacity(),
+        }
+    }
+}
+
+impl ClientRateLimitConfig {
+    pub fn default_enabled() -> bool {
+        true
+    }
+    pub fn default_tokens_per_refill() -> u32 {
+        60
+    }
+    pub fn default_refill_interval_ms() -> u64 {
+        60_000
+    }
+    pub fn default_burst_capacity() -> u32 {
+        20
     }
 }
 

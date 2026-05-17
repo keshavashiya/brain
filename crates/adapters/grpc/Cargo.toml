@@ -13,6 +13,7 @@ categories.workspace = true
 [dependencies]
 brain_core = { workspace = true }
 signal       = { workspace = true }
+resilience   = { workspace = true }
 observe      = { workspace = true }
 identity     = { workspace = true }
 tonic        = { version = "0.14", features = ["transport"] }

@@ -432,6 +432,7 @@ impl Default for BrainConfig {
                     permissions: vec!["read".to_string(), "write".to_string()],
                     agent_id: None,
                 }],
+                rate_limit: ClientRateLimitConfig::default(),
             },
             channel: ChannelIntelligenceConfig::default(),
             agents: AgentsConfig::default(),

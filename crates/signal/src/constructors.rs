@@ -179,6 +179,7 @@ impl SignalProcessor {
             tool_registry: None,
             intent_router: None,
             breaker_registry: None,
+            client_rate_limits: None,
             standing_approvals: None,
             confirmation_timeout: None,
             proactivity_enabled,

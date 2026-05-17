@@ -16,8 +16,8 @@ pub mod security;
 
 pub use auth::{check_auth, AuthResult};
 pub use config::{
-    AccessConfig, AgentEntry, AgentsConfig, ApiKeyConfig, BrainConfig, DeliveryConfig, LlmConfig,
-    ProviderEntry,
+    AccessConfig, AgentEntry, AgentsConfig, ApiKeyConfig, BrainConfig, ClientRateLimitConfig,
+    DeliveryConfig, LlmConfig, ProviderEntry,
 };
 pub use security::ActionTier;
 

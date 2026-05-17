@@ -387,6 +387,21 @@ impl SignalProcessor {
         self.breaker_registry.as_ref()
     }
 
+    /// Attach the per-client rate-limit registry. Adapters (HTTP / WS /
+    /// gRPC) call `.get_or_create(api_key).try_acquire()` per request and
+    /// reject with the protocol's analog of HTTP 429 when the bucket is
+    /// drained. Wiring is optional — without a registry, rate limiting
+    /// is disabled.
+    pub fn with_client_rate_limits(mut self, registry: Arc<resilience::RateLimitRegistry>) -> Self {
+        self.client_rate_limits = Some(registry);
+        self
+    }
+
+    /// Expose the configured per-client rate-limit registry, if any.
+    pub fn client_rate_limits(&self) -> Option<&Arc<resilience::RateLimitRegistry>> {
+        self.client_rate_limits.as_ref()
+    }
+
     /// Attach a standing-approval store. Wire the same `Arc` into the
     /// `ConfirmationEngine` so the bypass check and the slash commands
     /// see one consistent table.

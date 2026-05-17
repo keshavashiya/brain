@@ -218,6 +218,13 @@ agents:
 # A random key is generated on `brain init` and printed once to stdout.
 access:
   api_keys: []
+  # Per-client rate limiting (Issue 51). Keyed by API key for authenticated
+  # routes; anonymous requests bypass and hit the auth wall instead.
+  rate_limit:
+    enabled: true
+    tokens_per_refill: 60
+    refill_interval_ms: 60000
+    burst_capacity: 20
 
 # ── Internal defaults (safe to leave unchanged) ────────────────────────────────
 brain:

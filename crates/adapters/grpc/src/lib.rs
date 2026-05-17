@@ -532,15 +532,18 @@ pub async fn serve(
     let addr: SocketAddr = format!("{host}:{port}").parse()?;
 
     let auth_keys = Arc::new(processor.config().access.api_keys.clone());
+    let rate_limits = processor.client_rate_limits().cloned();
 
     let memory_svc =
         MemoryServiceServer::with_interceptor(MemoryServiceImpl::new(processor.clone()), {
             let keys = Arc::clone(&auth_keys);
-            move |req: Request<()>| auth_interceptor(req, &keys)
+            let rl = rate_limits.clone();
+            move |req: Request<()>| auth_interceptor(req, &keys, rl.as_ref())
         });
     let agent_svc = AgentServiceServer::with_interceptor(AgentServiceImpl::new(processor), {
         let keys = Arc::clone(&auth_keys);
-        move |req: Request<()>| auth_interceptor(req, &keys)
+        let rl = rate_limits.clone();
+        move |req: Request<()>| auth_interceptor(req, &keys, rl.as_ref())
     });
 
     tracing::info!("Synapse gRPC online at {addr}");
@@ -562,6 +565,7 @@ pub async fn serve(
 fn auth_interceptor(
     req: Request<()>,
     api_keys: &[brain_core::ApiKeyConfig],
+    rate_limits: Option<&Arc<::resilience::RateLimitRegistry>>,
 ) -> Result<Request<()>, Status> {
     let metadata = req.metadata();
 
@@ -580,14 +584,31 @@ fn auth_interceptor(
     // gRPC requests can both read and write, so require write permission.
     let result = brain_core::check_auth(api_keys, provided_key, "write");
     match result {
-        brain_core::AuthResult::Open | brain_core::AuthResult::Allowed => Ok(req),
-        brain_core::AuthResult::InsufficientPermission => Err(Status::permission_denied(
-            result.error_message("write").unwrap_or_default(),
-        )),
-        _ => Err(Status::unauthenticated(
-            result.error_message("write").unwrap_or_default(),
-        )),
+        brain_core::AuthResult::Open | brain_core::AuthResult::Allowed => {}
+        brain_core::AuthResult::InsufficientPermission => {
+            return Err(Status::permission_denied(
+                result.error_message("write").unwrap_or_default(),
+            ));
+        }
+        _ => {
+            return Err(Status::unauthenticated(
+                result.error_message("write").unwrap_or_default(),
+            ));
+        }
     }
+
+    // Per-client rate limit (Issue 51). Only applied when both a
+    // registry is wired and the caller presented a key — open mode
+    // (no `api_keys` configured) intentionally has no throttling.
+    if let (Some(registry), Some(key)) = (rate_limits, provided_key) {
+        let limiter = registry.get_or_create(key);
+        if !limiter.try_acquire() {
+            tracing::warn!("gRPC rate limit exceeded for client");
+            return Err(Status::resource_exhausted("Too many requests"));
+        }
+    }
+
+    Ok(req)
 }
 
 /// Resolve the `Principal` for a gRPC request by reading the key from

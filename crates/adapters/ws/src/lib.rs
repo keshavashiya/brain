@@ -125,64 +125,65 @@ async fn handle_connection(
 
     // ── Step 1: authenticate ─────────────────────────────────────────────────
     // Also resolves the `Principal` once and binds it to the connection's
-    // lifetime — every subsequent signal frame uses it.
-    let (authed, principal): (bool, Option<identity::Principal>) = match ws_rx.next().await {
-        None => return,
-        Some(Err(e)) => {
-            tracing::debug!(conn_id = %conn_id, "WS recv error during auth: {e}");
-            return;
-        }
-        Some(Ok(Message::Text(text))) => {
-            match serde_json::from_str::<AuthMessage>(text.as_str()) {
-                Err(e) => {
-                    let resp = AuthResponse {
-                        status: "error",
-                        conn_id: None,
-                        message: Some(format!("Expected auth message: {e}")),
-                    };
-                    send_json_frame(&mut ws_tx, &resp, conn_id).await;
-                    return;
-                }
-                Ok(auth) => {
-                    if !validate_key(api_keys, &auth.api_key) {
+    // lifetime — every subsequent signal frame uses it. `client_key` is
+    // captured so subsequent per-frame rate-limit checks key off the same
+    // identifier the HTTP middleware uses.
+    let (authed, principal, client_key): (bool, Option<identity::Principal>, Option<String>) =
+        match ws_rx.next().await {
+            None => return,
+            Some(Err(e)) => {
+                tracing::debug!(conn_id = %conn_id, "WS recv error during auth: {e}");
+                return;
+            }
+            Some(Ok(Message::Text(text))) => {
+                match serde_json::from_str::<AuthMessage>(text.as_str()) {
+                    Err(e) => {
                         let resp = AuthResponse {
                             status: "error",
                             conn_id: None,
-                            message: Some("Invalid or missing API key".to_string()),
+                            message: Some(format!("Expected auth message: {e}")),
                         };
                         send_json_frame(&mut ws_tx, &resp, conn_id).await;
                         return;
                     }
-                    // Resolve the Principal once. None when the key has no
-                    // agent_id mapping or no IdentityStore is wired
-                    // (back-compat).
-                    let principal = resolve_principal(api_keys, &auth.api_key, &processor).await;
-                    // Auth OK — send confirmation
-                    let resp = AuthResponse {
-                        status: "authenticated",
-                        conn_id: Some(conn_id.to_string()),
-                        message: None,
-                    };
-                    send_json_frame(&mut ws_tx, &resp, conn_id).await;
-                    (true, principal)
+                    Ok(auth) => {
+                        if !validate_key(api_keys, &auth.api_key) {
+                            let resp = AuthResponse {
+                                status: "error",
+                                conn_id: None,
+                                message: Some("Invalid or missing API key".to_string()),
+                            };
+                            send_json_frame(&mut ws_tx, &resp, conn_id).await;
+                            return;
+                        }
+                        let principal =
+                            resolve_principal(api_keys, &auth.api_key, &processor).await;
+                        let resp = AuthResponse {
+                            status: "authenticated",
+                            conn_id: Some(conn_id.to_string()),
+                            message: None,
+                        };
+                        send_json_frame(&mut ws_tx, &resp, conn_id).await;
+                        (true, principal, Some(auth.api_key))
+                    }
                 }
             }
-        }
-        Some(Ok(Message::Close(_))) => return,
-        Some(Ok(_)) => {
-            let resp = AuthResponse {
-                status: "error",
-                conn_id: None,
-                message: Some("First frame must be a text auth message".to_string()),
-            };
-            send_json_frame(&mut ws_tx, &resp, conn_id).await;
-            return;
-        }
-    };
+            Some(Ok(Message::Close(_))) => return,
+            Some(Ok(_)) => {
+                let resp = AuthResponse {
+                    status: "error",
+                    conn_id: None,
+                    message: Some("First frame must be a text auth message".to_string()),
+                };
+                send_json_frame(&mut ws_tx, &resp, conn_id).await;
+                return;
+            }
+        };
 
     if !authed {
         return;
     }
+    let rate_limits = processor.client_rate_limits().cloned();
 
     // ── Step 2: process signal frames + proactive push ──────────────────────
     // Subscribe to proactive notifications (if router is available).
@@ -220,6 +221,28 @@ async fn handle_connection(
                 };
                 match msg {
                     Message::Text(text) => {
+                        // Per-client rate limit (Issue 51). Drop the frame
+                        // with an error response when the bucket is drained.
+                        if let (Some(reg), Some(key)) = (rate_limits.as_ref(), client_key.as_ref()) {
+                            let limiter = reg.get_or_create(key);
+                            if !limiter.try_acquire() {
+                                tracing::warn!(
+                                    conn_id = %conn_id,
+                                    "WS rate limit exceeded"
+                                );
+                                let frame = serde_json::json!({
+                                    "type": "error",
+                                    "code": "rate_limited",
+                                    "message": "Too many requests",
+                                });
+                                if let Ok(json) = serde_json::to_string(&frame) {
+                                    if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                continue;
+                            }
+                        }
                         // Try to parse as ClientMessage to check for streaming flag
                         let client_msg: Option<ClientMessage> = serde_json::from_str(text.as_str()).ok();
                         if let Some(ref cm) = client_msg {

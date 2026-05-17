@@ -13,6 +13,7 @@ categories.workspace = true
 [dependencies]
 brain_core = { workspace = true }
 signal = { workspace = true }
+resilience = { workspace = true }
 observe = { workspace = true }
 identity = { workspace = true }
 tokio-tungstenite = { workspace = true }

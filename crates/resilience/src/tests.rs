@@ -492,38 +492,32 @@ async fn rate_limiter_refills_over_time() {
     let rl = RateLimiter::new("t", rl_config(50, 1000, 2)); // 50 tok/s, burst 2
     rl.acquire().await;
     rl.acquire().await; // drains
-    assert!(!rl.try_acquire().await, "should be drained");
+    assert!(!rl.try_acquire(), "should be drained");
     sleep(Duration::from_millis(60)).await; // ≥ 3 tokens accrue, capped at burst=2
+    assert!(rl.try_acquire(), "first refill token should be present");
     assert!(
-        rl.try_acquire().await,
-        "first refill token should be present"
-    );
-    assert!(
-        rl.try_acquire().await,
+        rl.try_acquire(),
         "second refill token should be present (capped at burst)"
     );
-    assert!(!rl.try_acquire().await, "third try should miss — capped");
+    assert!(!rl.try_acquire(), "third try should miss — capped");
 }
 
 #[tokio::test]
 async fn rate_limiter_try_acquire_does_not_block() {
     let rl = RateLimiter::new("t", rl_config(1, 10_000, 1)); // 0.1 tok/s
-    assert!(rl.try_acquire().await, "first token should be present");
-    assert!(
-        !rl.try_acquire().await,
-        "second try should fail without sleeping"
-    );
+    assert!(rl.try_acquire(), "first token should be present");
+    assert!(!rl.try_acquire(), "second try should fail without sleeping");
 }
 
 #[tokio::test]
 async fn rate_limit_registry_creates_limiters_lazily() {
     let reg = RateLimitRegistry::new(rl_config(10, 1000, 10));
-    assert!(reg.is_empty().await);
-    assert!(reg.get("missing").await.is_none());
-    let rl = reg.get_or_create("mcp:echo:echo").await;
+    assert!(reg.is_empty());
+    assert!(reg.get("missing").is_none());
+    let rl = reg.get_or_create("mcp:echo:echo");
     assert_eq!(rl.tool_id(), "mcp:echo:echo");
-    assert_eq!(reg.len().await, 1);
-    let again = reg.get_or_create("mcp:echo:echo").await;
+    assert_eq!(reg.len(), 1);
+    let again = reg.get_or_create("mcp:echo:echo");
     assert!(Arc::ptr_eq(&rl, &again), "same Arc on second call");
 }
 
@@ -532,9 +526,9 @@ async fn rate_limit_registry_isolates_per_tool() {
     let reg = RateLimitRegistry::new(rl_config(1, 10_000, 1));
     reg.acquire("a").await;
     // 'a' is drained; 'b' should still have its own full bucket.
-    let rl_b = reg.get_or_create("b").await;
+    let rl_b = reg.get_or_create("b");
     assert!(
-        rl_b.try_acquire().await,
+        rl_b.try_acquire(),
         "tool b should not be affected by tool a's drain"
     );
 }
