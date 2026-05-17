@@ -18,6 +18,30 @@ Workspace-locked: all 31 crates publish at 0.4.0 together.
 
 ### Added
 
+- **Pillar wiring — every `with_*` injection slot now populated in
+  bootstrap** (Issues 5–11, 18–19, 21, 29–30; Wave A). The eight
+  pillar crates shipped between v0.3.0 and v0.4.0 — `brainos-observe`,
+  `brainos-identity`, `brainos-mcphost`, `brainos-terminal`,
+  `brainos-intent`, `brainos-reflex`, `brainos-resilience`,
+  `brainos-orchestrate` — were compiled and unit-tested but
+  `cli::{serve,bootstrap}.rs` only wired `with_standing_approvals`,
+  leaving every other guard like `if let Some(observer) = self.observer`
+  silently inactive in production. v0.4.0 closes that gap.
+  `BroadcastObserver`, `ConfigIdentityStore`, `RmcpHost` (as default
+  MCP host wrapped in `ResilientMcpHost`), Terminal Bridge (behind
+  `--terminal` serve flag), `InMemoryToolRegistry` +
+  `DefaultIntentRouter` + `InMemoryCapabilityIndex`,
+  `FsReflex`/`CronReflex`/`SysStateReflex` reflex sources, and the
+  `BreakerRegistry` are all now constructed in bootstrap and threaded
+  through `SignalProcessor`. The compactor runs as a 24h reflection
+  task in `cli::serve`. Terminal sessions mirror into the episodic
+  graph via `HippocampusTerminalSink`. `DualMemoryReader` is wired as
+  a first-class field on `SignalProcessor`. A DLQ drain task purges
+  the dead-letter queue periodically. New umbrella test
+  `crates/cli/src/bootstrap.rs::build_processor_populates_every_injection_slot`
+  is the new contract — a new `with_*` builder cannot land without a
+  matching bootstrap call.
+
 - **Canonical verb vocabulary** (Issue 158, v1.0.0 RFC §1).
   New `intent::verbs::VERBS` lists the 23 verbs the kernel addresses
   (`memory.store`, `shell.exec`, `mcp.mount`, …) with namespace, action,
@@ -45,9 +69,162 @@ Workspace-locked: all 31 crates publish at 0.4.0 together.
   on-disk window persistence. Functionally equivalent within a single
   process. Adds `blake3 = "1"` to workspace dependencies.
 
+- **Config hygiene** (Issues 32, 36–41; Wave D).
+  - `default.yaml` brain.version bumped `0.2.0` → `0.4.0` (Issue 32).
+  - `impl Default for BrainConfig` proactivity fields synced with
+    `default.yaml`; new `default_matches_yaml` regression test
+    (Issue 36).
+  - `storage.hnsw.{ef_construction,m,ef_search,max_elements}` now
+    threaded into `RuVectorStore::open` instead of hardcoded
+    (Issue 37).
+  - `cli::serve` respects `adapters.{http,ws,grpc,mcp}.enabled` flags
+    as a secondary filter after CLI flags (Issue 38).
+  - Dead config fields removed: `adapters.mcp.{stdio,http}` and
+    empty `memory.episodic` struct (Issues 39, 41).
+  - Legacy `llm.provider` marked `#[deprecated]`; startup warns when
+    both it and `providers[]` are set (Issue 40).
+
+- **Public surface shrunk** (Issues 33–34, Wave E).
+  `channel::CorrelatedCommand` and `channel::RoutingDecision` are no
+  longer publicly re-exported.
+
 ### Fixed
 
-_(filled per-fix)_
+- **`handle_prune_audit` honours `older_than`** (Issue 1, Wave B.1).
+  Now parses `"30d"`/`"7d"`/`"24h"` and passes the real duration to
+  `audit.prune(...)`. Previously the parameter was silently ignored.
+
+- **`handle_list_schedules` / `handle_cancel_schedule` actually
+  query** (Issues 2–3, Waves B.2–B.3). Both intents now call into the
+  scheduled-intent store (`list_scheduled_intents` / `cancel_scheduled_intent`)
+  and format real results. Previously returned hardcoded placeholder
+  strings.
+
+- **`handle_set_proactivity` toggles state** (Issue 4, Wave B.4).
+  Simplified to a runtime-mutable toggle backed by `RwLock`. Full
+  windowed-mutation semantics deferred to v1.0.
+
+- **HTTP error responses can no longer panic** (Issue 43, Wave C.1).
+  All `Response::builder().unwrap()` call sites replaced with
+  `.map_err(...)` returning a 500 fallback.
+
+- **External error messages sanitized** (Issue 44, Wave C.2).
+  `SignalError::to_public()` returns a sanitized `PublicError`; all
+  adapter error renderers use it. Internal stack-trace-grade details
+  no longer leak across the wire.
+
+- **`ProjectInspect` path-sandboxed** (Issue 119, Wave C.6).
+  `handle_project_inspect` canonicalizes the requested path and
+  rejects anything outside `config.security.allowed_paths`
+  (default: `$HOME`). Previously, an LLM-extracted path could read
+  arbitrary files.
+
+- **`ActionDispatcher::execute_command` routes through the sandbox**
+  (Issue 121, Wave C.7). Replaced raw `tokio::process::Command` with
+  the wired `SandboxExecutor`. Resource limits, allowlist, and
+  platform isolation now apply to dispatcher invocations.
+
+- **Adapter `enabled` flags are a real gate** (Issue 38, Wave D.4;
+  also listed under Changed). Setting `adapters.http.enabled: false`
+  now actually prevents the HTTP adapter from starting, instead of
+  being silently ignored.
+
+### Security
+
+- **Per-client rate limiting on HTTP/WS/gRPC** (Issue 51, Wave C.3).
+  Resilience `RateLimiter` wired into the Tower stack on HTTP and WS
+  adapters; gRPC interceptor enforces the same.
+
+- **Webhook endpoint requires Bearer auth when verifier-less**
+  (Issue 52, Wave C.4). `POST /v1/webhooks/:id` now demands a Bearer
+  token whenever the configured transport has `verifier == None`.
+
+- **Fail-closed startup on empty `api_keys`** (Issues 53–54, Wave C.5).
+  `brain serve` exits non-zero on launch if `adapters.api_keys` is
+  empty, unless `--no-auth` is passed explicitly. Shell-mode allowlist
+  bypass is now documented in OPERATIONS.md.
+
+- **OAuth `aud` claim validation at MCP mount time** (Issue 163,
+  CVE-2025-6514 / confused-deputy via token passthrough). New
+  `mcphost::aud_check::validate_token_aud` decodes the persisted
+  access token (JWT format only — opaque tokens skip validation) and
+  rejects a mount when the token's `aud` claim does not include the
+  configured RFC 8707 `resource` indicator. `mcphost::manager_from_vault`
+  signature gained `expected_resource` + an `Option<Arc<dyn Observer>>`;
+  `RmcpHost::mount_http` defaults the resource to the server URL
+  (canonical mapping for vanilla MCP deployments) and threads its
+  observer through. Mismatches surface as
+  `BrainEvent::Error { source: "mcphost.oauth" }` on the live event
+  bus AND fail the mount. Signature verification is intentionally
+  out of scope — vault + TLS to AS + PKCE are the trust boundary,
+  not in-band JWS verification. +9 unit tests covering string-aud
+  match, array-aud match, mismatch, missing-aud, opaque-token, and
+  malformed-JWT shapes.
+
+- **MCP tool descriptions treated as untrusted at the LLM boundary**
+  (Issue 162). New `intent::sanitization::render_tool_description_for_prompt`
+  fences every attacker-controllable description inside a labelled
+  `~~~`-delimited block, strips C0 control bytes + ANSI CSI escapes,
+  defangs any literal fence sentinel inside the body, and caps length
+  at 2 KiB on a UTF-8 char boundary. `intent::ToolDescriptor.description`
+  and `mcphost::ToolDescriptor.description` carry doc-comments marking
+  them untrusted; callers wiring descriptions into prompts must use
+  the sanitizer. Complements the hash-pin rug-pull detector in
+  `mcphost::RmcpHost` (which catches *changes* to descriptions);
+  the sanitizer is what stops a single hostile first-mount description
+  from landing as live system instructions.
+
+### Removed
+
+- **Dead code cleanup** (Issues 13–14, 16–17, 20, 23, 27–28; Wave E).
+  - `FORGET_RE` and `STORE_FACT_RE` regexes removed (shadowed by
+    `classify_explicit`).
+  - `set_action_namespace()` and `recall_memories()` removed
+    (no callers).
+  - `AckSignalHandler` moved into `#[cfg(test)]`.
+  - `AgentTask.credentials`, `Markdown::push_blank`/`Markdown::kv`,
+    and `extract::is_supported` removed.
+
+- **Dead config fields removed** (Issues 18–19, 21; Wave A side-effects).
+  `credential_vault` field dropped, `sandbox_executor` accessor
+  visibility downgraded, `RelayConfig.api_key` removed.
+
+### Deferred
+
+- **Tower middleware exact ordering** (Issue 154, RFC §4.2).
+  `ResilientMcpHost` remains a hand-rolled decorator. Swap to
+  `tower::ServiceBuilder` composition deferred to v1.0.0 — security-
+  sensitive layer; must preserve semantics through the transition.
+
+- **Modifiers-based capability scoping** (Issue 159, RFC §12 OQ#2).
+  Identity has path-scope (PR1) but not the full
+  `AuthorizationRequest.modifiers` per-principal allowlist. Wire
+  contract change deferred to v1.0.0.
+
+- **DualMemoryReader → RecallEngine composition.** The reader is
+  wired as a `SignalProcessor` field, but does NOT compose into
+  `RecallEngine::recall`. `DualMemoryReader` only exposes
+  `read_by_id`; `RecallEngine` is hybrid BM25+ANN. They don't compose
+  without graph-side FTS5 + ANN, which is out of v0.4.0 scope.
+  Reopens as a v0.5.0 slice when graph search lands.
+
+- **Structural follow-ups** clustered for v0.5.0+: performance
+  (embedding cache, namespace scan, blocking std::fs in async, N+1
+  deletes, SqlitePool mutex serialization, HNSW preallocation, batch
+  embed clones); test coverage (vault, adapters, resilience, identity,
+  intent, plus benchmarks and fuzzing); async hygiene (blocking I/O
+  on async runtime, fire-and-forget spawns, std::sync::mpsc in async);
+  SOLID refactors (`SignalProcessor` field reduction, `pipeline.rs` /
+  `serve.rs` / `main.rs` splits, large match-arm extraction); duplicate
+  consolidation (two `CircuitBreaker` impls, LLM message conversion
+  and HTTP error handling repeated across providers, embedding HTTP
+  client builder, `identity::Tier` vs `ActionTier`); workspace lints
+  + `publish = false` guards; CI matrix (macOS, Windows, MSRV) and
+  release automation; cross-platform (Linux protoc, Windows syscall
+  guards); medium-severity security hardening (gRPC message limits,
+  CORS exact-match, webhook replay protection, SSRF, vault passphrase
+  exposure, MCP arbitrary-mount risk); and `brain doctor --deep`
+  system inspection.
 
 ### Security
 
