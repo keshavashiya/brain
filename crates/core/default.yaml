@@ -80,6 +80,11 @@ security:
     "sh",
   ]
   exec_timeout_seconds: 30
+  # Roots that read-only filesystem inspection (project_inspect) is
+  # allowed to touch. Empty defaults to $HOME; set explicit entries
+  # like ["~/code", "~/work"] to restrict further. Paths outside any
+  # allowed root — after canonicalization — are rejected.
+  allowed_paths: []
 
 # ── Actions ────────────────────────────────────────────────────────────────────
 actions:

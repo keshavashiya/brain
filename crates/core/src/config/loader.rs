@@ -366,6 +366,10 @@ impl Default for BrainConfig {
                     "sh".into(),
                 ],
                 exec_timeout_seconds: 30,
+                // Empty → handler defaults to `$HOME`. Configure
+                // `security.allowed_paths: ["~/code", "~/work"]` to
+                // restrict further.
+                allowed_paths: Vec::new(),
             },
             actions: ActionsConfig {
                 web_search: WebSearchActionConfig {

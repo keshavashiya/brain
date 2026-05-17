@@ -959,7 +959,55 @@ impl SignalProcessor {
         prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
     ) -> Result<PipelineResult, SignalError> {
         let expanded = expand_user_path(&path);
-        let pb = std::path::PathBuf::from(&expanded);
+        let requested = std::path::PathBuf::from(&expanded);
+
+        // Issue 119: canonicalize first, then enforce that the resolved
+        // path lives under `security.allowed_paths` (default: `$HOME`).
+        // `canonicalize` resolves `..` and symlinks so `~/code/../../etc`
+        // can't escape the configured root.
+        let canonical = match std::fs::canonicalize(&requested) {
+            Ok(p) => p,
+            Err(e) => {
+                let resp = prepend_nudges(SignalResponse::ok(
+                    signal_id,
+                    format!(
+                        "Can't inspect `{}` — {}. Pass an absolute path I can read.",
+                        requested.display(),
+                        friendly_io_error(&e)
+                    ),
+                ));
+                return Ok(PipelineResult::Complete(resp));
+            }
+        };
+
+        let allowed_roots = resolve_allowed_roots(&self.config.security.allowed_paths);
+        if !path_under_any_root(&canonical, &allowed_roots) {
+            tracing::warn!(
+                requested = %requested.display(),
+                resolved = %canonical.display(),
+                "project_inspect rejected — path outside security.allowed_paths"
+            );
+            let roots = allowed_roots
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let resp = prepend_nudges(SignalResponse::ok(
+                signal_id,
+                format!(
+                    "I can't inspect `{}` — it's outside the configured allowed_paths ({}). \
+                     Edit `security.allowed_paths` if you need to widen the sandbox.",
+                    requested.display(),
+                    if roots.is_empty() {
+                        "$HOME".to_string()
+                    } else {
+                        roots
+                    },
+                ),
+            ));
+            return Ok(PipelineResult::Complete(resp));
+        }
+        let pb = canonical;
 
         let metadata = match std::fs::metadata(&pb) {
             Ok(m) => m,
@@ -2505,6 +2553,42 @@ impl<'a> Drop for CancelGuard<'a> {
 
 // ── ProjectInspect helpers ─────────────────────────────────────────────────
 
+/// Resolve `security.allowed_paths` into a list of canonicalized roots.
+/// Empty input defaults to `$HOME`. Entries that fail to canonicalize
+/// (e.g. typo, missing directory) are dropped with a warning — a
+/// misconfigured entry must not silently widen the sandbox.
+fn resolve_allowed_roots(configured: &[String]) -> Vec<std::path::PathBuf> {
+    let raw: Vec<String> = if configured.is_empty() {
+        std::env::var("HOME").into_iter().collect()
+    } else {
+        configured.to_vec()
+    };
+    raw.into_iter()
+        .filter_map(|entry| {
+            let expanded = expand_user_path(&entry);
+            match std::fs::canonicalize(&expanded) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    tracing::warn!(
+                        entry = %entry,
+                        error = %e,
+                        "security.allowed_paths entry could not be canonicalized — ignored"
+                    );
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/// True when `candidate` is equal to or a descendant of any entry in
+/// `roots`. Both sides should already be canonicalized.
+fn path_under_any_root(candidate: &std::path::Path, roots: &[std::path::PathBuf]) -> bool {
+    roots
+        .iter()
+        .any(|root| candidate == root.as_path() || candidate.starts_with(root))
+}
+
 /// Expand a leading `~` to the user's home directory. Anything else is
 /// returned as-is — the caller resolves relative paths against cwd.
 fn expand_user_path(p: &str) -> String {
@@ -2925,6 +3009,77 @@ mod duration_parse_tests {
         assert!(parse_human_duration("30").is_err());
         assert!(parse_human_duration("30x").is_err());
         assert!(parse_human_duration("abc").is_err());
+    }
+}
+
+#[cfg(test)]
+mod project_inspect_path_gate_tests {
+    use super::{path_under_any_root, resolve_allowed_roots};
+    use std::fs;
+
+    #[test]
+    fn empty_config_defaults_to_home() {
+        let roots = resolve_allowed_roots(&[]);
+        if let Some(home) = std::env::var_os("HOME") {
+            let home_canonical = fs::canonicalize(home).expect("HOME must canonicalize");
+            assert_eq!(roots, vec![home_canonical]);
+        }
+    }
+
+    #[test]
+    fn rejects_path_outside_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let inside = tmp.path().join("ok");
+        fs::create_dir_all(&inside).unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+
+        let root_canonical = fs::canonicalize(tmp.path()).unwrap();
+        let inside_canonical = fs::canonicalize(&inside).unwrap();
+        let outside_canonical = fs::canonicalize(outside_dir.path()).unwrap();
+
+        assert!(path_under_any_root(
+            &inside_canonical,
+            std::slice::from_ref(&root_canonical)
+        ));
+        assert!(!path_under_any_root(
+            &outside_canonical,
+            std::slice::from_ref(&root_canonical)
+        ));
+    }
+
+    #[test]
+    fn symlink_escape_is_rejected_via_canonicalization() {
+        // sandbox/inner -> /tmp/escape (symlink). resolve_allowed_roots
+        // canonicalizes sandbox into the real path; path_under_any_root
+        // sees the resolved escape target and refuses.
+        let sandbox = tempfile::tempdir().unwrap();
+        let escape = tempfile::tempdir().unwrap();
+        let link = sandbox.path().join("inner");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(escape.path(), &link).unwrap();
+        #[cfg(not(unix))]
+        {
+            // Symlinks on other platforms aren't reliable here — skip.
+            return;
+        }
+
+        let sandbox_root = fs::canonicalize(sandbox.path()).unwrap();
+        let resolved_link = fs::canonicalize(&link).unwrap();
+        assert!(
+            !path_under_any_root(&resolved_link, &[sandbox_root]),
+            "symlink to outside path must not be considered inside the root"
+        );
+    }
+
+    #[test]
+    fn malformed_root_is_dropped_not_widened() {
+        // A nonexistent path in `allowed_paths` should be silently
+        // dropped, never reinterpreted as "allow everything".
+        let roots = resolve_allowed_roots(&["/this/path/definitely/does/not/exist".to_string()]);
+        assert!(
+            roots.is_empty(),
+            "broken entries must drop, not widen the sandbox"
+        );
     }
 }
 

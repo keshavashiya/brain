@@ -297,6 +297,13 @@ pub struct EncryptionConfig {
 pub struct SecurityConfig {
     pub exec_allowlist: Vec<String>,
     pub exec_timeout_seconds: u32,
+    /// Roots that read-only filesystem inspection (`project_inspect`) is
+    /// allowed to touch. Each entry may use `~` for the user's home and
+    /// is canonicalized at use time. An empty list means "default to
+    /// `$HOME`" — never "anywhere" — so a fresh install can't be
+    /// coaxed into reading `/etc` or `/Users/<other>/...`.
+    #[serde(default)]
+    pub allowed_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
