@@ -5,6 +5,39 @@ All notable changes to Brain OS are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — unreleased
+
+"Wire the Pillars + Fix the Stubs" release. v0.3.0 → v0.4.0 promotes
+every pillar crate shipped between v0.3.0 and this release from
+"compiles and tests in isolation" to "wired into production startup."
+The umbrella test `build_processor_populates_every_injection_slot` in
+`crates/cli/src/bootstrap.rs` is the new contract — a new `with_*`
+builder cannot land without a matching bootstrap call.
+
+Workspace-locked: all 31 crates publish at 0.4.0 together.
+
+### Added
+
+_(filled per-fix as security/RFC gap closures land — see PRs in
+`D-Reconcile.2` wave for the historical record of the 91 commits
+between v0.3.0 and tagging.)_
+
+### Changed
+
+_(filled per-fix)_
+
+### Fixed
+
+_(filled per-fix)_
+
+### Security
+
+_(filled per-fix)_
+
+### Deferred
+
+_(carry-overs to v0.5.0 / v1.0.0 are listed here as each is decided)_
+
 ## [0.3.0] — 2026-05-14
 
 Natural-language interface release. Focus: collapse the CLI surface
