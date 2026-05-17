@@ -13,11 +13,6 @@ pub(crate) struct PatternDef {
     pub(crate) extractors: &'static [(&'static str, usize)],
 }
 
-static STORE_FACT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(?:remember|note|keep in mind)\s+(?:that\s+)?(.+?)$")
-        .expect("invariant: STORE_FACT_RE must be valid")
-});
-
 static RECALL_RE: LazyLock<Regex> = LazyLock::new(|| {
     // Recall = "look up something in long-term memory by topic".
     // Conversational meta-questions like "what did we discuss?" must NOT match
@@ -41,11 +36,6 @@ static MEMORY_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
             (?:dump|list|display)\s+(?:my\s+|all\s+)?(?:memory|memories|all\s+facts|stored\s+facts?)
         )$
     ").expect("invariant: MEMORY_SUMMARY_RE must be valid")
-});
-
-static FORGET_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(?:forget|delete|remove)\s+(?:about\s+)?(.+?)$")
-        .expect("invariant: FORGET_RE must be valid")
 });
 
 static EXECUTE_COMMAND_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -242,16 +232,14 @@ static PIN_CHANNEL_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// All patterns in priority order — first match wins.
+///
+/// `Intent::StoreFact` (`remember/note/keep in mind …`) and
+/// `Intent::Forget` (`forget/delete/remove …`) intentionally have no
+/// entries here — those prefixes are handled earlier by
+/// `classify_explicit`, which runs before `classify_regex` in
+/// `classify_with_history`. The regex shadows were removed in v0.4.0
+/// to drop dead code (audit Issues 13 + 14).
 pub(crate) const PATTERNS: &[PatternDef] = &[
-    PatternDef {
-        regex: &STORE_FACT_RE,
-        base_intent: Intent::StoreFact {
-            subject: String::new(),
-            predicate: String::new(),
-            object: String::new(),
-        },
-        extractors: &[("content", 1)],
-    },
     PatternDef {
         regex: &MEMORY_SUMMARY_RE,
         base_intent: Intent::MemorySummary,
@@ -275,13 +263,6 @@ pub(crate) const PATTERNS: &[PatternDef] = &[
             query: String::new(),
         },
         extractors: &[("query", 1)],
-    },
-    PatternDef {
-        regex: &FORGET_RE,
-        base_intent: Intent::Forget {
-            target: String::new(),
-        },
-        extractors: &[("target", 1)],
     },
     PatternDef {
         regex: &EXECUTE_COMMAND_RE,
@@ -547,19 +528,11 @@ impl IntentClassifier {
         };
 
         match base {
-            Intent::StoreFact { .. } => {
-                let content = get_group("content");
-                Intent::StoreFact {
-                    subject: "user".to_string(),
-                    predicate: "said".to_string(),
-                    object: content,
-                }
-            }
+            // `StoreFact` / `Forget` are produced by `classify_explicit`,
+            // not the regex pipeline — see PATTERNS doc-comment (audit
+            // Issues 13 + 14).
             Intent::Recall { .. } => Intent::Recall {
                 query: get_group("query"),
-            },
-            Intent::Forget { .. } => Intent::Forget {
-                target: get_group("target"),
             },
             Intent::ExecuteCommand { .. } => {
                 let cmd_str = get_group("command");

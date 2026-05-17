@@ -391,7 +391,11 @@ fn test_intent_to_action_system_status() {
 #[test]
 fn test_regex_classification_has_empty_extracted_facts() {
     let classifier = IntentClassifier::new();
-    let result = classifier.classify_regex("Remember that I like coffee");
+    // After audit Issues 13 + 14 the `remember …` / `forget …` prefixes
+    // are handled by `classify_explicit`, so they no longer reach the
+    // regex pipeline. Use a `recall` input that still routes through
+    // `classify_regex` to exercise the same invariant.
+    let result = classifier.classify_regex("recall my notes about Rust");
     assert!(
         result.unwrap().extracted_facts.is_empty(),
         "Regex classification should have empty extracted_facts"
