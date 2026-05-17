@@ -372,9 +372,15 @@ fn synthesise_entries(llm: &brain_core::LlmConfig) -> Vec<brain_core::ProviderEn
     if !llm.providers.is_empty() {
         return llm.providers.clone();
     }
+    // Single-provider fallback path — legitimate use of the deprecated
+    // `llm.provider` field (Issue 40). The startup warning fires when
+    // both shapes are set; here `providers[]` is empty so it's the only
+    // way to know which transport to talk to.
+    #[allow(deprecated)]
+    let kind = llm.provider.clone();
     vec![brain_core::ProviderEntry {
         name: "default".to_string(),
-        kind: llm.provider.clone(),
+        kind,
         base_url: llm.base_url.clone(),
         api_key: llm.api_key.clone(),
         model: llm.model.clone(),

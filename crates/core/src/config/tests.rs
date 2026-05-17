@@ -9,7 +9,11 @@ use super::*;
 fn test_default_config() {
     let config = BrainConfig::default();
     assert_eq!(config.brain.data_dir, "~/.brain");
-    assert_eq!(config.llm.provider, "ollama");
+    // Legacy field is #[deprecated] (Issue 40) but still populated by the
+    // default; read explicitly suppressed.
+    #[allow(deprecated)]
+    let provider = config.llm.provider.clone();
+    assert_eq!(provider, "ollama");
     assert_eq!(config.embedding.dimensions, 768);
     assert!(!config.encryption.enabled);
     assert_eq!(
@@ -23,6 +27,65 @@ fn test_default_config() {
     assert_eq!(config.proactivity.quiet_hours.start, "20:00");
     assert_eq!(config.proactivity.quiet_hours.end, "10:00");
     assert!(config.adapters.http.enabled);
+}
+
+/// Issue 40 regression: `validate()` must warn when the legacy
+/// `llm.provider` is set alongside `llm.providers[]`, so operators
+/// notice the deprecated single-shape field that `providers[]` now
+/// supersedes.
+#[test]
+fn validate_warns_when_legacy_provider_overlaps_providers_array() {
+    let mut config = BrainConfig::default();
+    config.brain.data_dir = std::env::temp_dir()
+        .join("brain-legacy-llm-test")
+        .to_string_lossy()
+        .to_string();
+    // Default already has legacy `provider = "ollama"`. Add a providers[]
+    // entry so the two shapes overlap.
+    config.llm.providers.push(ProviderEntry {
+        name: "primary".into(),
+        kind: "ollama".into(),
+        base_url: "http://localhost:11434".into(),
+        api_key: String::new(),
+        model: "qwen2.5-coder:7b".into(),
+        preferred_models: Vec::new(),
+    });
+
+    let warnings = config.validate().expect("validate must succeed");
+    assert!(
+        warnings.iter().any(|w| w.contains("Legacy `llm.provider`")),
+        "expected legacy provider warning, got: {warnings:?}"
+    );
+}
+
+/// Issue 40: `validate()` is silent when only the new `providers[]`
+/// shape is configured (legacy field empty) — the warning fires
+/// purely on overlap, not on the legacy shape itself.
+#[test]
+fn validate_silent_when_legacy_provider_empty() {
+    let mut config = BrainConfig::default();
+    config.brain.data_dir = std::env::temp_dir()
+        .join("brain-no-legacy-llm-test")
+        .to_string_lossy()
+        .to_string();
+    #[allow(deprecated)]
+    {
+        config.llm.provider.clear();
+    }
+    config.llm.providers.push(ProviderEntry {
+        name: "primary".into(),
+        kind: "ollama".into(),
+        base_url: "http://localhost:11434".into(),
+        api_key: String::new(),
+        model: "qwen2.5-coder:7b".into(),
+        preferred_models: Vec::new(),
+    });
+
+    let warnings = config.validate().expect("validate must succeed");
+    assert!(
+        !warnings.iter().any(|w| w.contains("Legacy `llm.provider`")),
+        "no legacy warning expected when only providers[] is set, got: {warnings:?}"
+    );
 }
 
 /// Issue 36 regression: the four `proactivity` fields the audit

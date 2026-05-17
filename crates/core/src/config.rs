@@ -190,6 +190,16 @@ impl HnswConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LlmConfig {
+    /// Legacy single-provider selector. Superseded by `providers[]`,
+    /// which supports multi-provider failover and runtime health
+    /// checks. Still honoured as the implicit single entry when
+    /// `providers[]` is empty, and `Embedder::from_config` reads it
+    /// to pick the embedding transport — so it can't be removed yet.
+    /// New configs should leave this set to a reasonable default and
+    /// drive everything from `providers[]` instead.
+    #[deprecated(
+        note = "Set `llm.providers[]` instead. Single-provider mode is still functional but no longer the recommended shape."
+    )]
     pub provider: String,
     pub model: String,
     pub base_url: String,

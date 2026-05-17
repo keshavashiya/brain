@@ -356,9 +356,15 @@ impl McpServer {
 
     fn tool_user_profile(&self) -> Result<Value, (i32, String)> {
         let config = self.processor.config();
+        // Surface the active LLM transport in the profile JSON. The
+        // legacy `llm.provider` field is #[deprecated] (Issue 40) but
+        // still load-bearing as the single-provider fallback; reading
+        // it here is the deliberate path.
+        #[allow(deprecated)]
+        let llm_provider = config.llm.provider.clone();
         let profile = json!({
             "llm": {
-                "provider": config.llm.provider,
+                "provider": llm_provider,
                 "model": config.llm.model
             },
             "embedding": {

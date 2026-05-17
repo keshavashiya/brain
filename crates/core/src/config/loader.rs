@@ -213,6 +213,24 @@ impl BrainConfig {
             ));
         }
 
+        // Issue 40: `llm.provider` is #[deprecated]. When `providers[]`
+        // is non-empty AND the legacy field is also set, the loader
+        // backfills providers[0] from the legacy shape — but operators
+        // typically don't realise the legacy field is no longer
+        // authoritative for LLM routing. Surface the overlap loudly so
+        // they migrate to `providers[]`.
+        #[allow(deprecated)]
+        let legacy_provider_set = !self.llm.provider.trim().is_empty();
+        if !self.llm.providers.is_empty() && legacy_provider_set {
+            warnings.push(
+                "Legacy `llm.provider` is set alongside `llm.providers[]`. \
+                 `llm.providers[]` is the authoritative routing surface; \
+                 the legacy field is only kept for embedder selection \
+                 and will be retired in a future release."
+                    .to_string(),
+            );
+        }
+
         if self.memory.consolidation.enabled && self.memory.consolidation.interval_hours == 0 {
             warnings.push("Consolidation interval_hours is 0 — consolidation will run immediately on every daemon wake-up, which may impact performance.".to_string());
         }
@@ -274,6 +292,9 @@ impl BrainConfig {
 }
 
 impl Default for BrainConfig {
+    // `llm.provider` is `#[deprecated]` (Issue 40) but still load-bearing as
+    // the implicit single entry when `providers[]` is empty — populate it.
+    #[allow(deprecated)]
     fn default() -> Self {
         Self {
             brain: GeneralConfig {

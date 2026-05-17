@@ -515,9 +515,15 @@ fn build_action_dispatcher(
 ) -> anyhow::Result<cortex::actions::ActionDispatcher> {
     let embedding_dim = processor.embedding_dim();
     let llm_api_key = resolve_llm_api_key(config);
+    // `Embedder::from_config` still keys off `llm.provider`. The field is
+    // #[deprecated] (Issue 40) but load-bearing here until embedder
+    // selection learns to read `providers[]`; the explicit read is
+    // suppressed at the call site rather than forced through a wrapper.
+    #[allow(deprecated)]
+    let embed_provider = config.llm.provider.clone();
     let embedder = Arc::new(tokio::sync::Mutex::new(
         hippocampus::Embedder::from_config(
-            &config.llm.provider,
+            &embed_provider,
             &config.llm.base_url,
             &config.embedding.model,
             &llm_api_key,

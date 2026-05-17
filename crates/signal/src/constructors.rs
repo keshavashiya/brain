@@ -75,18 +75,22 @@ impl SignalProcessor {
                 .map_err(|e| SignalError::Init(format!("Failed to create LLM provider: {e}")))?,
         );
 
-        // Create embedder — provider is selected from llm.provider config.
-        // The model and dimension come from the embedding config section.
-        // embedding.dimensions MUST match the model's actual output size.
+        // Create embedder — the embedding transport key still comes from
+        // the legacy `llm.provider` field (Issue 40 keeps it #[deprecated]
+        // but load-bearing for embedder selection). The cortex LLM
+        // provider is picked by `providers[]` when set; the embedder API
+        // hasn't followed yet, so this single read is intentional.
         let embedding_dim = config.embedding.dimensions as usize;
+        #[allow(deprecated)]
+        let embed_provider = config.llm.provider.clone();
         tracing::info!(
-            provider = config.llm.provider,
+            provider = %embed_provider,
             model = config.embedding.model,
             dim = embedding_dim,
             "Embedding provider selected"
         );
         let embedder_inner = hippocampus::Embedder::from_config(
-            &config.llm.provider,
+            &embed_provider,
             &config.llm.base_url,
             &config.embedding.model,
             &llm_api_key,
