@@ -75,10 +75,22 @@ pub async fn build_processor(
     // gate just like HTTP/WS/gRPC/MCP signal handlers. Network-side
     // `TerminalAuth` (api-key → agent_id → principal) is attached in
     // `cmd_serve` at gRPC-server spawn, matching how every other adapter
-    // wires its per-request authentication.
-    let terminal_bridge = terminal::TerminalBridge::new().with_observer(observer.clone());
+    // wires its per-request authentication. The graph sink mirrors every
+    // session lifecycle into the episodic graph as a
+    // `tool_call → terminal_event(open) → terminal_event(close)` chain
+    // so recall / audit can reason about terminal activity the same way
+    // it does about other tool calls.
+    let graph: Arc<dyn hippocampus::EpisodicGraph> = Arc::new(hippocampus::SqliteGraph::new(
+        processor.episodic().pool().clone(),
+    ));
+    let graph_sink: Arc<dyn terminal::TerminalGraphSink> = Arc::new(
+        signal::terminal_graph_mirror::HippocampusTerminalSink::new(graph),
+    );
+    let terminal_bridge = terminal::TerminalBridge::new()
+        .with_observer(observer.clone())
+        .with_graph_sink(graph_sink);
     processor = processor.with_terminal_bridge(Arc::new(terminal_bridge));
-    tracing::info!("Terminal Bridge wired (registry + observer)");
+    tracing::info!("Terminal Bridge wired (registry + observer + graph sink)");
 
     // Per-tool circuit breaker registry — minted before the router and
     // the MCP host so both share one source of truth. The router
@@ -900,6 +912,66 @@ mod tests {
             .clone();
         // Sessions registry starts empty out of the box.
         assert!(bridge.sessions().is_empty().await);
+    }
+
+    // Confirms `build_processor` attaches a `HippocampusTerminalSink`
+    // to the bridge so a real session lifecycle leaves nodes in the
+    // episodic graph backed by the same SQLite pool the rest of the
+    // processor uses. Without this, terminal activity is invisible to
+    // recall/audit even though the bridge itself works.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn terminal_bridge_mirrors_session_lifecycle_into_graph() {
+        use hippocampus::EpisodicGraph;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = brain_core::BrainConfig::default();
+        cfg.brain.data_dir = tmp.path().to_str().unwrap().to_string();
+        cfg.agents.auto_discovery = false;
+
+        let processor = build_processor(&cfg).await.expect("processor builds");
+        let bridge = processor
+            .terminal_bridge()
+            .expect("terminal bridge wired")
+            .clone();
+        let svc = bridge.svc();
+        let handle = svc
+            .open_via_pipeline(
+                terminal::pb::OpenRequest {
+                    program: "/bin/sh".to_string(),
+                    args: vec!["-c".into(), "exit 0".into()],
+                    env: Default::default(),
+                    cwd: String::new(),
+                    initial_size: Some(terminal::pb::PtySize {
+                        rows: 24,
+                        cols: 80,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    }),
+                    client_id: String::new(),
+                    set_controlling_tty: false,
+                },
+                None,
+            )
+            .await
+            .expect("open session");
+        svc.close_via_pipeline(&handle.session_id)
+            .await
+            .expect("close session");
+
+        // The graph sink lives behind the bridge — verify by reading
+        // the same pool through a fresh `SqliteGraph` handle. Three
+        // nodes (tool_call + open_event + close_event) are the
+        // documented per-lifecycle output.
+        let graph = hippocampus::SqliteGraph::new(processor.episodic().pool().clone());
+        let nodes = graph.list_all_nodes().expect("list nodes");
+        assert_eq!(
+            nodes.len(),
+            3,
+            "expected 3 nodes after one session lifecycle, got {}: {:?}",
+            nodes.len(),
+            nodes.iter().map(|n| n.kind.as_str()).collect::<Vec<_>>()
+        );
     }
 
     // Confirms `build_processor` wires the capability kernel — a
