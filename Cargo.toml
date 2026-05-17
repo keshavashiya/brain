@@ -94,6 +94,9 @@ argon2 = "0.5"
 sha2 = "0.10"
 blake3 = "1"
 
+# Base64 (encryption blobs, JWT decode)
+base64 = "0.22"
+
 # Random (PKCE code verifier, vault salt)
 rand = "0.8"
 

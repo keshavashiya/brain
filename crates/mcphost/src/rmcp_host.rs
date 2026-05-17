@@ -173,13 +173,29 @@ impl RmcpHost {
         let mut transport_cfg = StreamableHttpClientTransportConfig::with_uri(url.clone());
         transport_cfg.custom_headers = protocol_version_headers();
 
-        let svc: RunningService<RoleClient, ()> = if oauth_cfg.is_some() {
+        let svc: RunningService<RoleClient, ()> = if let Some(oauth) = oauth_cfg.as_ref() {
             let vault = self.vault.clone().ok_or_else(|| {
                 McpHostError::Auth(
                     "OAuth configured but RmcpHost has no vault — wire one via with_vault()".into(),
                 )
             })?;
-            let manager = oauth::manager_from_vault(&url, &name, vault).await?;
+            // RFC 8707 resource indicator. Defaults to the server URL
+            // when the operator hasn't customised it — that's the
+            // canonical mapping for vanilla MCP deployments where the
+            // server IS the protected resource.
+            let expected_resource = if oauth.resource.trim().is_empty() {
+                url.as_str()
+            } else {
+                oauth.resource.as_str()
+            };
+            let manager = oauth::manager_from_vault(
+                &url,
+                &name,
+                expected_resource,
+                vault,
+                self.observer.clone(),
+            )
+            .await?;
             let auth_client = AuthClient::new(reqwest::Client::new(), manager);
             let transport = StreamableHttpClientTransport::with_client(auth_client, transport_cfg);
             ().serve(transport)

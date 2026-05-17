@@ -51,6 +51,22 @@ _(filled per-fix)_
 
 ### Security
 
+- **OAuth `aud` claim validation at MCP mount time** (Issue 163,
+  CVE-2025-6514 / confused-deputy via token passthrough). New
+  `mcphost::aud_check::validate_token_aud` decodes the persisted
+  access token (JWT format only — opaque tokens skip validation) and
+  rejects a mount when the token's `aud` claim does not include the
+  configured RFC 8707 `resource` indicator. `mcphost::manager_from_vault`
+  signature gained `expected_resource` + an `Option<Arc<dyn Observer>>`;
+  `RmcpHost::mount_http` defaults the resource to the server URL
+  (canonical mapping for vanilla MCP deployments) and threads its
+  observer through. Mismatches surface as
+  `BrainEvent::Error { source: "mcphost.oauth" }` on the live event
+  bus AND fail the mount. Signature verification is intentionally
+  out of scope — vault + TLS to AS + PKCE are the trust boundary,
+  not in-band JWS verification. +9 unit tests covering string-aud
+  match, array-aud match, mismatch, missing-aud, opaque-token, and
+  malformed-JWT shapes.
 - **MCP tool descriptions treated as untrusted at the LLM boundary**
   (Issue 162). New `intent::sanitization::render_tool_description_for_prompt`
   fences every attacker-controllable description inside a labelled

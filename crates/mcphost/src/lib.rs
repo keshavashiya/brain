@@ -26,6 +26,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use tokio::sync::RwLock;
 
+pub mod aud_check;
 pub mod capability_index;
 pub mod error;
 pub mod oauth;
@@ -33,6 +34,7 @@ pub mod resilient;
 pub mod rmcp_host;
 pub mod types;
 
+pub use aud_check::{validate_token_aud, AudCheckOutcome};
 pub use capability_index::{CapabilityIndex, InMemoryCapabilityIndex};
 pub use error::McpHostError;
 pub use oauth::{manager_from_vault, VaultCredentialStore};
