@@ -233,7 +233,7 @@ access:
 
 # ── Internal defaults (safe to leave unchanged) ────────────────────────────────
 brain:
-  version: "0.2.0"
+  version: "0.4.0"
   data_dir: "~/.brain"
 
 storage:
