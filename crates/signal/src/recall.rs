@@ -110,21 +110,6 @@ impl SignalProcessor {
         }
     }
 
-    /// Recall memories using hybrid search (BM25 + ANN), with embedding done internally.
-    ///
-    /// Returns merged and ranked memories. Falls back to BM25-only episodic search
-    /// when the semantic store is unavailable.
-    pub async fn recall_memories(
-        &self,
-        query: &str,
-        top_k: usize,
-        namespace: Option<&str>,
-    ) -> Vec<hippocampus::Memory> {
-        let query_vector = self.embed_text(query).await;
-        let (memories, _, _) = self.do_recall(query, query_vector, top_k, namespace).await;
-        memories
-    }
-
     /// Search semantic facts by text query (embed → vector ANN search).
     ///
     /// Returns up to `top_k` facts ranked by similarity. If `namespace` is

@@ -63,16 +63,6 @@ impl SignalProcessor {
         self
     }
 
-    /// Set the namespace used by the action dispatcher (if attached).
-    ///
-    /// Call this before `prepare()` when the active namespace changes
-    /// (e.g. CLI session namespace switch).
-    pub fn set_action_namespace(&mut self, ns: &str) {
-        if let Some(d) = &mut self.action_dispatcher {
-            d.set_namespace(ns);
-        }
-    }
-
     /// Flush all in-flight writes and checkpoint the SQLite WAL.
     ///
     /// Call this on graceful shutdown to ensure no committed data is lost.
