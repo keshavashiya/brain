@@ -460,6 +460,7 @@ impl ToolRegistry for InMemoryToolRegistry {
 }
 
 pub mod sanitization;
+pub mod verbs;
 
 #[cfg(test)]
 mod tests;

@@ -410,4 +410,146 @@ mod tests {
         assert_eq!(req.verb_action, "store");
         assert_eq!(tier, Tier::Write);
     }
+
+    /// Cross-check: every typed-Intent variant that produces an
+    /// `AuthorizationRequest` must use a verb that exists in
+    /// `intent::verbs::VERBS`, and `tier_for_verb` must return the
+    /// same tier as the registry's hint for every entry. Catches
+    /// drift between `intent_to_auth` and the kernel vocabulary at
+    /// test time — the v0.4.0 substitute for the boot-time
+    /// `verbs.toml` registry RFC §158 nominally described.
+    #[test]
+    fn every_static_verb_is_in_registry() {
+        use chrono::Utc;
+        use intent::{IntentToken, Object, Provenance, Verb};
+
+        // Build one representative of every authz-mapped Intent variant.
+        // Pure-conversation variants (Chat, Recall, …) return `None`
+        // from `intent_to_auth` and need no registry entry.
+        let typed: Vec<Intent> = vec![
+            Intent::StoreFact {
+                subject: "s".into(),
+                predicate: "p".into(),
+                object: "o".into(),
+            },
+            Intent::Forget { target: "x".into() },
+            Intent::ExecuteCommand {
+                command: "ls".into(),
+                args: vec![],
+            },
+            Intent::WebSearch { query: "x".into() },
+            Intent::SendMessage {
+                channel: "ch".into(),
+                recipient: "u".into(),
+                content: "hi".into(),
+            },
+            Intent::Schedule {
+                description: "d".into(),
+                cron: None,
+            },
+            Intent::CancelSchedule { id: "1".into() },
+            Intent::DecomposeTask {
+                request: "build".into(),
+            },
+            Intent::CancelTask {
+                task_id: "1".into(),
+            },
+            Intent::CancelSignal {
+                signal_id: "1".into(),
+            },
+            Intent::DelegateTask {
+                agent: "claude-code".into(),
+                prompt: "do thing".into(),
+            },
+            Intent::RespondToApproval {
+                nonce: "n".into(),
+                decision: "approve".into(),
+            },
+            Intent::PruneAudit {
+                older_than: "30d".into(),
+            },
+            Intent::SetChannelPreference {
+                channel: "ch".into(),
+                category: "c".into(),
+                weight: 1.0,
+                pinned: false,
+            },
+            Intent::SetProactivity {
+                enabled: true,
+                until: None,
+            },
+            Intent::ProjectInspect {
+                path: "/p".into(),
+                focus: None,
+            },
+            Intent::OpenTerminalSession {
+                program: "bash".into(),
+                args: vec![],
+                cwd: None,
+            },
+            Intent::CloseTerminalSession {
+                session_id: "s".into(),
+            },
+            Intent::MountMcpServer {
+                name: "m".into(),
+                transport: "stdio".into(),
+                command_or_url: "x".into(),
+            },
+            Intent::UnmountMcpServer { name: "m".into() },
+            Intent::RevokeStandingApproval { id: "1".into() },
+        ];
+
+        for variant in &typed {
+            let (req, _tier) = intent_to_auth(variant)
+                .unwrap_or_else(|| panic!("intent {variant:?} produced no AuthorizationRequest"));
+            assert!(
+                intent::verbs::lookup(&req.verb_ns, &req.verb_action).is_some(),
+                "verb {}.{} produced by {:?} is not in intent::verbs::VERBS",
+                req.verb_ns,
+                req.verb_action,
+                variant,
+            );
+        }
+
+        // Drive `tier_for_verb` through every registered verb and
+        // confirm the inferred tier matches the registry's tier_hint.
+        // The hint is the source of truth for the kernel vocabulary;
+        // `tier_for_verb` is its enforcement.
+        for spec in intent::verbs::VERBS {
+            let inferred = tier_for_verb(spec.ns, spec.action);
+            let expected = match spec.tier_hint {
+                intent::verbs::TierHint::Read => Tier::Read,
+                intent::verbs::TierHint::Write => Tier::Write,
+                intent::verbs::TierHint::Execute => Tier::Execute,
+                intent::verbs::TierHint::Destructive => Tier::Destructive,
+                intent::verbs::TierHint::External => Tier::External,
+            };
+            assert_eq!(
+                inferred, expected,
+                "tier mismatch for {}.{}: tier_for_verb={:?} registry={:?}",
+                spec.ns, spec.action, inferred, expected,
+            );
+        }
+
+        // Probe `Intent::ToolCall` with a registered verb and verify
+        // the SIT path resolves cleanly through tier_for_verb.
+        let token = IntentToken::new(
+            Verb::new("memory", "store"),
+            Object {
+                kind: "fact".into(),
+                value: serde_json::Value::Null,
+            },
+            Provenance::User {
+                raw_input: "test".into(),
+                ui_origin: None,
+                ts: Utc::now(),
+            },
+            "personal".into(),
+        );
+        let intent = Intent::ToolCall(Box::new(token));
+        let (req, tier) = intent_to_auth(&intent).unwrap();
+        assert_eq!(req.verb_ns, "memory");
+        assert_eq!(req.verb_action, "store");
+        assert_eq!(tier, Tier::Write);
+    }
 }

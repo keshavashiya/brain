@@ -18,9 +18,21 @@ Workspace-locked: all 31 crates publish at 0.4.0 together.
 
 ### Added
 
-_(filled per-fix as security/RFC gap closures land — see PRs in
-`D-Reconcile.2` wave for the historical record of the 91 commits
-between v0.3.0 and tagging.)_
+- **Canonical verb vocabulary** (Issue 158, v1.0.0 RFC §1).
+  New `intent::verbs::VERBS` lists the 23 verbs the kernel addresses
+  (`memory.store`, `shell.exec`, `mcp.mount`, …) with namespace, action,
+  conservative `TierHint`, and human summary. New helpers
+  `intent::verbs::lookup(ns, action)` and `intent::verbs::namespaces()`
+  give consumers a single source of truth for what the kernel can
+  authorize. Implemented as compile-time constants rather than a
+  separate `verbs.toml` file: the verb surface is kernel contract
+  (adding one requires a new `Intent` variant + authz mapping +
+  handler), not config. Cross-check test
+  `signal::authz::tests::every_static_verb_is_in_registry` asserts
+  every typed-Intent → AuthorizationRequest verb resolves through
+  `lookup`, AND that `tier_for_verb` matches each entry's
+  `tier_hint` — typos in `intent_to_auth` therefore fail the test
+  suite rather than the runtime.
 
 ### Changed
 
