@@ -15,7 +15,7 @@ use tokio_stream::Stream;
 use tonic::{transport::Server, Request, Response, Status};
 use uuid::Uuid;
 
-use signal::{Signal, SignalSource};
+use signal::{Signal, SignalError, SignalSource};
 
 /// Convert protobuf empty string to Option (proto3 defaults strings to "").
 fn non_empty(s: String) -> Option<String> {
@@ -24,6 +24,18 @@ fn non_empty(s: String) -> Option<String> {
     } else {
         Some(s)
     }
+}
+
+/// Map a `SignalError` to a sanitized gRPC `Status` (Issue 44). Internal
+/// detail (storage paths, SQL strings) stays in tracing logs only.
+fn public_status(err: &SignalError) -> Status {
+    let public = err.to_public();
+    let code = match err {
+        SignalError::Init(_) => tonic::Code::Unavailable,
+        SignalError::Storage(_) => tonic::Code::Unavailable,
+        SignalError::Llm(_) | SignalError::Processing(_) => tonic::Code::Internal,
+    };
+    Status::new(code, public.message)
 }
 
 // ── Generated protobuf types ──────────────────────────────────────────────────
@@ -147,7 +159,10 @@ impl MemoryService for MemoryServiceImpl {
                 success: true,
                 message: "Fact stored successfully".to_string(),
             })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => {
+                tracing::error!(error = %e, "gRPC store_fact failed");
+                Err(public_status(&e))
+            }
         }
     }
 
@@ -225,7 +240,8 @@ impl MemoryService for MemoryServiceImpl {
                     let _ = tx.send(Ok(event)).await;
                 }
                 Err(e) => {
-                    let _ = tx.send(Err(Status::internal(e.to_string()))).await;
+                    tracing::error!(error = %e, "gRPC stream_signals processing failed");
+                    let _ = tx.send(Err(public_status(&e))).await;
                 }
             }
         });
@@ -371,7 +387,10 @@ impl AgentService for AgentServiceImpl {
                 episodes_used: resp.memory_context.episodes_used as u32,
                 session_id: resp.session_id.unwrap_or_default(),
             })),
-            Err(e) => Err(Status::internal(e.to_string())),
+            Err(e) => {
+                tracing::error!(error = %e, "gRPC send_signal processing failed");
+                Err(public_status(&e))
+            }
         }
     }
 

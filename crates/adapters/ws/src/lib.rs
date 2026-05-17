@@ -240,7 +240,11 @@ async fn handle_connection(
                             Ok(Some(r)) => r,
                             Ok(None) => continue, // Shouldn't happen for non-streaming, but be safe
                             Err(e) => {
-                                SignalResponse::error(Uuid::new_v4(), e.to_string())
+                                tracing::warn!(conn_id = %conn_id, "process_text_frame error: {e}");
+                                SignalResponse::error(
+                                    Uuid::new_v4(),
+                                    e.to_public().message.to_string(),
+                                )
                             }
                         };
                         let json = match serde_json::to_string(&response) {

@@ -127,11 +127,12 @@ pub async fn post_signal_handler(
                 error = %e,
                 "signal processing failed"
             );
+            let public = e.to_public();
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 serde_json::json!({
-                    "error": "Signal processing failed",
-                    "details": e.to_string()
+                    "error": public.code,
+                    "message": public.message,
                 })
                 .to_string(),
             ));

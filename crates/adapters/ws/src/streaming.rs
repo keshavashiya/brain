@@ -53,7 +53,10 @@ pub(crate) async fn process_text_frame(
         Ok(r) => Ok(Some(r)),
         Err(e) => {
             tracing::warn!(conn_id = %conn_id, "Signal processing error: {e}");
-            Ok(Some(SignalResponse::error(signal_id, e.to_string())))
+            Ok(Some(SignalResponse::error(
+                signal_id,
+                e.to_public().message.to_string(),
+            )))
         }
     }
 }
@@ -192,9 +195,14 @@ pub(crate) async fn handle_streaming_request(
                     Ok(p) => break p,
                     Err(e) => {
                         tracing::warn!(conn_id = %conn_id, "Signal prepare error: {e}");
+                        let public = e.to_public();
                         let _ = send_json_frame_to_sink(
                             ws_tx,
-                            &serde_json::json!({"type": "error", "message": e.to_string()}),
+                            &serde_json::json!({
+                                "type": "error",
+                                "code": public.code,
+                                "message": public.message,
+                            }),
                             conn_id,
                         )
                         .await;

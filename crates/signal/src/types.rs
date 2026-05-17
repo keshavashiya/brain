@@ -27,6 +27,54 @@ pub enum SignalError {
     Init(String),
 }
 
+/// Network-safe rendering of a [`SignalError`].
+///
+/// Adapter responses (HTTP / WS / gRPC / MCP) MUST go through this instead
+/// of `SignalError::to_string()` so internal details (storage paths, SQL
+/// strings, LLM provider messages, init failures) never reach untrusted
+/// callers. The original error is preserved in tracing logs for operators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicError {
+    /// Stable machine-readable code suitable for client branching.
+    pub code: &'static str,
+    /// Human-readable message safe to expose externally.
+    pub message: &'static str,
+}
+
+impl PublicError {
+    /// 500 Internal Server Error analog for unknown processing failures.
+    pub const PROCESSING: PublicError = PublicError {
+        code: "processing_failed",
+        message: "Failed to process signal",
+    };
+    pub const STORAGE: PublicError = PublicError {
+        code: "storage_unavailable",
+        message: "Storage backend unavailable",
+    };
+    pub const LLM: PublicError = PublicError {
+        code: "llm_error",
+        message: "Language model error",
+    };
+    pub const INIT: PublicError = PublicError {
+        code: "service_unavailable",
+        message: "Service not ready",
+    };
+}
+
+impl SignalError {
+    /// Strip internal detail and return a sanitized error suitable for
+    /// rendering to network clients. Keep the original error in tracing
+    /// logs alongside any call site that uses this.
+    pub fn to_public(&self) -> PublicError {
+        match self {
+            SignalError::Processing(_) => PublicError::PROCESSING,
+            SignalError::Storage(_) => PublicError::STORAGE,
+            SignalError::Llm(_) => PublicError::LLM,
+            SignalError::Init(_) => PublicError::INIT,
+        }
+    }
+}
+
 // ─── Signal Types ─────────────────────────────────────────────────────────────
 
 /// The source protocol of an incoming signal.
@@ -356,6 +404,22 @@ pub fn response_to_text(content: &ResponseContent) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn to_public_strips_internal_detail() {
+        let storage = SignalError::Storage("disk full at /var/lib/brain/db.sqlite".into());
+        let public = storage.to_public();
+        assert_eq!(public, PublicError::STORAGE);
+        // Sanity-check: nothing in the public payload reveals the path.
+        assert!(!public.message.contains("/var/lib"));
+        assert!(!public.code.contains("/var/lib"));
+
+        let processing = SignalError::Processing("panic in classify_explicit".into());
+        assert_eq!(processing.to_public(), PublicError::PROCESSING);
+
+        let init = SignalError::Init("SQLite migration v22 failed".into());
+        assert_eq!(init.to_public(), PublicError::INIT);
+    }
 
     #[test]
     fn signal_new_starts_with_no_provenance() {
