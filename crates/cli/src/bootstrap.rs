@@ -10,6 +10,10 @@ use crate::encryption::resolve_encryptor;
 use crate::encryption::resolve_llm_api_key;
 use backends::*;
 use confirm::StandingApprovalStore;
+// `use backends::*;` re-exports a `resilience` submodule, which would
+// shadow the `brainos-resilience` extern crate. Name the breaker types
+// explicitly to keep `BreakerConfig` / `BreakerRegistry` reachable.
+use ::resilience::{BreakerConfig, BreakerRegistry};
 
 /// Build a fully-wired `SignalProcessor` from config.
 ///
@@ -76,23 +80,46 @@ pub async fn build_processor(
     processor = processor.with_terminal_bridge(Arc::new(terminal_bridge));
     tracing::info!("Terminal Bridge wired (registry + observer)");
 
+    // Per-tool circuit breaker registry — minted before the router and
+    // the MCP host so both share one source of truth. The router
+    // queries it via `intent::BreakerCheck` to exclude `Open` tools
+    // from scoring; the `ResilientMcpHost` decorator records
+    // success/failure on every call so the breaker reflects ground
+    // truth. Observer is threaded in so state transitions land on the
+    // same bus SSE subscribes to.
+    let breaker_cfg = BreakerConfig {
+        failure_threshold: config.actions.resilience.circuit_breaker_threshold,
+        open_duration: std::time::Duration::from_secs(
+            config.actions.resilience.circuit_breaker_cooldown_secs,
+        ),
+        ..BreakerConfig::default()
+    };
+    let breakers = Arc::new(BreakerRegistry::new(breaker_cfg).with_observer(observer.clone()));
+    tracing::info!(
+        failure_threshold = config.actions.resilience.circuit_breaker_threshold,
+        cooldown_secs = config.actions.resilience.circuit_breaker_cooldown_secs,
+        "Breaker registry wired"
+    );
+
     // Capability kernel — workspace-wide registry of every tool the host
     // can dispatch to, plus the intent router that resolves a classified
     // `IntentToken` to a concrete `ToolRoute`. The same `ToolRegistry`
     // is threaded into the MCP host below so every server mount
     // auto-populates it; the mcphost-side `CapabilityIndex` keeps the
-    // host's own per-server lookup hot. Breaker registry (so `Open` tools
-    // are excluded from scoring) is wired in a later slice.
+    // host's own per-server lookup hot. The breaker registry is wired
+    // into the router so `Open` tools are skipped during scoring.
     let tool_registry: Arc<dyn intent::ToolRegistry> =
         Arc::new(intent::InMemoryToolRegistry::new());
-    let intent_router: Arc<dyn intent::IntentRouter> =
-        Arc::new(intent::DefaultIntentRouter::new(tool_registry.clone()));
+    let breaker_check: Arc<dyn intent::BreakerCheck> = breakers.clone();
+    let intent_router: Arc<dyn intent::IntentRouter> = Arc::new(
+        intent::DefaultIntentRouter::new(tool_registry.clone()).with_breakers(breaker_check),
+    );
     let mcp_capability_index: Arc<dyn mcphost::CapabilityIndex> =
         Arc::new(mcphost::InMemoryCapabilityIndex::new());
     processor = processor
         .with_tool_registry(tool_registry.clone())
         .with_intent_router(intent_router);
-    tracing::info!("Capability kernel wired (registry + DefaultIntentRouter)");
+    tracing::info!("Capability kernel wired (registry + DefaultIntentRouter + breakers)");
 
     // MCP host — always wired so `Intent::MountMcpServer` /
     // `ListMcpServers` / `UnmountMcpServer` and the `mcp:{server}:{tool}`
@@ -104,15 +131,22 @@ pub async fn build_processor(
     // (`tools/list` hash change) and refresh-failure events land on the
     // same bus the SSE stream subscribes to. The tool registry +
     // capability index let mounts populate the workspace-wide and
-    // host-local catalogs the router queries.
-    let mcp_host: Arc<dyn mcphost::MCPHost> = Arc::new(
+    // host-local catalogs the router queries. The host is wrapped in
+    // `ResilientMcpHost` so every `call` records breaker outcomes and
+    // `Open` tools fail fast at the host boundary as well — keeps the
+    // breaker state honest even when callers bypass the router.
+    let rmcp_inner: Arc<dyn mcphost::MCPHost> = Arc::new(
         mcphost::RmcpHost::new()
             .with_observer(observer.clone())
             .with_tool_registry(tool_registry)
             .with_capability_index(mcp_capability_index),
     );
-    processor = processor.with_mcp_host(mcp_host);
-    tracing::info!("MCP host wired (RmcpHost; mount servers via Intent::MountMcpServer)");
+    let mcp_host: Arc<dyn mcphost::MCPHost> =
+        Arc::new(mcphost::ResilientMcpHost::new(rmcp_inner).with_breakers(breakers.clone()));
+    processor = processor
+        .with_mcp_host(mcp_host)
+        .with_breaker_registry(breakers);
+    tracing::info!("MCP host wired (RmcpHost + ResilientMcpHost decorator with breakers)");
 
     let action_dispatcher = build_action_dispatcher(config, &processor)?;
     processor = processor.with_action_dispatcher(action_dispatcher);
@@ -889,6 +923,46 @@ mod tests {
         assert!(
             registry.list().await.is_empty(),
             "default install has no tools registered yet"
+        );
+    }
+
+    // Confirms `build_processor` wires a `BreakerRegistry` and that the
+    // same `Arc` reaches both the processor surface and (transitively)
+    // the router's `BreakerCheck` view. Recording failures above the
+    // configured threshold must flip the breaker to `Open`, which is
+    // exactly the signal the router consults to skip a sick tool.
+    #[tokio::test]
+    async fn breaker_registry_wired_and_shared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cfg = brain_core::BrainConfig::default();
+        cfg.brain.data_dir = tmp.path().to_str().unwrap().to_string();
+        cfg.agents.auto_discovery = false;
+
+        let processor = build_processor(&cfg).await.expect("processor builds");
+        let registry = processor
+            .breaker_registry()
+            .expect("breaker registry wired by build_processor")
+            .clone();
+
+        // No outcomes recorded yet — registry is empty and untouched
+        // tool ids report as closed via the BreakerCheck surface.
+        assert!(registry.is_empty().await);
+        use intent::BreakerCheck;
+        assert!(!registry.is_open("mcp:test:never-called").await);
+
+        // Pushing the configured number of failures must flip the
+        // breaker `Open` for the affected tool only.
+        let threshold = cfg.actions.resilience.circuit_breaker_threshold;
+        for _ in 0..threshold {
+            registry.record_failure("mcp:test:sick").await;
+        }
+        assert!(
+            registry.is_open("mcp:test:sick").await,
+            "breaker should be Open after {threshold} consecutive failures"
+        );
+        assert!(
+            !registry.is_open("mcp:test:healthy").await,
+            "untouched tool must stay closed"
         );
     }
 

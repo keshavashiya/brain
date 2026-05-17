@@ -591,6 +591,7 @@ dependencies = [
  "brainos-observe",
  "brainos-orchestrate",
  "brainos-reflex",
+ "brainos-resilience",
  "brainos-sandbox",
  "brainos-signal",
  "brainos-storage",
