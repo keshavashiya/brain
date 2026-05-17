@@ -41,7 +41,6 @@ embedding:
 
 # ── Memory ─────────────────────────────────────────────────────────────────────
 memory:
-  episodic: {}
   semantic:
     similarity_threshold: 0.65
     max_results: 20
@@ -155,8 +154,6 @@ adapters:
     port: 19790
   mcp:
     enabled: true
-    stdio: true
-    http: true
     port: 19791
   grpc:
     enabled: true

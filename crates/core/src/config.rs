@@ -247,14 +247,10 @@ pub struct EmbeddingConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
-    pub episodic: EpisodicConfig,
     pub semantic: SemanticConfig,
     pub search: SearchConfig,
     pub consolidation: ConsolidationConfig,
 }
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct EpisodicConfig {}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SemanticConfig {
@@ -789,8 +785,6 @@ pub struct WebSocketAdapterConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpAdapterConfig {
     pub enabled: bool,
-    pub stdio: bool,
-    pub http: bool,
     pub port: u16,
 }
 

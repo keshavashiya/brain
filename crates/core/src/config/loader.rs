@@ -304,7 +304,6 @@ impl Default for BrainConfig {
                 dimensions: 768,
             },
             memory: MemoryConfig {
-                episodic: EpisodicConfig {},
                 semantic: SemanticConfig {
                     similarity_threshold: 0.65,
                     max_results: 20,
@@ -423,8 +422,6 @@ impl Default for BrainConfig {
                 },
                 mcp: McpAdapterConfig {
                     enabled: true,
-                    stdio: true,
-                    http: true,
                     port: 19791,
                 },
                 grpc: GrpcAdapterConfig {
