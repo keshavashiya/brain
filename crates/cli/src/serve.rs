@@ -314,6 +314,7 @@ pub(crate) async fn cmd_serve(
             quiet_end: config.proactivity.quiet_hours.end.clone(),
             ..Default::default()
         };
+        let runtime_toggle = p.proactivity_enabled();
         set.spawn(async move {
             let engine = ganglia::HabitEngine::new(p.episodic().pool().clone(), habit_cfg.clone());
             if let Err(e) = engine.ensure_tables() {
@@ -326,6 +327,9 @@ pub(crate) async fn cmd_serve(
             ticker.tick().await;
             loop {
                 ticker.tick().await;
+                if !runtime_toggle.load(std::sync::atomic::Ordering::SeqCst) {
+                    continue;
+                }
                 match engine.generate_proactive() {
                     Ok(Some(msg)) => {
                         tracing::info!(
@@ -353,6 +357,7 @@ pub(crate) async fn cmd_serve(
     if config.proactivity.enabled && config.proactivity.open_loop.enabled {
         let p = processor.clone();
         let ol_cfg = config.proactivity.open_loop.clone();
+        let runtime_toggle = p.proactivity_enabled();
         set.spawn(async move {
             let detector = ganglia::OpenLoopDetector::with_llm(
                 p.episodic().pool().clone(),
@@ -369,6 +374,9 @@ pub(crate) async fn cmd_serve(
             ticker.tick().await;
             loop {
                 ticker.tick().await;
+                if !runtime_toggle.load(std::sync::atomic::Ordering::SeqCst) {
+                    continue;
+                }
                 match detector.generate_reminders_async().await {
                     Ok(reminders) if !reminders.is_empty() => {
                         if let Some(router) = p.notification_router() {

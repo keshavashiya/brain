@@ -162,6 +162,17 @@ pub struct SignalProcessor {
     /// ([`brain_core::security::ActionTier::default_timeout`]). Tests
     /// shorten this so the no-bypass path doesn't take 60s+.
     confirmation_timeout: Option<std::time::Duration>,
+
+    /// Runtime proactivity toggle. Initialised from
+    /// `config.proactivity.enabled` and flipped by
+    /// `handle_set_proactivity`. The CLI bootstrap hands a clone of this
+    /// `Arc` to the ganglia habit-engine and open-loop background tasks,
+    /// which check it on every tick and skip generation when it is
+    /// `false`. Spawn-time still respects the startup config: if
+    /// `proactivity.enabled` was `false` at boot, the tasks were never
+    /// spawned and a runtime flip to `true` cannot resurrect them —
+    /// that's the v1.0 work.
+    proactivity_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

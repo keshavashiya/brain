@@ -242,6 +242,15 @@ impl SignalProcessor {
         self.agent_registry.as_ref()
     }
 
+    /// Expose the runtime proactivity toggle. The CLI bootstrap hands
+    /// this `Arc` to the ganglia habit-engine and open-loop background
+    /// tasks so they can skip generation when the user disables nudges
+    /// at runtime. Spawn-time wiring still respects the startup config —
+    /// the flag is a per-tick guard, not a re-spawn trigger.
+    pub fn proactivity_enabled(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.proactivity_enabled.clone()
+    }
+
     // ── Scheduled intent management ───────────────────────────────────────────
 
     /// List scheduled intents, optionally filtered by namespace.

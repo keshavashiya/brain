@@ -139,6 +139,9 @@ impl SignalProcessor {
         let classifier = thalamus::IntentClassifier::new()
             .with_llm_fallback(Arc::new(thalamus::LlmIntentFallback::new(llm.clone())));
 
+        let proactivity_enabled = Arc::new(std::sync::atomic::AtomicBool::new(
+            config.proactivity.enabled,
+        ));
         let processor = Self {
             config,
             classifier,
@@ -178,6 +181,7 @@ impl SignalProcessor {
             breaker_registry: None,
             standing_approvals: None,
             confirmation_timeout: None,
+            proactivity_enabled,
         };
 
         // Warm up the LLM model in the background to avoid first-call timeout

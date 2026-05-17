@@ -1310,13 +1310,29 @@ impl SignalProcessor {
         signal_id: Uuid,
         prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
     ) -> Result<PipelineResult, SignalError> {
-        // Scheduled intents are stored in episodic pool's scheduled_intents table
-        // We can query them via a direct SQL if needed, or if SignalProcessor
-        // has a method for it.
-        // For now, let's look for a method or use a placeholder.
-        let message =
-            "Background schedules list is currently only available via `brain schedules list`."
-                .to_string();
+        let intents: Vec<_> = self
+            .list_scheduled_intents(None)?
+            .into_iter()
+            .filter(|i| i.status == "scheduled")
+            .collect();
+        let message = if intents.is_empty() {
+            "No active scheduled intents.".to_string()
+        } else {
+            let mut md = crate::render::Markdown::new();
+            md.push_heading(3, "Scheduled intents");
+            for intent in &intents {
+                let cadence = intent.cron.as_deref().unwrap_or("one-shot");
+                md.push_bullet(
+                    0,
+                    format!(
+                        "`{}` — {} ({}) [{}]",
+                        intent.id, intent.description, cadence, intent.namespace
+                    ),
+                );
+            }
+            md.push_line("Cancel with `cancel schedule <id>`.");
+            md.build()
+        };
         let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
         Ok(PipelineResult::Complete(resp))
     }
@@ -1324,12 +1340,18 @@ impl SignalProcessor {
     pub(super) async fn handle_cancel_schedule(
         &self,
         signal_id: Uuid,
-        _id: String,
+        id: String,
         prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
     ) -> Result<PipelineResult, SignalError> {
-        let message =
-            "Schedule cancellation is currently only available via `brain schedules cancel`."
-                .to_string();
+        let trimmed = id.trim();
+        let message = if trimmed.is_empty() {
+            "Missing schedule id. Try `cancel schedule <id>`.".to_string()
+        } else {
+            match self.cancel_scheduled_intent(trimmed)? {
+                true => format!("Cancelled schedule `{trimmed}`."),
+                false => format!("No active schedule with id `{trimmed}`."),
+            }
+        };
         let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
         Ok(PipelineResult::Complete(resp))
     }
@@ -1593,16 +1615,38 @@ impl SignalProcessor {
         &self,
         signal_id: Uuid,
         enabled: bool,
-        _until: Option<String>,
+        until: Option<String>,
         prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
     ) -> Result<PipelineResult, SignalError> {
-        // This would ideally update config or a live state.
-        // For now, since we don't have a live proactivity toggle in SignalProcessor,
-        // we'll just return a message.
-        let message = if enabled {
-            "Proactivity enabled (simulated).".to_string()
-        } else {
-            "Proactivity disabled (simulated).".to_string()
+        if let Some(window) = until.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            let message = format!(
+                "Time-bounded proactivity pauses (`for {window}`) aren't supported yet — \
+                 v0.4.0 only honours plain `enable nudges` / `disable nudges`. \
+                 Re-issue without the duration suffix."
+            );
+            let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+            return Ok(PipelineResult::Complete(resp));
+        }
+
+        let previous = self
+            .proactivity_enabled
+            .swap(enabled, std::sync::atomic::Ordering::SeqCst);
+        let startup_enabled = self.config.proactivity.enabled;
+        let message = match (previous, enabled) {
+            (false, true) if !startup_enabled => {
+                "Proactivity flag set to enabled, but the background habit and \
+                 open-loop tasks weren't spawned at startup (config had \
+                 `proactivity.enabled: false`). Set it `true` in your config and \
+                 restart to actually start generating nudges."
+                    .to_string()
+            }
+            (false, true) => "Proactivity enabled. Nudges resume on the next tick.".to_string(),
+            (true, false) => "Proactivity disabled. Background habit / open-loop tasks will \
+                 skip generation on the next tick. Set `proactivity.enabled: false` \
+                 in your config to keep it off across restarts."
+                .to_string(),
+            (true, true) => "Proactivity already enabled.".to_string(),
+            (false, false) => "Proactivity already disabled.".to_string(),
         };
 
         let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
@@ -1614,13 +1658,24 @@ impl SignalProcessor {
         signal_id: Uuid,
         prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
     ) -> Result<PipelineResult, SignalError> {
+        let runtime = self
+            .proactivity_enabled
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let startup = self.config.proactivity.enabled;
+        let runtime_label = if runtime { "enabled" } else { "disabled" };
+        let drift_note = if runtime == startup {
+            String::new()
+        } else {
+            format!(
+                " (toggled this session; startup config = {})",
+                if startup { "enabled" } else { "disabled" }
+            )
+        };
         let message = format!(
-            "Proactivity status:\n  • Habit engine: {}\n  • Open-loop detector: {}\n  • Quiet hours: {}-{}",
-            if self.config.proactivity.enabled {
-                "active"
-            } else {
-                "disabled"
-            },
+            "Proactivity status:\n  • Runtime toggle: {runtime_label}{drift_note}\n  \
+             • Habit engine (startup): {}\n  • Open-loop detector (startup): {}\n  \
+             • Quiet hours: {}-{}",
+            if startup { "active" } else { "disabled" },
             if self.config.proactivity.open_loop.enabled {
                 "active"
             } else {
@@ -2870,6 +2925,269 @@ mod duration_parse_tests {
         assert!(parse_human_duration("30").is_err());
         assert!(parse_human_duration("30x").is_err());
         assert!(parse_human_duration("abc").is_err());
+    }
+}
+
+#[cfg(test)]
+mod list_schedules_tests {
+    use super::*;
+    use crate::types::SignalResponse;
+    use uuid::Uuid;
+
+    async fn make_processor() -> SignalProcessor {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let processor = SignalProcessor::new(config).await.unwrap();
+        std::mem::forget(temp);
+        processor
+    }
+
+    fn body_of(result: PipelineResult) -> String {
+        match result {
+            PipelineResult::Complete(resp) => match resp.response {
+                crate::types::ResponseContent::Text(t) => t,
+                other => panic!("expected Text response, got {other:?}"),
+            },
+            _ => panic!("expected PipelineResult::Complete"),
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_when_no_intents_scheduled() {
+        let processor = make_processor().await;
+        let result = processor
+            .handle_list_schedules(Uuid::new_v4(), &|r: SignalResponse| r)
+            .await
+            .unwrap();
+        let body = body_of(result);
+        assert!(
+            body.contains("No active scheduled intents"),
+            "got: {body:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn renders_persisted_intents_with_id_and_cadence() {
+        let processor = make_processor().await;
+        let pool = processor.episodic().pool();
+        let id_a = pool
+            .insert_scheduled_intent("daily standup ping", Some("0 9 * * *"), "work", None)
+            .unwrap();
+        let id_b = pool
+            .insert_scheduled_intent("write release notes", None, "personal", None)
+            .unwrap();
+
+        let result = processor
+            .handle_list_schedules(Uuid::new_v4(), &|r: SignalResponse| r)
+            .await
+            .unwrap();
+        let body = body_of(result);
+
+        assert!(body.contains("### Scheduled intents"), "got: {body:?}");
+        assert!(body.contains(&id_a), "missing id_a in: {body:?}");
+        assert!(body.contains("daily standup ping"), "got: {body:?}");
+        assert!(body.contains("0 9 * * *"), "got: {body:?}");
+        assert!(body.contains(&id_b), "missing id_b in: {body:?}");
+        assert!(body.contains("one-shot"), "missing cadence label: {body:?}");
+        assert!(
+            body.contains("cancel schedule"),
+            "missing hint line: {body:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_marks_intent_cancelled_and_drops_it_from_list() {
+        let processor = make_processor().await;
+        let pool = processor.episodic().pool();
+        let id = pool
+            .insert_scheduled_intent("nightly compact", Some("0 3 * * *"), "system", None)
+            .unwrap();
+
+        let result = processor
+            .handle_cancel_schedule(Uuid::new_v4(), id.clone(), &|r: SignalResponse| r)
+            .await
+            .unwrap();
+        let body = body_of(result);
+        assert!(body.contains("Cancelled schedule"), "got: {body:?}");
+        assert!(body.contains(&id), "got: {body:?}");
+
+        let listed = processor
+            .handle_list_schedules(Uuid::new_v4(), &|r: SignalResponse| r)
+            .await
+            .unwrap();
+        let listed_body = body_of(listed);
+        assert!(
+            !listed_body.contains(&id),
+            "cancelled id should drop from active list, got: {listed_body:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_unknown_id_reports_no_active_schedule() {
+        let processor = make_processor().await;
+        let result = processor
+            .handle_cancel_schedule(
+                Uuid::new_v4(),
+                "does-not-exist".to_string(),
+                &|r: SignalResponse| r,
+            )
+            .await
+            .unwrap();
+        let body = body_of(result);
+        assert!(body.contains("No active schedule"), "got: {body:?}");
+        assert!(body.contains("does-not-exist"), "got: {body:?}");
+    }
+
+    #[tokio::test]
+    async fn cancel_empty_id_returns_usage_hint() {
+        let processor = make_processor().await;
+        let result = processor
+            .handle_cancel_schedule(Uuid::new_v4(), "   ".to_string(), &|r: SignalResponse| r)
+            .await
+            .unwrap();
+        let body = body_of(result);
+        assert!(body.contains("Missing schedule id"), "got: {body:?}");
+    }
+}
+
+#[cfg(test)]
+mod proactivity_tests {
+    use super::*;
+    use crate::types::SignalResponse;
+    use std::sync::atomic::Ordering;
+    use uuid::Uuid;
+
+    async fn make_processor() -> SignalProcessor {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let processor = SignalProcessor::new(config).await.unwrap();
+        std::mem::forget(temp);
+        processor
+    }
+
+    fn body_of(result: PipelineResult) -> String {
+        match result {
+            PipelineResult::Complete(resp) => match resp.response {
+                crate::types::ResponseContent::Text(t) => t,
+                other => panic!("expected Text response, got {other:?}"),
+            },
+            _ => panic!("expected PipelineResult::Complete"),
+        }
+    }
+
+    #[tokio::test]
+    async fn toggle_flips_runtime_flag_and_is_visible_in_status() {
+        let processor = make_processor().await;
+        // Default config has proactivity disabled, so the runtime flag starts false.
+        assert!(!processor.proactivity_enabled.load(Ordering::SeqCst));
+
+        let enable = processor
+            .handle_set_proactivity(Uuid::new_v4(), true, None, &|r: SignalResponse| r)
+            .await
+            .unwrap();
+        let body = body_of(enable);
+        // Default config has proactivity disabled at startup, so the response
+        // should warn that background tasks weren't spawned.
+        assert!(body.contains("weren't spawned at startup"), "got: {body:?}");
+        assert!(processor.proactivity_enabled.load(Ordering::SeqCst));
+
+        let status = processor
+            .handle_proactivity_status(Uuid::new_v4(), &|r: SignalResponse| r)
+            .await
+            .unwrap();
+        let body = body_of(status);
+        assert!(
+            body.contains("Runtime toggle: enabled"),
+            "status missing runtime label: {body:?}"
+        );
+        assert!(
+            body.contains("toggled this session"),
+            "status missing drift marker: {body:?}"
+        );
+
+        let disable = processor
+            .handle_set_proactivity(Uuid::new_v4(), false, None, &|r: SignalResponse| r)
+            .await
+            .unwrap();
+        let body = body_of(disable);
+        assert!(body.contains("Proactivity disabled"), "got: {body:?}");
+        assert!(!processor.proactivity_enabled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn repeat_toggle_reports_already_state() {
+        let processor = make_processor().await;
+        // Already disabled by default.
+        let result = processor
+            .handle_set_proactivity(Uuid::new_v4(), false, None, &|r: SignalResponse| r)
+            .await
+            .unwrap();
+        let body = body_of(result);
+        assert!(
+            body.contains("already disabled"),
+            "expected idempotent ack: {body:?}"
+        );
+
+        processor.proactivity_enabled.store(true, Ordering::SeqCst);
+        let result = processor
+            .handle_set_proactivity(Uuid::new_v4(), true, None, &|r: SignalResponse| r)
+            .await
+            .unwrap();
+        let body = body_of(result);
+        assert!(
+            body.contains("already enabled"),
+            "expected idempotent ack: {body:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn enable_when_startup_was_enabled_promises_next_tick() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        config.proactivity.enabled = true;
+        let processor = SignalProcessor::new(config).await.unwrap();
+        std::mem::forget(temp);
+
+        // Flip off then back on to land in the (false, true) branch with
+        // startup_enabled = true.
+        processor.proactivity_enabled.store(false, Ordering::SeqCst);
+        let result = processor
+            .handle_set_proactivity(Uuid::new_v4(), true, None, &|r: SignalResponse| r)
+            .await
+            .unwrap();
+        let body = body_of(result);
+        assert!(
+            body.contains("Nudges resume on the next tick"),
+            "got: {body:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn until_window_is_rejected_without_mutating_flag() {
+        let processor = make_processor().await;
+        let before = processor.proactivity_enabled.load(Ordering::SeqCst);
+        let result = processor
+            .handle_set_proactivity(
+                Uuid::new_v4(),
+                false,
+                Some("2h".to_string()),
+                &|r: SignalResponse| r,
+            )
+            .await
+            .unwrap();
+        let body = body_of(result);
+        assert!(
+            body.contains("aren't supported yet") && body.contains("2h"),
+            "got: {body:?}"
+        );
+        assert_eq!(
+            before,
+            processor.proactivity_enabled.load(Ordering::SeqCst),
+            "rejected request must not flip the flag"
+        );
     }
 }
 
