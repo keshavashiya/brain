@@ -35,6 +35,7 @@ impl SignalHandler for RelayPipelineHandler {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn cmd_serve(
     config: &brain_core::BrainConfig,
     http: bool,
@@ -43,6 +44,7 @@ pub(crate) async fn cmd_serve(
     mcp: bool,
     terminal: bool,
     host: String,
+    no_auth: bool,
 ) -> anyhow::Result<()> {
     // Validate config before starting
     match config.validate() {
@@ -53,6 +55,27 @@ pub(crate) async fn cmd_serve(
                 eprintln!("WARNING: {w}");
             }
         }
+    }
+
+    // Issue 54: empty `access.api_keys` silently means "open mode" inside
+    // `brain_core::check_auth`. Bail loudly unless the operator opts in
+    // via `--no-auth`, so a misconfigured install can't ship anonymous
+    // network endpoints by accident.
+    if config.access.api_keys.is_empty() {
+        if !no_auth {
+            anyhow::bail!(
+                "No API keys configured. Run `brain init` to generate one, edit \
+                 `access.api_keys` in your config, or pass `--no-auth` to run \
+                 anonymously (insecure — never expose to a network)."
+            );
+        }
+        tracing::warn!(
+            "Running without authentication — all /v1/* endpoints are anonymous (--no-auth)"
+        );
+        eprintln!(
+            "WARNING: --no-auth is set; every adapter accepts anonymous requests. \
+             Bind to 127.0.0.1 only and never expose this process to a network."
+        );
     }
 
     let run_all = !http && !ws && !grpc && !mcp && !terminal;
@@ -1144,6 +1167,35 @@ async fn drain_dlq_batch(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue 54 regression: `cmd_serve` must refuse to boot when
+    /// `access.api_keys` is empty unless `--no-auth` is passed.
+    #[tokio::test]
+    async fn cmd_serve_refuses_empty_api_keys_without_no_auth() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain_core::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        config.access.api_keys.clear();
+
+        let err = cmd_serve(
+            &config,
+            false,
+            false,
+            false,
+            false,
+            false,
+            "127.0.0.1".to_string(),
+            false, // no_auth = false
+        )
+        .await
+        .expect_err("serve should bail when api_keys is empty");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("No API keys configured"),
+            "expected the explicit error message, got: {msg}"
+        );
+    }
 
     #[tokio::test]
     async fn test_promotion_idempotency_guard() {

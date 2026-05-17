@@ -40,6 +40,20 @@ pub struct CredentialRef {
 ///   shifts to the daemon's ambient PATH plus the existing rlimits +
 ///   Seatbelt + timeout. Use this for any non-trivial command the LLM
 ///   produced that argv mode can't run.
+///
+/// # Security — shell-mode bypass (audit Issue 53)
+///
+/// Shell mode is a deliberate hole in the per-binary allowlist. `sh -c`
+/// can call any binary reachable on PATH, and the `forbidden_commands`
+/// deny-list only checks the first token of the wrapped string — so
+/// `eval "$(echo ZXZpbA== | base64 -d)"`, command substitution, and
+/// variable indirection slip past it. The remaining safety controls
+/// (rlimits, macOS Seatbelt network deny, timeout, tier-based
+/// confirmation prompts) still apply, but operators must treat any
+/// `SandboxCommand::shell` call site as a Tier::Execute action that
+/// can run arbitrary system commands. Prefer argv mode whenever the
+/// command can be expressed that way; reach for `shell()` only when a
+/// pipeline or redirect is genuinely required.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxCommand {
     pub binary: String,
