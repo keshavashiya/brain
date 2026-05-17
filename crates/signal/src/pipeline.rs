@@ -1077,14 +1077,16 @@ impl SignalProcessor {
         prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
     ) -> Result<PipelineResult, SignalError> {
         let message = match &self.audit_trail {
-            Some(audit) => {
-                // Parse duration from string (stub: use 30 days if parsing fails)
-                let duration = chrono::Duration::try_days(30).unwrap();
-                match audit.prune(duration).await {
+            Some(audit) => match parse_human_duration(&older_than) {
+                Ok(duration) => match audit.prune(duration).await {
                     Ok(n) => format!("Pruned {n} entries older than {older_than}"),
                     Err(e) => format!("Failed to prune audit: {e}"),
-                }
-            }
+                },
+                Err(e) => format!(
+                    "Couldn't parse duration {older_than:?}: {e}. \
+                     Try forms like 24h, 7d, 4w, 1y."
+                ),
+            },
             None => "Audit trail is not wired.".to_string(),
         };
 
@@ -2777,6 +2779,97 @@ fn build_decompose_excerpt(token: &str, pb: &std::path::Path) -> Option<String> 
         ))
     } else {
         None
+    }
+}
+
+/// Parse a short human duration like `24h`, `7d`, `4w`, `2y` into a
+/// `chrono::Duration`. Used by intents that take a `older_than` field
+/// from the user. Trailing whitespace is tolerated; case-insensitive
+/// on the unit suffix; the numeric prefix must be a positive integer.
+///
+/// Supported units (single letter):
+/// - `m` minutes (rarely useful for retention, kept for symmetry)
+/// - `h` hours
+/// - `d` days
+/// - `w` weeks (7 days)
+/// - `y` years (365 days — non-leap approximation, fine for prune
+///   thresholds where ±1 day doesn't matter)
+fn parse_human_duration(input: &str) -> Result<chrono::Duration, String> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Err("empty duration".into());
+    }
+    let bytes = s.as_bytes();
+    let unit = bytes[bytes.len() - 1].to_ascii_lowercase() as char;
+    if !matches!(unit, 'm' | 'h' | 'd' | 'w' | 'y') {
+        return Err(format!("unknown unit {unit:?}"));
+    }
+    let n_str = &s[..s.len() - 1];
+    let n: i64 = n_str
+        .parse()
+        .map_err(|_| format!("not a non-negative integer: {n_str:?}"))?;
+    if n <= 0 {
+        return Err(format!("duration must be positive, got {n}"));
+    }
+    let dur = match unit {
+        'm' => chrono::Duration::try_minutes(n),
+        'h' => chrono::Duration::try_hours(n),
+        'd' => chrono::Duration::try_days(n),
+        'w' => chrono::Duration::try_weeks(n),
+        'y' => chrono::Duration::try_days(n.saturating_mul(365)),
+        _ => unreachable!(),
+    };
+    dur.ok_or_else(|| format!("duration out of range: {n}{unit}"))
+}
+
+#[cfg(test)]
+mod duration_parse_tests {
+    use super::parse_human_duration;
+
+    #[test]
+    fn parses_common_forms() {
+        assert_eq!(
+            parse_human_duration("24h").unwrap(),
+            chrono::Duration::try_hours(24).unwrap()
+        );
+        assert_eq!(
+            parse_human_duration("7d").unwrap(),
+            chrono::Duration::try_days(7).unwrap()
+        );
+        assert_eq!(
+            parse_human_duration("4w").unwrap(),
+            chrono::Duration::try_weeks(4).unwrap()
+        );
+        assert_eq!(
+            parse_human_duration("1y").unwrap(),
+            chrono::Duration::try_days(365).unwrap()
+        );
+        assert_eq!(
+            parse_human_duration("30m").unwrap(),
+            chrono::Duration::try_minutes(30).unwrap()
+        );
+    }
+
+    #[test]
+    fn ignores_trailing_whitespace_and_unit_case() {
+        assert_eq!(
+            parse_human_duration("30D ").unwrap(),
+            chrono::Duration::try_days(30).unwrap()
+        );
+        assert_eq!(
+            parse_human_duration("12H").unwrap(),
+            chrono::Duration::try_hours(12).unwrap()
+        );
+    }
+
+    #[test]
+    fn rejects_zero_negative_and_garbage() {
+        assert!(parse_human_duration("0d").is_err());
+        assert!(parse_human_duration("-5d").is_err());
+        assert!(parse_human_duration("").is_err());
+        assert!(parse_human_duration("30").is_err());
+        assert!(parse_human_duration("30x").is_err());
+        assert!(parse_human_duration("abc").is_err());
     }
 }
 
