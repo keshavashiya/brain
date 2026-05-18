@@ -84,9 +84,12 @@ pub async fn cmd_tail(config: &brain_core::BrainConfig, filter: TailFilter) -> R
     filter.append_query(&mut url);
     let api_key = resolve_api_key(config);
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(0)) // long-poll
-        .build()?;
+    // No total-request timeout — this is a long-poll SSE stream and we want
+    // it to stay open until the server closes it or the user interrupts.
+    // (`Duration::from_secs(0)` is NOT "no timeout" in reqwest — it sets a
+    // zero-second total timeout, which aborts the request immediately. The
+    // default is no timeout, so we just don't call `.timeout(...)`.)
+    let client = reqwest::Client::builder().build()?;
     let resp = client
         .get(&url)
         .header("Authorization", format!("Bearer {api_key}"))
