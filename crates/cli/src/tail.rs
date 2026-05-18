@@ -101,6 +101,10 @@ pub async fn cmd_tail(config: &brain_core::BrainConfig, filter: TailFilter) -> R
         anyhow::bail!("daemon returned {} for {url}", resp.status());
     }
 
+    // Print a one-shot "connected" line to stderr so silent windows
+    // (no events flowing yet) don't look like the command hung.
+    eprintln!("brain tail: connected to {base_url}/v1/events — waiting for events…");
+
     let mut stdout = BufWriter::new(tokio::io::stdout());
     let mut event_name = String::new();
     let mut data_buf = String::new();

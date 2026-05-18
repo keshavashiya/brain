@@ -174,6 +174,11 @@ pub(crate) async fn handle_streaming_request(
 
     let signal_id = signal.id;
 
+    // Mirror what `SignalProcessor::process` does at its entry so the
+    // streaming path is observable too — without this, a `brain chat`
+    // round-trip emits zero BrainEvents and `brain tail` looks broken.
+    processor.publish_signal_received(&signal).await;
+
     // Surface progress while the pipeline runs — otherwise the client just
     // sees nothing until the first LLM token. These frames are advisory.
     let _ = send_json_frame_to_sink(
