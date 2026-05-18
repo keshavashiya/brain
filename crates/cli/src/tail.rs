@@ -89,7 +89,7 @@ pub async fn cmd_tail(config: &brain_core::BrainConfig, filter: TailFilter) -> R
         .build()?;
     let resp = client
         .get(&url)
-        .header("x-api-key", api_key)
+        .header("Authorization", format!("Bearer {api_key}"))
         .header("Accept", "text/event-stream")
         .send()
         .await

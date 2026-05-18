@@ -274,10 +274,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         builder.init();
     }
 
-    let config = brain_core::BrainConfig::load().unwrap_or_else(|e| {
-        tracing::warn!("Failed to load config, using defaults: {e}");
-        brain_core::BrainConfig::default()
-    });
+    // Config parse errors are fatal: silently falling back to defaults would
+    // boot the daemon with no API keys, no principals, and no standing
+    // approvals — i.e. "open mode" without the operator's knowledge.
+    // A missing config file is NOT an error here (loader returns Ok with
+    // embedded defaults); only malformed YAML / invalid enum values reach this.
+    let config = brain_core::BrainConfig::load()
+        .map_err(|e| anyhow::anyhow!("failed to load config: {e}"))?;
 
     config.ensure_data_dirs()?;
 

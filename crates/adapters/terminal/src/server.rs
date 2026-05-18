@@ -342,7 +342,7 @@ impl TerminalSvc {
             .registry
             .remove(&id.to_string())
             .await
-            .ok_or_else(|| Status::not_found(format!("session '{id}'")))?;
+            .ok_or_else(|| Status::not_found(format!("session '{id}' not found")))?;
 
         let mut child = session.child.lock().await;
         let already_exited = matches!(child.try_wait(), Ok(Some(_)));
@@ -386,7 +386,7 @@ impl TerminalSvc {
         self.registry
             .get(&id.to_string())
             .await
-            .ok_or_else(|| Status::not_found(format!("session '{id}'")))
+            .ok_or_else(|| Status::not_found(format!("session '{id}' not found")))
     }
 
     /// Buffer one input chunk into the session's PTY writer pump. Returns the
