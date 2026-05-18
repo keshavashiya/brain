@@ -5,7 +5,12 @@
 //! `close_inner`, `write_input_inner`, …) which `Interact` also drives
 //! directly, so the two surfaces share one code path per operation.
 
-use std::{io::Read, sync::Arc, time::SystemTime};
+use std::{
+    collections::VecDeque,
+    io::Read,
+    sync::{Arc, Mutex as StdMutex},
+    time::SystemTime,
+};
 
 use bytes::Bytes;
 use chrono::Utc;
@@ -240,13 +245,20 @@ impl TerminalSvc {
         let master = Arc::new(Mutex::new(pair.master));
         let (out_tx, out_anchor) = broadcast::channel::<Bytes>(OUT_BROADCAST_CAPACITY);
         let (in_tx, mut in_rx) = mpsc::channel::<Bytes>(IN_MPSC_CAPACITY);
+        let replay: Arc<StdMutex<VecDeque<Bytes>>> = Arc::new(StdMutex::new(
+            VecDeque::with_capacity(OUT_BROADCAST_CAPACITY),
+        ));
 
-        // PTY reader → broadcast. The pump owns the *only* `Sender`;
-        // see `Session::out_anchor` for the EOF-propagation rationale.
+        // PTY reader → replay + broadcast. The pump owns the *only* `Sender`;
+        // see `Session::out_anchor` for the EOF-propagation rationale. The
+        // pump appends to `replay` *and* publishes on the broadcast inside
+        // one critical section — see `Session::attach_snapshot` for the
+        // race this closes.
         {
             let reader_res = master.lock().await.try_clone_reader();
             let reader = reader_res.map_err(|e| Status::internal(format!("clone_reader: {e}")))?;
-            tokio::task::spawn_blocking(move || pump_reader(reader, out_tx));
+            let replay_for_pump = replay.clone();
+            tokio::task::spawn_blocking(move || pump_reader(reader, out_tx, replay_for_pump));
         }
 
         // mpsc → PTY writer. Lives on a blocking task until `in_rx` closes
@@ -326,6 +338,7 @@ impl TerminalSvc {
         let session = Arc::new(Session {
             meta,
             out_anchor,
+            replay,
             in_tx,
             master,
             child: Arc::new(Mutex::new(child)),
@@ -477,11 +490,23 @@ impl TerminalSession for TerminalSvc {
         let id = req.into_inner().session_id;
         let session = self.lookup(&id).await?;
 
-        let mut rx = session.out_anchor.resubscribe();
+        let (snapshot, mut rx) = session.attach_snapshot();
         let (tx, out) = mpsc::channel::<Result<OutputChunk, Status>>(STREAM_OUT_BUFFER);
 
         tokio::spawn(async move {
             let mut seq: u64 = 0;
+            for bytes in snapshot {
+                seq += 1;
+                let chunk = OutputChunk {
+                    data: bytes.to_vec(),
+                    ts: timestamp_now(),
+                    seq,
+                    eof: false,
+                };
+                if tx.send(Ok(chunk)).await.is_err() {
+                    return;
+                }
+            }
             loop {
                 match rx.recv().await {
                     Ok(bytes) => {
@@ -750,8 +775,23 @@ fn spawn_output_forwarder(
                 .await;
             return;
         };
-        let mut rx = session.out_anchor.resubscribe();
+        let (snapshot, mut rx) = session.attach_snapshot();
         let mut seq: u64 = 0;
+        for bytes in snapshot {
+            seq += 1;
+            let chunk = OutputChunk {
+                data: bytes.to_vec(),
+                ts: timestamp_now(),
+                seq,
+                eof: false,
+            };
+            let frame = ServerFrame {
+                k: Some(server_frame::K::Output(chunk)),
+            };
+            if tx.send(Ok(frame)).await.is_err() {
+                return;
+            }
+        }
         loop {
             match rx.recv().await {
                 Ok(bytes) => {
@@ -804,17 +844,33 @@ fn spawn_output_forwarder(
 /// Sends raw bytes into `out_tx` until the reader hits EOF or a fatal
 /// error. Dropping `out_tx` here is what closes the broadcast for every
 /// subscriber — that's how child-exit propagates to clients.
-fn pump_reader(mut reader: Box<dyn Read + Send>, out_tx: broadcast::Sender<Bytes>) {
+///
+/// Each chunk is pushed onto `replay` *and* sent on the broadcast inside
+/// one critical section. Attachers take the same lock in
+/// `Session::attach_snapshot` to snapshot+resubscribe atomically, which
+/// is what stops a fast-exiting child from racing past late attachers.
+fn pump_reader(
+    mut reader: Box<dyn Read + Send>,
+    out_tx: broadcast::Sender<Bytes>,
+    replay: Arc<StdMutex<VecDeque<Bytes>>>,
+) {
     let mut buf = vec![0u8; PTY_READ_BUFFER_SIZE];
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break, // EOF
             Ok(n) => {
+                let chunk = Bytes::copy_from_slice(&buf[..n]);
+                let mut guard = replay.lock().expect("replay mutex poisoned");
+                if guard.len() == OUT_BROADCAST_CAPACITY {
+                    guard.pop_front();
+                }
+                guard.push_back(chunk.clone());
                 // `send` returns Err only when there are zero receivers.
                 // We keep pumping in case a new subscriber attaches later;
                 // the broadcast keeps the most recent `OUT_BROADCAST_CAPACITY`
                 // chunks for them either way.
-                let _ = out_tx.send(Bytes::copy_from_slice(&buf[..n]));
+                let _ = out_tx.send(chunk);
+                drop(guard);
             }
             Err(_) => break,
         }

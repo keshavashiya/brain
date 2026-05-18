@@ -4,7 +4,8 @@
 //! callers only see [`crate::SessionMeta`] via [`crate::SessionRegistry::meta`]
 //! / [`crate::SessionRegistry::list`].
 
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use bytes::Bytes;
 use portable_pty::{Child, MasterPty};
@@ -35,6 +36,16 @@ pub(crate) const IN_MPSC_CAPACITY: usize = 64;
 pub(crate) struct Session {
     pub(crate) meta: SessionMeta,
     pub(crate) out_anchor: broadcast::Receiver<Bytes>,
+    /// Bounded replay of PTY output emitted before each attach. The pump
+    /// pushes here under `replay`'s lock and *then* sends on the broadcast,
+    /// both inside the same critical section. An attacher takes the same
+    /// lock to snapshot the buffer and `resubscribe()` at the broadcast's
+    /// current tail — so the snapshot ends exactly where the live
+    /// subscription begins. Without this, a fast-exiting child can drop
+    /// the broadcast sender before any attacher subscribes, and
+    /// `Receiver::resubscribe()` (which positions at the current tail,
+    /// not the head) gives the late attacher only EOF.
+    pub(crate) replay: Arc<StdMutex<VecDeque<Bytes>>>,
     pub(crate) in_tx: mpsc::Sender<Bytes>,
     pub(crate) master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     pub(crate) child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
@@ -42,4 +53,16 @@ pub(crate) struct Session {
     /// `close_inner` to wire the close-side edge back to the open
     /// event. `None` when the bridge runs without a graph sink.
     pub(crate) graph_handles: Option<TerminalGraphHandles>,
+}
+
+impl Session {
+    /// Atomic "give me everything so far, then start streaming" handle for
+    /// `Attach` / `Interact`. Returns a snapshot of past chunks and a new
+    /// subscriber that will receive every chunk produced after the snapshot.
+    pub(crate) fn attach_snapshot(&self) -> (Vec<Bytes>, broadcast::Receiver<Bytes>) {
+        let buf = self.replay.lock().expect("replay mutex poisoned");
+        let snapshot: Vec<Bytes> = buf.iter().cloned().collect();
+        let rx = self.out_anchor.resubscribe();
+        (snapshot, rx)
+    }
 }

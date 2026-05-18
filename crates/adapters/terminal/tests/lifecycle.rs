@@ -174,3 +174,56 @@ async fn registry_meta_reflects_open() {
         .await
         .unwrap();
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn attach_after_child_exit_still_replays_output() {
+    // Pins the late-attach race fixed in Session::attach_snapshot: open a
+    // child that exits before we subscribe, then verify Attach still
+    // delivers the pre-exit PTY output (not just EOF).
+    let bridge = TerminalBridge::new();
+    let svc = bridge.svc();
+
+    let session_id = svc
+        .open(Request::new(open_request(
+            "/bin/sh",
+            vec!["-c".into(), "printf hello-from-replay".into()],
+        )))
+        .await
+        .expect("open")
+        .into_inner()
+        .session_id;
+
+    // Wait long enough that the pump has read EOF and dropped the
+    // broadcast Sender — i.e. a plain resubscribe at this point would
+    // give an immediately-Closed receiver.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let attach_resp = svc
+        .attach(Request::new(SessionHandle {
+            session_id: session_id.clone(),
+        }))
+        .await
+        .expect("attach should succeed");
+    let mut stream = attach_resp.into_inner();
+
+    let mut received = Vec::<u8>::new();
+    let mut saw_eof = false;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while let Ok(Some(item)) = tokio::time::timeout_at(deadline, stream.next()).await {
+        let chunk = item.expect("attach stream item should be Ok");
+        if chunk.eof {
+            saw_eof = true;
+            break;
+        }
+        received.extend_from_slice(&chunk.data);
+    }
+    assert!(saw_eof, "expected EOF chunk after child exits");
+    let s = String::from_utf8_lossy(&received);
+    assert!(
+        s.contains("hello-from-replay"),
+        "expected replay-buffer payload after late attach, got: {s:?}"
+    );
+
+    let _ = svc.close(Request::new(SessionHandle { session_id })).await;
+}
