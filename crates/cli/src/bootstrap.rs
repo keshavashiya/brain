@@ -249,8 +249,15 @@ async fn wire_safety_infrastructure(
 ) -> anyhow::Result<signal::SignalProcessor> {
     let db = processor.episodic().pool().clone();
 
-    // Audit trail — always wired (foundation for everything below)
-    let audit_trail = audit::SqliteAuditTrail::new(db.clone());
+    // Audit trail — always wired (foundation for everything below).
+    // The observer is attached so every committed audit row publishes a
+    // `BrainEvent::AuditAppended` onto the shared bus — that's what HTTP
+    // `/v1/events`, the WS adapter, and gRPC SSE subscribers consume.
+    // Without this, only `SignalReceived` reaches subscribers.
+    let mut audit_trail = audit::SqliteAuditTrail::new(db.clone());
+    if let Some(obs) = processor.observer() {
+        audit_trail = audit_trail.with_observer(obs.clone());
+    }
     audit_trail
         .ensure_tables()
         .map_err(|e| anyhow::anyhow!("Audit trail table init failed: {e}"))?;
