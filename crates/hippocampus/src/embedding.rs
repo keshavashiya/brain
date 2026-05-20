@@ -161,7 +161,7 @@ impl OllamaProvider {
     pub fn new(base_url: &str, model: &str) -> Result<Self, EmbeddingError> {
         // Ollama may need to load the model on first call — allow up to 120s
         let client = reqwest::Client::builder()
-            .timeout(brain_core::timeouts::EMBEDDING_OLLAMA)
+            .timeout(brain::timeouts::EMBEDDING_OLLAMA)
             .build()
             .map_err(|e| EmbeddingError::Provider(format!("Failed to create HTTP client: {e}")))?;
         Ok(Self {
@@ -254,7 +254,7 @@ struct OpenAIEmbedData {
 impl OpenAIProvider {
     pub fn new(base_url: &str, model: &str, api_key: &str) -> Result<Self, EmbeddingError> {
         let client = reqwest::Client::builder()
-            .timeout(brain_core::timeouts::EMBEDDING_OPENAI)
+            .timeout(brain::timeouts::EMBEDDING_OPENAI)
             .build()
             .map_err(|e| EmbeddingError::Provider(format!("Failed to create HTTP client: {e}")))?;
         Ok(Self {

@@ -1,7 +1,7 @@
 //! Bridge command — relay messages between Brain and an external gateway.
 
 pub(crate) async fn cmd_bridge(
-    config: &brain_core::BrainConfig,
+    config: &brain::BrainConfig,
     gateway_url: &str,
     api_key: Option<&str>,
 ) -> anyhow::Result<()> {

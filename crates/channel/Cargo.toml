@@ -11,7 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-brain_core = { workspace = true }
+brain         = { workspace = true }
 storage = { workspace = true }
 confirm = { workspace = true }
 bridge = { workspace = true }
@@ -36,3 +36,6 @@ ed25519-dalek = { version = "2", default-features = false, features = ["pkcs8", 
 tempfile = "3"
 wiremock = "0.6"
 rand = "0.8"
+
+[lints]
+workspace = true

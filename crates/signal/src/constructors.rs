@@ -6,7 +6,7 @@ use crate::types::*;
 use crate::SignalProcessor;
 
 /// Resolve the LLM API key from config, with env var fallback for backwards compatibility.
-fn resolve_llm_api_key(config: &brain_core::BrainConfig) -> String {
+fn resolve_llm_api_key(config: &brain::BrainConfig) -> String {
     let from_config = config.llm.api_key.trim().to_string();
     if !from_config.is_empty() {
         return from_config;
@@ -19,7 +19,7 @@ impl SignalProcessor {
     ///
     /// Opens the SQLite database, connects to RuVector, creates the LLM provider,
     /// and wires the intent classifier, importance scorer, and context assembler.
-    pub async fn new(config: brain_core::BrainConfig) -> Result<Self, SignalError> {
+    pub async fn new(config: brain::BrainConfig) -> Result<Self, SignalError> {
         Self::new_with_encryptor(
             config,
             #[cfg(feature = "encryption")]
@@ -34,7 +34,7 @@ impl SignalProcessor {
     /// AES-256-GCM encrypted at rest; RuVector `content` fields are also
     /// encrypted in their JSON files on disk.
     pub async fn new_with_encryptor(
-        config: brain_core::BrainConfig,
+        config: brain::BrainConfig,
         #[cfg(feature = "encryption")] encryptor: Option<storage::Encryptor>,
     ) -> Result<Self, SignalError> {
         // Open SQLite pool — attach encryptor if provided
@@ -103,7 +103,7 @@ impl SignalProcessor {
         // Note: ruvector-core stores only IDs; content encryption is handled by SQLite.
         // Issue 37: HNSW tuning comes from `storage.hnsw` in config
         // instead of the hardcoded values that used to live inside the
-        // storage crate. Convert the user-facing `brain_core::HnswConfig`
+        // storage crate. Convert the user-facing `brain::HnswConfig`
         // to the storage-crate type at the boundary.
         let hnsw = storage::HnswConfig {
             m: config.storage.hnsw.m,
@@ -175,7 +175,7 @@ impl SignalProcessor {
             events_tx,
             notification_router: None,
             action_dispatcher: None,
-            metrics: Arc::new(brain_core::metrics::SubsystemMetrics::new()),
+            metrics: Arc::new(brain::metrics::SubsystemMetrics::new()),
             // Safety infrastructure — all opt-in
             audit_trail: None,
             confirmation_engine: None,

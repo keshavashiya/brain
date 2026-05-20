@@ -271,8 +271,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     // approvals — i.e. "open mode" without the operator's knowledge.
     // A missing config file is NOT an error here (loader returns Ok with
     // embedded defaults); only malformed YAML / invalid enum values reach this.
-    let config = brain_core::BrainConfig::load()
-        .map_err(|e| anyhow::anyhow!("failed to load config: {e}"))?;
+    let config =
+        brain::BrainConfig::load().map_err(|e| anyhow::anyhow!("failed to load config: {e}"))?;
 
     config.ensure_data_dirs()?;
 
@@ -287,7 +287,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             println!("Forming neural pathways...");
             println!("  Cortex (data dir):  {}", data_dir.display());
 
-            let generated_key = match brain_core::BrainConfig::write_default_config(force)? {
+            let generated_key = match brain::BrainConfig::write_default_config(force)? {
                 Some((path, key)) => {
                     println!("  Genome (config):    {} (written)", path.display());
                     Some(key)
@@ -295,7 +295,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 None => {
                     println!(
                         "  Genome (config):    {} (exists, --force to overwrite)",
-                        brain_core::BrainConfig::user_config_path().display()
+                        brain::BrainConfig::user_config_path().display()
                     );
                     None
                 }
@@ -316,7 +316,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 let salt = storage::Encryptor::generate_salt();
                 encryption::write_salt(&config, &salt)?;
 
-                let config_path = brain_core::BrainConfig::user_config_path();
+                let config_path = brain::BrainConfig::user_config_path();
                 if let Ok(yaml) = std::fs::read_to_string(&config_path) {
                     let patched = yaml.replace(
                         "enabled: false               # Run `brain init --encrypt` to generate a salt and enable",
@@ -340,7 +340,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
 
             println!(
                 "\nNeural pathways formed. Edit {} to customize your genome.",
-                brain_core::BrainConfig::user_config_path().display()
+                brain::BrainConfig::user_config_path().display()
             );
         }
 

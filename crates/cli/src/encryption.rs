@@ -3,7 +3,7 @@
 #[cfg(feature = "encryption")]
 use std::io::IsTerminal;
 
-use brain_core::BrainConfig;
+use brain::BrainConfig;
 
 #[cfg(feature = "encryption")]
 pub(crate) fn salt_path(config: &BrainConfig) -> std::path::PathBuf {

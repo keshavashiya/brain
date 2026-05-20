@@ -9,7 +9,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use brain_core::ApiKeyConfig;
+use brain::ApiKeyConfig;
 use brainos_terminal::{
     pb::{terminal_session_server::TerminalSession, OpenRequest, PtySize, SessionHandle},
     TerminalAuth, TerminalBridge,

@@ -21,7 +21,7 @@ pub struct AppState {
     /// LRU cache: signal_id → SignalResponse. Bounded to `CACHE_CAPACITY` entries.
     pub cache: Mutex<lru::LruCache<Uuid, signal::SignalResponse>>,
     /// Configured API keys (loaded from BrainConfig).
-    pub api_keys: Vec<brain_core::ApiKeyConfig>,
+    pub api_keys: Vec<brain::ApiKeyConfig>,
     /// Request counters and latency.
     pub metrics: Arc<Metrics>,
 }

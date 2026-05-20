@@ -1,6 +1,6 @@
 //! Daemon lifecycle helpers — PID management, spawn, and stop.
 
-use brain_core::BrainConfig;
+use brain::BrainConfig;
 
 pub(crate) fn pid_path(config: &BrainConfig) -> std::path::PathBuf {
     config.data_dir().join("brain.pid")
@@ -168,13 +168,13 @@ pub(crate) fn is_service_installed() -> bool {
 /// Uses async reqwest because the CLI runs under #[tokio::main]; the blocking
 /// client spawns its own runtime and panics when dropped inside an async
 /// context (`Cannot drop a runtime in a context where blocking is not allowed`).
-pub(crate) async fn is_daemon_running(config: &brain_core::BrainConfig) -> bool {
+pub(crate) async fn is_daemon_running(config: &brain::BrainConfig) -> bool {
     let host = &config.adapters.http.host;
     let port = config.adapters.http.port;
     let health_url = format!("http://{host}:{port}/health");
 
     let Ok(client) = reqwest::Client::builder()
-        .timeout(brain_core::timeouts::HEALTH_CHECK)
+        .timeout(brain::timeouts::HEALTH_CHECK)
         .build()
     else {
         return false;

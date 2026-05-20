@@ -24,7 +24,7 @@ fn random_port() -> u16 {
 #[ignore = "Requires local TCP listener permissions in the runtime environment"]
 async fn test_cross_protocol_memory_parity() {
     let temp = tempfile::tempdir().unwrap();
-    let mut config = brain_core::BrainConfig::default();
+    let mut config = brain::BrainConfig::default();
     config.brain.data_dir = temp.path().to_str().unwrap().to_string();
     let api_key = config.access.api_keys.first().unwrap().key.clone();
 

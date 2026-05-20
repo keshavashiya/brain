@@ -77,7 +77,7 @@ where
 mod tests {
     use super::*;
     use crate::SignalSource;
-    use brain_core::BrainConfig;
+    use brain::BrainConfig;
     use reflex::NoopReflex;
 
     async fn make_processor() -> Arc<SignalProcessor> {

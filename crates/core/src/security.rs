@@ -1,6 +1,6 @@
 //! Cross-cutting security primitives shared by audit, confirm, sandbox,
 //! and orchestrator. Lives here to keep the type single-sourced — every
-//! consumer crate already depends on `brain_core`, so promoting these
+//! consumer crate already depends on `brain`, so promoting these
 //! to the leaf avoids the previous three-way duplication and the manual
 //! `convert_tier()` shims that came with it.
 

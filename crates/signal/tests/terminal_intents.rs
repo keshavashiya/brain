@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use brain_core::BrainConfig;
+use brain::BrainConfig;
 use brainos_signal::{ResponseContent, Signal, SignalProcessor, SignalSource};
 use terminal::TerminalBridge;
 

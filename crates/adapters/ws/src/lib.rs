@@ -16,7 +16,7 @@
 
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
-use brain_core::ApiKeyConfig;
+use brain::ApiKeyConfig;
 use channel::DeliveryIntent;
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
@@ -445,7 +445,7 @@ where
 /// Returns true if `key` is valid and has write permission (WS connections can both read and write).
 fn validate_key(api_keys: &[ApiKeyConfig], key: &str) -> bool {
     // WS connections need write permission since they can send signals.
-    brain_core::check_auth(api_keys, Some(key), "write").is_allowed()
+    brain::check_auth(api_keys, Some(key), "write").is_allowed()
 }
 
 /// Resolve the `Principal` bound to this connection from the validated key.
@@ -478,7 +478,7 @@ mod tests {
     use tokio_tungstenite::connect_async;
 
     fn demo_keys() -> Vec<ApiKeyConfig> {
-        brain_core::BrainConfig::default().access.api_keys
+        brain::BrainConfig::default().access.api_keys
     }
 
     fn random_port() -> u16 {
@@ -614,7 +614,7 @@ mod tests {
     #[tokio::test]
     async fn test_process_text_frame_invalid_json() {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let processor = signal::SignalProcessor::new(config).await.unwrap();
 
@@ -629,7 +629,7 @@ mod tests {
     #[tokio::test]
     async fn test_process_text_frame_store_fact() {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let processor = signal::SignalProcessor::new(config).await.unwrap();
 
@@ -648,7 +648,7 @@ mod tests {
         use tokio_tungstenite::tungstenite::Message;
 
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let api_key = config.access.api_keys.first().unwrap().key.clone();
         let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
@@ -695,7 +695,7 @@ mod tests {
         use tokio_tungstenite::tungstenite::Message;
 
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let api_key = config.access.api_keys.first().unwrap().key.clone();
         let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
@@ -766,7 +766,7 @@ mod tests {
         use tokio_tungstenite::tungstenite::Message;
 
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let api_key = config.access.api_keys.first().unwrap().key.clone();
         let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
@@ -816,7 +816,7 @@ mod tests {
         use tokio_tungstenite::tungstenite::Message;
 
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let api_key = config.access.api_keys.first().unwrap().key.clone();
         let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
@@ -893,7 +893,7 @@ mod tests {
         use tokio_tungstenite::tungstenite::Message;
 
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let api_key = config.access.api_keys.first().unwrap().key.clone();
         let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());

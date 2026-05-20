@@ -11,7 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-brain_core = { workspace = true }
+brain         = { workspace = true }
 signal = { workspace = true }
 hippocampus = { workspace = true }
 tokio = { workspace = true }
@@ -28,3 +28,6 @@ tower = { version = "0.5", features = ["limit"] }
 [dev-dependencies]
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+
+[lints]
+workspace = true

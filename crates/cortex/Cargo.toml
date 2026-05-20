@@ -11,7 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-brain_core = { workspace = true }
+brain         = { workspace = true }
 storage = { workspace = true }
 hippocampus = { workspace = true }
 sandbox = { workspace = true }
@@ -29,3 +29,6 @@ futures = { workspace = true }
 [dev-dependencies]
 mockito = { workspace = true }
 tokio = { workspace = true }
+
+[lints]
+workspace = true

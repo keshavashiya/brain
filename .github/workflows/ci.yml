@@ -55,6 +55,13 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all -- --check
 
+  crate-names:
+    name: Crate Names
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: ./scripts/check-crate-names.sh
+
   test:
     name: Test
     runs-on: ubuntu-latest

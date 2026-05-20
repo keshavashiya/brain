@@ -59,10 +59,7 @@ pub(crate) enum VaultAction {
     Status,
 }
 
-pub(crate) async fn cmd_vault(
-    _config: &brain_core::BrainConfig,
-    action: VaultAction,
-) -> Result<()> {
+pub(crate) async fn cmd_vault(_config: &brain::BrainConfig, action: VaultAction) -> Result<()> {
     // For now, vault config is default-constructed. Wiring it into
     // BrainConfig is a follow-up; in this slice the env var and default
     // ~/.brain/vault path are sufficient.

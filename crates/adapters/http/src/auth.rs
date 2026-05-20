@@ -9,7 +9,7 @@ pub fn extract_bearer(headers: &HeaderMap) -> Option<&str> {
     headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
-        .and_then(brain_core::auth::extract_bearer_from_value)
+        .and_then(brain::auth::extract_bearer_from_value)
 }
 
 /// Resolve the requesting `Principal` from the request headers.
@@ -48,7 +48,7 @@ pub fn check_auth(
     permission: &str,
 ) -> Result<(), (StatusCode, String)> {
     let provided_key = extract_bearer(headers);
-    let result = brain_core::check_auth(&state.api_keys, provided_key, permission);
+    let result = brain::check_auth(&state.api_keys, provided_key, permission);
     if result.is_allowed() {
         Ok(())
     } else {

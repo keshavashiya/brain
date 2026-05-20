@@ -15,7 +15,7 @@ struct MemoryExport {
 }
 
 pub(crate) async fn cmd_export(
-    config: &brain_core::BrainConfig,
+    config: &brain::BrainConfig,
     output: Option<&str>,
 ) -> anyhow::Result<()> {
     let daemon_url = crate::bootstrap::require_daemon(config).await?;
@@ -72,7 +72,7 @@ pub(crate) async fn cmd_export(
 }
 
 pub(crate) async fn cmd_import(
-    config: &brain_core::BrainConfig,
+    config: &brain::BrainConfig,
     file: &str,
     dry_run: bool,
 ) -> anyhow::Result<()> {

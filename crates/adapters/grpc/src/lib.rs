@@ -74,7 +74,7 @@ pub enum GrpcAdapterError {
 /// gRPC implementation of `MemoryService`.
 pub struct MemoryServiceImpl {
     processor: Arc<signal::SignalProcessor>,
-    api_keys: Arc<Vec<brain_core::ApiKeyConfig>>,
+    api_keys: Arc<Vec<brain::ApiKeyConfig>>,
 }
 
 impl MemoryServiceImpl {
@@ -256,7 +256,7 @@ impl MemoryService for MemoryServiceImpl {
 /// gRPC implementation of `AgentService`.
 pub struct AgentServiceImpl {
     processor: Arc<signal::SignalProcessor>,
-    api_keys: Arc<Vec<brain_core::ApiKeyConfig>>,
+    api_keys: Arc<Vec<brain::ApiKeyConfig>>,
 }
 
 impl AgentServiceImpl {
@@ -564,7 +564,7 @@ pub async fn serve(
 /// If no keys are configured, all requests are allowed (open mode).
 fn auth_interceptor(
     req: Request<()>,
-    api_keys: &[brain_core::ApiKeyConfig],
+    api_keys: &[brain::ApiKeyConfig],
     rate_limits: Option<&Arc<::resilience::RateLimitRegistry>>,
 ) -> Result<Request<()>, Status> {
     let metadata = req.metadata();
@@ -577,15 +577,15 @@ fn auth_interceptor(
             metadata.get("authorization").and_then(|v| {
                 v.to_str()
                     .ok()
-                    .and_then(|s| brain_core::auth::extract_bearer_from_value(s).or(Some(s)))
+                    .and_then(|s| brain::auth::extract_bearer_from_value(s).or(Some(s)))
             })
         });
 
     // gRPC requests can both read and write, so require write permission.
-    let result = brain_core::check_auth(api_keys, provided_key, "write");
+    let result = brain::check_auth(api_keys, provided_key, "write");
     match result {
-        brain_core::AuthResult::Allowed => {}
-        brain_core::AuthResult::InsufficientPermission => {
+        brain::AuthResult::Allowed => {}
+        brain::AuthResult::InsufficientPermission => {
             return Err(Status::permission_denied(
                 result.error_message("write").unwrap_or_default(),
             ));
@@ -618,7 +618,7 @@ fn auth_interceptor(
 /// `None` and the pipeline's identity gate is skipped (back-compat).
 async fn resolve_principal_from_metadata<T>(
     req: &Request<T>,
-    api_keys: &[brain_core::ApiKeyConfig],
+    api_keys: &[brain::ApiKeyConfig],
     processor: &signal::SignalProcessor,
 ) -> Option<identity::Principal> {
     let metadata = req.metadata();
@@ -629,7 +629,7 @@ async fn resolve_principal_from_metadata<T>(
             metadata.get("authorization").and_then(|v| {
                 v.to_str()
                     .ok()
-                    .and_then(|s| brain_core::auth::extract_bearer_from_value(s).or(Some(s)))
+                    .and_then(|s| brain::auth::extract_bearer_from_value(s).or(Some(s)))
             })
         })?;
     let agent_id = api_keys
@@ -662,7 +662,7 @@ mod tests {
     // Helper: build a SignalProcessor backed by a temp directory.
     async fn make_processor() -> Arc<signal::SignalProcessor> {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let proc = signal::SignalProcessor::new(config).await.unwrap();
         // Keep temp alive by leaking (fine for tests)

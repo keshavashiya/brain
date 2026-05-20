@@ -1,7 +1,7 @@
 //! Health checks for the local environment — `brain doctor` plus the
 //! lightweight Ollama probe shown at the end of `brain init`.
 
-use brain_core::BrainConfig;
+use brain::BrainConfig;
 
 /// Strip a `:tag` suffix so callers can match against Ollama's `name` field
 /// regardless of whether the user wrote `nomic-embed-text` or

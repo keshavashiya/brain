@@ -33,7 +33,7 @@ use ::resilience::{BreakerConfig, BreakerRegistry};
 /// - Background tasks (consolidation, proactivity — only `brain serve`)
 /// - Credential vault (wired separately via `wire_vault`)
 pub async fn build_processor(
-    config: &brain_core::BrainConfig,
+    config: &brain::BrainConfig,
 ) -> anyhow::Result<signal::SignalProcessor> {
     #[cfg(feature = "encryption")]
     let mut processor = {
@@ -244,7 +244,7 @@ pub async fn build_processor(
 /// and is wired on demand (e.g. `brain vault` / `brain auth` commands).
 async fn wire_safety_infrastructure(
     processor: signal::SignalProcessor,
-    config: &brain_core::BrainConfig,
+    config: &brain::BrainConfig,
     sandbox_executor: Arc<dyn sandbox::SandboxExecutor>,
 ) -> anyhow::Result<signal::SignalProcessor> {
     let db = processor.episodic().pool().clone();
@@ -412,7 +412,7 @@ async fn wire_safety_infrastructure(
 ///    that aren't fingerprinted. These always run and overwrite any
 ///    auto-discovered entry on name collision.
 async fn build_agent_registry(
-    config: &brain_core::BrainConfig,
+    config: &brain::BrainConfig,
 ) -> anyhow::Result<delegate::AgentRegistry> {
     let mut registry = delegate::AgentRegistry::new();
 
@@ -517,7 +517,7 @@ async fn build_agent_registry(
 
 /// Build the action dispatcher with all configured backends.
 fn build_action_dispatcher(
-    config: &brain_core::BrainConfig,
+    config: &brain::BrainConfig,
     processor: &signal::SignalProcessor,
 ) -> anyhow::Result<cortex::actions::ActionDispatcher> {
     let embedding_dim = processor.embedding_dim();
@@ -583,11 +583,11 @@ fn build_action_dispatcher(
             Option<Arc<dyn cortex::actions::WebSearchBackend>>,
             anyhow::Error,
         > = match ws.provider {
-            brain_core::config::WebSearchProvider::DuckDuckGo => {
+            brain::config::WebSearchProvider::DuckDuckGo => {
                 DuckDuckGoSearchBackend::new_with_metrics(timeout, res, metrics.clone())
                     .map(|b| Some(Arc::new(b) as _))
             }
-            brain_core::config::WebSearchProvider::Searxng => {
+            brain::config::WebSearchProvider::Searxng => {
                 let ep = if endpoint.is_empty() {
                     "http://localhost:8888"
                 } else {
@@ -596,7 +596,7 @@ fn build_action_dispatcher(
                 SearxngSearchBackend::new_with_metrics(ep, timeout, res, metrics.clone())
                     .map(|b| Some(Arc::new(b) as _))
             }
-            brain_core::config::WebSearchProvider::Tavily => {
+            brain::config::WebSearchProvider::Tavily => {
                 let api_key = ws.api_key.trim();
                 if api_key.is_empty() {
                     tracing::warn!(
@@ -619,7 +619,7 @@ fn build_action_dispatcher(
                     .map(|b| Some(Arc::new(b) as _))
                 }
             }
-            brain_core::config::WebSearchProvider::Custom => {
+            brain::config::WebSearchProvider::Custom => {
                 if endpoint.is_empty() {
                     tracing::warn!(
                             "actions.web_search.provider=custom but endpoint is empty; backend not configured"
@@ -688,14 +688,14 @@ fn build_action_dispatcher(
 /// Check if a Brain daemon is already running by probing its health endpoint.
 ///
 /// Returns the base URL (e.g. `http://127.0.0.1:19789`) if the daemon is alive.
-pub async fn detect_running_daemon(config: &brain_core::BrainConfig) -> Option<String> {
+pub async fn detect_running_daemon(config: &brain::BrainConfig) -> Option<String> {
     let host = &config.adapters.http.host;
     let port = config.adapters.http.port;
     let base_url = format!("http://{host}:{port}");
     let health_url = format!("{base_url}/health");
 
     let client = reqwest::Client::builder()
-        .timeout(brain_core::timeouts::HEALTH_CHECK)
+        .timeout(brain::timeouts::HEALTH_CHECK)
         .build()
         .ok()?;
 
@@ -721,7 +721,7 @@ pub async fn detect_running_daemon(config: &brain_core::BrainConfig) -> Option<S
 /// This is the canonical way for CLI commands to ensure they don't create
 /// their own SignalProcessor (which would cause RuVector lock contention
 /// and memory isolation).
-pub async fn require_daemon(config: &brain_core::BrainConfig) -> anyhow::Result<String> {
+pub async fn require_daemon(config: &brain::BrainConfig) -> anyhow::Result<String> {
     let max_attempts = 4;
     for attempt in 0..max_attempts {
         if let Some(url) = detect_running_daemon(config).await {
@@ -746,14 +746,11 @@ pub async fn require_daemon(config: &brain_core::BrainConfig) -> anyhow::Result<
 /// daemon's MCP endpoint, and writes the response to stdout. This ensures
 /// that the daemon's single SignalProcessor handles all requests — no
 /// ruvector lock contention, no memory isolation.
-pub async fn proxy_mcp_stdio(
-    mcp_url: &str,
-    config: &brain_core::BrainConfig,
-) -> anyhow::Result<()> {
+pub async fn proxy_mcp_stdio(mcp_url: &str, config: &brain::BrainConfig) -> anyhow::Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     let client = reqwest::Client::builder()
-        .timeout(brain_core::timeouts::DAEMON_SETUP)
+        .timeout(brain::timeouts::DAEMON_SETUP)
         .build()?;
 
     // Resolve API key for the x-api-key header.
@@ -836,10 +833,10 @@ mod tests {
 
     // Minimal config producer that disables auto-discovery and provides
     // one manual subprocess delegate — keeps the test offline and tight.
-    fn cfg_with_manual_delegate() -> brain_core::BrainConfig {
-        let mut c = brain_core::BrainConfig::default();
+    fn cfg_with_manual_delegate() -> brain::BrainConfig {
+        let mut c = brain::BrainConfig::default();
         c.agents.auto_discovery = false;
-        c.agents.delegates = vec![brain_core::config::AgentEntry {
+        c.agents.delegates = vec![brain::config::AgentEntry {
             name: "hand-wired".to_string(),
             kind: "subprocess".to_string(),
             alias: None,
@@ -871,7 +868,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_agent_registry_empty_when_fully_disabled() {
-        let mut cfg = brain_core::BrainConfig::default();
+        let mut cfg = brain::BrainConfig::default();
         cfg.agents.auto_discovery = false;
         let reg = build_agent_registry(&cfg).await.expect("registry builds");
         assert!(reg.is_empty());
@@ -888,7 +885,7 @@ mod tests {
         use signal::types::{Signal, SignalSource};
 
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = brain_core::BrainConfig::default();
+        let mut cfg = brain::BrainConfig::default();
         cfg.brain.data_dir = tmp.path().to_str().unwrap().to_string();
         cfg.agents.auto_discovery = false;
 
@@ -922,7 +919,7 @@ mod tests {
     #[tokio::test]
     async fn identity_store_wired_with_configured_principal() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = brain_core::BrainConfig::default();
+        let mut cfg = brain::BrainConfig::default();
         cfg.brain.data_dir = tmp.path().to_str().unwrap().to_string();
         cfg.agents.auto_discovery = false;
         cfg.identity = identity::IdentityConfig {
@@ -966,7 +963,7 @@ mod tests {
     #[tokio::test]
     async fn terminal_bridge_wired() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = brain_core::BrainConfig::default();
+        let mut cfg = brain::BrainConfig::default();
         cfg.brain.data_dir = tmp.path().to_str().unwrap().to_string();
         cfg.agents.auto_discovery = false;
 
@@ -990,7 +987,7 @@ mod tests {
         use hippocampus::EpisodicGraph;
 
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = brain_core::BrainConfig::default();
+        let mut cfg = brain::BrainConfig::default();
         cfg.brain.data_dir = tmp.path().to_str().unwrap().to_string();
         cfg.agents.auto_discovery = false;
 
@@ -1050,7 +1047,7 @@ mod tests {
         use hippocampus::EpisodicGraph;
 
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = brain_core::BrainConfig::default();
+        let mut cfg = brain::BrainConfig::default();
         cfg.brain.data_dir = tmp.path().to_str().unwrap().to_string();
         cfg.agents.auto_discovery = false;
 
@@ -1094,7 +1091,7 @@ mod tests {
     #[tokio::test]
     async fn capability_kernel_wired_and_empty() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = brain_core::BrainConfig::default();
+        let mut cfg = brain::BrainConfig::default();
         cfg.brain.data_dir = tmp.path().to_str().unwrap().to_string();
         cfg.agents.auto_discovery = false;
 
@@ -1118,7 +1115,7 @@ mod tests {
     #[tokio::test]
     async fn breaker_registry_wired_and_shared() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = brain_core::BrainConfig::default();
+        let mut cfg = brain::BrainConfig::default();
         cfg.brain.data_dir = tmp.path().to_str().unwrap().to_string();
         cfg.agents.auto_discovery = false;
 
@@ -1158,7 +1155,7 @@ mod tests {
     #[tokio::test]
     async fn mcp_host_wired_and_empty_by_default() {
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = brain_core::BrainConfig::default();
+        let mut cfg = brain::BrainConfig::default();
         cfg.brain.data_dir = tmp.path().to_str().unwrap().to_string();
         cfg.agents.auto_discovery = false;
 
@@ -1185,7 +1182,7 @@ mod tests {
         use signal::types::{Signal, SignalSource};
 
         let tmp = tempfile::tempdir().unwrap();
-        let mut cfg = brain_core::BrainConfig::default();
+        let mut cfg = brain::BrainConfig::default();
         cfg.brain.data_dir = tmp.path().to_str().unwrap().to_string();
         cfg.agents.auto_discovery = false;
         cfg.identity = identity::IdentityConfig {

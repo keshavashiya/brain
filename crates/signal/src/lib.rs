@@ -41,7 +41,7 @@ pub use types::*;
 /// One instance is shared across all adapters. Each incoming Signal is routed
 /// through intent classification → importance scoring → memory → LLM → response.
 pub struct SignalProcessor {
-    config: brain_core::BrainConfig,
+    config: brain::BrainConfig,
     classifier: thalamus::IntentClassifier,
     importance: amygdala::ImportanceScorer,
     episodic: hippocampus::EpisodicStore,
@@ -59,7 +59,7 @@ pub struct SignalProcessor {
     /// Action dispatcher for executing tool intents (set via builder).
     action_dispatcher: Option<cortex::actions::ActionDispatcher>,
     /// Cross-subsystem metrics (embedding, consolidation, circuit breaker, intent).
-    metrics: std::sync::Arc<brain_core::metrics::SubsystemMetrics>,
+    metrics: std::sync::Arc<brain::metrics::SubsystemMetrics>,
 
     // ── Safety infrastructure (opt-in via builder) ───────────────────────
     /// Immutable audit trail — records every consequential action.
@@ -163,7 +163,7 @@ pub struct SignalProcessor {
     standing_approvals: Option<std::sync::Arc<dyn confirm::StandingApprovalStore>>,
     /// Optional override for the inline confirmation gate's per-request
     /// timeout. Defaults to the tier-driven value
-    /// ([`brain_core::security::ActionTier::default_timeout`]). Tests
+    /// ([`brain::security::ActionTier::default_timeout`]). Tests
     /// shorten this so the no-bypass path doesn't take 60s+.
     confirmation_timeout: Option<std::time::Duration>,
 

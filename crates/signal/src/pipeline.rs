@@ -2091,11 +2091,11 @@ impl SignalProcessor {
         signal_id: Uuid,
         intent: &thalamus::Intent,
     ) -> Option<SignalResponse> {
-        // identity::Tier and brain_core::security::ActionTier carry
+        // identity::Tier and brain::security::ActionTier carry
         // identical variants; the converter keeps the cross-crate
         // boundary explicit rather than relying on shared serialization.
-        fn convert_tier(t: identity::Tier) -> brain_core::security::ActionTier {
-            use brain_core::security::ActionTier;
+        fn convert_tier(t: identity::Tier) -> brain::security::ActionTier {
+            use brain::security::ActionTier;
             match t {
                 identity::Tier::Read => ActionTier::Read,
                 identity::Tier::Write => ActionTier::Write,
@@ -3250,7 +3250,7 @@ mod list_schedules_tests {
 
     async fn make_processor() -> SignalProcessor {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let processor = SignalProcessor::new(config).await.unwrap();
         std::mem::forget(temp);
@@ -3374,7 +3374,7 @@ mod proactivity_tests {
 
     async fn make_processor() -> SignalProcessor {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         // Pin proactivity disabled — these tests exercise the disabled→
         // enabled toggle path and must not inherit whichever value the
@@ -3463,7 +3463,7 @@ mod proactivity_tests {
     #[tokio::test]
     async fn enable_when_startup_was_enabled_promises_next_tick() {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         config.proactivity.enabled = true;
         let processor = SignalProcessor::new(config).await.unwrap();
@@ -3567,7 +3567,7 @@ mod tool_call_dispatch_tests {
 
     async fn make_processor() -> SignalProcessor {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let processor = SignalProcessor::new(config).await.unwrap();
         std::mem::forget(temp);

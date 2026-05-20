@@ -15,7 +15,7 @@ default = ["encryption"]
 encryption = ["storage/encryption"]
 
 [dependencies]
-brain_core = { workspace = true }
+brain         = { workspace = true }
 storage = { workspace = true }
 hippocampus = { workspace = true }
 cortex = { workspace = true }
@@ -54,3 +54,6 @@ pdf-extract = "0.10"
 tempfile = "3"
 proptest = "1"
 serde_yaml = { workspace = true }
+
+[lints]
+workspace = true

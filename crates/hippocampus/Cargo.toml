@@ -12,7 +12,7 @@ categories.workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
-brain_core = { workspace = true }
+brain         = { workspace = true }
 storage = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
@@ -42,3 +42,6 @@ harness = false
 [[bench]]
 name = "consolidation"
 harness = false
+
+[lints]
+workspace = true

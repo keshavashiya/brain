@@ -35,3 +35,6 @@ secret-service = { version = "4", features = ["rt-tokio-crypto-rust"] }
 tempfile = "3"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 storage = { workspace = true }
+
+[lints]
+workspace = true

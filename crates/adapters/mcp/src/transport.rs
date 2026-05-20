@@ -136,7 +136,7 @@ pub async fn serve_http(
         .route("/", post(http_handler))
         .route("/mcp", post(http_handler))
         .with_state(state)
-        .layer(brain_core::cors::localhost_cors())
+        .layer(brain::cors::localhost_cors())
         .layer(axum::extract::DefaultBodyLimit::max(1_048_576))
         .layer(tower::limit::ConcurrencyLimitLayer::new(100));
 

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use brain_core::metrics::SubsystemMetrics;
+use brain::metrics::SubsystemMetrics;
 
 use crate::resilience::{resilient_send, CircuitBreaker};
 
@@ -33,7 +33,7 @@ pub fn render_message_template(
 }
 
 pub struct WebhookMessageBackend {
-    channels: HashMap<String, brain_core::config::ChannelConfig>,
+    channels: HashMap<String, brain::config::ChannelConfig>,
     client: reqwest::Client,
     circuit_breaker: Arc<CircuitBreaker>,
     max_retries: u32,
@@ -42,17 +42,17 @@ pub struct WebhookMessageBackend {
 
 impl WebhookMessageBackend {
     pub fn new(
-        channels: &HashMap<String, brain_core::config::ChannelConfig>,
+        channels: &HashMap<String, brain::config::ChannelConfig>,
         timeout_ms: u64,
-        resilience: &brain_core::config::ResilienceConfig,
+        resilience: &brain::config::ResilienceConfig,
     ) -> anyhow::Result<Self> {
         Self::new_with_metrics(channels, timeout_ms, resilience, None)
     }
 
     pub fn new_with_metrics(
-        channels: &HashMap<String, brain_core::config::ChannelConfig>,
+        channels: &HashMap<String, brain::config::ChannelConfig>,
         timeout_ms: u64,
-        resilience: &brain_core::config::ResilienceConfig,
+        resilience: &brain::config::ResilienceConfig,
         metrics: Option<Arc<SubsystemMetrics>>,
     ) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
@@ -315,8 +315,8 @@ mod tests {
 
     // ─── Mock HTTP tests ────────────────────────────────────────────────────
 
-    fn fast_resilience() -> brain_core::config::ResilienceConfig {
-        brain_core::config::ResilienceConfig {
+    fn fast_resilience() -> brain::config::ResilienceConfig {
+        brain::config::ResilienceConfig {
             max_retries: 0,
             retry_base_ms: 10,
             circuit_breaker_threshold: 5,
@@ -324,11 +324,11 @@ mod tests {
         }
     }
 
-    fn build_channels(name: &str, url: &str) -> HashMap<String, brain_core::config::ChannelConfig> {
+    fn build_channels(name: &str, url: &str) -> HashMap<String, brain::config::ChannelConfig> {
         let mut map = HashMap::new();
         map.insert(
             name.to_string(),
-            brain_core::config::ChannelConfig {
+            brain::config::ChannelConfig {
                 url: url.to_string(),
                 body: String::new(),
                 headers: HashMap::new(),

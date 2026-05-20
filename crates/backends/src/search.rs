@@ -3,13 +3,13 @@
 
 use std::sync::Arc;
 
-use brain_core::metrics::SubsystemMetrics;
+use brain::metrics::SubsystemMetrics;
 
 use crate::resilience::{resilient_send, CircuitBreaker};
 
 fn make_cb(
     name: &str,
-    resilience: &brain_core::config::ResilienceConfig,
+    resilience: &brain::config::ResilienceConfig,
     metrics: Option<Arc<SubsystemMetrics>>,
 ) -> CircuitBreaker {
     let cb = CircuitBreaker::new(
@@ -87,14 +87,14 @@ pub struct DuckDuckGoSearchBackend {
 impl DuckDuckGoSearchBackend {
     pub fn new(
         timeout_ms: u64,
-        resilience: &brain_core::config::ResilienceConfig,
+        resilience: &brain::config::ResilienceConfig,
     ) -> anyhow::Result<Self> {
         Self::new_with_metrics(timeout_ms, resilience, None)
     }
 
     pub fn new_with_metrics(
         timeout_ms: u64,
-        resilience: &brain_core::config::ResilienceConfig,
+        resilience: &brain::config::ResilienceConfig,
         metrics: Option<Arc<SubsystemMetrics>>,
     ) -> anyhow::Result<Self> {
         // DDG's HTML endpoint inspects the User-Agent and serves the
@@ -467,7 +467,7 @@ impl SearxngSearchBackend {
     pub fn new(
         endpoint: &str,
         timeout_ms: u64,
-        resilience: &brain_core::config::ResilienceConfig,
+        resilience: &brain::config::ResilienceConfig,
     ) -> anyhow::Result<Self> {
         Self::new_with_metrics(endpoint, timeout_ms, resilience, None)
     }
@@ -475,7 +475,7 @@ impl SearxngSearchBackend {
     pub fn new_with_metrics(
         endpoint: &str,
         timeout_ms: u64,
-        resilience: &brain_core::config::ResilienceConfig,
+        resilience: &brain::config::ResilienceConfig,
         metrics: Option<Arc<SubsystemMetrics>>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
@@ -553,7 +553,7 @@ impl TavilySearchBackend {
         endpoint: &str,
         api_key: &str,
         timeout_ms: u64,
-        resilience: &brain_core::config::ResilienceConfig,
+        resilience: &brain::config::ResilienceConfig,
     ) -> anyhow::Result<Self> {
         Self::new_with_metrics(endpoint, api_key, timeout_ms, resilience, None)
     }
@@ -562,7 +562,7 @@ impl TavilySearchBackend {
         endpoint: &str,
         api_key: &str,
         timeout_ms: u64,
-        resilience: &brain_core::config::ResilienceConfig,
+        resilience: &brain::config::ResilienceConfig,
         metrics: Option<Arc<SubsystemMetrics>>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
@@ -653,7 +653,7 @@ impl CustomSearchBackend {
     pub fn new(
         endpoint: &str,
         timeout_ms: u64,
-        resilience: &brain_core::config::ResilienceConfig,
+        resilience: &brain::config::ResilienceConfig,
     ) -> anyhow::Result<Self> {
         Self::new_with_metrics(endpoint, timeout_ms, resilience, None)
     }
@@ -661,7 +661,7 @@ impl CustomSearchBackend {
     pub fn new_with_metrics(
         endpoint: &str,
         timeout_ms: u64,
-        resilience: &brain_core::config::ResilienceConfig,
+        resilience: &brain::config::ResilienceConfig,
         metrics: Option<Arc<SubsystemMetrics>>,
     ) -> anyhow::Result<Self> {
         Ok(Self {
@@ -804,8 +804,8 @@ mod tests {
     use super::*;
     use cortex::actions::WebSearchBackend;
 
-    fn fast_resilience() -> brain_core::config::ResilienceConfig {
-        brain_core::config::ResilienceConfig {
+    fn fast_resilience() -> brain::config::ResilienceConfig {
+        brain::config::ResilienceConfig {
             max_retries: 0,
             retry_base_ms: 10,
             circuit_breaker_threshold: 5,

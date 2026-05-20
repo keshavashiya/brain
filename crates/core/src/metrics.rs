@@ -1,6 +1,6 @@
 //! Shared subsystem metrics used across subsystems for Prometheus exposition.
 //!
-//! Kept in `brain_core` so that subsystems (signal, hippocampus, backends) can
+//! Kept in `brain` so that subsystems (signal, hippocampus, backends) can
 //! increment counters without taking a dependency on the HTTP adapter. The HTTP
 //! adapter is the only component that renders these as Prometheus text.
 

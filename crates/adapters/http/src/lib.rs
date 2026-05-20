@@ -55,7 +55,7 @@ mod tests {
     /// Build a test router with the API key pre-loaded.
     async fn make_router() -> (Router, tempfile::TempDir, String) {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let api_key = config.access.api_keys.first().unwrap().key.clone();
         let api_keys = config.access.api_keys.clone();
@@ -136,10 +136,10 @@ mod tests {
     #[tokio::test]
     async fn test_rate_limit_returns_429_after_burst() {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         // Tiny bucket so the test is fast and deterministic.
-        config.access.rate_limit = brain_core::ClientRateLimitConfig {
+        config.access.rate_limit = brain::ClientRateLimitConfig {
             enabled: true,
             tokens_per_refill: 1,
             refill_interval_ms: 60_000,
@@ -217,7 +217,7 @@ mod tests {
         };
 
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let api_key = config.access.api_keys.first().unwrap().key.clone();
         let api_keys = config.access.api_keys.clone();
@@ -559,9 +559,9 @@ mod tests {
     #[tokio::test]
     async fn test_search_with_read_only_key() {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
-        config.access.api_keys.push(brain_core::ApiKeyConfig {
+        config.access.api_keys.push(brain::ApiKeyConfig {
             key: "read-only-key".to_string(),
             name: "Read Only".to_string(),
             permissions: vec!["read".to_string()],
@@ -593,9 +593,9 @@ mod tests {
     #[tokio::test]
     async fn test_post_signal_read_only_key_returns_401() {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
-        config.access.api_keys.push(brain_core::ApiKeyConfig {
+        config.access.api_keys.push(brain::ApiKeyConfig {
             key: "read-only-key".to_string(),
             name: "Read Only".to_string(),
             permissions: vec!["read".to_string()],
@@ -627,7 +627,7 @@ mod tests {
     #[tokio::test]
     async fn test_http_store_signal_fact_persisted_in_db() {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let api_key = config.access.api_keys.first().unwrap().key.clone();
         let api_keys = config.access.api_keys.clone();
@@ -691,7 +691,7 @@ mod tests {
     #[tokio::test]
     async fn test_http_memory_search_returns_stored_fact() {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let api_key = config.access.api_keys.first().unwrap().key.clone();
         let api_keys = config.access.api_keys.clone();
@@ -739,7 +739,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_cached_signal_with_auth() {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let api_key = config.access.api_keys.first().unwrap().key.clone();
         let api_keys = config.access.api_keys.clone();

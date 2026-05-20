@@ -8,7 +8,7 @@ use brainos_signal::{
 async fn test_process_store_fact_integration() {
     let temp_dir = tempfile::tempdir().unwrap();
 
-    let mut config = brain_core::BrainConfig::default();
+    let mut config = brain::BrainConfig::default();
     config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
 
     let processor = SignalProcessor::new(config).await.unwrap();
@@ -39,7 +39,7 @@ async fn test_process_store_fact_integration() {
 #[tokio::test]
 async fn test_store_fact_then_search_roundtrip() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let mut config = brain_core::BrainConfig::default();
+    let mut config = brain::BrainConfig::default();
     config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
 
     let processor = SignalProcessor::new(config).await.unwrap();
@@ -78,7 +78,7 @@ async fn test_store_fact_then_search_roundtrip() {
 #[tokio::test]
 async fn test_forget_is_namespace_scoped() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let mut config = brain_core::BrainConfig::default();
+    let mut config = brain::BrainConfig::default();
     config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
     let processor = SignalProcessor::new(config).await.unwrap();
 
@@ -104,7 +104,7 @@ async fn test_forget_is_namespace_scoped() {
 #[tokio::test]
 async fn test_store_fact_preserves_agent() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let mut config = brain_core::BrainConfig::default();
+    let mut config = brain::BrainConfig::default();
     config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
 
     let processor = SignalProcessor::new(config).await.unwrap();
@@ -137,7 +137,7 @@ async fn test_store_fact_preserves_agent() {
 async fn test_process_chat_reaches_llm() {
     let temp_dir = tempfile::tempdir().unwrap();
 
-    let mut config = brain_core::BrainConfig::default();
+    let mut config = brain::BrainConfig::default();
     config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
 
     let processor = SignalProcessor::new(config).await.unwrap();
@@ -166,7 +166,7 @@ async fn test_process_chat_reaches_llm() {
 #[tokio::test]
 async fn observer_receives_signal_received_event() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let mut config = brain_core::BrainConfig::default();
+    let mut config = brain::BrainConfig::default();
     config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
 
     let observer = observe::BroadcastObserver::new();
@@ -212,7 +212,7 @@ async fn observer_receives_signal_received_event() {
 #[tokio::test]
 async fn cancel_signal_for_unknown_id_returns_noop_message() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let mut config = brain_core::BrainConfig::default();
+    let mut config = brain::BrainConfig::default();
     config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
     let processor = SignalProcessor::new(config).await.unwrap();
 
@@ -240,7 +240,7 @@ async fn cancel_signal_for_unknown_id_returns_noop_message() {
 #[tokio::test]
 async fn cancel_signal_triggers_registered_notify() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let mut config = brain_core::BrainConfig::default();
+    let mut config = brain::BrainConfig::default();
     config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
     let processor = SignalProcessor::new(config).await.unwrap();
 
@@ -279,7 +279,7 @@ async fn phase_0_acceptance_signal_audit_cancel_within_budget() {
     use std::sync::Arc;
 
     let temp_dir = tempfile::tempdir().unwrap();
-    let mut config = brain_core::BrainConfig::default();
+    let mut config = brain::BrainConfig::default();
     config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
 
     let observer = observe::BroadcastObserver::new();
@@ -376,7 +376,7 @@ proptest::proptest! {
             .unwrap()
             .block_on(async move {
                 let temp = tempfile::tempdir().unwrap();
-                let mut cfg = brain_core::BrainConfig::default();
+                let mut cfg = brain::BrainConfig::default();
                 cfg.brain.data_dir = temp.path().to_str().unwrap().to_string();
                 let observer = observe::BroadcastObserver::new();
                 let processor = SignalProcessor::new(cfg)
@@ -413,7 +413,7 @@ async fn phase_1_two_agents_one_runs_one_escalates() {
     use std::sync::Arc;
 
     let temp_dir = tempfile::tempdir().unwrap();
-    let mut config = brain_core::BrainConfig::default();
+    let mut config = brain::BrainConfig::default();
     config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
 
     // Identity config: claude-code holds shell.exec at Execute; cursor at Read.
@@ -525,7 +525,7 @@ async fn phase_1_happy_path_audit_carries_principal() {
     use std::sync::Arc;
 
     let temp_dir = tempfile::tempdir().unwrap();
-    let mut config = brain_core::BrainConfig::default();
+    let mut config = brain::BrainConfig::default();
     config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
 
     let id_cfg: identity::IdentityConfig = serde_yaml::from_str(
@@ -630,7 +630,7 @@ async fn phase_1_happy_path_audit_carries_principal() {
 async fn tool_registry_accessor_round_trips() {
     use std::sync::Arc;
     let temp_dir = tempfile::tempdir().unwrap();
-    let mut config = brain_core::BrainConfig::default();
+    let mut config = brain::BrainConfig::default();
     config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
     let processor = SignalProcessor::new(config).await.unwrap();
     assert!(processor.tool_registry().is_none());

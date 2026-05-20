@@ -34,7 +34,7 @@ impl From<ganglia::ProactiveMessage> for ProactiveNotification {
 pub struct NotificationRouter {
     db: SqlitePool,
     proactive_tx: broadcast::Sender<ProactiveNotification>,
-    delivery_config: brain_core::DeliveryConfig,
+    delivery_config: brain::DeliveryConfig,
     /// Webhook sender — when set, proactive messages are pushed to configured channels.
     webhook_sender: Option<Box<dyn WebhookSender>>,
 }
@@ -52,7 +52,7 @@ pub trait WebhookSender: Send + Sync {
 
 impl NotificationRouter {
     /// Create a new notification router.
-    pub fn new(db: SqlitePool, delivery_config: brain_core::DeliveryConfig) -> Self {
+    pub fn new(db: SqlitePool, delivery_config: brain::DeliveryConfig) -> Self {
         let (proactive_tx, _) = broadcast::channel(256);
         Self {
             db,
@@ -146,7 +146,7 @@ mod tests {
 
     fn test_router() -> NotificationRouter {
         let db = SqlitePool::open_memory().unwrap();
-        let config = brain_core::DeliveryConfig {
+        let config = brain::DeliveryConfig {
             outbox: true,
             broadcast: true,
             webhook_channels: Vec::new(),
@@ -262,7 +262,7 @@ mod tests {
     #[tokio::test]
     async fn test_webhook_sender_called_for_configured_channels() {
         let db = SqlitePool::open_memory().unwrap();
-        let config = brain_core::DeliveryConfig {
+        let config = brain::DeliveryConfig {
             outbox: false,
             broadcast: false,
             webhook_channels: vec!["chat-main".into(), "ops".into()],
@@ -306,7 +306,7 @@ mod tests {
     #[tokio::test]
     async fn test_webhook_not_called_when_no_channels() {
         let db = SqlitePool::open_memory().unwrap();
-        let config = brain_core::DeliveryConfig {
+        let config = brain::DeliveryConfig {
             outbox: false,
             broadcast: false,
             webhook_channels: Vec::new(),

@@ -8,7 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use brain_core::metrics::SubsystemMetrics;
+use brain::metrics::SubsystemMetrics;
 use cortex::actions::{ActionError, FetchedPage, UrlFetchBackend};
 
 use crate::resilience::{resilient_send, CircuitBreaker};
@@ -34,12 +34,12 @@ pub struct BasicUrlFetcher {
 }
 
 impl BasicUrlFetcher {
-    pub fn new(resilience: &brain_core::config::ResilienceConfig) -> anyhow::Result<Self> {
+    pub fn new(resilience: &brain::config::ResilienceConfig) -> anyhow::Result<Self> {
         Self::new_with_metrics(resilience, None)
     }
 
     pub fn new_with_metrics(
-        resilience: &brain_core::config::ResilienceConfig,
+        resilience: &brain::config::ResilienceConfig,
         metrics: Option<Arc<SubsystemMetrics>>,
     ) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
@@ -275,8 +275,8 @@ mod tests {
         assert_eq!(out, "alpha\nbeta gamma\ndelta");
     }
 
-    fn fast_resilience() -> brain_core::config::ResilienceConfig {
-        brain_core::config::ResilienceConfig {
+    fn fast_resilience() -> brain::config::ResilienceConfig {
+        brain::config::ResilienceConfig {
             max_retries: 0,
             retry_base_ms: 1,
             circuit_breaker_threshold: 5,

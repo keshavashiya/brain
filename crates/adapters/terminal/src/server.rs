@@ -141,7 +141,7 @@ fn api_key_from_metadata<T>(req: &Request<T>) -> Option<String> {
     let authz = metadata
         .get("authorization")
         .and_then(|v| v.to_str().ok())?;
-    let key = brain_core::auth::extract_bearer_from_value(authz).unwrap_or(authz);
+    let key = brain::auth::extract_bearer_from_value(authz).unwrap_or(authz);
     Some(key.to_string())
 }
 

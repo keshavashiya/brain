@@ -11,7 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-brain_core = { workspace = true }
+brain         = { workspace = true }
 signal       = { workspace = true }
 resilience   = { workspace = true }
 observe      = { workspace = true }
@@ -35,3 +35,6 @@ protobuf-src = "2.1"
 
 [dev-dependencies]
 tempfile = "3"
+
+[lints]
+workspace = true

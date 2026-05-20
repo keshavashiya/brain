@@ -37,7 +37,7 @@ impl SignalHandler for RelayPipelineHandler {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn cmd_serve(
-    config: &brain_core::BrainConfig,
+    config: &brain::BrainConfig,
     http: bool,
     ws: bool,
     grpc: bool,
@@ -319,7 +319,7 @@ pub(crate) async fn cmd_serve(
     // ── Proactivity first-run notice ────────────────────────────────
     if config.proactivity.enabled {
         // Show a notice if user hasn't explicitly configured proactivity
-        let user_config_path = brain_core::BrainConfig::user_config_path();
+        let user_config_path = brain::BrainConfig::user_config_path();
         let user_explicitly_set = std::fs::read_to_string(&user_config_path)
             .map(|s| s.contains("proactivity") && s.contains("enabled"))
             .unwrap_or(false);
@@ -806,7 +806,7 @@ async fn forward_inbound_to_signal(
 /// other reflexes still spawn, mirroring how adapter bind failures
 /// degrade gracefully.
 async fn wire_reflex_sources(
-    cfg: &brain_core::config::ReflexConfig,
+    cfg: &brain::config::ReflexConfig,
     processor: &Arc<signal::SignalProcessor>,
     set: &mut tokio::task::JoinSet<anyhow::Result<()>>,
 ) {
@@ -910,18 +910,14 @@ async fn wire_reflex_sources(
             .rules
             .iter()
             .map(|r| match r {
-                brain_core::config::SysReflexRuleEntry::BatteryBelow { threshold } => {
+                brain::config::SysReflexRuleEntry::BatteryBelow { threshold } => {
                     reflex::SysStateRule::BatteryBelow(*threshold)
                 }
-                brain_core::config::SysReflexRuleEntry::OnAcChanged => {
-                    reflex::SysStateRule::OnAcChanged
-                }
-                brain_core::config::SysReflexRuleEntry::NetworkChanged => {
+                brain::config::SysReflexRuleEntry::OnAcChanged => reflex::SysStateRule::OnAcChanged,
+                brain::config::SysReflexRuleEntry::NetworkChanged => {
                     reflex::SysStateRule::NetworkChanged
                 }
-                brain_core::config::SysReflexRuleEntry::LockChanged => {
-                    reflex::SysStateRule::LockChanged
-                }
+                brain::config::SysReflexRuleEntry::LockChanged => reflex::SysStateRule::LockChanged,
             })
             .collect();
         let sys_cfg = reflex::SysStateReflexConfig::new(std::time::Duration::from_secs(
@@ -953,7 +949,7 @@ async fn wire_reflex_sources(
 /// and feed inbound messages into the signal pipeline (after the
 /// correlator has had a chance to claim them).
 async fn wire_preset_transports(
-    entries: &[brain_core::config::TransportEntry],
+    entries: &[brain::config::TransportEntry],
     processor: Arc<signal::SignalProcessor>,
     dispatcher: Arc<channel::ChannelDispatcher>,
     correlator: Arc<channel::ConfirmationCorrelator>,
@@ -1178,7 +1174,7 @@ mod tests {
     #[tokio::test]
     async fn cmd_serve_refuses_empty_api_keys() {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         config.access.api_keys.clear();
 
@@ -1204,7 +1200,7 @@ mod tests {
     #[tokio::test]
     async fn test_promotion_idempotency_guard() {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let processor = signal::SignalProcessor::new(config).await.unwrap();
 
@@ -1243,7 +1239,7 @@ mod tests {
     #[tokio::test]
     async fn wire_reflex_sources_noop_on_default_config() {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let processor = Arc::new(signal::SignalProcessor::new(config.clone()).await.unwrap());
         let mut set: tokio::task::JoinSet<anyhow::Result<()>> = tokio::task::JoinSet::new();
@@ -1262,7 +1258,7 @@ mod tests {
     #[tokio::test]
     async fn wire_reflex_sources_spawns_cron_when_enabled() {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         config.reflex.cron.enabled = true;
         config.reflex.cron.poll_interval_seconds = 60;

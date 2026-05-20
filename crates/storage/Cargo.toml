@@ -34,3 +34,6 @@ ruvector-core = { version = "2.0.5", default-features = false, features = ["stor
 
 [dev-dependencies]
 tempfile = "3"
+
+[lints]
+workspace = true

@@ -14,9 +14,9 @@ use uuid::Uuid;
 use super::query::AuditQuerySpec;
 use super::rollback::RollbackPlan;
 
-/// Re-export the canonical [`brain_core::security::ActionTier`] so audit
+/// Re-export the canonical [`brain::security::ActionTier`] so audit
 /// and confirm/sandbox/orchestrate share exactly one definition.
-pub use brain_core::security::ActionTier;
+pub use brain::security::ActionTier;
 
 /// Outcome of an executed action.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -184,7 +184,7 @@ impl OpenLoopDetector {
             // Extract meaningful keywords from the topic for matching
             let topic_words: Vec<String> = topic
                 .split_whitespace()
-                .map(brain_core::normalize_keyword)
+                .map(brain::normalize_keyword)
                 .filter(|w| w.len() >= 4)
                 .collect();
             if topic_words.is_empty() {

@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use brain_core::metrics::SubsystemMetrics;
+use brain::metrics::SubsystemMetrics;
 
 /// Tracks consecutive failures and opens a circuit after a threshold is reached.
 pub struct CircuitBreaker {

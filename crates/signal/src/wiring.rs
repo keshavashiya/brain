@@ -7,7 +7,7 @@ use crate::SignalProcessor;
 
 impl SignalProcessor {
     /// Expose the config (for adapter use).
-    pub fn config(&self) -> &brain_core::BrainConfig {
+    pub fn config(&self) -> &brain::BrainConfig {
         &self.config
     }
 
@@ -37,7 +37,7 @@ impl SignalProcessor {
     }
 
     /// Expose the subsystem metrics handle (for adapter use / instrumentation).
-    pub fn metrics(&self) -> &Arc<brain_core::metrics::SubsystemMetrics> {
+    pub fn metrics(&self) -> &Arc<brain::metrics::SubsystemMetrics> {
         &self.metrics
     }
 

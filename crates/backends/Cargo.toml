@@ -11,7 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-brain_core = { workspace = true }
+brain         = { workspace = true }
 cortex = { workspace = true }
 hippocampus = { workspace = true }
 storage = { workspace = true }
@@ -33,3 +33,6 @@ tokio = { workspace = true }
 [[bench]]
 name = "circuit_breaker"
 harness = false
+
+[lints]
+workspace = true

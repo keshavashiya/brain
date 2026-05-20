@@ -11,7 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-brain_core   = { workspace = true }
+brain         = { workspace = true }
 observe      = { workspace = true }
 identity     = { workspace = true }
 intent       = { workspace = true }
@@ -54,3 +54,6 @@ rmcp = { version = "1.7", features = [
     "macros",
     "transport-streamable-http-server",
 ] }
+
+[lints]
+workspace = true

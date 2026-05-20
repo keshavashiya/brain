@@ -21,7 +21,7 @@ encryption = ["storage/encryption", "signal/encryption"]
 ganglia = ["dep:ganglia"]
 
 [dependencies]
-brain_core = { workspace = true }
+brain         = { workspace = true }
 storage = { workspace = true }
 rusqlite = { workspace = true }
 hippocampus = { workspace = true }
@@ -75,3 +75,6 @@ tokio-tungstenite = { workspace = true }
 futures-util = "0.3"
 tonic = { version = "0.14", features = ["transport"] }
 tempfile = "3"
+
+[lints]
+workspace = true

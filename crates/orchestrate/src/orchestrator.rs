@@ -989,7 +989,7 @@ fn summarize_first_line(s: &str) -> String {
 }
 
 // `audit::ActionTier`, `confirm::ActionTier`, and `sandbox::ActionTier`
-// are now all re-exports of `brain_core::ActionTier`. The previous
+// are now all re-exports of `brain::ActionTier`. The previous
 // `convert_tier` / `convert_audit_tier` / local `RequiresConfirmation`
 // trait existed solely to bridge the three former duplicate enums.
 // `requires_confirmation()` is now an inherent method on the canonical

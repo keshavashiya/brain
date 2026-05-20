@@ -28,3 +28,6 @@ criterion = { workspace = true }
 [[bench]]
 name = "scoring"
 harness = false
+
+[lints]
+workspace = true

@@ -196,11 +196,11 @@ pub fn create_provider(config: &ProviderConfig) -> Result<Box<dyn LlmProvider>, 
 
 // ─── Multi-provider selection ───────────────────────────────────────────────
 
-/// Build a `ProviderConfig` from a `brain_core::ProviderEntry` and shared
+/// Build a `ProviderConfig` from a `brain::ProviderEntry` and shared
 /// temperature/max_tokens. `model_override` lets `select_provider` swap in
 /// a preferred model discovered via `list_models`.
 fn provider_config_from_entry(
-    entry: &brain_core::ProviderEntry,
+    entry: &brain::ProviderEntry,
     temperature: f64,
     max_tokens: i32,
     model_override: Option<&str>,
@@ -230,9 +230,7 @@ fn provider_config_from_entry(
 /// Fail-safe: if no provider answers `list_models`, we still return the
 /// first entry as a best effort rather than erroring out (the underlying
 /// generate call will surface the real problem when used).
-pub async fn select_provider(
-    llm: &brain_core::LlmConfig,
-) -> Result<Box<dyn LlmProvider>, LlmError> {
+pub async fn select_provider(llm: &brain::LlmConfig) -> Result<Box<dyn LlmProvider>, LlmError> {
     let entries = synthesise_entries(llm);
     let max_tokens = llm.max_tokens as i32;
 
@@ -293,7 +291,7 @@ pub async fn select_provider(
 /// chain tries each in order whenever the current provider returns a retriable
 /// error (429 / 5xx / unavailable / timeout).
 pub async fn build_failover_chain(
-    llm: &brain_core::LlmConfig,
+    llm: &brain::LlmConfig,
 ) -> Result<failover::FalloverProvider, LlmError> {
     let entries = synthesise_entries(llm);
     let max_tokens = llm.max_tokens as i32;
@@ -368,7 +366,7 @@ pub async fn build_failover_chain(
     Ok(failover::FalloverProvider::new(providers))
 }
 
-fn synthesise_entries(llm: &brain_core::LlmConfig) -> Vec<brain_core::ProviderEntry> {
+fn synthesise_entries(llm: &brain::LlmConfig) -> Vec<brain::ProviderEntry> {
     if !llm.providers.is_empty() {
         return llm.providers.clone();
     }
@@ -378,7 +376,7 @@ fn synthesise_entries(llm: &brain_core::LlmConfig) -> Vec<brain_core::ProviderEn
     // way to know which transport to talk to.
     #[allow(deprecated)]
     let kind = llm.provider.clone();
-    vec![brain_core::ProviderEntry {
+    vec![brain::ProviderEntry {
         name: "default".to_string(),
         kind,
         base_url: llm.base_url.clone(),

@@ -19,7 +19,7 @@ use crate::state::{AppState, CACHE_CAPACITY};
 pub fn create_router(
     processor: Arc<signal::SignalProcessor>,
     webhook_handlers: HashMap<String, Arc<WebhookInboundTransport>>,
-    api_keys: Vec<brain_core::ApiKeyConfig>,
+    api_keys: Vec<brain::ApiKeyConfig>,
     cors_enabled: bool,
 ) -> Router {
     let rate_limits = processor.client_rate_limits().cloned();
@@ -67,7 +67,7 @@ pub fn create_router(
         .with_state(state);
 
     if cors_enabled {
-        router.layer(brain_core::cors::localhost_cors())
+        router.layer(brain::cors::localhost_cors())
     } else {
         router
     }

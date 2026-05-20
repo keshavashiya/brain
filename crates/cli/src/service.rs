@@ -75,7 +75,7 @@ pub(crate) async fn cmd_service_install() -> anyhow::Result<()> {
         // source of truth), fall back to PID file. This prevents RuVector lock
         // contention when launchd starts the new instance.
         use crate::daemon;
-        let config = brain_core::BrainConfig::load().ok();
+        let config = brain::BrainConfig::load().ok();
         if let Some(ref cfg) = config {
             if daemon::is_daemon_running(cfg).await {
                 // Daemon respondinging to HTTP — kill via PID if we have it.

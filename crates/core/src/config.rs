@@ -119,8 +119,8 @@ impl SysReflexEntry {
     }
 }
 
-/// YAML-bound mirror of `reflex::SysStateRule`. Kept here so `brain_core`
-/// doesn't take a dependency on `reflex` (which depends on `brain_core`
+/// YAML-bound mirror of `reflex::SysStateRule`. Kept here so `brain`
+/// doesn't take a dependency on `reflex` (which depends on `brain`
 /// transitively); `cmd_serve` converts each entry to a concrete
 /// `SysStateRule` at spawn time.
 #[derive(Debug, Clone, Serialize, Deserialize)]

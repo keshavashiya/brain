@@ -63,7 +63,7 @@ impl Metrics {
     }
 
     /// Render counters as Prometheus plain-text format (text/plain; version=0.0.4).
-    pub fn render(&self, subsystems: &brain_core::metrics::SubsystemMetrics) -> String {
+    pub fn render(&self, subsystems: &brain::metrics::SubsystemMetrics) -> String {
         let signals_total = self.signals_total.load(Ordering::Relaxed);
         let signals_ok = self.signals_ok.load(Ordering::Relaxed);
         let signals_error = self.signals_error.load(Ordering::Relaxed);

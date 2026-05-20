@@ -64,7 +64,7 @@ fn urlencode(s: &str) -> String {
 }
 
 /// Resolve the API key from `BRAIN_API_KEY` env or the first configured key.
-fn resolve_api_key(config: &brain_core::BrainConfig) -> String {
+fn resolve_api_key(config: &brain::BrainConfig) -> String {
     let env = std::env::var("BRAIN_API_KEY").unwrap_or_default();
     if !env.is_empty() {
         return env;
@@ -78,7 +78,7 @@ fn resolve_api_key(config: &brain_core::BrainConfig) -> String {
 }
 
 /// Drive the tail loop until the stream closes or the user interrupts.
-pub async fn cmd_tail(config: &brain_core::BrainConfig, filter: TailFilter) -> Result<()> {
+pub async fn cmd_tail(config: &brain::BrainConfig, filter: TailFilter) -> Result<()> {
     let base_url = bootstrap::require_daemon(config).await?;
     let mut url = format!("{base_url}/v1/events");
     filter.append_query(&mut url);

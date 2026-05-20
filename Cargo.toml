@@ -34,6 +34,19 @@ members = [
     "crates/resilience",
 ]
 
+[workspace.lints.rust]
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+# Patterns established pre-v0.5.0 that are not worth chasing as part of the
+# structural-polish wave. Revisit case-by-case in v0.6.0+.
+too_many_arguments = "allow"
+type_complexity = "allow"
+module_inception = "allow"
+result_large_err = "allow"
+large_enum_variant = "allow"
+
 [workspace.package]
 version = "0.4.0"
 edition = "2021"
@@ -125,7 +138,7 @@ futures-core = "0.3"
 tokio-tungstenite = "0.26"
 
 # Internal crates
-brain_core = { package = "brainos-core", path = "crates/core", version = "0.4.0" }
+brain = { package = "brainos-core", path = "crates/core", version = "0.4.0" }
 storage = { package = "brainos-storage", path = "crates/storage", version = "0.4.0", default-features = false }
 hippocampus = { package = "brainos-hippocampus", path = "crates/hippocampus", version = "0.4.0" }
 cortex = { package = "brainos-cortex", path = "crates/cortex", version = "0.4.0" }

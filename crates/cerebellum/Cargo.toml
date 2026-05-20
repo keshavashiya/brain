@@ -11,7 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-brain_core = { workspace = true }
+brain         = { workspace = true }
 storage = { workspace = true }
 rusqlite = { workspace = true }
 serde = { workspace = true }
@@ -23,3 +23,6 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+
+[lints]
+workspace = true

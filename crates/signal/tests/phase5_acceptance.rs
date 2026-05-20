@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use brain_core::BrainConfig;
+use brain::BrainConfig;
 use brainos_signal::{
     reflex_runner, ResponseContent, Signal, SignalProcessor, SignalResponse, SignalSource,
 };

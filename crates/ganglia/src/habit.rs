@@ -119,7 +119,7 @@ impl HabitEngine {
             // Use unique keywords per episode to avoid duplicate inflation
             let mut seen: HashSet<String> = HashSet::new();
             for word in content.split_whitespace() {
-                let kw = brain_core::normalize_keyword(word);
+                let kw = brain::normalize_keyword(word);
                 if kw.len() >= 4 && !STOPWORDS.contains(&kw.as_str()) && seen.insert(kw.clone()) {
                     let entry = counts
                         .entry((kw, dow, hour))

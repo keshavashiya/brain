@@ -76,7 +76,7 @@ impl OpenAiProvider {
         max_tokens: Option<i32>,
     ) -> Result<Self, LlmError> {
         let client = reqwest::Client::builder()
-            .timeout(brain_core::timeouts::LLM_GENERATE)
+            .timeout(brain::timeouts::LLM_GENERATE)
             .build()
             .map_err(|e| {
                 LlmError::ProviderUnavailable(format!("Failed to create HTTP client: {e}"))

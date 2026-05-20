@@ -48,7 +48,7 @@ pub struct RecallConfig {
 }
 
 impl RecallConfig {
-    /// Build from individual config values (avoids cross-crate dependency on brain_core).
+    /// Build from individual config values (avoids cross-crate dependency on brain).
     pub fn from_config(
         rrf_k: u32,
         pre_fusion_limit: u32,

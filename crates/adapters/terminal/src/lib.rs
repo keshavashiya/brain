@@ -93,11 +93,11 @@ impl SessionRegistry {
 #[derive(Clone)]
 pub struct TerminalAuth {
     pub identity: Arc<dyn IdentityStore>,
-    pub api_keys: Arc<Vec<brain_core::ApiKeyConfig>>,
+    pub api_keys: Arc<Vec<brain::ApiKeyConfig>>,
 }
 
 impl TerminalAuth {
-    pub fn new(identity: Arc<dyn IdentityStore>, api_keys: Vec<brain_core::ApiKeyConfig>) -> Self {
+    pub fn new(identity: Arc<dyn IdentityStore>, api_keys: Vec<brain::ApiKeyConfig>) -> Self {
         Self {
             identity,
             api_keys: Arc::new(api_keys),

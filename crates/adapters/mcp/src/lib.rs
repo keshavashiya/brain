@@ -37,7 +37,7 @@
 
 use std::sync::Arc;
 
-use brain_core::ApiKeyConfig;
+use brain::ApiKeyConfig;
 use serde_json::{json, Value};
 
 mod protocol;
@@ -81,7 +81,7 @@ impl McpServer {
     /// Returns true if the given key is valid with write permission (or if auth is disabled).
     /// MCP clients can both read and write, so we require write permission.
     pub fn validate_key(&self, key: &str) -> bool {
-        brain_core::check_auth(&self.api_keys, Some(key), "write").is_allowed()
+        brain::check_auth(&self.api_keys, Some(key), "write").is_allowed()
     }
 
     /// Handle a single JSON-RPC request and return a response.
@@ -404,7 +404,7 @@ mod tests {
     /// Create a test server with no API keys (auth disabled).
     async fn make_server() -> (McpServer, tempfile::TempDir) {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let processor = signal::SignalProcessor::new(config).await.unwrap();
         // No api_keys → auth disabled for unit tests
@@ -414,7 +414,7 @@ mod tests {
     /// Create a test server WITH the generated API key (auth enabled).
     async fn make_server_with_auth() -> (McpServer, tempfile::TempDir, String) {
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let api_key = config.access.api_keys.first().unwrap().key.clone();
         let api_keys = config.access.api_keys.clone();
@@ -676,7 +676,7 @@ mod tests {
 
     #[test]
     fn test_validate_key_with_valid_key() {
-        let config = brain_core::BrainConfig::default();
+        let config = brain::BrainConfig::default();
         let keys = config.access.api_keys;
         let server_keys = keys.clone();
         // Ensure the generated key is present
@@ -693,7 +693,7 @@ mod tests {
         use tower::util::ServiceExt;
 
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let api_keys = config.access.api_keys.clone();
         let processor = signal::SignalProcessor::new(config).await.unwrap();
@@ -704,7 +704,7 @@ mod tests {
         let router = Router::new()
             .route("/mcp", post(http_handler))
             .with_state(state)
-            .layer(brain_core::cors::localhost_cors());
+            .layer(brain::cors::localhost_cors());
 
         let body = serde_json::json!({
             "jsonrpc": "2.0",
@@ -732,7 +732,7 @@ mod tests {
         use tower::util::ServiceExt;
 
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let api_keys = config.access.api_keys.clone();
         let processor = signal::SignalProcessor::new(config).await.unwrap();
@@ -743,7 +743,7 @@ mod tests {
         let router = Router::new()
             .route("/mcp", post(http_handler))
             .with_state(state)
-            .layer(brain_core::cors::localhost_cors());
+            .layer(brain::cors::localhost_cors());
 
         let body = serde_json::json!({
             "jsonrpc": "2.0",
@@ -771,7 +771,7 @@ mod tests {
         use tower::util::ServiceExt;
 
         let temp = tempfile::tempdir().unwrap();
-        let mut config = brain_core::BrainConfig::default();
+        let mut config = brain::BrainConfig::default();
         config.brain.data_dir = temp.path().to_str().unwrap().to_string();
         let api_key = config.access.api_keys.first().unwrap().key.clone();
         let api_keys = config.access.api_keys.clone();
@@ -783,7 +783,7 @@ mod tests {
         let router = Router::new()
             .route("/mcp", post(http_handler))
             .with_state(state)
-            .layer(brain_core::cors::localhost_cors());
+            .layer(brain::cors::localhost_cors());
 
         let body = serde_json::json!({
             "jsonrpc": "2.0",

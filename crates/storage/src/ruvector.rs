@@ -66,8 +66,8 @@ pub struct VectorResult {
 }
 
 /// Tuning knobs for the underlying ruvector HNSW index. Mirrors the
-/// fields in `brain_core::HnswConfig` but lives here so the storage
-/// crate can stay independent of `brain_core`. Callers convert at the
+/// fields in `brain::HnswConfig` but lives here so the storage
+/// crate can stay independent of `brain`. Callers convert at the
 /// boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HnswConfig {

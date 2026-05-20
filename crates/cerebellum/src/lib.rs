@@ -137,7 +137,7 @@ impl ProcedureStore {
 
         let input_words: Vec<String> = input
             .split_whitespace()
-            .map(brain_core::normalize_keyword)
+            .map(brain::normalize_keyword)
             .collect();
 
         Ok(candidates
@@ -146,7 +146,7 @@ impl ProcedureStore {
                 let trigger_words: Vec<String> = p
                     .trigger_pattern
                     .split_whitespace()
-                    .map(brain_core::normalize_keyword)
+                    .map(brain::normalize_keyword)
                     .collect();
                 if trigger_words.is_empty() {
                     return false;

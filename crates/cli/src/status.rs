@@ -4,7 +4,7 @@ use crate::bootstrap;
 use crate::daemon::{is_process_running, read_pid};
 use crate::encryption::resolve_llm_api_key;
 
-pub(crate) async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Result<()> {
+pub(crate) async fn show_status(config: &brain::BrainConfig) -> anyhow::Result<()> {
     println!("Brain Scan");
     println!("  DNA:          v{}", env!("CARGO_PKG_VERSION"));
     println!("  Cortex:       {}", config.data_dir().display());
@@ -64,7 +64,7 @@ pub(crate) async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Res
     println!("  Neural mesh:  {}", config.ruvector_path().display());
     println!(
         "  Genome:       {}",
-        brain_core::BrainConfig::user_config_path().display()
+        brain::BrainConfig::user_config_path().display()
     );
 
     println!("\n  Synapses:");
@@ -110,7 +110,7 @@ pub(crate) async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Res
     // Opening SQLite directly causes RuVector lock contention.
     if let Some(base_url) = daemon_running {
         let client = reqwest::Client::builder()
-            .timeout(brain_core::timeouts::STATUS_CHECK)
+            .timeout(brain::timeouts::STATUS_CHECK)
             .build()
             .unwrap_or_default();
         let api_key = config
@@ -159,12 +159,12 @@ pub(crate) async fn show_status(config: &brain_core::BrainConfig) -> anyhow::Res
         .trim_end_matches('/');
     let probes_searxng = matches!(
         config.actions.web_search.provider,
-        brain_core::config::WebSearchProvider::Searxng
+        brain::config::WebSearchProvider::Searxng
     );
     if probes_searxng && !searxng_ep.is_empty() {
         println!("\n  External Services:");
         let client = reqwest::Client::builder()
-            .timeout(brain_core::timeouts::STATUS_CHECK)
+            .timeout(brain::timeouts::STATUS_CHECK)
             .build()
             .unwrap_or_default();
         let health_url = format!("{}/healthz", searxng_ep);

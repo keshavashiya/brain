@@ -444,14 +444,14 @@ async fn connect_ws_session(ws_url: &str, api_key: &str) -> anyhow::Result<(WsSi
     Ok((sink, stream))
 }
 
-fn ws_url(config: &brain_core::BrainConfig) -> String {
+fn ws_url(config: &brain::BrainConfig) -> String {
     format!(
         "ws://{}:{}",
         config.adapters.http.host, config.adapters.ws.port
     )
 }
 
-fn first_api_key(config: &brain_core::BrainConfig) -> anyhow::Result<String> {
+fn first_api_key(config: &brain::BrainConfig) -> anyhow::Result<String> {
     config
         .access
         .api_keys
@@ -461,7 +461,7 @@ fn first_api_key(config: &brain_core::BrainConfig) -> anyhow::Result<String> {
 }
 
 pub(crate) async fn chat_non_interactive(
-    config: &brain_core::BrainConfig,
+    config: &brain::BrainConfig,
     message: &str,
 ) -> anyhow::Result<()> {
     let _ = crate::bootstrap::require_daemon(config).await?;
@@ -574,7 +574,7 @@ async fn run_reader<P: ExternalPrinter + Send + 'static>(
     }
 }
 
-pub(crate) async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()> {
+pub(crate) async fn chat_interactive(config: &brain::BrainConfig) -> anyhow::Result<()> {
     let _ = crate::bootstrap::require_daemon(config).await?;
     let ws_url = ws_url(config);
     let api_key = first_api_key(config)?;

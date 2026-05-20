@@ -10,7 +10,7 @@
 
 use std::sync::Arc;
 
-use brain_core::BrainConfig;
+use brain::BrainConfig;
 use brainos_signal::{ResponseContent, Signal, SignalProcessor, SignalSource};
 use mcphost::{InMemoryMcpHost, MCPHost};
 use terminal::TerminalBridge;

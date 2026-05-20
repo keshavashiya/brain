@@ -3,7 +3,7 @@
 #[derive(Clone)]
 pub struct DefaultSchedulingBackend {
     pub db: storage::SqlitePool,
-    pub mode: brain_core::config::SchedulingMode,
+    pub mode: brain::config::SchedulingMode,
 }
 
 #[async_trait::async_trait]
@@ -14,7 +14,7 @@ impl cortex::actions::SchedulingBackend for DefaultSchedulingBackend {
         cron: Option<&str>,
         namespace: &str,
     ) -> Result<cortex::actions::ScheduleOutcome, cortex::actions::ActionError> {
-        if self.mode != brain_core::config::SchedulingMode::PersistOnly {
+        if self.mode != brain::config::SchedulingMode::PersistOnly {
             return Err(cortex::actions::ActionError::InvalidArguments(format!(
                 "Unsupported scheduling mode: {:?}",
                 self.mode
@@ -48,7 +48,7 @@ mod tests {
         let db = storage::SqlitePool::open_memory().unwrap();
         let backend = DefaultSchedulingBackend {
             db: db.clone(),
-            mode: brain_core::config::SchedulingMode::PersistOnly,
+            mode: brain::config::SchedulingMode::PersistOnly,
         };
 
         let outcome = cortex::actions::SchedulingBackend::schedule(

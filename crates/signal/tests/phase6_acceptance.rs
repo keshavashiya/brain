@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use brain_core::BrainConfig;
+use brain::BrainConfig;
 use brainos_signal::{ResponseContent, Signal, SignalProcessor, SignalResponse, SignalSource};
 use chrono::Utc;
 use delegate::{
