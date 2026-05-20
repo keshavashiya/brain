@@ -485,6 +485,17 @@ impl SignalProcessor {
             "Signal classified"
         );
 
+        if let Some(observer) = &self.observer {
+            let intent_summary = intent_summary_of(&classification.intent);
+            let ev = observe::BrainEvent::IntentClassified {
+                id: signal.id,
+                intent: intent_summary,
+                confidence: classification.confidence as f32,
+                ts: chrono::Utc::now(),
+            };
+            let _ = observer.publish(ev).await;
+        }
+
         if !classification.extracted_facts.is_empty() {
             let facts_to_store: Vec<_> = classification
                 .extracted_facts
@@ -1312,6 +1323,19 @@ impl SignalProcessor {
                             format!("Approval {nonce} rejected. Action cancelled.")
                         }
                     }
+                    // The user replied after the nonce already settled
+                    // (timed_out / approved / rejected / NotFound). This
+                    // is almost always benign: the chat client buffered
+                    // the keystroke during a previous in-flight signal
+                    // and flushed it slightly late. Surfacing
+                    // "Approval already resolved" as a Brain: error
+                    // just confuses the user, so we swallow it quietly
+                    // with no body so the renderer skips it.
+                    Err(confirm::ConfirmError::AlreadyResolved(_))
+                    | Err(confirm::ConfirmError::NotFound(_)) => {
+                        let resp = prepend_nudges(SignalResponse::ok(signal_id, String::new()));
+                        return Ok(PipelineResult::Complete(resp));
+                    }
                     Err(e) => format!("Failed to respond to {nonce}: {e}"),
                 }
             }
@@ -2101,8 +2125,38 @@ impl SignalProcessor {
                 &req.verb_action,
             ));
         }
+        let nonce = spec.nonce.clone();
 
-        match engine.request(spec).await {
+        if let Some(observer) = &self.observer {
+            let ev = observe::BrainEvent::ConfirmationRequested {
+                id: signal_id,
+                nonce: nonce.clone(),
+                reason: description.clone(),
+                ts: chrono::Utc::now(),
+            };
+            let _ = observer.publish(ev).await;
+        }
+
+        let result = engine.request(spec).await;
+
+        if let Some(observer) = &self.observer {
+            let decision = match &result {
+                Ok(confirm::ApprovalOutcome::Approved) => "approved",
+                Ok(confirm::ApprovalOutcome::Rejected { .. }) => "rejected",
+                Ok(confirm::ApprovalOutcome::TimedOut) => "timed_out",
+                Ok(confirm::ApprovalOutcome::Aborted { .. }) => "aborted",
+                Err(_) => "error",
+            };
+            let ev = observe::BrainEvent::ConfirmationResolved {
+                id: signal_id,
+                nonce,
+                decision: decision.to_string(),
+                ts: chrono::Utc::now(),
+            };
+            let _ = observer.publish(ev).await;
+        }
+
+        match result {
             Ok(confirm::ApprovalOutcome::Approved) => None,
             Ok(confirm::ApprovalOutcome::Rejected { reason }) => Some(SignalResponse::error(
                 signal_id,
@@ -2550,6 +2604,111 @@ impl<'a> Drop for CancelGuard<'a> {
 
 // `DeliveryCategory::parse` (and `FromStr`) live in the channel crate —
 // no local normalizer needed here.
+
+/// Project a thalamus::Intent into the observe-crate IntentSummary shape.
+/// Kept in the signal crate so we keep observe free of a thalamus dep.
+/// Args are best-effort redacted via observe::Redactor.
+fn intent_summary_of(intent: &thalamus::Intent) -> observe::IntentSummary {
+    use thalamus::Intent;
+    let (kind, mut args) = match intent {
+        Intent::Chat { content } => ("Chat", serde_json::json!({ "content": content })),
+        Intent::StoreFact {
+            subject,
+            predicate,
+            object,
+        } => (
+            "StoreFact",
+            serde_json::json!({ "subject": subject, "predicate": predicate, "object": object }),
+        ),
+        Intent::Forget { target } => ("Forget", serde_json::json!({ "target": target })),
+        Intent::Recall { query } => ("Recall", serde_json::json!({ "query": query })),
+        Intent::MemorySummary => ("MemorySummary", serde_json::Value::Null),
+        Intent::ExecuteCommand { command, args } => (
+            "ExecuteCommand",
+            serde_json::json!({ "command": command, "args": args }),
+        ),
+        Intent::WebSearch { query } => ("WebSearch", serde_json::json!({ "query": query })),
+        Intent::SendMessage {
+            channel,
+            recipient,
+            content,
+        } => (
+            "SendMessage",
+            serde_json::json!({ "channel": channel, "recipient": recipient, "content": content }),
+        ),
+        Intent::ProjectInspect { path, focus } => (
+            "ProjectInspect",
+            serde_json::json!({ "path": path, "focus": focus }),
+        ),
+        Intent::DelegateTask { agent, prompt } => (
+            "DelegateTask",
+            serde_json::json!({ "agent": agent, "prompt": prompt }),
+        ),
+        Intent::ToolCall(token) => (
+            "ToolCall",
+            serde_json::json!({
+                "verb_ns": token.verb.namespace,
+                "verb_action": token.verb.action,
+            }),
+        ),
+        // For control-plane and inspection intents the variant name alone
+        // suffices — no payload of interest for observers.
+        other => (intent_variant_name(other), serde_json::Value::Null),
+    };
+    observe::Redactor::new().redact(&mut args);
+    observe::IntentSummary {
+        kind: kind.to_string(),
+        args_redacted: args,
+    }
+}
+
+/// Fallback variant-name extractor for intents we don't project explicitly.
+/// Strips the `Intent::` prefix and any payload from the Debug rendering so
+/// the resulting string is a stable enum-style tag.
+fn intent_variant_name(intent: &thalamus::Intent) -> &'static str {
+    use thalamus::Intent::*;
+    match intent {
+        Chat { .. } => "Chat",
+        StoreFact { .. } => "StoreFact",
+        Forget { .. } => "Forget",
+        Recall { .. } => "Recall",
+        MemorySummary => "MemorySummary",
+        ExecuteCommand { .. } => "ExecuteCommand",
+        WebSearch { .. } => "WebSearch",
+        SendMessage { .. } => "SendMessage",
+        ProjectInspect { .. } => "ProjectInspect",
+        DelegateTask { .. } => "DelegateTask",
+        ToolCall(_) => "ToolCall",
+        QueryAudit { .. } => "QueryAudit",
+        PruneAudit { .. } => "PruneAudit",
+        ListApprovals { .. } => "ListApprovals",
+        RespondToApproval { .. } => "RespondToApproval",
+        BudgetStatus { .. } => "BudgetStatus",
+        Schedule { .. } => "Schedule",
+        ListSchedules => "ListSchedules",
+        CancelSchedule { .. } => "CancelSchedule",
+        SystemStatus => "SystemStatus",
+        QueryAgents { .. } => "QueryAgents",
+        ListTasks => "ListTasks",
+        TaskStatus { .. } => "TaskStatus",
+        CancelTask { .. } => "CancelTask",
+        CancelSignal { .. } => "CancelSignal",
+        SetProactivity { .. } => "SetProactivity",
+        ProactivityStatus => "ProactivityStatus",
+        DecomposeTask { .. } => "DecomposeTask",
+        ListChannels => "ListChannels",
+        ChannelPreferences { .. } => "ChannelPreferences",
+        SetChannelPreference { .. } => "SetChannelPreference",
+        OpenTerminalSession { .. } => "OpenTerminalSession",
+        CloseTerminalSession { .. } => "CloseTerminalSession",
+        ListTerminalSessions => "ListTerminalSessions",
+        MountMcpServer { .. } => "MountMcpServer",
+        UnmountMcpServer { .. } => "UnmountMcpServer",
+        ListMcpServers => "ListMcpServers",
+        ListStandingApprovals => "ListStandingApprovals",
+        RevokeStandingApproval { .. } => "RevokeStandingApproval",
+    }
+}
 
 // ── ProjectInspect helpers ─────────────────────────────────────────────────
 
