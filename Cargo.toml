@@ -170,7 +170,7 @@ reflex = { package = "brainos-reflex", path = "crates/reflex", version = "0.4.0"
 resilience = { package = "brainos-resilience", path = "crates/resilience", version = "0.4.0" }
 
 # Benchmarks
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 # Testing
 mockito = "1"
