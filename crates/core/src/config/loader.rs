@@ -203,7 +203,7 @@ impl BrainConfig {
         }
 
         if self.access.api_keys.is_empty() {
-            warnings.push("No API keys configured — all adapters will reject authenticated requests. Run `brain init` or add a key under 'access.api_keys'.".to_string());
+            return Err("No API keys configured. Run `brain init` to generate a config with a secure API key, or configure 'access.api_keys' manually.".to_string());
         }
 
         if self.llm.temperature > 1.5 {

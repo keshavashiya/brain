@@ -810,13 +810,13 @@ mod tests {
         assert!(val["result"]["tools"].is_array());
     }
 
-    /// validate_key() returns true when api_keys is empty (auth disabled).
+    /// validate_key() returns false when api_keys is empty (fails closed).
     #[tokio::test]
-    async fn test_validate_key_empty_keys_always_ok() {
+    async fn test_validate_key_empty_keys_fails_closed() {
         let (server, _tmp) = make_server().await;
-        // api_keys is empty → always valid
-        assert!(server.validate_key("anykey"));
-        assert!(server.validate_key(""));
+        // api_keys is empty → fail-closed (reject all)
+        assert!(!server.validate_key("anykey"));
+        assert!(!server.validate_key(""));
     }
 
     /// validate_key() returns true for generated key when auth is enabled.

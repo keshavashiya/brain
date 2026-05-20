@@ -584,7 +584,7 @@ fn auth_interceptor(
     // gRPC requests can both read and write, so require write permission.
     let result = brain_core::check_auth(api_keys, provided_key, "write");
     match result {
-        brain_core::AuthResult::Open | brain_core::AuthResult::Allowed => {}
+        brain_core::AuthResult::Allowed => {}
         brain_core::AuthResult::InsufficientPermission => {
             return Err(Status::permission_denied(
                 result.error_message("write").unwrap_or_default(),

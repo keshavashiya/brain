@@ -11,8 +11,6 @@ use crate::config::ApiKeyConfig;
 /// Result of an authentication check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthResult {
-    /// Auth is disabled (no API keys configured) — allow all.
-    Open,
     /// Key is valid and has the requested permission.
     Allowed,
     /// No key was provided.
@@ -26,13 +24,13 @@ pub enum AuthResult {
 impl AuthResult {
     /// Returns `true` if the request should be allowed.
     pub fn is_allowed(&self) -> bool {
-        matches!(self, AuthResult::Open | AuthResult::Allowed)
+        matches!(self, AuthResult::Allowed)
     }
 
     /// Returns a human-readable error message, or `None` if allowed.
     pub fn error_message(&self, permission: &str) -> Option<String> {
         match self {
-            AuthResult::Open | AuthResult::Allowed => None,
+            AuthResult::Allowed => None,
             AuthResult::MissingKey => Some("Missing API key".to_string()),
             AuthResult::InvalidKey => Some("Invalid API key".to_string()),
             AuthResult::InsufficientPermission => {
@@ -51,7 +49,7 @@ pub fn extract_bearer_from_value(value: &str) -> Option<&str> {
 
 /// Validate an API key against the configured keys with permission checking.
 ///
-/// - If `api_keys` is empty, auth is disabled and all requests are allowed.
+/// - If `api_keys` is empty, returns `MissingKey` (fail-closed security).
 /// - If `provided_key` is `None`, returns `MissingKey`.
 /// - If the key doesn't match any configured key, returns `InvalidKey`.
 /// - If the key matches but lacks the required permission, returns `InsufficientPermission`.
@@ -62,7 +60,7 @@ pub fn check_auth(
     permission: &str,
 ) -> AuthResult {
     if api_keys.is_empty() {
-        return AuthResult::Open;
+        return AuthResult::MissingKey;
     }
 
     let key = match provided_key {
@@ -110,9 +108,12 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_keys_allows_all() {
-        assert_eq!(check_auth(&[], Some("anything"), "write"), AuthResult::Open);
-        assert_eq!(check_auth(&[], None, "read"), AuthResult::Open);
+    fn test_empty_keys_fails_closed() {
+        assert_eq!(
+            check_auth(&[], Some("anything"), "write"),
+            AuthResult::MissingKey
+        );
+        assert_eq!(check_auth(&[], None, "read"), AuthResult::MissingKey);
     }
 
     #[test]

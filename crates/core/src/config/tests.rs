@@ -162,7 +162,12 @@ fn writable_test_data_dir() -> String {
 fn validated_config() -> BrainConfig {
     let mut c = BrainConfig::default();
     c.brain.data_dir = writable_test_data_dir();
-    c.access.api_keys.clear();
+    c.access.api_keys = vec![ApiKeyConfig {
+        key: "test-secure-api-key-12345".to_string(),
+        name: "test".to_string(),
+        permissions: vec!["read".to_string(), "write".to_string()],
+        agent_id: None,
+    }];
     c
 }
 
@@ -179,13 +184,16 @@ fn test_validate_generated_key_no_warning() {
 }
 
 #[test]
-fn test_validate_no_api_keys_warning() {
-    let config = validated_config();
-    let warnings = config.validate().expect("should be valid");
+fn test_validate_no_api_keys_fails() {
+    let mut config = BrainConfig::default();
+    config.brain.data_dir = writable_test_data_dir();
+    config.access.api_keys.clear();
+    let err = config
+        .validate()
+        .expect_err("should fail with empty API keys");
     assert!(
-        warnings.iter().any(|w| w.contains("No API keys")),
-        "expected no-api-keys warning, got: {:?}",
-        warnings
+        err.contains("No API keys configured"),
+        "unexpected error message: {err}"
     );
 }
 

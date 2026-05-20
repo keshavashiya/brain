@@ -101,14 +101,6 @@ enum Commands {
         /// Host to bind all synapses to
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
-        /// Allow startup with no API keys configured. Without this flag
-        /// the daemon refuses to boot when `access.api_keys` is empty,
-        /// because empty keys silently fall back to "open mode" and
-        /// every `/v1/*` endpoint becomes anonymous. Set this only on
-        /// trusted local boxes — never on a host reachable over the
-        /// network.
-        #[arg(long)]
-        no_auth: bool,
     },
 
     /// Expose a nerve ending — MCP stdio server for external AI clients.
@@ -581,9 +573,8 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             mcp,
             terminal,
             host,
-            no_auth,
         } => {
-            serve::cmd_serve(&config, http, ws, grpc, mcp, terminal, host, no_auth).await?;
+            serve::cmd_serve(&config, http, ws, grpc, mcp, terminal, host).await?;
         }
 
         // ── mcp stdio ─────────────────────────────────────────────────────────
