@@ -1,0 +1,738 @@
+//! HTTP adapter unit + integration tests.
+
+use std::{num::NonZeroUsize, sync::Arc};
+
+use axum::{
+    body::Body,
+    http::{self, Request},
+    routing::{get, post},
+    Router,
+};
+use tokio::sync::Mutex;
+use tower::util::ServiceExt;
+use uuid::Uuid;
+
+use crate::handlers::*;
+use crate::metrics::Metrics;
+use crate::state::{AppState, CACHE_CAPACITY};
+use crate::types::*;
+
+/// Build a test router with the API key pre-loaded.
+async fn make_router() -> (Router, tempfile::TempDir, String) {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = brain::BrainConfig::default();
+    config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+    let api_key = config.access.api_keys.first().unwrap().key.clone();
+    let api_keys = config.access.api_keys.clone();
+    let processor = signal::SignalProcessor::new(config).await.unwrap();
+    let router = crate::create_router(
+        Arc::new(processor),
+        std::collections::HashMap::new(),
+        api_keys,
+        true,
+    );
+    (router, temp, api_key)
+}
+
+#[test]
+fn test_parse_source_defaults_to_http() {
+    assert_eq!(
+        signal::SignalSource::parse(None, signal::SignalSource::Http),
+        signal::SignalSource::Http
+    );
+    assert_eq!(
+        signal::SignalSource::parse(Some("http"), signal::SignalSource::Http),
+        signal::SignalSource::Http
+    );
+}
+
+#[test]
+fn test_parse_source_all_variants() {
+    assert_eq!(
+        signal::SignalSource::parse(Some("cli"), signal::SignalSource::Http),
+        signal::SignalSource::Cli
+    );
+    assert_eq!(
+        signal::SignalSource::parse(Some("ws"), signal::SignalSource::Http),
+        signal::SignalSource::WebSocket
+    );
+    assert_eq!(
+        signal::SignalSource::parse(Some("mcp"), signal::SignalSource::Http),
+        signal::SignalSource::Mcp
+    );
+    assert_eq!(
+        signal::SignalSource::parse(Some("grpc"), signal::SignalSource::Http),
+        signal::SignalSource::Grpc
+    );
+}
+
+#[test]
+fn test_health_response_serializes() {
+    let h = HealthResponse {
+        status: "ok",
+        version: "1.0.0",
+    };
+    let json = serde_json::to_string(&h).unwrap();
+    assert!(json.contains("\"status\":\"ok\""));
+    assert!(json.contains("\"version\""));
+}
+
+#[test]
+fn test_fact_json_serializes() {
+    let f = FactJson {
+        id: "abc".into(),
+        namespace: "personal".into(),
+        category: "personal".into(),
+        subject: "user".into(),
+        predicate: "likes".into(),
+        object: "Rust".into(),
+        confidence: 0.9,
+        distance: Some(0.05),
+    };
+    let json = serde_json::to_string(&f).unwrap();
+    assert!(json.contains("\"subject\":\"user\""));
+    assert!(json.contains("\"namespace\":\"personal\""));
+    assert!(json.contains("\"distance\":0.05"));
+}
+
+/// Per-client rate limit (Issue 51): after the burst is drained, the
+/// next `/v1/*` request from the same key gets 429. Anonymous routes
+/// (`/health`) remain unthrottled.
+#[tokio::test]
+async fn test_rate_limit_returns_429_after_burst() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = brain::BrainConfig::default();
+    config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+    // Tiny bucket so the test is fast and deterministic.
+    config.access.rate_limit = brain::ClientRateLimitConfig {
+        enabled: true,
+        tokens_per_refill: 1,
+        refill_interval_ms: 60_000,
+        burst_capacity: 2,
+    };
+    let api_key = config.access.api_keys.first().unwrap().key.clone();
+    let api_keys = config.access.api_keys.clone();
+    let processor = signal::SignalProcessor::new(config).await.unwrap();
+    let registry = std::sync::Arc::new(resilience::RateLimitRegistry::new(
+        resilience::RateLimitConfig {
+            tokens_per_refill: 1,
+            refill_interval: std::time::Duration::from_millis(60_000),
+            burst_capacity: 2,
+        },
+    ));
+    let processor = processor.with_client_rate_limits(registry);
+    let router = crate::create_router(
+        Arc::new(processor),
+        std::collections::HashMap::new(),
+        api_keys,
+        true,
+    );
+
+    let make_req = || {
+        Request::builder()
+            .method(http::Method::GET)
+            .uri("/v1/memory/facts")
+            .header("authorization", format!("Bearer {api_key}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    // Burst of 2 should succeed (auth passes — 200 with empty list).
+    for _ in 0..2 {
+        let resp = router.clone().oneshot(make_req()).await.unwrap();
+        assert!(
+            resp.status() != http::StatusCode::TOO_MANY_REQUESTS,
+            "burst should not 429: got {}",
+            resp.status()
+        );
+    }
+    // Third should 429.
+    let resp = router.clone().oneshot(make_req()).await.unwrap();
+    assert_eq!(resp.status(), http::StatusCode::TOO_MANY_REQUESTS);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(payload["error"], "rate_limited");
+
+    // /health is anonymous → still served, never 429.
+    let health = router
+        .oneshot(
+            Request::builder()
+                .method(http::Method::GET)
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(health.status(), http::StatusCode::OK);
+}
+
+/// POST /v1/webhooks/:id on a verifier-less transport must require a
+/// Brain API key (Issue 52). Anonymous POST → 401, Bearer → 200.
+#[tokio::test]
+async fn test_post_webhook_without_verifier_requires_bearer_auth() {
+    use channel::transport::{
+        inbound::{WebhookInboundConfig, WebhookInboundTransport},
+        preset::{
+            FieldExtractors, HttpMethod, PresetDefinition, PresetKind, SendSpec, WebhookInboundSpec,
+        },
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = brain::BrainConfig::default();
+    config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+    let api_key = config.access.api_keys.first().unwrap().key.clone();
+    let api_keys = config.access.api_keys.clone();
+
+    let preset = PresetDefinition {
+        id: "test-webhook".into(),
+        kind: PresetKind::WebhookInbound,
+        label: Some("test".into()),
+        poll: None,
+        send: Some(SendSpec {
+            url_template: "http://example.invalid/{reply_to}".into(),
+            method: HttpMethod::Post,
+            body_template: "{}".into(),
+            content_type: "application/json".into(),
+            headers: std::collections::HashMap::new(),
+        }),
+        webhook: Some(WebhookInboundSpec {
+            messages_path: "$".into(),
+            extract: FieldExtractors {
+                id: Some("$.id".into()),
+                text: "$.text".into(),
+                user_ref: None,
+                reply_to: None,
+                extra: std::collections::HashMap::new(),
+            },
+            ack_body: None,
+            ack_content_type: "application/json".into(),
+            ack_extract: std::collections::HashMap::new(),
+            ack_only_when: None,
+        }),
+        verifier: None, // ← key: no signature verification
+    };
+    let transport = std::sync::Arc::new(
+        WebhookInboundTransport::new(WebhookInboundConfig::new("w", "w", preset)).unwrap(),
+    );
+    assert!(
+        !transport.has_verifier(),
+        "test fixture should be verifier-less"
+    );
+
+    let processor = signal::SignalProcessor::new(config).await.unwrap();
+    let mut webhooks = std::collections::HashMap::new();
+    webhooks.insert("ingest".to_string(), transport);
+
+    let router = crate::create_router(Arc::new(processor), webhooks, api_keys, true);
+
+    // Anonymous → 401.
+    let resp = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(http::Method::POST)
+                .uri("/v1/webhooks/ingest")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"id":"m1","text":"hi"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), http::StatusCode::UNAUTHORIZED);
+
+    // With Bearer → 200.
+    let resp = router
+        .oneshot(
+            Request::builder()
+                .method(http::Method::POST)
+                .uri("/v1/webhooks/ingest")
+                .header("authorization", format!("Bearer {api_key}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"id":"m1","text":"hi"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), http::StatusCode::OK);
+}
+
+/// POST /v1/webhooks/:id with an unknown id returns 404 (regression for Issue 43 — used to panic via `Response::builder().unwrap()`).
+#[tokio::test]
+async fn test_post_webhook_unknown_id_returns_404() {
+    let (router, _tmp, _api_key) = make_router().await;
+
+    let request = Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/webhooks/does-not-exist")
+        .body(Body::from(""))
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(
+        text.contains("does-not-exist"),
+        "expected 404 body to identify the missing transport: {text}"
+    );
+}
+
+/// GET /openapi.json — no auth required, returns valid OpenAPI spec.
+#[tokio::test]
+async fn test_openapi_endpoint() {
+    let (router, _tmp, _api_key) = make_router().await;
+
+    let request = Request::builder()
+        .method(http::Method::GET)
+        .uri("/openapi.json")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let spec: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
+    assert_eq!(spec["openapi"], "3.0.3");
+    assert!(
+        spec["paths"]["/v1/signals"].is_object(),
+        "missing /v1/signals path"
+    );
+    assert!(
+        spec["components"]["schemas"]["FactJson"].is_object(),
+        "missing FactJson schema"
+    );
+}
+
+/// GET /api — no auth required, returns Swagger UI HTML.
+#[tokio::test]
+async fn test_swagger_ui_endpoint() {
+    let (router, _tmp, _api_key) = make_router().await;
+
+    let request = Request::builder()
+        .method(http::Method::GET)
+        .uri("/api")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = std::str::from_utf8(&bytes).unwrap();
+    assert!(body.contains("swagger-ui"), "missing Swagger UI element");
+    assert!(body.contains("/openapi.json"), "missing spec URL reference");
+}
+
+/// GET /ui — no auth required, returns HTML page.
+#[tokio::test]
+async fn test_ui_endpoint() {
+    let (router, _tmp, _api_key) = make_router().await;
+
+    let request = Request::builder()
+        .method(http::Method::GET)
+        .uri("/ui")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+
+    let ct = response
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(ct.contains("text/html"), "expected text/html, got: {ct}");
+
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = std::str::from_utf8(&bytes).unwrap();
+    assert!(body.contains("Brain Memory Explorer"), "missing page title");
+    assert!(
+        body.contains("/v1/memory/search"),
+        "missing API endpoint reference"
+    );
+}
+
+/// GET /metrics — no auth required, returns Prometheus text.
+#[tokio::test]
+async fn test_metrics_endpoint() {
+    let (router, _tmp, _api_key) = make_router().await;
+
+    let request = Request::builder()
+        .method(http::Method::GET)
+        .uri("/metrics")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+
+    let ct = response
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(ct.contains("text/plain"), "expected text/plain, got: {ct}");
+
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = std::str::from_utf8(&bytes).unwrap();
+    assert!(
+        body.contains("brain_signals_total"),
+        "missing counter in metrics output"
+    );
+    assert!(
+        body.contains("brain_search_total"),
+        "missing search counter"
+    );
+}
+
+/// GET /health — no auth required, always returns 200.
+#[tokio::test]
+async fn test_health_endpoint() {
+    let (router, _tmp, _api_key) = make_router().await;
+
+    let request = Request::builder()
+        .method(http::Method::GET)
+        .uri("/health")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["status"], "ok");
+}
+
+/// POST /v1/signals without auth → 401.
+#[tokio::test]
+async fn test_post_signal_no_auth_returns_401() {
+    let (router, _tmp, _api_key) = make_router().await;
+
+    let payload = serde_json::json!({"content": "Remember Rust is fast"});
+    let request = Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/signals")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&payload).unwrap()))
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
+}
+
+/// POST /v1/signals with invalid key → 401.
+#[tokio::test]
+async fn test_post_signal_invalid_key_returns_401() {
+    let (router, _tmp, _api_key) = make_router().await;
+
+    let payload = serde_json::json!({"content": "Remember Rust is fast"});
+    let request = Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/signals")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer wrong-key")
+        .body(Body::from(serde_json::to_string(&payload).unwrap()))
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
+}
+
+/// POST /v1/signals with valid API key → 200.
+#[tokio::test]
+async fn test_post_signal_store_fact_with_auth() {
+    let (router, _tmp, api_key) = make_router().await;
+
+    let payload = serde_json::json!({"content": "Remember that Rust is fast"});
+    let request = Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/signals")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {api_key}"))
+        .body(Body::from(serde_json::to_string(&payload).unwrap()))
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(resp["status"], "Ok");
+}
+
+/// GET /v1/memory/facts with no auth → 401.
+#[tokio::test]
+async fn test_get_facts_no_auth_returns_401() {
+    let (router, _tmp, _api_key) = make_router().await;
+
+    let request = Request::builder()
+        .method(http::Method::GET)
+        .uri("/v1/memory/facts")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
+}
+
+/// GET /v1/memory/facts with valid API key → 200.
+#[tokio::test]
+async fn test_get_facts_endpoint_with_auth() {
+    let (router, _tmp, api_key) = make_router().await;
+
+    let request = Request::builder()
+        .method(http::Method::GET)
+        .uri("/v1/memory/facts")
+        .header("authorization", format!("Bearer {api_key}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(body.is_array());
+}
+
+/// POST /v1/memory/search with valid read-only key → 200.
+#[tokio::test]
+async fn test_search_with_read_only_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = brain::BrainConfig::default();
+    config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+    config.access.api_keys.push(brain::ApiKeyConfig {
+        key: "read-only-key".to_string(),
+        name: "Read Only".to_string(),
+        permissions: vec!["read".to_string()],
+        agent_id: None,
+    });
+    let api_keys = config.access.api_keys.clone();
+    let processor = signal::SignalProcessor::new(config).await.unwrap();
+    let router = crate::create_router(
+        Arc::new(processor),
+        std::collections::HashMap::new(),
+        api_keys,
+        true,
+    );
+
+    let payload = serde_json::json!({"query": "Rust", "top_k": 5});
+    let request = Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/memory/search")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer read-only-key")
+        .body(Body::from(serde_json::to_string(&payload).unwrap()))
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+}
+
+/// POST /v1/signals with read-only key → 401 (missing write permission).
+#[tokio::test]
+async fn test_post_signal_read_only_key_returns_401() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = brain::BrainConfig::default();
+    config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+    config.access.api_keys.push(brain::ApiKeyConfig {
+        key: "read-only-key".to_string(),
+        name: "Read Only".to_string(),
+        permissions: vec!["read".to_string()],
+        agent_id: None,
+    });
+    let api_keys = config.access.api_keys.clone();
+    let processor = signal::SignalProcessor::new(config).await.unwrap();
+    let router = crate::create_router(
+        Arc::new(processor),
+        std::collections::HashMap::new(),
+        api_keys,
+        true,
+    );
+
+    let payload = serde_json::json!({"content": "Remember something"});
+    let request = Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/signals")
+        .header("content-type", "application/json")
+        .header("authorization", "Bearer read-only-key")
+        .body(Body::from(serde_json::to_string(&payload).unwrap()))
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
+}
+
+/// Integration test: HTTP POST /v1/signals (store intent) → fact persisted in DB.
+#[tokio::test]
+async fn test_http_store_signal_fact_persisted_in_db() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = brain::BrainConfig::default();
+    config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+    let api_key = config.access.api_keys.first().unwrap().key.clone();
+    let api_keys = config.access.api_keys.clone();
+    let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
+    let state = Arc::new(AppState {
+        processor,
+        webhook_handlers: std::collections::HashMap::new(),
+        cache: Mutex::new(lru::LruCache::new(
+            NonZeroUsize::new(CACHE_CAPACITY).unwrap(),
+        )),
+        api_keys,
+        metrics: Arc::new(Metrics::default()),
+    });
+
+    let payload = serde_json::json!({"content": "Remember that Rust is fast"});
+    let post_req = Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/signals")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {api_key}"))
+        .body(Body::from(serde_json::to_string(&payload).unwrap()))
+        .unwrap();
+
+    let router = Router::new()
+        .route("/v1/signals", post(post_signal_handler))
+        .route("/v1/memory/facts", get(get_facts_handler))
+        .with_state(state.clone());
+
+    let post_resp = router.clone().oneshot(post_req).await.unwrap();
+    assert_eq!(post_resp.status(), http::StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(post_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let resp_json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(resp_json["status"], "Ok");
+    assert!(resp_json["memory_context"].is_object());
+
+    let get_req = Request::builder()
+        .method(http::Method::GET)
+        .uri("/v1/memory/facts")
+        .header("authorization", format!("Bearer {api_key}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let get_resp = router.oneshot(get_req).await.unwrap();
+    assert_eq!(get_resp.status(), http::StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(get_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let facts: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(facts.is_array(), "Expected array of facts");
+    assert!(
+        !facts.as_array().unwrap().is_empty(),
+        "Stored fact should appear in GET /v1/memory/facts"
+    );
+}
+
+/// Integration test: HTTP POST /v1/memory/search → returns relevant fact.
+#[tokio::test]
+async fn test_http_memory_search_returns_stored_fact() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = brain::BrainConfig::default();
+    config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+    let api_key = config.access.api_keys.first().unwrap().key.clone();
+    let api_keys = config.access.api_keys.clone();
+    let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
+
+    let _ = processor
+        .store_fact_direct("personal", "test", "Ferris", "is", "the Rust mascot", None)
+        .await
+        .unwrap();
+
+    let state = Arc::new(AppState {
+        processor,
+        webhook_handlers: std::collections::HashMap::new(),
+        cache: Mutex::new(lru::LruCache::new(
+            NonZeroUsize::new(CACHE_CAPACITY).unwrap(),
+        )),
+        api_keys,
+        metrics: Arc::new(Metrics::default()),
+    });
+
+    let router = Router::new()
+        .route("/v1/memory/search", post(search_memory_handler))
+        .with_state(state);
+
+    let payload = serde_json::json!({"query": "Ferris Rust mascot", "top_k": 5});
+    let request = Request::builder()
+        .method(http::Method::POST)
+        .uri("/v1/memory/search")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {api_key}"))
+        .body(Body::from(serde_json::to_string(&payload).unwrap()))
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let results: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(results.is_array(), "Expected array of search results");
+}
+
+/// Integration test: cached signal can be retrieved by GET /v1/signals/:id.
+#[tokio::test]
+async fn test_get_cached_signal_with_auth() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = brain::BrainConfig::default();
+    config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+    let api_key = config.access.api_keys.first().unwrap().key.clone();
+    let api_keys = config.access.api_keys.clone();
+    let processor = Arc::new(signal::SignalProcessor::new(config).await.unwrap());
+    let state = Arc::new(AppState {
+        processor,
+        webhook_handlers: std::collections::HashMap::new(),
+        cache: Mutex::new(lru::LruCache::new(
+            NonZeroUsize::new(CACHE_CAPACITY).unwrap(),
+        )),
+        api_keys,
+        metrics: Arc::new(Metrics::default()),
+    });
+
+    let id = Uuid::new_v4();
+    let fake_resp = signal::SignalResponse::ok(id, "test response");
+    state.cache.lock().await.put(id, fake_resp);
+
+    let router = Router::new()
+        .route("/v1/signals/:id", get(get_signal_handler))
+        .with_state(state);
+
+    let request = Request::builder()
+        .method(http::Method::GET)
+        .uri(format!("/v1/signals/{id}"))
+        .header("authorization", format!("Bearer {api_key}"))
+        .body(Body::empty())
+        .unwrap();
+
+    let response = router.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), http::StatusCode::OK);
+}
