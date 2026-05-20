@@ -129,6 +129,45 @@ Workspace-locked: all 31 crates publish at 0.4.0 together.
   now actually prevents the HTTP adapter from starting, instead of
   being silently ignored.
 
+#### Post-closeout soak fixes
+
+- **WebSocket chat confirmation reach.** Each authenticated WS
+  connection now registers a `WsChatTransport` with the
+  `ChannelDispatcher` (id `ws:<conn-uuid>`) so confirmation prompts
+  and any other outbound `DeliveryIntent` reach the user on the same
+  socket they're chatting on. Inbound is a no-op — chat content
+  already flows through `process_text_frame` into the signal pipeline.
+  The connection handler calls `unregister_transport` on disconnect
+  so the router stops routing to dead handles.
+  `ChannelDispatcher::unregister_transport` and
+  `ChannelRouter::unregister` are new (idempotent) and used only by
+  short-lived transports. The streaming response path was also
+  reshaped around a per-connection `mpsc<Message>` fan-in so the
+  reader, writer, and BrainEvent broadcast subscriber don't fight
+  over the underlying sink.
+- **Observability gap closed: `IntentClassified`,
+  `ConfirmationRequested`, `ConfirmationResolved` now actually
+  emit** from the signal pipeline. Previously defined on the bus but
+  never published; `brain tail` and the WS event stream now surface
+  them in real time. Resolution decisions are tagged
+  `approved`/`rejected`/`timed_out`/`aborted`/`error`.
+- **Late `RespondToApproval` swallowed silently.** If the user's
+  chat client buffered an `approve <nonce>` keystroke that lands
+  after the engine has already timed out / approved / rejected the
+  nonce (`AlreadyResolved` / `NotFound`), the pipeline now returns
+  an empty body so the renderer skips it. Previously it surfaced
+  "Approval already resolved" as a confusing `Brain:` error.
+- **Terminal replay buffer closes late-attach race** in `TerminalBridge`
+  (commit 9868dd2).
+- **`SignalReceived` published on streaming WS chat + `brain tail`
+  prints a connect line** (commit 237dac1).
+- **`brain tail` reqwest no longer hangs** on zero-duration timeout
+  (commit b5aaf0e).
+- **Audit observer wired in bootstrap** so `SqliteAuditTrail` events
+  reach the bus (commit 9708294).
+- **Soak regressions fixed**: `brain tail` auth handshake, config
+  fallback path, terminal close error text (commit d8e0612).
+
 ### Security
 
 - **Per-client rate limiting on HTTP/WS/gRPC** (Issue 51, Wave C.3).
@@ -139,10 +178,16 @@ Workspace-locked: all 31 crates publish at 0.4.0 together.
   (Issue 52, Wave C.4). `POST /v1/webhooks/:id` now demands a Bearer
   token whenever the configured transport has `verifier == None`.
 
-- **Fail-closed startup on empty `api_keys`** (Issues 53–54, Wave C.5).
-  `brain serve` exits non-zero on launch if `adapters.api_keys` is
-  empty, unless `--no-auth` is passed explicitly. Shell-mode allowlist
-  bypass is now documented in OPERATIONS.md.
+- **Fail-closed on empty `api_keys`** (Issues 53–54, Wave C.5 + soak
+  hardening). Config validation returns `Err` when `access.api_keys` is
+  empty — `brain serve`, `brain start`, and every other command that
+  loads config refuses to boot. The `AuthResult::Open` enum variant
+  that previously let empty-keys silently fall through to "allow all"
+  has been removed; `check_auth` now returns `MissingKey` so adapters
+  fail closed even on direct calls. The original `--no-auth` opt-in
+  flag from the first Wave C.5 patch was also removed — running
+  anonymously is no longer possible. Shell-mode allowlist bypass
+  remains documented in OPERATIONS.md.
 
 - **OAuth `aud` claim validation at MCP mount time** (Issue 163,
   CVE-2025-6514 / confused-deputy via token passthrough). New
@@ -225,41 +270,6 @@ Workspace-locked: all 31 crates publish at 0.4.0 together.
   CORS exact-match, webhook replay protection, SSRF, vault passphrase
   exposure, MCP arbitrary-mount risk); and `brain doctor --deep`
   system inspection.
-
-### Security
-
-- **OAuth `aud` claim validation at MCP mount time** (Issue 163,
-  CVE-2025-6514 / confused-deputy via token passthrough). New
-  `mcphost::aud_check::validate_token_aud` decodes the persisted
-  access token (JWT format only — opaque tokens skip validation) and
-  rejects a mount when the token's `aud` claim does not include the
-  configured RFC 8707 `resource` indicator. `mcphost::manager_from_vault`
-  signature gained `expected_resource` + an `Option<Arc<dyn Observer>>`;
-  `RmcpHost::mount_http` defaults the resource to the server URL
-  (canonical mapping for vanilla MCP deployments) and threads its
-  observer through. Mismatches surface as
-  `BrainEvent::Error { source: "mcphost.oauth" }` on the live event
-  bus AND fail the mount. Signature verification is intentionally
-  out of scope — vault + TLS to AS + PKCE are the trust boundary,
-  not in-band JWS verification. +9 unit tests covering string-aud
-  match, array-aud match, mismatch, missing-aud, opaque-token, and
-  malformed-JWT shapes.
-- **MCP tool descriptions treated as untrusted at the LLM boundary**
-  (Issue 162). New `intent::sanitization::render_tool_description_for_prompt`
-  fences every attacker-controllable description inside a labelled
-  `~~~`-delimited block, strips C0 control bytes + ANSI CSI escapes,
-  defangs any literal fence sentinel inside the body, and caps length
-  at 2 KiB on a UTF-8 char boundary. `intent::ToolDescriptor.description`
-  and `mcphost::ToolDescriptor.description` carry doc-comments marking
-  them untrusted; callers wiring descriptions into prompts must use
-  the sanitizer. Complements the hash-pin rug-pull detector in
-  `mcphost::RmcpHost` (which catches *changes* to descriptions);
-  the sanitizer is what stops a single hostile first-mount description
-  from landing as live system instructions.
-
-### Deferred
-
-_(carry-overs to v0.5.0 / v1.0.0 are listed here as each is decided)_
 
 ## [0.3.0] — 2026-05-14
 
