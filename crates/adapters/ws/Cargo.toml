@@ -16,6 +16,8 @@ signal = { workspace = true }
 resilience = { workspace = true }
 observe = { workspace = true }
 identity = { workspace = true }
+channel = { workspace = true }
+async-trait = { workspace = true }
 tokio-tungstenite = { workspace = true }
 tokio = { workspace = true }
 futures-util = "0.3"

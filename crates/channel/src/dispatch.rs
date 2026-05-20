@@ -64,6 +64,15 @@ impl ChannelDispatcher {
         Ok(())
     }
 
+    /// Drop a previously-registered transport (and its router descriptor).
+    /// Used by short-lived transports — e.g. a WebSocket chat session that
+    /// goes away on disconnect — so the router doesn't try to deliver to
+    /// a dead handle. Idempotent.
+    pub async fn unregister_transport(&self, channel_id: &str) -> Result<(), ChannelError> {
+        self.transports.write().await.remove(channel_id);
+        self.router.unregister(channel_id).await
+    }
+
     pub fn router(&self) -> &Arc<dyn ChannelRouter> {
         &self.router
     }

@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::StreamExt;
 use signal::{PipelineResult, Signal, SignalError, SignalResponse, SignalSource};
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
@@ -61,19 +62,18 @@ pub(crate) async fn process_text_frame(
     }
 }
 
-/// Send a JSON value as a text frame. Returns Err if the send failed.
+/// Push a JSON value as a text frame through the per-connection fan-in
+/// mpsc. Returns Err if the writer task is gone (client disconnected) so
+/// callers can short-circuit and stop generating more chunks.
 async fn send_json_frame_to_sink(
-    ws_tx: &mut futures_util::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
-        Message,
-    >,
+    out_tx: &mpsc::Sender<Message>,
     value: &serde_json::Value,
     conn_id: Uuid,
 ) -> Result<(), ()> {
     match serde_json::to_string(value) {
         Ok(json) => {
-            if ws_tx.send(Message::Text(json.into())).await.is_err() {
-                tracing::debug!(conn_id = %conn_id, "Failed to send WS frame");
+            if out_tx.send(Message::Text(json.into())).await.is_err() {
+                tracing::debug!(conn_id = %conn_id, "Failed to send WS frame (writer closed)");
                 Err(())
             } else {
                 Ok(())
@@ -148,15 +148,13 @@ impl Drop for StreamFinalizer {
 ///
 /// Sends `chunk` frames for each token and a final `complete` frame.
 pub(crate) async fn handle_streaming_request(
-    ws_tx: &mut futures_util::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
-        Message,
-    >,
+    out_tx: mpsc::Sender<Message>,
     conn_id: Uuid,
     processor: Arc<signal::SignalProcessor>,
     client_msg: ClientMessage,
     principal: Option<identity::Principal>,
 ) {
+    let ws_tx = &out_tx;
     let source = SignalSource::parse(client_msg.source.as_deref(), SignalSource::WebSocket);
     let signal = Signal::from_adapter_request(signal::AdapterRequest {
         source,

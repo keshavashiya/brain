@@ -17,21 +17,33 @@
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 
 use brain_core::ApiKeyConfig;
+use channel::DeliveryIntent;
 use futures_util::{SinkExt, StreamExt};
 use serde::Serialize;
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 use uuid::Uuid;
 
 use signal::SignalResponse;
 
+mod chat_transport;
 mod protocol;
 mod streaming;
 
 pub use protocol::{AuthMessage, AuthResponse, ClientMessage, ConnectionInfo, Connections};
 
+use chat_transport::{ws_channel_id, WsChatTransport};
 use streaming::handle_streaming_request;
 pub(crate) use streaming::process_text_frame;
+
+/// Bounded fan-in capacity for the per-connection writer mpsc. Sized so the
+/// writer task can absorb a burst of brain_event/proactive/approval frames
+/// without forcing producers to wait, but small enough that a stalled
+/// client's queue can't grow unbounded.
+const OUTGOING_QUEUE_CAPACITY: usize = 64;
+/// Bounded queue for `DeliveryIntent`s arriving on `WsChatTransport.send`.
+/// The relay task drains this into the outgoing queue.
+const INTENT_QUEUE_CAPACITY: usize = 16;
 
 // ─── Errors ───────────────────────────────────────────────────────────────────
 
@@ -124,10 +136,11 @@ async fn handle_connection(
     let (mut ws_tx, mut ws_rx) = ws_stream.split();
 
     // ── Step 1: authenticate ─────────────────────────────────────────────────
-    // Also resolves the `Principal` once and binds it to the connection's
-    // lifetime — every subsequent signal frame uses it. `client_key` is
-    // captured so subsequent per-frame rate-limit checks key off the same
-    // identifier the HTTP middleware uses.
+    // Auth runs before we spawn the writer task so failure paths can close
+    // the socket directly without leaving a writer task draining a dead
+    // channel. Once auth succeeds we hand `ws_tx` to the writer task and
+    // every subsequent producer (frame handler, brain_event, approval
+    // prompt) writes via the fan-in `out_tx` mpsc.
     let (authed, principal, client_key): (bool, Option<identity::Principal>, Option<String>) =
         match ws_rx.next().await {
             None => return,
@@ -185,22 +198,74 @@ async fn handle_connection(
     }
     let rate_limits = processor.client_rate_limits().cloned();
 
+    // ── Fan-in writer ───────────────────────────────────────────────────────
+    // One task owns `ws_tx`; everyone else (frame handlers, push streams,
+    // approval relay) sends `Message`s through `out_tx`. This is what makes
+    // concurrent frame processing safe — multiple in-flight signal pipelines
+    // can stream chunks back without contending for the sink.
+    let (out_tx, mut out_rx) = mpsc::channel::<Message>(OUTGOING_QUEUE_CAPACITY);
+    let writer_handle = tokio::spawn(async move {
+        while let Some(msg) = out_rx.recv().await {
+            if ws_tx.send(msg).await.is_err() {
+                break;
+            }
+        }
+        // Best-effort: politely close once producers are done.
+        let _ = ws_tx.send(Message::Close(None)).await;
+        let _ = ws_tx.close().await;
+    });
+
+    // ── Register this connection as a Channel transport ─────────────────────
+    // So `ChannelDispatcher::dispatch(Confirm-category intent)` can reach
+    // the active chat session. The transport pushes intents through an
+    // mpsc which the relay task below converts into JSON frames.
+    let dispatcher = processor.channel_dispatcher().cloned();
+    let channel_id = ws_channel_id(conn_id);
+    let (intent_tx, mut intent_rx) = mpsc::channel::<DeliveryIntent>(INTENT_QUEUE_CAPACITY);
+    if let Some(d) = &dispatcher {
+        let transport = Arc::new(WsChatTransport::new(conn_id, intent_tx.clone()));
+        if let Err(e) = d.register_transport(transport).await {
+            tracing::warn!(
+                conn_id = %conn_id, error = %e,
+                "WS chat transport register failed; approval prompts won't reach this session"
+            );
+        } else {
+            tracing::debug!(conn_id = %conn_id, channel_id = %channel_id, "WS chat transport registered");
+        }
+    }
+    let relay_out = out_tx.clone();
+    let relay_conn = conn_id;
+    let relay_handle = tokio::spawn(async move {
+        while let Some(intent) = intent_rx.recv().await {
+            let frame = serde_json::json!({
+                "type": "approval_request",
+                "intent_id": intent.id,
+                "category": format!("{:?}", intent.category).to_lowercase(),
+                "urgency": format!("{:?}", intent.urgency).to_lowercase(),
+                "nonce": intent.nonce,
+                "content": intent.content,
+            });
+            let Ok(json) = serde_json::to_string(&frame) else {
+                tracing::error!(conn_id = %relay_conn, "approval frame serialize failed");
+                continue;
+            };
+            if relay_out.send(Message::Text(json.into())).await.is_err() {
+                break;
+            }
+        }
+    });
+
     // ── Step 2: process signal frames + proactive push ──────────────────────
-    // Subscribe to proactive notifications (if router is available).
     let mut proactive_rx = processor.notification_router().map(|r| r.subscribe());
-    // Subscribe to the BrainEvent bus (if observer is wired).
     let mut brain_rx = processor.subscribe_brain_events();
 
     loop {
-        // Build a future that resolves when a proactive notification arrives,
-        // or pends forever if no router is configured.
         let proactive_fut = async {
             match proactive_rx.as_mut() {
                 Some(rx) => rx.recv().await,
                 None => std::future::pending().await,
             }
         };
-        // Same pattern for the BrainEvent bus.
         let brain_fut = async {
             match brain_rx.as_mut() {
                 Some(rx) => rx.recv().await,
@@ -209,7 +274,9 @@ async fn handle_connection(
         };
 
         tokio::select! {
-            // Incoming client frame
+            // Incoming client frame — spawn the handler so the outer loop
+            // keeps draining ws_rx (and approval pushes keep flowing) even
+            // while a prior signal is awaiting confirmation.
             result = ws_rx.next() => {
                 let Some(result) = result else { break };
                 let msg = match result {
@@ -221,68 +288,69 @@ async fn handle_connection(
                 };
                 match msg {
                     Message::Text(text) => {
-                        // Per-client rate limit (Issue 51). Drop the frame
-                        // with an error response when the bucket is drained.
                         if let (Some(reg), Some(key)) = (rate_limits.as_ref(), client_key.as_ref()) {
                             let limiter = reg.get_or_create(key);
                             if !limiter.try_acquire() {
-                                tracing::warn!(
-                                    conn_id = %conn_id,
-                                    "WS rate limit exceeded"
-                                );
+                                tracing::warn!(conn_id = %conn_id, "WS rate limit exceeded");
                                 let frame = serde_json::json!({
                                     "type": "error",
                                     "code": "rate_limited",
                                     "message": "Too many requests",
                                 });
                                 if let Ok(json) = serde_json::to_string(&frame) {
-                                    if ws_tx.send(Message::Text(json.into())).await.is_err() {
-                                        break;
-                                    }
+                                    let _ = out_tx.send(Message::Text(json.into())).await;
                                 }
                                 continue;
                             }
                         }
-                        // Try to parse as ClientMessage to check for streaming flag
-                        let client_msg: Option<ClientMessage> = serde_json::from_str(text.as_str()).ok();
-                        if let Some(ref cm) = client_msg {
-                            if cm.stream == Some(true) {
-                                // Streaming path: handle directly, no single response
-                                handle_streaming_request(
-                                    &mut ws_tx,
-                                    conn_id,
-                                    processor.clone(),
-                                    cm.clone(),
-                                    principal.clone(),
-                                ).await;
-                                continue;
+                        let text_string = text.to_string();
+                        let client_msg: Option<ClientMessage> =
+                            serde_json::from_str(text_string.as_str()).ok();
+                        let out_tx_clone = out_tx.clone();
+                        let proc_clone = processor.clone();
+                        let principal_clone = principal.clone();
+                        tokio::spawn(async move {
+                            if let Some(cm) = client_msg.as_ref() {
+                                if cm.stream == Some(true) {
+                                    handle_streaming_request(
+                                        out_tx_clone,
+                                        conn_id,
+                                        proc_clone,
+                                        cm.clone(),
+                                        principal_clone,
+                                    )
+                                    .await;
+                                    return;
+                                }
                             }
-                        }
-                        // Non-streaming: use the standard pipeline
-                        let response = match process_text_frame(text.as_str(), conn_id, &processor, principal.as_ref()).await {
-                            Ok(Some(r)) => r,
-                            Ok(None) => continue, // Shouldn't happen for non-streaming, but be safe
-                            Err(e) => {
-                                tracing::warn!(conn_id = %conn_id, "process_text_frame error: {e}");
-                                SignalResponse::error(
-                                    Uuid::new_v4(),
-                                    e.to_public().message.to_string(),
-                                )
+                            let response = match process_text_frame(
+                                text_string.as_str(),
+                                conn_id,
+                                &proc_clone,
+                                principal_clone.as_ref(),
+                            )
+                            .await
+                            {
+                                Ok(Some(r)) => r,
+                                Ok(None) => return,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        conn_id = %conn_id,
+                                        "process_text_frame error: {e}"
+                                    );
+                                    SignalResponse::error(
+                                        Uuid::new_v4(),
+                                        e.to_public().message.to_string(),
+                                    )
+                                }
+                            };
+                            if let Ok(json) = serde_json::to_string(&response) {
+                                let _ = out_tx_clone.send(Message::Text(json.into())).await;
                             }
-                        };
-                        let json = match serde_json::to_string(&response) {
-                            Ok(j) => j,
-                            Err(e) => {
-                                tracing::error!(conn_id = %conn_id, "Failed to serialize response: {e}");
-                                continue;
-                            }
-                        };
-                        if ws_tx.send(Message::Text(json.into())).await.is_err() {
-                            break;
-                        }
+                        });
                     }
                     Message::Ping(data) => {
-                        let _ = ws_tx.send(Message::Pong(data)).await;
+                        let _ = out_tx.send(Message::Pong(data)).await;
                     }
                     Message::Close(_) => {
                         tracing::debug!(conn_id = %conn_id, "Client sent Close frame");
@@ -291,7 +359,6 @@ async fn handle_connection(
                     _ => {}
                 }
             }
-            // BrainEvent push (v1.0.0 §8 observability bus)
             result = brain_fut => {
                 match result {
                     Ok(ev) => {
@@ -300,7 +367,7 @@ async fn handle_connection(
                             "event": ev,
                         });
                         if let Ok(json) = serde_json::to_string(&frame) {
-                            if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                            if out_tx.send(Message::Text(json.into())).await.is_err() {
                                 break;
                             }
                         }
@@ -313,7 +380,6 @@ async fn handle_connection(
                     }
                 }
             }
-            // Proactive notification push
             result = proactive_fut => {
                 match result {
                     Ok(notification) => {
@@ -327,7 +393,7 @@ async fn handle_connection(
                             frame["agent"] = serde_json::json!(agent);
                         }
                         if let Ok(json) = serde_json::to_string(&frame) {
-                            if ws_tx.send(Message::Text(json.into())).await.is_err() {
+                            if out_tx.send(Message::Text(json.into())).await.is_err() {
                                 break;
                             }
                         }
@@ -337,13 +403,27 @@ async fn handle_connection(
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         tracing::debug!(conn_id = %conn_id, "Notification channel closed");
-                        // Channel closed but client connection may still be live — disable proactive push.
                         proactive_rx = None;
                     }
                 }
             }
         }
     }
+
+    // ── Teardown ────────────────────────────────────────────────────────────
+    // Order matters: unregister first (so no new intents arrive), drop
+    // `intent_tx` (so the relay task exits), then drop `out_tx` (so the
+    // writer task exits). The join handles guarantee both background tasks
+    // are fully torn down before this future returns.
+    if let Some(d) = &dispatcher {
+        if let Err(e) = d.unregister_transport(&channel_id).await {
+            tracing::debug!(conn_id = %conn_id, error = %e, "WS transport unregister failed");
+        }
+    }
+    drop(intent_tx);
+    drop(out_tx);
+    let _ = relay_handle.await;
+    let _ = writer_handle.await;
 }
 
 /// Send a JSON-serialisable value as a text frame; log errors but don't panic.
@@ -490,9 +570,9 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_key_empty_list() {
-        // With empty key list, auth is disabled (open access) — any key passes
-        assert!(validate_key(&[], "anykey"));
+    fn test_validate_key_empty_list_fails_closed() {
+        // With empty key list, auth is fail-closed — all keys rejected
+        assert!(!validate_key(&[], "anykey"));
     }
 
     #[test]

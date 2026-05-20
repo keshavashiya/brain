@@ -3,27 +3,33 @@
 //! Uses WebSocket for communication with the daemon, enabling lower latency
 //! and a consistent protocol across all adapters.
 //!
-//! Rendering is unified: every server frame (chunk, complete, proactive,
-//! error) is buffered into an in-memory accumulator and rendered exactly
-//! once via [`render_response`] when the response settles. This avoids
-//! cursor-rewind hacks that broke whenever streamed content scrolled past
-//! the terminal bottom.
+//! Interactive mode runs two halves concurrently so the user can reply to
+//! an approval prompt (`approve <nonce>` / `reject <nonce>`) while a prior
+//! signal is still in-flight. Without this, a 60s confirmation window
+//! always expires before rustyline gets the next line. The reader half
+//! receives frames and emits rendered text via rustyline's external
+//! printer (so prints land cleanly above the prompt); the sender half
+//! reads lines and pushes them on the socket.
 
 use std::io::{stdout, Write};
+use std::sync::Arc;
 
 use crossterm::cursor::MoveToColumn;
 use crossterm::style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor};
 use crossterm::terminal::{Clear, ClearType};
 use crossterm::ExecutableCommand;
 use futures_util::{SinkExt, StreamExt};
-use rustyline::DefaultEditor;
+use rustyline::{DefaultEditor, ExternalPrinter};
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::encryption::resolve_llm_api_key;
 use crate::status::show_status;
 
 /// Render a transient progress line ("routing…", "thinking…") that will be
-/// overwritten when the real response is rendered.
+/// overwritten when the real response is rendered. Only used in the
+/// non-interactive (one-shot) path; the interactive loop drops status
+/// frames because rustyline's external printer can't overwrite lines.
 fn render_status_line(message: &str) -> std::io::Result<()> {
     let mut out = stdout();
     out.execute(MoveToColumn(0))?;
@@ -113,7 +119,19 @@ enum ResponseLabel {
 }
 
 impl ResponseLabel {
-    fn write_prefix(self) -> std::io::Result<()> {
+    /// Hand-rolled ANSI prefix so the rendered output can be assembled as
+    /// a `String` and shipped through rustyline's external printer. We
+    /// don't go via crossterm here because crossterm wants a writer.
+    fn ansi_prefix(self) -> &'static str {
+        match self {
+            // bold + green / yellow / red, reset at end
+            ResponseLabel::Brain => "\x1b[1;32mBrain:\x1b[0m\n",
+            ResponseLabel::Proactive => "\x1b[1;33m[proactive]\x1b[0m\n",
+            ResponseLabel::Error => "\x1b[1;31mError:\x1b[0m\n",
+        }
+    }
+
+    fn write_prefix_direct(self) -> std::io::Result<()> {
         let mut out = stdout();
         match self {
             ResponseLabel::Brain => {
@@ -140,17 +158,34 @@ impl ResponseLabel {
     }
 }
 
-/// The single rendering path for any response body. Prints the label
-/// header on its own line, then the markdown-rendered body, then a
-/// trailing blank line so the next `You:` prompt has visual breathing
-/// room. Always called *after* the transient status line has been
-/// cleared.
-fn render_response(label: ResponseLabel, body: &str) {
+/// Build the full rendered string (label + markdown body + trailing blank
+/// line) for a response. Empty bodies render as empty so the caller can
+/// skip them.
+fn render_to_string(label: ResponseLabel, body: &str) -> String {
+    let trimmed = body.trim_end();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    let processed = preprocess_markdown(trimmed);
+    let skin = brain_skin();
+    let formatted = skin.text(&processed, Some(terminal_width()));
+    let rendered = formatted.to_string();
+    let rendered = rendered.trim_end_matches('\n');
+    let mut out = String::with_capacity(rendered.len() + 32);
+    out.push_str(label.ansi_prefix());
+    out.push_str(rendered);
+    out.push('\n');
+    out
+}
+
+/// Direct-render path used by the one-shot (non-interactive) chat —
+/// writes straight to stdout via crossterm.
+fn render_response_direct(label: ResponseLabel, body: &str) {
     let trimmed = body.trim_end();
     if trimmed.is_empty() {
         return;
     }
-    let _ = label.write_prefix();
+    let _ = label.write_prefix_direct();
     let processed = preprocess_markdown(trimmed);
     let skin = brain_skin();
     let formatted = skin.text(&processed, Some(terminal_width()));
@@ -160,14 +195,11 @@ fn render_response(label: ResponseLabel, body: &str) {
     let _ = stdout().flush();
 }
 
-/// Aggregates incoming WS frames into a single buffered response, then
-/// renders it exactly once. The same struct is used for both the one-shot
-/// (`send_ws_message`) and persistent (`WsSession::send_message`) paths so
-/// behaviour cannot drift between them.
+/// Aggregates incoming WS frames into a single buffered response for the
+/// one-shot path. The interactive path uses [`InteractiveAccumulator`]
+/// which prints through an external printer instead.
 struct ResponseAccumulator {
     body: String,
-    /// `Some` once we know which label to render with. The first content-
-    /// bearing frame fixes this; subsequent frames just append.
     label: Option<ResponseLabel>,
 }
 
@@ -196,20 +228,23 @@ impl ResponseAccumulator {
 
     fn render_proactive(content: &str) {
         let _ = clear_status_line();
-        render_response(ResponseLabel::Proactive, content);
+        render_response_direct(ResponseLabel::Proactive, content);
+    }
+
+    fn render_approval_prompt(content: &str) {
+        let _ = clear_status_line();
+        render_response_direct(ResponseLabel::Proactive, content);
     }
 
     fn render_error(message: &str) {
         let _ = clear_status_line();
-        render_response(ResponseLabel::Error, message);
+        render_response_direct(ResponseLabel::Error, message);
     }
 
-    /// Render whatever was buffered. Caller is responsible for clearing the
-    /// status line first if appropriate.
     fn finalize(self) -> Option<String> {
         if let Some(label) = self.label {
             let _ = clear_status_line();
-            render_response(label, &self.body);
+            render_response_direct(label, &self.body);
         }
         Some(self.body).filter(|t| !t.is_empty())
     }
@@ -240,18 +275,14 @@ fn extract_complete_body(frame: &serde_json::Value) -> &str {
     ""
 }
 
-/// Result of routing a single inbound text frame into the accumulator.
+/// Result of routing a single inbound text frame into the one-shot
+/// accumulator. The interactive loop has its own routing.
 enum FrameOutcome {
-    /// Keep reading more frames.
     Continue,
-    /// Response settled — render and return the body.
     Complete,
-    /// Server reported an error.
     Error(String),
 }
 
-/// Apply one parsed text frame to the accumulator. Pure routing — no IO
-/// beyond the transient status-line and inline proactive renders.
 fn apply_frame(acc: &mut ResponseAccumulator, frame: &serde_json::Value) -> FrameOutcome {
     match frame.get("type").and_then(|v| v.as_str()) {
         Some("status") => {
@@ -266,6 +297,14 @@ fn apply_frame(acc: &mut ResponseAccumulator, frame: &serde_json::Value) -> Fram
             if let Some(content) = frame.get("content").and_then(|c| c.as_str()) {
                 ResponseAccumulator::render_proactive(content);
             }
+            FrameOutcome::Continue
+        }
+        Some("approval_request") => {
+            let body = frame
+                .get("content")
+                .and_then(|c| c.as_str())
+                .unwrap_or("Approval required.");
+            ResponseAccumulator::render_approval_prompt(body);
             FrameOutcome::Continue
         }
         Some("chunk") => {
@@ -299,9 +338,9 @@ type WsStream = futures_util::stream::SplitStream<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 >;
 
-/// Drive the frame loop on `stream`, applying frames into `acc` until the
-/// response settles or the connection ends. Returns the final rendered body
-/// (if any) on success, or an error.
+/// One-shot path: drive frames until the response settles or the connection
+/// closes. Used by `chat_non_interactive` and during the brief auth+send
+/// for the legacy single-message flow.
 async fn drive_frames(sink: &mut WsSink, stream: &mut WsStream) -> anyhow::Result<Option<String>> {
     let mut acc = ResponseAccumulator::new();
     loop {
@@ -336,8 +375,7 @@ async fn drive_frames(sink: &mut WsSink, stream: &mut WsStream) -> anyhow::Resul
     }
 }
 
-/// Send a chat message via a running daemon's WebSocket API. One-shot
-/// connection: connects, authenticates, sends, drains frames, returns.
+/// One-shot: connect, auth, send, drain, return.
 async fn send_ws_message(
     ws_url: &str,
     api_key: &str,
@@ -377,33 +415,9 @@ async fn send_ws_message(
     drive_frames(&mut sink, &mut stream).await
 }
 
-/// Persistent WS connection for interactive mode. Auth happens once at
-/// connect time; each `send_message` reuses the same socket.
-struct WsSession {
-    sink: WsSink,
-    stream: WsStream,
-}
-
-impl WsSession {
-    async fn send_message(
-        &mut self,
-        message: &str,
-        session_id: &str,
-    ) -> anyhow::Result<Option<String>> {
-        let signal = serde_json::json!({
-            "content": message,
-            "session_id": session_id,
-            "stream": true,
-        });
-        self.sink
-            .send(Message::Text(signal.to_string().into()))
-            .await?;
-
-        drive_frames(&mut self.sink, &mut self.stream).await
-    }
-}
-
-async fn connect_ws_session(ws_url: &str, api_key: &str) -> anyhow::Result<WsSession> {
+/// Connect + authenticate, returning the split sink/stream pair the
+/// interactive loop drives concurrently.
+async fn connect_ws_session(ws_url: &str, api_key: &str) -> anyhow::Result<(WsSink, WsStream)> {
     let (ws, _) = tokio_tungstenite::connect_async(ws_url).await?;
     let (mut sink, mut stream) = ws.split();
 
@@ -427,7 +441,7 @@ async fn connect_ws_session(ws_url: &str, api_key: &str) -> anyhow::Result<WsSes
         return Err(anyhow::anyhow!("Auth error: {error}"));
     }
 
-    Ok(WsSession { sink, stream })
+    Ok((sink, stream))
 }
 
 fn ws_url(config: &brain_core::BrainConfig) -> String {
@@ -460,12 +474,112 @@ pub(crate) async fn chat_non_interactive(
     Ok(())
 }
 
+/// Inbound frames from the reader task to the input-loop driver, used so
+/// the input loop can run `/status`-style work after the reader briefly
+/// pauses and so it knows when the socket has gone away.
+enum ReaderEvent {
+    /// The reader observed a clean or error close. The input loop should
+    /// stop after the user's next keystroke.
+    Closed(Option<String>),
+}
+
+/// Run the WS reader task: pull frames, accumulate chunks, render
+/// completed/proactive/approval/error bodies via the external printer.
+/// Skips status frames (rustyline's external printer can't overwrite an
+/// in-place line, so transient status text would just pile up above the
+/// prompt).
+async fn run_reader<P: ExternalPrinter + Send + 'static>(
+    mut stream: WsStream,
+    mut printer: P,
+    notify: mpsc::Sender<ReaderEvent>,
+) {
+    let mut acc = ResponseAccumulator::new();
+    loop {
+        let frame = match stream.next().await {
+            Some(Ok(frame)) => frame,
+            Some(Err(e)) => {
+                let _ = notify
+                    .send(ReaderEvent::Closed(Some(format!("WebSocket error: {e}"))))
+                    .await;
+                return;
+            }
+            None => {
+                let _ = notify.send(ReaderEvent::Closed(None)).await;
+                return;
+            }
+        };
+
+        let text = match frame {
+            Message::Text(t) => t.to_string(),
+            Message::Ping(_) => continue,
+            Message::Close(_) => {
+                let _ = notify.send(ReaderEvent::Closed(None)).await;
+                return;
+            }
+            _ => continue,
+        };
+
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+
+        match parsed.get("type").and_then(|v| v.as_str()) {
+            Some("status") => {
+                // Skip — see fn doc.
+            }
+            Some("proactive") => {
+                if let Some(content) = parsed.get("content").and_then(|c| c.as_str()) {
+                    let rendered = render_to_string(ResponseLabel::Proactive, content);
+                    if !rendered.is_empty() {
+                        let _ = printer.print(rendered);
+                    }
+                }
+            }
+            Some("approval_request") => {
+                let body = parsed
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("Approval required.");
+                let rendered = render_to_string(ResponseLabel::Proactive, body);
+                if !rendered.is_empty() {
+                    let _ = printer.print(rendered);
+                }
+            }
+            Some("chunk") => {
+                if let Some(content) = parsed.get("content").and_then(|c| c.as_str()) {
+                    acc.push_chunk(content);
+                }
+            }
+            Some("complete") => {
+                let body = extract_complete_body(&parsed);
+                acc.set_complete_body(body);
+                let finished = std::mem::replace(&mut acc, ResponseAccumulator::new());
+                if let Some(label) = finished.label {
+                    let rendered = render_to_string(label, &finished.body);
+                    if !rendered.is_empty() {
+                        let _ = printer.print(rendered);
+                    }
+                }
+            }
+            Some("error") => {
+                let msg = parsed
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("Unknown error");
+                let rendered = render_to_string(ResponseLabel::Error, msg);
+                if !rendered.is_empty() {
+                    let _ = printer.print(rendered);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(crate) async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow::Result<()> {
     let _ = crate::bootstrap::require_daemon(config).await?;
     let ws_url = ws_url(config);
     let api_key = first_api_key(config)?;
 
-    let mut session_id = uuid::Uuid::new_v4().to_string();
+    let session_id = Arc::new(std::sync::Mutex::new(uuid::Uuid::new_v4().to_string()));
 
     let ver = env!("CARGO_PKG_VERSION");
     let title = format!("Brain v{ver}");
@@ -494,69 +608,142 @@ pub(crate) async fn chat_interactive(config: &brain_core::BrainConfig) -> anyhow
     println!("Signals: /status  /clear  /quit");
     println!();
 
-    let mut ws = connect_ws_session(&ws_url, &api_key).await?;
+    let (sink, stream) = connect_ws_session(&ws_url, &api_key).await?;
 
     let mut rl = DefaultEditor::new()?;
     let history_path = config.data_dir().join("history.txt");
     let _ = rl.load_history(&history_path);
+    let printer = rl
+        .create_external_printer()
+        .map_err(|e| anyhow::anyhow!("Failed to attach external printer: {e}"))?;
 
-    loop {
-        match rl.readline("You: ") {
-            Ok(line) => {
-                let input = line.trim();
-                if input.is_empty() {
-                    continue;
-                }
-                let _ = rl.add_history_entry(input);
+    let (reader_tx, mut reader_rx) = mpsc::channel::<ReaderEvent>(4);
+    let reader_handle = tokio::spawn(run_reader(stream, printer, reader_tx));
 
-                match input {
-                    "/quit" | "/exit" | "/q" => {
-                        println!("Going dormant...");
+    // Bridge blocking rustyline into async land. The blocking thread owns
+    // the editor; it sends each non-empty line over `line_tx`. Closing
+    // `line_tx` (by dropping the thread) tells the async loop to wind
+    // down.
+    let (line_tx, mut line_rx) = mpsc::channel::<LineEvent>(1);
+    let history_path_for_thread = history_path.clone();
+    let input_thread = std::thread::spawn(move || {
+        let mut rl = rl;
+        loop {
+            match rl.readline("You: ") {
+                Ok(line) => {
+                    let trimmed = line.trim().to_string();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let _ = rl.add_history_entry(&trimmed);
+                    if line_tx.blocking_send(LineEvent::Line(trimmed)).is_err() {
                         break;
                     }
-                    "/status" => {
-                        show_status(config).await?;
-                        continue;
-                    }
-                    "/clear" => {
-                        session_id = uuid::Uuid::new_v4().to_string();
-                        println!("Session cleared — starting fresh conversation.");
-                        continue;
-                    }
-                    s if s.starts_with('/') => {
-                        println!("Unknown signal: {s}");
-                        println!("Available: /status  /clear  /quit");
-                        continue;
-                    }
-                    _ => {}
                 }
-
-                let response = ws.send_message(input, &session_id).await;
-
-                match response {
-                    Ok(Some(_)) => {}
-                    Ok(None) => {
-                        eprintln!("Daemon returned empty response.");
-                    }
-                    Err(e) => {
-                        eprintln!("{}", crate::errors::friendly_error(&e));
-                    }
+                Err(rustyline::error::ReadlineError::Interrupted)
+                | Err(rustyline::error::ReadlineError::Eof) => {
+                    let _ = line_tx.blocking_send(LineEvent::Quit);
+                    break;
                 }
-            }
-            Err(rustyline::error::ReadlineError::Interrupted)
-            | Err(rustyline::error::ReadlineError::Eof) => {
-                println!("Going dormant...");
-                break;
-            }
-            Err(err) => {
-                eprintln!("Error: {:?}", err);
-                break;
+                Err(e) => {
+                    let _ = line_tx.blocking_send(LineEvent::Error(e.to_string()));
+                    break;
+                }
             }
         }
-    }
+        let _ = rl.save_history(&history_path_for_thread);
+    });
 
-    let _ = rl.save_history(&history_path);
-    Ok(())
+    let mut sink = sink;
+    let result: anyhow::Result<()> = loop {
+        tokio::select! {
+            line = line_rx.recv() => {
+                match line {
+                    Some(LineEvent::Line(line)) => {
+                        match line.as_str() {
+                            "/quit" | "/exit" | "/q" => {
+                                println!("Going dormant...");
+                                break Ok(());
+                            }
+                            "/status" => {
+                                if let Err(e) = show_status(config).await {
+                                    eprintln!("status: {e}");
+                                }
+                                continue;
+                            }
+                            "/clear" => {
+                                *session_id.lock().unwrap() = uuid::Uuid::new_v4().to_string();
+                                println!("Session cleared — starting fresh conversation.");
+                                continue;
+                            }
+                            s if s.starts_with('/') => {
+                                println!("Unknown signal: {s}");
+                                println!("Available: /status  /clear  /quit");
+                                continue;
+                            }
+                            _ => {}
+                        }
+
+                        let sid = session_id.lock().unwrap().clone();
+                        let signal = serde_json::json!({
+                            "content": line,
+                            "session_id": sid,
+                            "stream": true,
+                        });
+                        if let Err(e) = sink.send(Message::Text(signal.to_string().into())).await {
+                            eprintln!("send failed: {e}");
+                            break Err(anyhow::anyhow!(e));
+                        }
+                    }
+                    Some(LineEvent::Quit) => {
+                        println!("Going dormant...");
+                        break Ok(());
+                    }
+                    Some(LineEvent::Error(msg)) => {
+                        eprintln!("Error: {msg}");
+                        break Err(anyhow::anyhow!(msg));
+                    }
+                    None => {
+                        // Input thread exited unexpectedly.
+                        break Ok(());
+                    }
+                }
+            }
+            event = reader_rx.recv() => {
+                match event {
+                    Some(ReaderEvent::Closed(reason)) => {
+                        if let Some(reason) = reason {
+                            eprintln!("Connection lost: {reason}");
+                        } else {
+                            eprintln!("Connection closed by server.");
+                        }
+                        break Ok(());
+                    }
+                    None => break Ok(()),
+                }
+            }
+        }
+    };
+
+    // Close the WS politely, drop the input thread (rustyline still
+    // blocked on readline will be killed when the process exits or the
+    // join completes after the user hits Enter).
+    let _ = sink.close().await;
+    drop(line_rx);
+    let _ = reader_handle.await;
+    // We deliberately do not join `input_thread`: rustyline is still
+    // blocked on a read, and there's no clean cross-platform way to
+    // wake it. Returning here lets the runtime tear down on its own.
+    drop(input_thread);
+
+    result
+}
+
+/// Events from the blocking rustyline thread to the async loop.
+enum LineEvent {
+    Line(String),
+    Quit,
+    Error(String),
 }
 
 #[cfg(test)]
@@ -660,5 +847,18 @@ mod tests {
             FrameOutcome::Error(msg) => assert_eq!(msg, "boom"),
             _ => panic!("expected Error"),
         }
+    }
+
+    #[test]
+    fn render_to_string_includes_label_prefix() {
+        let s = render_to_string(ResponseLabel::Brain, "hello");
+        assert!(s.contains("Brain:"));
+        assert!(s.contains("hello"));
+    }
+
+    #[test]
+    fn render_to_string_empty_body_yields_empty() {
+        assert!(render_to_string(ResponseLabel::Brain, "").is_empty());
+        assert!(render_to_string(ResponseLabel::Brain, "   \n  ").is_empty());
     }
 }

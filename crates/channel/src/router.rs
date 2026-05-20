@@ -87,6 +87,12 @@ pub trait ChannelRouter: Send + Sync {
     /// for wiring the actual transport that delivers to it.
     async fn register(&self, descriptor: ChannelDescriptor) -> Result<(), ChannelError>;
 
+    /// Remove a previously-registered channel so the router no longer
+    /// considers it as a candidate. Used by short-lived transports (e.g. a
+    /// WebSocket chat session that goes away on disconnect). Idempotent —
+    /// removing an unknown id is a no-op.
+    async fn unregister(&self, channel_id: &str) -> Result<(), ChannelError>;
+
     /// Mark a channel (un)healthy so the router can skip failing channels
     /// until they recover.
     async fn set_health(&self, channel_id: &str, healthy: bool) -> Result<(), ChannelError>;
@@ -250,6 +256,12 @@ impl ChannelRouter for DefaultChannelRouter {
     async fn register(&self, descriptor: ChannelDescriptor) -> Result<(), ChannelError> {
         let mut map = self.channels.write().await;
         map.insert(descriptor.id.clone(), descriptor);
+        Ok(())
+    }
+
+    async fn unregister(&self, channel_id: &str) -> Result<(), ChannelError> {
+        let mut map = self.channels.write().await;
+        map.remove(channel_id);
         Ok(())
     }
 
