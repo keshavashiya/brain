@@ -340,10 +340,6 @@ impl SignalProcessor {
                 self.handle_memory_summary(signal_id, signal, conversation_history, &prepend_nudges)
                     .await
             }
-            thalamus::Intent::ProjectInspect { path, focus } => {
-                self.handle_project_inspect(signal_id, signal, path, focus, &prepend_nudges)
-                    .await
-            }
             thalamus::Intent::ListChannels => {
                 self.handle_list_channels(signal_id, &prepend_nudges).await
             }
@@ -775,9 +771,31 @@ impl SignalProcessor {
         } else {
             None
         };
-        let messages = self
-            .context_assembler
-            .assemble_with_addendum(&content, &memories, history, addendum);
+
+        // Path-attachment grounding: if the user named one or more
+        // local paths in `content`, read each on their behalf and pass
+        // the snapshots to the assembler. Replaces the old
+        // `Intent::ProjectInspect` branch that bypassed SOUL entirely.
+        let attachments = crate::attachment::build_chat_attachments(
+            &content,
+            &self.config.security.allowed_paths,
+        );
+        if !attachments.is_empty() {
+            tracing::debug!(
+                attached = attachments.attached.len(),
+                skipped = attachments.skipped.len(),
+                "chat turn carries path attachments"
+            );
+        }
+
+        let messages = self.context_assembler.assemble_full(
+            &content,
+            &memories,
+            history,
+            addendum,
+            &attachments.attached,
+            &attachments.skipped,
+        );
 
         Ok(PipelineResult::LlmReady {
             signal_id,
@@ -954,141 +972,6 @@ impl SignalProcessor {
             session_id: signal.session_id.clone(),
         });
         Ok(PipelineResult::Complete(resp))
-    }
-
-    /// Read-only inspection of a local directory or file path. The handler
-    /// builds a structured snapshot of the path (top-level entries, anchor
-    /// files like README/Cargo.toml/package.json), then asks the LLM to
-    /// summarise. No sandbox, no decomposition, no shell scripts — this is
-    /// deliberately bounded and synchronous so the chat answer is fast.
-    pub(super) async fn handle_project_inspect(
-        &self,
-        signal_id: Uuid,
-        signal: &Signal,
-        path: String,
-        focus: Option<String>,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
-    ) -> Result<PipelineResult, SignalError> {
-        let expanded = expand_user_path(&path);
-        let requested = std::path::PathBuf::from(&expanded);
-
-        // Issue 119: canonicalize first, then enforce that the resolved
-        // path lives under `security.allowed_paths` (default: `$HOME`).
-        // `canonicalize` resolves `..` and symlinks so `~/code/../../etc`
-        // can't escape the configured root.
-        let canonical = match std::fs::canonicalize(&requested) {
-            Ok(p) => p,
-            Err(e) => {
-                let resp = prepend_nudges(SignalResponse::ok(
-                    signal_id,
-                    format!(
-                        "Can't inspect `{}` — {}. Pass an absolute path I can read.",
-                        requested.display(),
-                        friendly_io_error(&e)
-                    ),
-                ));
-                return Ok(PipelineResult::Complete(resp));
-            }
-        };
-
-        let allowed_roots = resolve_allowed_roots(&self.config.security.allowed_paths);
-        if !path_under_any_root(&canonical, &allowed_roots) {
-            tracing::warn!(
-                requested = %requested.display(),
-                resolved = %canonical.display(),
-                "project_inspect rejected — path outside security.allowed_paths"
-            );
-            let roots = allowed_roots
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            let resp = prepend_nudges(SignalResponse::ok(
-                signal_id,
-                format!(
-                    "I can't inspect `{}` — it's outside the configured allowed_paths ({}). \
-                     Edit `security.allowed_paths` if you need to widen the sandbox.",
-                    requested.display(),
-                    if roots.is_empty() {
-                        "$HOME".to_string()
-                    } else {
-                        roots
-                    },
-                ),
-            ));
-            return Ok(PipelineResult::Complete(resp));
-        }
-        let pb = canonical;
-
-        let metadata = match std::fs::metadata(&pb) {
-            Ok(m) => m,
-            Err(e) => {
-                let resp = prepend_nudges(SignalResponse::ok(
-                    signal_id,
-                    format!(
-                        "Can't inspect `{}` — {}. Pass an absolute path I can read.",
-                        pb.display(),
-                        friendly_io_error(&e)
-                    ),
-                ));
-                return Ok(PipelineResult::Complete(resp));
-            }
-        };
-
-        let snapshot = if metadata.is_dir() {
-            build_directory_snapshot(&pb)
-        } else if metadata.is_file() {
-            build_file_snapshot(&pb)
-        } else {
-            let resp = prepend_nudges(SignalResponse::ok(
-                signal_id,
-                format!("`{}` is not a regular file or directory.", pb.display()),
-            ));
-            return Ok(PipelineResult::Complete(resp));
-        };
-
-        let focus_line = focus
-            .as_deref()
-            .map(|f| format!("\nThe user specifically wants: {f}\n"))
-            .unwrap_or_default();
-
-        let system_prompt = format!(
-            "You are inspecting a local project for the user. The block between \
-             <PROJECT> tags is the actual content read from disk — file tree and \
-             key file excerpts. Summarise honestly: what kind of project this is, \
-             how it is organised, the most important entry points, and anything \
-             notable about its build/runtime. Use bullets, keep it under 250 \
-             words, do not invent files that aren't shown, and do not run any \
-             commands — you cannot.{focus_line}\n\n<PROJECT path=\"{}\">\n{snapshot}\n</PROJECT>",
-            pb.display()
-        );
-
-        let messages = vec![
-            cortex::llm::Message {
-                role: cortex::llm::Role::System,
-                content: system_prompt,
-            },
-            cortex::llm::Message {
-                role: cortex::llm::Role::User,
-                content: match focus.as_deref() {
-                    Some(f) => format!("Summarise this project, with focus on: {f}"),
-                    None => "Summarise this project.".to_string(),
-                },
-            },
-        ];
-
-        Ok(PipelineResult::LlmReady {
-            signal_id,
-            messages,
-            memory_context: crate::MemoryContext {
-                facts_used: 0,
-                episodes_used: 0,
-            },
-            session_id: signal.session_id.clone(),
-            user_content: signal.content.clone(),
-            namespace: signal.namespace.clone(),
-            agent: signal.agent.clone(),
-        })
     }
 
     pub(super) async fn handle_query_audit(
@@ -2636,10 +2519,6 @@ fn intent_summary_of(intent: &thalamus::Intent) -> observe::IntentSummary {
             "SendMessage",
             serde_json::json!({ "channel": channel, "recipient": recipient, "content": content }),
         ),
-        Intent::ProjectInspect { path, focus } => (
-            "ProjectInspect",
-            serde_json::json!({ "path": path, "focus": focus }),
-        ),
         Intent::DelegateTask { agent, prompt } => (
             "DelegateTask",
             serde_json::json!({ "agent": agent, "prompt": prompt }),
@@ -2676,7 +2555,6 @@ fn intent_variant_name(intent: &thalamus::Intent) -> &'static str {
         ExecuteCommand { .. } => "ExecuteCommand",
         WebSearch { .. } => "WebSearch",
         SendMessage { .. } => "SendMessage",
-        ProjectInspect { .. } => "ProjectInspect",
         DelegateTask { .. } => "DelegateTask",
         ToolCall(_) => "ToolCall",
         QueryAudit { .. } => "QueryAudit",
@@ -2710,13 +2588,16 @@ fn intent_variant_name(intent: &thalamus::Intent) -> &'static str {
     }
 }
 
-// ── ProjectInspect helpers ─────────────────────────────────────────────────
+// ── Path-attachment helpers ────────────────────────────────────────────────
+// Shared by chat-time attachment snapshotting (`crate::attachment`) and
+// the decompose path-excerpt collector below. The `security.allowed_paths`
+// boundary is enforced via `resolve_allowed_roots` + `path_under_any_root`.
 
 /// Resolve `security.allowed_paths` into a list of canonicalized roots.
 /// Empty input defaults to `$HOME`. Entries that fail to canonicalize
 /// (e.g. typo, missing directory) are dropped with a warning — a
 /// misconfigured entry must not silently widen the sandbox.
-fn resolve_allowed_roots(configured: &[String]) -> Vec<std::path::PathBuf> {
+pub(crate) fn resolve_allowed_roots(configured: &[String]) -> Vec<std::path::PathBuf> {
     let raw: Vec<String> = if configured.is_empty() {
         std::env::var("HOME").into_iter().collect()
     } else {
@@ -2742,7 +2623,10 @@ fn resolve_allowed_roots(configured: &[String]) -> Vec<std::path::PathBuf> {
 
 /// True when `candidate` is equal to or a descendant of any entry in
 /// `roots`. Both sides should already be canonicalized.
-fn path_under_any_root(candidate: &std::path::Path, roots: &[std::path::PathBuf]) -> bool {
+pub(crate) fn path_under_any_root(
+    candidate: &std::path::Path,
+    roots: &[std::path::PathBuf],
+) -> bool {
     roots
         .iter()
         .any(|root| candidate == root.as_path() || candidate.starts_with(root))
@@ -2750,7 +2634,7 @@ fn path_under_any_root(candidate: &std::path::Path, roots: &[std::path::PathBuf]
 
 /// Expand a leading `~` to the user's home directory. Anything else is
 /// returned as-is — the caller resolves relative paths against cwd.
-fn expand_user_path(p: &str) -> String {
+pub(crate) fn expand_user_path(p: &str) -> String {
     if let Some(rest) = p.strip_prefix("~/") {
         if let Some(home) = std::env::var_os("HOME") {
             let mut out = std::path::PathBuf::from(home);
@@ -2768,7 +2652,7 @@ fn expand_user_path(p: &str) -> String {
 
 /// Map an io::Error to a one-liner the user can act on. Avoids exposing
 /// the bare Rust error format ("No such file or directory (os error 2)").
-fn friendly_io_error(e: &std::io::Error) -> String {
+pub(crate) fn friendly_io_error(e: &std::io::Error) -> String {
     match e.kind() {
         std::io::ErrorKind::NotFound => "no such path".to_string(),
         std::io::ErrorKind::PermissionDenied => "permission denied".to_string(),
@@ -2776,31 +2660,6 @@ fn friendly_io_error(e: &std::io::Error) -> String {
         _ => e.to_string(),
     }
 }
-
-/// Files that materially explain what a project is. Reading the first
-/// ~6 KB of any present anchor lets the LLM produce a faithful summary
-/// without slurping the whole tree.
-const ANCHOR_FILES: &[&str] = &[
-    "README.md",
-    "README",
-    "README.rst",
-    "Cargo.toml",
-    "package.json",
-    "pyproject.toml",
-    "setup.py",
-    "go.mod",
-    "Gemfile",
-    "pom.xml",
-    "build.gradle",
-    "build.gradle.kts",
-    "Makefile",
-    "justfile",
-    "Justfile",
-    "CHANGELOG.md",
-    "ARCHITECTURE.md",
-    "CLAUDE.md",
-    "AGENTS.md",
-];
 
 /// Directories not worth surfacing in the snapshot — they bloat the
 /// listing and rarely help a summary.
@@ -2820,11 +2679,38 @@ const SKIP_DIRS: &[&str] = &[
     ".cache",
 ];
 
-/// Build an inspection snapshot for a directory: top-level entries + the
-/// content of any anchor files present.
-fn build_directory_snapshot(root: &std::path::Path) -> String {
+/// File extensions to skip during the inline-probe pass. This is a
+/// *performance* filter, not an editorial one: we skip these to avoid
+/// reading multi-MB media files only to throw them away when UTF-8
+/// validation fails. Text-shaped extensions still flow through the
+/// extractor and may or may not return readable content.
+const BINARY_PROBE_SKIP: &[&str] = &[
+    "webp", "jpg", "jpeg", "png", "gif", "bmp", "tiff", "tif", "ico", "heic", "heif", "svg", "mp4",
+    "mov", "avi", "mkv", "webm", "m4v", "mp3", "wav", "flac", "ogg", "m4a", "aac", "zip", "tar",
+    "gz", "tgz", "bz2", "xz", "7z", "rar", "exe", "dll", "so", "dylib", "bin", "ttf", "woff",
+    "woff2", "otf", "eot", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "class", "jar", "pyc",
+    "wasm",
+];
+
+/// Extensions that almost always hold human-readable narrative content.
+/// Used only to *order* the inline-probe pass — files with these
+/// extensions are probed first within the entry-budget so a README or
+/// `_chat.txt` shows up ahead of arbitrary configs. Not a hard filter:
+/// everything else still gets a chance (binary-skip applied first).
+const NARRATIVE_EXTS: &[&str] = &[
+    "md", "markdown", "txt", "text", "rst", "asciidoc", "adoc", "org", "log",
+];
+
+/// Build a content-neutral directory snapshot:
+/// 1. Top-level entries listing (capped, with overflow count).
+/// 2. Extension histogram so the LLM sees content shape past the cap.
+/// 3. Inline excerpts of up to a few readable top-level files.
+///
+/// No hunt for anchor filenames, no source-landmark walks, no editorial
+/// framing ("no anchor files found…"). The SOUL prompt decides what
+/// kind of directory this is from what the snapshot shows.
+pub(crate) fn build_directory_snapshot(root: &std::path::Path) -> String {
     let mut out = String::new();
-    out.push_str("Top-level entries:\n");
 
     let mut entries: Vec<(String, bool)> = match std::fs::read_dir(root) {
         Ok(rd) => rd
@@ -2844,59 +2730,99 @@ fn build_directory_snapshot(root: &std::path::Path) -> String {
     };
     entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
-    let max_entries = 40;
+    // (1) Entry listing — dirs first, then files, alphabetical within each.
+    out.push_str("Top-level entries:\n");
+    const MAX_LISTED: usize = 40;
     for (i, (name, is_dir)) in entries.iter().enumerate() {
-        if i == max_entries {
+        if i == MAX_LISTED {
             out.push_str(&format!(
                 "  … (+{} more entries omitted)\n",
-                entries.len() - max_entries
+                entries.len() - MAX_LISTED
             ));
             break;
         }
         out.push_str(&format!("  {}{}\n", name, if *is_dir { "/" } else { "" }));
     }
 
-    // Surface a couple of source-directory subtrees that are common
-    // landmarks — but only one level deep so we don't blow up on big
-    // monorepos.
-    for landmark in ["src", "crates", "lib", "app", "apps", "packages"] {
-        let p = root.join(landmark);
-        if !p.is_dir() {
+    // (2) Extension histogram over *all* files (including those past
+    // the listing cap), so a 100-image folder shows "100 .webp" instead
+    // of just whatever fit in the listing window.
+    let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut no_ext = 0usize;
+    for (name, is_dir) in &entries {
+        if *is_dir {
             continue;
         }
-        if let Ok(rd) = std::fs::read_dir(&p) {
-            let kids: Vec<String> = rd
-                .filter_map(|e| e.ok())
-                .map(|e| {
-                    let name = e.file_name().to_string_lossy().into_owned();
-                    let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                    format!("{}{}", name, if is_dir { "/" } else { "" })
-                })
-                .filter(|n| !n.starts_with('.'))
-                .take(30)
-                .collect();
-            if !kids.is_empty() {
-                out.push_str(&format!("\n{landmark}/ (one level):\n"));
-                for k in kids {
-                    out.push_str(&format!("  {k}\n"));
+        match std::path::Path::new(name)
+            .extension()
+            .and_then(|e| e.to_str())
+        {
+            Some(ext) if !ext.is_empty() => {
+                *counts.entry(ext.to_ascii_lowercase()).or_insert(0) += 1;
+            }
+            _ => no_ext += 1,
+        }
+    }
+    if !counts.is_empty() || no_ext > 0 {
+        let mut bucket: Vec<(String, usize)> = counts.into_iter().collect();
+        bucket.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        out.push_str("\nFile types:\n");
+        for (ext, count) in &bucket {
+            out.push_str(&format!("  {count} .{ext}\n"));
+        }
+        if no_ext > 0 {
+            out.push_str(&format!("  {no_ext} (no extension)\n"));
+        }
+    }
+
+    // (3) Inline up to MAX_INLINED readable top-level files. Narrative
+    // extensions go first so README / _chat.txt / notes.md surface
+    // ahead of arbitrary configs; everything else gets a chance after.
+    const MAX_INLINED: usize = 3;
+    const PROBE_BYTES: usize = 4 * 1024;
+    let ext_of = |name: &str| {
+        std::path::Path::new(name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+    };
+    let is_narrative = |name: &str| {
+        ext_of(name)
+            .as_deref()
+            .map(|e| NARRATIVE_EXTS.contains(&e))
+            .unwrap_or(false)
+    };
+    let mut inlined = 0usize;
+    for narrative_first in [true, false] {
+        if inlined == MAX_INLINED {
+            break;
+        }
+        for (name, is_dir) in &entries {
+            if inlined == MAX_INLINED {
+                break;
+            }
+            if *is_dir {
+                continue;
+            }
+            if is_narrative(name) != narrative_first {
+                continue;
+            }
+            if let Some(ext) = ext_of(name) {
+                if BINARY_PROBE_SKIP.contains(&ext.as_str()) {
+                    continue;
                 }
             }
+            let p = root.join(name);
+            match crate::extract::read_path_as_text(&p, PROBE_BYTES) {
+                Ok(body) => {
+                    out.push_str(&format!(
+                        "\n--- {name} (first {PROBE_BYTES} bytes) ---\n{body}\n"
+                    ));
+                    inlined += 1;
+                }
+                Err(_) => continue,
+            }
         }
-    }
-
-    let mut anchors_found = 0;
-    for anchor in ANCHOR_FILES {
-        let p = root.join(anchor);
-        if !p.is_file() {
-            continue;
-        }
-        anchors_found += 1;
-        out.push_str(&format!("\n--- {anchor} (first 6 KB) ---\n"));
-        out.push_str(&read_truncated(&p, 6 * 1024));
-    }
-
-    if anchors_found == 0 {
-        out.push_str("\n(no anchor files found — README/Cargo.toml/package.json/etc.)\n");
     }
 
     out
@@ -2904,7 +2830,7 @@ fn build_directory_snapshot(root: &std::path::Path) -> String {
 
 /// Snapshot of a single file: path + first 12 KB of content. Binary
 /// files are reported as such instead of being fed through.
-fn build_file_snapshot(p: &std::path::Path) -> String {
+pub(crate) fn build_file_snapshot(p: &std::path::Path) -> String {
     let mut out = format!("File: {}\n\n", p.display());
     out.push_str(&read_truncated(p, 12 * 1024));
     out
@@ -3172,7 +3098,132 @@ mod duration_parse_tests {
 }
 
 #[cfg(test)]
-mod project_inspect_path_gate_tests {
+mod directory_snapshot_tests {
+    use super::build_directory_snapshot;
+    use std::fs;
+
+    #[test]
+    fn empty_directory_lists_no_entries_and_no_histogram() {
+        let dir = tempfile::tempdir().unwrap();
+        let snap = build_directory_snapshot(dir.path());
+        assert!(snap.contains("Top-level entries:"));
+        assert!(!snap.contains("File types:"));
+        // No leftover editorial framing from the old anchor-hunt code.
+        assert!(!snap.contains("no anchor files found"));
+        assert!(!snap.contains("README"));
+        assert!(!snap.contains("Cargo.toml"));
+    }
+
+    #[test]
+    fn whatsapp_shaped_folder_inlines_chat_text_not_media() {
+        // Regression scenario: a folder of .webp stickers + one
+        // narrative .txt. The old anchor-hunt missed _chat.txt entirely
+        // and emitted "(no anchor files found)". The new snapshot must
+        // surface _chat.txt's content and show the .webp count in the
+        // histogram.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("_chat.txt"),
+            "[01/07/2025] Alice: hey\n[01/07/2025] Bob: yo",
+        )
+        .unwrap();
+        for i in 0..5 {
+            // Non-UTF-8 bytes so the extractor returns NotText.
+            fs::write(
+                dir.path().join(format!("IMG_{i:03}.webp")),
+                [0u8, 0xff, 0xfe],
+            )
+            .unwrap();
+        }
+        let snap = build_directory_snapshot(dir.path());
+
+        assert!(
+            snap.contains("_chat.txt"),
+            "snapshot missed _chat.txt entry"
+        );
+        assert!(
+            snap.contains("Alice: hey"),
+            "snapshot didn't inline narrative text:\n{snap}"
+        );
+        assert!(snap.contains("File types:"), "histogram missing:\n{snap}");
+        assert!(snap.contains("5 .webp"), "webp count missing:\n{snap}");
+        assert!(snap.contains("1 .txt"), "txt count missing:\n{snap}");
+    }
+
+    #[test]
+    fn pure_binary_folder_emits_listing_and_histogram_only() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..3 {
+            fs::write(dir.path().join(format!("a{i}.jpg")), [0u8, 0xff]).unwrap();
+        }
+        let snap = build_directory_snapshot(dir.path());
+        assert!(snap.contains("3 .jpg"));
+        // Binary files must not be inlined (and the BINARY_PROBE_SKIP
+        // list short-circuits the probe before extract.rs even reads).
+        assert!(!snap.contains("--- a0.jpg"));
+    }
+
+    #[test]
+    fn narrative_files_are_probed_before_other_text_files() {
+        // A folder with two readable files: notes.md (narrative) and
+        // settings.toml (config). Both extensions are non-binary. The
+        // narrative pass must inline notes.md first.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("notes.md"), "# Personal notes\n\nimportant").unwrap();
+        fs::write(dir.path().join("settings.toml"), "key = \"value\"").unwrap();
+        let snap = build_directory_snapshot(dir.path());
+
+        let md_pos = snap.find("--- notes.md").expect("notes.md not inlined");
+        let toml_pos = snap
+            .find("--- settings.toml")
+            .expect("settings.toml not inlined");
+        assert!(
+            md_pos < toml_pos,
+            "narrative file should be inlined before non-narrative:\n{snap}"
+        );
+    }
+
+    #[test]
+    fn caps_inlined_files_at_three() {
+        // Five readable .md files; only three should be inlined.
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            fs::write(
+                dir.path().join(format!("note{i}.md")),
+                format!("content {i}"),
+            )
+            .unwrap();
+        }
+        let snap = build_directory_snapshot(dir.path());
+        let inlined_count = snap.matches("--- note").count();
+        assert_eq!(inlined_count, 3, "should inline exactly 3 files:\n{snap}");
+    }
+
+    #[test]
+    fn entry_overflow_shows_total_count() {
+        // 45 entries (> MAX_LISTED = 40). The overflow line must
+        // surface the remaining count so the LLM doesn't undercount.
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..45 {
+            fs::write(dir.path().join(format!("f{i:02}.dat")), "x").unwrap();
+        }
+        let snap = build_directory_snapshot(dir.path());
+        assert!(
+            snap.contains("+5 more entries omitted"),
+            "overflow line missing:\n{snap}"
+        );
+        // Histogram still covers all 45 files.
+        assert!(
+            snap.contains("45 .dat"),
+            "histogram should count all files:\n{snap}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod allowed_paths_gate_tests {
+    // Sandbox enforcement for path reads. Used by chat-time path
+    // attachments (`crate::attachment`) and decompose path excerpts.
     use super::{path_under_any_root, resolve_allowed_roots};
     use std::fs;
 

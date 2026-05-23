@@ -113,12 +113,6 @@ pub enum Intent {
     ProactivityStatus,
     /// Dump and summarise everything stored in memory.
     MemorySummary,
-    /// Read-only inspection of a local directory or file path. Lists the
-    /// tree, reads the obvious anchor files (README, manifest, top-level
-    /// `lib.rs`/`main.rs`/`index.*`), and asks the LLM to summarise.
-    /// Cheaper, more reliable, and far more honest than running this
-    /// through `DecomposeTask` → sandboxed shell scripts.
-    ProjectInspect { path: String, focus: Option<String> },
     /// List registered channels (router-known descriptors). The
     /// natural-language replacement for inspection CLIs.
     ListChannels,
@@ -239,11 +233,6 @@ impl Intent {
                     "content": content,
                 }),
                 vec!["notify.send".to_string()],
-            ),
-            Intent::ProjectInspect { path, focus } => (
-                Verb::new("fs", "read"),
-                serde_json::json!({ "path": path, "focus": focus }),
-                vec!["fs.read".to_string()],
             ),
             Intent::OpenTerminalSession { program, args, cwd } => (
                 Verb::new("terminal", "open"),
@@ -369,8 +358,6 @@ struct LlmIntentPayload {
     channel: Option<String>,
     recipient: Option<String>,
     content: Option<String>,
-    path: Option<String>,
-    focus: Option<String>,
     /// Specialist agent id for `delegate_task` (e.g. `"claude-code"`).
     agent: Option<String>,
     /// Prompt body for `delegate_task` (separate from `query`/`content`
@@ -413,7 +400,7 @@ impl LlmIntentFallback {
 }
 
 const CLASSIFIER_SYSTEM_PROMPT: &str = r#"You classify user input into exactly one intent for Brain OS.
-Valid intents: store_fact, recall, forget, execute_command, web_search, query_audit, prune_audit, list_approvals, respond_to_approval, budget_status, schedule, list_schedules, cancel_schedule, send_message, system_status, decompose_task, list_tasks, task_status, cancel_task, cancel_signal, query_agents, delegate_task, set_proactivity, proactivity_status, memory_summary, project_inspect, chat.
+Valid intents: store_fact, recall, forget, execute_command, web_search, query_audit, prune_audit, list_approvals, respond_to_approval, budget_status, schedule, list_schedules, cancel_schedule, send_message, system_status, decompose_task, list_tasks, task_status, cancel_task, cancel_signal, query_agents, delegate_task, set_proactivity, proactivity_status, memory_summary, chat.
 Rules:
 - query_audit is for checking past actions: "what did I run today", "show my audit entries", "what did I approve yesterday".
 - prune_audit is for deleting old audit entries: "prune audit logs older than 30 days".
@@ -433,7 +420,7 @@ Rules:
 - store_fact is ONLY for explicit memory requests: "remember that ...", "note that ...", "keep in mind ...".
 - execute_command is ONLY for explicit requests like "run ls", "execute cargo build". The command field must be a real shell command (ls, git, cargo, etc.).
 - decompose_task is for multi-step requests that need planning and execution: "build a CSV export feature", "set up CI/CD pipeline", "refactor the auth module and add tests", "deploy to production". The request must involve multiple steps or coordination. Simple single-step requests are NOT decompose_task.
-- project_inspect is for read-only, single-step requests to look at a local directory or file and describe/summarise/report on it: "look at the project at /path and summarise it", "tell me about /path", "describe the codebase at /path", "give me a report on /path", "analyse /path". REQUIRED: extract `path` from the input (the file/directory path the user named). Optional: `focus` is whatever the user wants emphasised ("its dependencies", "the test layout"). NEVER pick decompose_task for this shape — inspection is a read action, not a workflow.
+- A user message that names a local path (e.g. "summarise /Users/me/notes", "what's in ~/downloads/x", "read this file: /tmp/foo.txt") is chat — Brain reads the path as attached context and responds conversationally. Do NOT route these to decompose_task or any inspect-style intent; they go through the normal chat flow.
 - query_agents is for asking which specialist agents are available or why a named agent is unavailable: "what agents do you have", "which agents can code rust", "why aren't you using aider".
 - delegate_task is for explicit single-shot delegation to a named agent: "delegate to claude-code: refactor X", "ask codex: explain Y", "@aider: fix the bug". Set `agent` to the lowercase agent id and `prompt` to the task body. Do NOT use this for multi-step plans — those go to decompose_task and the orchestrator picks an agent itself.
 - Conversational statements ("I've done X", "I completed X", "I like X") are chat but ALSO extract any personal facts (see below).
@@ -451,7 +438,7 @@ Only extract a fact when the user is making a clear self-statement in natural la
 When recent conversation history is supplied above your input, USE it: a one-line reply right after a question is a parameter to that question, not a new biographical claim. If no history is supplied, default to skepticism — extract facts only when the wording is self-evidently a self-statement.
 If no facts qualify, set facts to [].
 
-Return only JSON with keys: intent, subject, predicate, object, query, filter, since, limit, older_than, status, nonce, decision, window, id, task_id, enabled, until, target, command, args, description, cron, channel, recipient, content, path, focus, facts.
+Return only JSON with keys: intent, subject, predicate, object, query, filter, since, limit, older_than, status, nonce, decision, window, id, task_id, enabled, until, target, command, args, description, cron, channel, recipient, content, facts.
 Missing keys must be null. facts must be [] if none."#;
 
 #[async_trait::async_trait]
@@ -691,23 +678,6 @@ impl IntentFallback for LlmIntentFallback {
             },
             "proactivity_status" => Intent::ProactivityStatus,
             "memory_summary" => Intent::MemorySummary,
-            "project_inspect" => {
-                let path = payload
-                    .path
-                    .or(payload.target)
-                    .or(payload.query)
-                    .unwrap_or_default()
-                    .trim()
-                    .to_string();
-                if path.is_empty() {
-                    Intent::Chat {
-                        content: input.to_string(),
-                    }
-                } else {
-                    let focus = payload.focus.filter(|f| !f.trim().is_empty());
-                    Intent::ProjectInspect { path, focus }
-                }
-            }
             _ => Intent::Chat {
                 content: input.to_string(),
             },

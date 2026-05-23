@@ -17,6 +17,7 @@ pub mod reflex_runner;
 pub mod terminal_graph_mirror;
 pub mod types;
 
+mod attachment;
 mod budget_guard;
 mod constructors;
 mod exchange;

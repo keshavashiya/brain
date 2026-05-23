@@ -1,9 +1,9 @@
 //! Path-to-text extraction.
 //!
 //! When a user references a file path, we'd like to feed its content to
-//! the LLM as grounding (for `project_inspect`) or to the decomposer as
-//! context (for `decompose_task`). Plain text files just need a UTF-8
-//! read; binary formats need decoding first.
+//! the LLM as grounding (for chat-time path attachments) or to the
+//! decomposer as context (for `decompose_task`). Plain text files just
+//! need a UTF-8 read; binary formats need decoding first.
 //!
 //! This module dispatches by extension to a per-format extractor and
 //! returns clean UTF-8 text. Failures are surfaced as `Err` so callers

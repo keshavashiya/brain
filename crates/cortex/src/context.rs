@@ -16,6 +16,7 @@ pub const TOKEN_BUDGETS: TokenBudget = TokenBudget {
     user_model: 300,
     conversation_history: 2000,
     response_buffer: 400,
+    attachments: 2500,
     total_context: 8192, // Default for most models
 };
 
@@ -43,6 +44,9 @@ pub struct TokenBudget {
     pub user_model: usize,
     pub conversation_history: usize,
     pub response_buffer: usize,
+    /// Cap on rendered path-attachments (snapshots of files/dirs the
+    /// user referenced in chat). Truncated to fit by the assembler.
+    pub attachments: usize,
     pub total_context: usize,
 }
 
@@ -54,6 +58,7 @@ impl TokenBudget {
             .saturating_sub(self.user_model)
             .saturating_sub(self.conversation_history)
             .saturating_sub(self.response_buffer)
+            .saturating_sub(self.attachments)
     }
 
     /// Create budget for a specific model context size.
@@ -68,6 +73,33 @@ impl Default for TokenBudget {
     fn default() -> Self {
         TOKEN_BUDGETS
     }
+}
+
+/// Path-attachment grounding for a chat turn. When the user references
+/// a local path in their message, the pipeline reads it on their behalf
+/// and hands the snapshot here so the LLM can see *what's actually
+/// there* alongside memories and history. The SOUL prompt's
+/// "ATTACHED_CONTENT" instructions explain how to read these blocks.
+#[derive(Debug, Clone)]
+pub struct Attachment {
+    /// Path token as the user wrote it. Preserved verbatim so the LLM
+    /// can refer back to the user's own wording.
+    pub display_path: String,
+    /// Rendered snapshot — directory listing + histogram + inlined
+    /// files for a directory, or file excerpt for a file. Built by
+    /// `signal::pipeline::build_directory_snapshot` /
+    /// `build_file_snapshot`.
+    pub snapshot: String,
+}
+
+/// A path the user referenced that couldn't be attached (not found,
+/// outside `security.allowed_paths`, wrong file kind). Rendered as a
+/// `<SKIPPED_PATH>` tag so Brain can mention it instead of silently
+/// dropping the reference.
+#[derive(Debug, Clone)]
+pub struct SkippedAttachment {
+    pub display_path: String,
+    pub reason: String,
 }
 
 /// User profile data for context injection.
@@ -164,6 +196,7 @@ Operating Principles:
 4. CONTEXTUAL AWARENESS: Use the provided User Profile to tailor your tone and relevance.
 5. CURIOSITY: When you lack context about the user, ask one focused follow-up question. Learning about the user is part of your job — don't wait to be told.
 6. FORMATTING: The user's terminal renders markdown. Use it lightly when it helps (lists for multi-item answers, **bold** for emphasis, `code` for identifiers). Skip headings and tables for short replies.
+7. ATTACHED CONTENT: When the user references a local path, an `<ATTACHED_CONTENT path="…">` block is provided below as grounding — that is what is actually on disk, read on the user's behalf. Adapt your response shape to the *content*, not to a template: a chat export deserves a conversational summary with themes, tone, and an honest opinion; a code project deserves a technical overview; a folder of photos or media deserves an honest "I can see these file types but I can't view the images themselves." Never describe a non-code folder as if it were a software project. If a `<SKIPPED_PATH reason="…"/>` tag appears, the user named a path I couldn't read — acknowledge it briefly and ask them to confirm or rephrase.
 
 You are the user's partner in thought. Your goal is to make their digital life feel like a continuous, coherent stream of intelligence."#
             .to_string()
@@ -191,6 +224,36 @@ You are the user's partner in thought. Your goal is to make their digital life f
         memories: &[Memory],
         conversation_history: &[Message],
         addendum: Option<&str>,
+    ) -> Vec<Message> {
+        self.assemble_full(
+            user_message,
+            memories,
+            conversation_history,
+            addendum,
+            &[],
+            &[],
+        )
+    }
+
+    /// Full assembly with path-attachment grounding. Attachments render
+    /// as `<ATTACHED_CONTENT>` blocks in a System message positioned
+    /// right before the user's actual message — closest attention slot
+    /// to "what the user just put on the table." Skipped paths render
+    /// as `<SKIPPED_PATH>` tags in the same block so Brain can mention
+    /// them naturally.
+    ///
+    /// Per-attachment content is truncated to fit `budget.attachments`;
+    /// when total snapshot text exceeds the budget, later attachments
+    /// shrink first so the first (and usually primary) reference stays
+    /// intact.
+    pub fn assemble_full(
+        &self,
+        user_message: &str,
+        memories: &[Memory],
+        conversation_history: &[Message],
+        addendum: Option<&str>,
+        attachments: &[Attachment],
+        skipped: &[SkippedAttachment],
     ) -> Vec<Message> {
         let mut messages = Vec::new();
         let memory_budget = self.budget.memory_budget();
@@ -264,7 +327,17 @@ You are the user's partner in thought. Your goal is to make their digital life f
         included_history.reverse();
         messages.extend(included_history);
 
-        // 4. Add current user message
+        // 4. Attached path grounding (renders right before the user
+        //    message so the LLM has it freshly in attention).
+        if let Some(block) = render_attachments_block(attachments, skipped, self.budget.attachments)
+        {
+            messages.push(Message {
+                role: Role::System,
+                content: block,
+            });
+        }
+
+        // 5. Add current user message
         messages.push(Message {
             role: Role::User,
             content: user_message.to_string(),
@@ -279,6 +352,62 @@ You are the user's partner in thought. Your goal is to make their digital life f
     }
 }
 
+/// Build the `<ATTACHED_CONTENT>` / `<SKIPPED_PATH>` block that goes
+/// just before the user's message. Returns `None` when there's nothing
+/// to render. Each attachment's snapshot is truncated to keep the
+/// total under `budget_tokens` (2 chars ≈ 1 token); later attachments
+/// shrink first so the primary reference stays intact.
+fn render_attachments_block(
+    attachments: &[Attachment],
+    skipped: &[SkippedAttachment],
+    budget_tokens: usize,
+) -> Option<String> {
+    if attachments.is_empty() && skipped.is_empty() {
+        return None;
+    }
+    // 2 chars per token (matches the conservative estimator used
+    // elsewhere in this module).
+    let char_budget = budget_tokens.saturating_mul(2);
+    let mut out = String::new();
+    let mut chars_used = 0usize;
+
+    for (i, att) in attachments.iter().enumerate() {
+        // Per-attachment ceiling: equal share of remaining budget,
+        // floored at 600 chars so a small attachment can always fit.
+        let remaining_atts = attachments.len() - i;
+        let per_attachment =
+            (char_budget.saturating_sub(chars_used) / remaining_atts.max(1)).max(600);
+        let body = truncate_snapshot(&att.snapshot, per_attachment);
+        let block = format!(
+            "<ATTACHED_CONTENT path=\"{}\">\n{}\n</ATTACHED_CONTENT>\n",
+            att.display_path, body
+        );
+        chars_used = chars_used.saturating_add(block.chars().count());
+        out.push_str(&block);
+    }
+    for sk in skipped {
+        let tag = format!(
+            "<SKIPPED_PATH path=\"{}\" reason=\"{}\"/>\n",
+            sk.display_path,
+            sk.reason.replace('"', "'"),
+        );
+        out.push_str(&tag);
+    }
+    Some(out)
+}
+
+/// Truncate a snapshot string to at most `cap_chars`, appending a
+/// short marker so the LLM knows content was cut. Walks back to a
+/// character boundary to avoid splitting multi-byte chars.
+fn truncate_snapshot(s: &str, cap_chars: usize) -> String {
+    if s.chars().count() <= cap_chars {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(cap_chars.saturating_sub(20)).collect();
+    out.push_str("\n…[truncated]");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -288,15 +417,18 @@ mod tests {
         let budget = TokenBudget::default();
         let memory_budget = budget.memory_budget();
 
-        // 8192 - 500 - 300 - 2000 - 400 = 4992
-        assert_eq!(memory_budget, 4992);
+        // 8192 - 500 - 300 - 2000 - 400 - 2500 = 2492
+        assert_eq!(memory_budget, 2492);
     }
 
     #[test]
     fn test_token_budget_for_context_size() {
         let budget = TokenBudget::for_context_size(128000);
         assert_eq!(budget.total_context, 128000);
-        assert_eq!(budget.memory_budget(), 128000 - 500 - 300 - 2000 - 400);
+        assert_eq!(
+            budget.memory_budget(),
+            128000 - 500 - 300 - 2000 - 400 - 2500
+        );
     }
 
     #[test]
@@ -449,6 +581,93 @@ mod tests {
         assert!(
             system.contains("CURIOSITY"),
             "SOUL prompt must include CURIOSITY operating principle"
+        );
+        assert!(
+            system.contains("ATTACHED CONTENT"),
+            "SOUL prompt must teach Brain how to handle <ATTACHED_CONTENT> blocks"
+        );
+        assert!(
+            system.contains("chat export deserves a conversational summary"),
+            "SOUL prompt must instruct response-shape adaptation by content type"
+        );
+    }
+
+    #[test]
+    fn attachments_render_as_a_dedicated_system_message_before_user() {
+        let assembler = ContextAssembler::with_defaults();
+        let attachments = vec![Attachment {
+            display_path: "/Users/me/notes.md".to_string(),
+            snapshot: "# my notes\nbuy milk".to_string(),
+        }];
+        let messages = assembler.assemble_full("read this", &[], &[], None, &attachments, &[]);
+
+        // Penultimate message should be the attachments block; last is
+        // the user message itself.
+        let user_msg = messages.last().expect("non-empty");
+        assert_eq!(user_msg.role, Role::User);
+        assert_eq!(user_msg.content, "read this");
+
+        let prev = &messages[messages.len() - 2];
+        assert_eq!(prev.role, Role::System);
+        assert!(
+            prev.content
+                .contains("<ATTACHED_CONTENT path=\"/Users/me/notes.md\">"),
+            "missing attached-content block:\n{}",
+            prev.content
+        );
+        assert!(prev.content.contains("buy milk"));
+        assert!(prev.content.contains("</ATTACHED_CONTENT>"));
+    }
+
+    #[test]
+    fn skipped_paths_render_as_a_tag_for_brain_to_mention() {
+        let assembler = ContextAssembler::with_defaults();
+        let skipped = vec![SkippedAttachment {
+            display_path: "/Users/me/missing.txt".to_string(),
+            reason: "path not found".to_string(),
+        }];
+        let messages = assembler.assemble_full("summarise it", &[], &[], None, &[], &skipped);
+        let prev = &messages[messages.len() - 2];
+        assert!(prev.content.contains("<SKIPPED_PATH"));
+        assert!(prev.content.contains("/Users/me/missing.txt"));
+        assert!(prev.content.contains("path not found"));
+    }
+
+    #[test]
+    fn no_attachments_means_no_extra_block() {
+        let assembler = ContextAssembler::with_defaults();
+        let before = assembler.assemble("hi", &[], &[]);
+        let after = assembler.assemble_full("hi", &[], &[], None, &[], &[]);
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "no attachments must not add a message"
+        );
+    }
+
+    #[test]
+    fn large_attachment_is_truncated_to_budget() {
+        // Snapshot is 60_000 chars (~30_000 tokens). Default attachments
+        // budget is 2500 tokens ≈ 5000 chars; the rendered block must be
+        // far smaller than the input snapshot.
+        let huge = "x".repeat(60_000);
+        let assembler = ContextAssembler::with_defaults();
+        let attachments = vec![Attachment {
+            display_path: "/Users/me/huge.txt".to_string(),
+            snapshot: huge,
+        }];
+        let messages = assembler.assemble_full("read", &[], &[], None, &attachments, &[]);
+        let prev = &messages[messages.len() - 2];
+        assert!(
+            prev.content.contains("[truncated]"),
+            "huge attachment must be marked as truncated"
+        );
+        // Sanity: rendered block must be at least an order of magnitude
+        // smaller than the input snapshot.
+        assert!(
+            prev.content.chars().count() < 10_000,
+            "rendered block too large: {} chars",
+            prev.content.chars().count()
         );
     }
 

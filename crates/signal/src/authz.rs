@@ -113,13 +113,6 @@ pub fn intent_to_auth(intent: &Intent) -> Option<(AuthorizationRequest, Tier)> {
             Tier::Write,
         )),
 
-        // ── Project inspect — Read (reads files) with path scoping ────
-        Intent::ProjectInspect { path, .. } => Some((
-            AuthorizationRequest::new("fs", "read")
-                .with_modifiers(serde_json::json!({ "path": path })),
-            Tier::Read,
-        )),
-
         // ── Terminal Bridge — same Execute tier as shell.exec ──────────
         Intent::OpenTerminalSession { program, cwd, .. } => Some((
             AuthorizationRequest::new("terminal", "open").with_modifiers(serde_json::json!({
@@ -245,19 +238,6 @@ mod tests {
         let intent = Intent::Forget { target: "x".into() };
         let (_req, tier) = intent_to_auth(&intent).unwrap();
         assert_eq!(tier, Tier::Destructive);
-    }
-
-    #[test]
-    fn project_inspect_carries_path_modifier() {
-        let intent = Intent::ProjectInspect {
-            path: "/Users/k/proj".into(),
-            focus: None,
-        };
-        let (req, tier) = intent_to_auth(&intent).unwrap();
-        assert_eq!(req.verb_ns, "fs");
-        assert_eq!(req.verb_action, "read");
-        assert_eq!(tier, Tier::Read);
-        assert_eq!(req.modifier_str("path"), Some("/Users/k/proj"));
     }
 
     #[test]
@@ -477,10 +457,6 @@ mod tests {
             Intent::SetProactivity {
                 enabled: true,
                 until: None,
-            },
-            Intent::ProjectInspect {
-                path: "/p".into(),
-                focus: None,
             },
             Intent::OpenTerminalSession {
                 program: "bash".into(),

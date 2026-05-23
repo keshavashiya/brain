@@ -187,35 +187,6 @@ static DECOMPOSE_TASK_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("invariant: DECOMPOSE_TASK_RE must be valid")
 });
 
-/// Read-only inspection: "look at <path>", "tell me about <path>",
-/// "summarise the project at <path>", "describe the codebase at <path>",
-/// "report on <path>", "analyse <path>". Captures the path token.
-/// Restricted to absolute paths or `~/`-prefixed paths so we don't
-/// accidentally swallow phrases like "look at this issue".
-static PROJECT_INSPECT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?ix)
-        (?:
-            (?:can\s+you\s+)?
-            (?:look\s+at|tell\s+me\s+about|describe|summari[sz]e|analy[sz]e|inspect|review)
-            (?:\s+(?:the\s+)?(?:project|codebase|repo(?:sitory)?|directory|folder|code))?
-            (?:\s+(?:at|in|under))?\s+
-            (?P<path>(?:~|/|\./|\.\./|[A-Za-z]:[\\/])\S+)
-            (?:\s+and\s+(?:provide|give\s+me|generate|produce|write)\s+(?:a\s+)?(?P<focus>.+?))?
-            \??$
-            |
-            (?:provide|give\s+me|generate|produce|write)\s+(?:a\s+)?
-            (?:detailed\s+)?(?:report|summary|overview)
-            \s+(?:on|of|for|about)\s+
-            (?:(?:the\s+)?(?:project|codebase|repo(?:sitory)?|directory)\s+(?:at|in)\s+)?
-            (?P<path2>(?:~|/|\./|\.\./|[A-Za-z]:[\\/])\S+)
-            \??$
-        )
-    ",
-    )
-    .expect("invariant: PROJECT_INSPECT_RE must be valid")
-});
-
 static LIST_CHANNELS_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(?:list channels|show channels|what channels(?:\s+are\s+available)?)\??$")
         .expect("invariant: LIST_CHANNELS_RE must be valid")
@@ -244,18 +215,6 @@ pub(crate) const PATTERNS: &[PatternDef] = &[
         regex: &MEMORY_SUMMARY_RE,
         base_intent: Intent::MemorySummary,
         extractors: &[],
-    },
-    // ProjectInspect must come before RECALL_RE — `tell me about /tmp/x`
-    // is a path-bearing inspection, not a memory recall about a topic
-    // named `/tmp/x`. The path-anchored regex is strict enough that
-    // non-path "tell me about Rust" still falls through to recall.
-    PatternDef {
-        regex: &PROJECT_INSPECT_RE,
-        base_intent: Intent::ProjectInspect {
-            path: String::new(),
-            focus: None,
-        },
-        extractors: &[("path", 0), ("focus", 0)],
     },
     PatternDef {
         regex: &RECALL_RE,
@@ -457,10 +416,18 @@ pub(crate) const PATTERNS: &[PatternDef] = &[
     },
 ];
 
+/// Default LLM classification timeout. Generous because free-tier hosted
+/// models (e.g. OpenRouter free pool) routinely take 20-40s for the first
+/// classification of a session, and falling back to keyword-only is worse
+/// than waiting a bit longer.
+pub const DEFAULT_LLM_CLASSIFY_TIMEOUT: tokio::time::Duration =
+    tokio::time::Duration::from_secs(45);
+
 /// Intent classifier using two-tier approach.
 pub struct IntentClassifier {
     patterns: Vec<(IntentPattern, Intent)>,
     llm_fallback: Option<Arc<dyn IntentFallback>>,
+    llm_timeout: tokio::time::Duration,
 }
 
 struct IntentPattern {
@@ -489,11 +456,20 @@ impl IntentClassifier {
         Self {
             patterns,
             llm_fallback: None,
+            llm_timeout: DEFAULT_LLM_CLASSIFY_TIMEOUT,
         }
     }
 
     pub fn with_llm_fallback(mut self, fallback: Arc<dyn IntentFallback>) -> Self {
         self.llm_fallback = Some(fallback);
+        self
+    }
+
+    /// Override the LLM classification timeout. Defaults to
+    /// [`DEFAULT_LLM_CLASSIFY_TIMEOUT`]. On timeout the classifier falls
+    /// through to keyword-only classification.
+    pub fn with_llm_timeout(mut self, timeout: tokio::time::Duration) -> Self {
+        self.llm_timeout = timeout;
         self
     }
 
@@ -603,18 +579,6 @@ impl IntentClassifier {
                     namespace: None,
                     category,
                 }
-            }
-            Intent::ProjectInspect { .. } => {
-                let path = captures
-                    .name("path")
-                    .or_else(|| captures.name("path2"))
-                    .map(|m| m.as_str().to_string())
-                    .unwrap_or_default();
-                let focus = captures
-                    .name("focus")
-                    .map(|m| m.as_str().trim().to_string())
-                    .filter(|s| !s.is_empty());
-                Intent::ProjectInspect { path, focus }
             }
             Intent::DecomposeTask { .. } => {
                 // The PATTERNS entry maps `("request", 1)` but the
@@ -885,7 +849,7 @@ impl IntentClassifier {
         }
 
         if let Some(fallback) = &self.llm_fallback {
-            let timeout = tokio::time::Duration::from_millis(15000);
+            let timeout = self.llm_timeout;
             match tokio::time::timeout(timeout, fallback.classify_with_history(input, history))
                 .await
             {
@@ -894,7 +858,10 @@ impl IntentClassifier {
                     tracing::warn!("LLM classifier returned None (error or parse failure)");
                 }
                 Err(_) => {
-                    tracing::warn!("LLM intent classification timed out (15s)");
+                    tracing::warn!(
+                        "LLM intent classification timed out ({}s)",
+                        timeout.as_secs()
+                    );
                 }
             }
         }

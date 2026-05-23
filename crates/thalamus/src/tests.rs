@@ -554,51 +554,6 @@ async fn test_bare_approve_classifies_to_respond() {
 }
 
 #[tokio::test]
-async fn test_project_inspect_regex_picks_up_absolute_paths() {
-    let classifier = IntentClassifier::new();
-    let inputs = [
-        "look at /Users/keshav/code/brain",
-        "tell me about /tmp/proj",
-        "summarise the project at /Users/keshav/Developer/workspace/brain",
-        "describe the codebase at ~/code/brain",
-        "give me a detailed report on /Users/keshav/Developer/workspace/brain",
-    ];
-    for input in inputs {
-        let result = classifier.classify(input).await;
-        match result.intent {
-            Intent::ProjectInspect { path, .. } => {
-                assert!(!path.is_empty(), "no path captured from '{input}'");
-                assert!(
-                    path.starts_with('/') || path.starts_with('~'),
-                    "captured path is not absolute: {path:?} (input: {input})"
-                );
-            }
-            other => panic!("Expected ProjectInspect for '{input}', got {other:?}"),
-        }
-    }
-}
-
-#[tokio::test]
-async fn test_project_inspect_does_not_swallow_chat() {
-    // "Look at this issue" / "tell me about Rust" must NOT match
-    // ProjectInspect — only inputs with an actual path should.
-    let classifier = IntentClassifier::new();
-    for input in [
-        "look at this issue",
-        "tell me about Rust",
-        "describe the project",
-    ] {
-        let result = classifier.classify(input).await;
-        if let Intent::ProjectInspect { path, .. } = &result.intent {
-            panic!(
-                "input '{input}' matched ProjectInspect with path={path:?}, \
-                 should have fallen through to chat/other"
-            );
-        }
-    }
-}
-
-#[tokio::test]
 async fn cancel_signal_regex_captures_uuid() {
     let classifier = IntentClassifier::new();
     let result = classifier
