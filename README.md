@@ -670,7 +670,7 @@ cargo run -p brainos -- serve --http --mcp
 ```
 
 **MSRV:** Brain OS supports the current stable Rust release and the two prior
-minor releases. The workspace declares `rust-version = "1.88"`; CI verifies
+minor releases. The workspace declares `rust-version = "1.91"`; CI verifies
 the workspace still compiles on that pinned toolchain. MSRV bumps are called
 out in `CHANGELOG.md` and treated as a minor-version event.
 

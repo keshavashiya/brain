@@ -52,10 +52,10 @@ version = "0.4.0"
 edition = "2021"
 # MSRV policy: support the current stable and the two prior minor releases
 # (N, N-1, N-2). Verified in CI by the `msrv` job. Bumps must be called out
-# in CHANGELOG and are a minor-version event. Pinned to 1.88 because
-# transitive dependencies (darling 0.23, home 0.5.12, process-wrap 9.1)
-# require 1.87+; bumping one notch above gives headroom.
-rust-version = "1.88"
+# in CHANGELOG and are a minor-version event. Pinned to 1.91 to match
+# the stated policy (current stable is 1.93). Hard floor is 1.89 —
+# ruvector-core uses `stdarch_x86_avx512`, stabilized in 1.89.
+rust-version = "1.91"
 authors = ["Keshav Ashiya"]
 license = "MIT"
 repository = "https://github.com/keshavashiya/brain"

@@ -16,11 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **CONTRIBUTING.md, PR template, and bug/feature issue templates.**
   Codifies the commit-message style, MSRV expectations, conventions, and
   required local CI parity steps.
-- **MSRV policy.** Workspace declares `rust-version = "1.88"` (anchored
-  by transitive dep requirements: darling 0.23, home 0.5.12,
-  process-wrap 9.1); new `msrv` CI job pins to that toolchain and runs
-  `cargo check --workspace --locked` on every push/PR. Policy: support
-  current stable + the two prior minor releases.
+- **MSRV policy.** Workspace declares `rust-version = "1.91"` (current
+  stable is 1.93; this matches the stated N-2 floor). The hard floor is
+  1.89 — ruvector-core uses `stdarch_x86_avx512`, stabilized in 1.89.
+  New `msrv` CI job pins to the declared toolchain and runs `cargo check
+  --workspace --locked` on every push/PR.
 - **CHANGELOG validation.** `scripts/check-changelog.sh` + `changelog`
   CI job verifies the workspace version has a matching section and
   fails the build when source/manifest changes lack a CHANGELOG entry.
