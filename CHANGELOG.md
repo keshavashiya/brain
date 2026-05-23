@@ -16,10 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **CONTRIBUTING.md, PR template, and bug/feature issue templates.**
   Codifies the commit-message style, MSRV expectations, conventions, and
   required local CI parity steps.
-- **MSRV policy.** Workspace declares `rust-version = "1.85"`; new
-  `msrv` CI job pins to that toolchain and runs `cargo check --workspace
-  --locked` on every push/PR. Policy: support current stable + the two
-  prior minor releases.
+- **MSRV policy.** Workspace declares `rust-version = "1.88"` (anchored
+  by transitive dep requirements: darling 0.23, home 0.5.12,
+  process-wrap 9.1); new `msrv` CI job pins to that toolchain and runs
+  `cargo check --workspace --locked` on every push/PR. Policy: support
+  current stable + the two prior minor releases.
 - **CHANGELOG validation.** `scripts/check-changelog.sh` + `changelog`
   CI job verifies the workspace version has a matching section and
   fails the build when source/manifest changes lack a CHANGELOG entry.
@@ -31,7 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   via `cargo-about`. License set mirrors `deny.toml`.
 - **Cross-platform CI matrix.** `check` now runs on Ubuntu, macOS, and
   Windows; `test` runs on Ubuntu + macOS (Windows skipped pending PTY
-  portability work in the terminal adapter).
+  portability work in the terminal adapter). Windows excludes the grpc
+  adapter — `protobuf-src` builds Abseil/protoc from C++ source, which
+  doesn't link cleanly against MSVC's ucrt.
 - **Migration regression tests.** `test_migrations_record_all_expected_versions`
   asserts every declared migration appears in the `_migrations` table
   after `migrate()`; `test_schema_snapshot_matches` compares

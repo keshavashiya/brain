@@ -26,6 +26,7 @@ accepted = [
     "Unlicense",
     "BSL-1.0",
     "OpenSSL",
+    "CDLA-Permissive-2.0",
 ]
 
 # Per-target filtering: we ship binaries for the matrix-tested triples.

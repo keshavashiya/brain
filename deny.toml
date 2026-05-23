@@ -32,6 +32,9 @@ allow = [
     "Unlicense",
     "BSL-1.0",
     "OpenSSL",
+    # webpki-root-certs (ships Mozilla's CA bundle) — CDLA-Permissive-2.0
+    # is a data license, permissive in spirit, fine to redistribute.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.93
 
@@ -41,10 +44,22 @@ exceptions = []
 
 [advisories]
 version = 2
-ignore = []
 # `yanked = "deny"` would block the CI on any yanked transitive dep — too
 # noisy for an active dependency graph. We warn instead and surface it.
 yanked = "warn"
+# Transitive-only advisories we can't fix without an upstream release.
+# Re-evaluate every time we bump deps; remove entries that no longer apply.
+ignore = [
+    # Bincode 1.x unmaintained. Pulled in by ruvector-core (vector storage)
+    # which hasn't migrated to bincode 2.x yet. No direct usage from our code.
+    { id = "RUSTSEC-2025-0141", reason = "transitive via ruvector-core; awaiting upstream bump to bincode 2.x" },
+    # IterMut Stacked-Borrows unsoundness in a transitive crate. Only
+    # exposed under Miri; no impact on production.
+    { id = "RUSTSEC-2026-0002", reason = "transitive; unsoundness only observable under Miri" },
+    # rand custom-logger unsoundness. We do not use rand::rng() with a
+    # custom logger anywhere in our code, and downstream crates don't either.
+    { id = "RUSTSEC-2026-0097", reason = "transitive; we do not call rand::rng() with a custom logger" },
+]
 
 [bans]
 multiple-versions = "warn"

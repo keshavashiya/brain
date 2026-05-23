@@ -52,8 +52,10 @@ version = "0.4.0"
 edition = "2021"
 # MSRV policy: support the current stable and the two prior minor releases
 # (N, N-1, N-2). Verified in CI by the `msrv` job. Bumps must be called out
-# in CHANGELOG and are a minor-version event.
-rust-version = "1.85"
+# in CHANGELOG and are a minor-version event. Pinned to 1.88 because
+# transitive dependencies (darling 0.23, home 0.5.12, process-wrap 9.1)
+# require 1.87+; bumping one notch above gives headroom.
+rust-version = "1.88"
 authors = ["Keshav Ashiya"]
 license = "MIT"
 repository = "https://github.com/keshavashiya/brain"
