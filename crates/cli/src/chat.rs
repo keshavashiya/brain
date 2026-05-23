@@ -483,17 +483,47 @@ enum ReaderEvent {
     Closed(Option<String>),
 }
 
+/// Format a status message as a dim grey line for the external printer.
+/// If `overwrite` is true, prepends an ANSI sequence that moves the
+/// cursor up one line and clears it, so the new line overdraws the
+/// previously printed status (or response label) instead of stacking.
+/// Rustyline redraws its prompt on the same line afterward.
+fn render_status_for_printer(stage: &str, message: &str, overwrite: bool) -> String {
+    let body = if message.trim().is_empty() {
+        stage
+    } else {
+        message
+    };
+    let prefix = if overwrite { "\x1b[1A\x1b[2K" } else { "" };
+    format!("{prefix}\x1b[2;90m  \u{2026} {body}\x1b[0m\n")
+}
+
+/// Wrap a rendered response (label + body) with a leading "clear previous
+/// line" escape when there's a transient status line above it. This lets
+/// the final response replace the last `… thinking…` line in-place.
+fn with_overwrite_prefix(rendered: String, overwrite: bool) -> String {
+    if !overwrite || rendered.is_empty() {
+        return rendered;
+    }
+    format!("\x1b[1A\x1b[2K{rendered}")
+}
+
 /// Run the WS reader task: pull frames, accumulate chunks, render
 /// completed/proactive/approval/error bodies via the external printer.
-/// Skips status frames (rustyline's external printer can't overwrite an
-/// in-place line, so transient status text would just pile up above the
-/// prompt).
+/// Status frames render as a single dim line per stage transition so the
+/// user has visible feedback while the pipeline runs; duplicates of the
+/// same stage are suppressed to avoid stacking.
 async fn run_reader<P: ExternalPrinter + Send + 'static>(
     mut stream: WsStream,
     mut printer: P,
     notify: mpsc::Sender<ReaderEvent>,
 ) {
     let mut acc = ResponseAccumulator::new();
+    let mut last_status_stage: Option<String> = None;
+    // Tracks whether the most recent printed line was a transient status.
+    // When true, the next print (status or response) prepends an ANSI
+    // sequence that overdraws that line in place.
+    let mut status_line_pending = false;
     loop {
         let frame = match stream.next().await {
             Some(Ok(frame)) => frame,
@@ -523,13 +553,32 @@ async fn run_reader<P: ExternalPrinter + Send + 'static>(
 
         match parsed.get("type").and_then(|v| v.as_str()) {
             Some("status") => {
-                // Skip — see fn doc.
+                let stage = parsed
+                    .get("stage")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let message = parsed
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if last_status_stage.as_deref() != Some(stage.as_str()) {
+                    let _ = printer.print(render_status_for_printer(
+                        &stage,
+                        message,
+                        status_line_pending,
+                    ));
+                    last_status_stage = Some(stage);
+                    status_line_pending = true;
+                }
             }
             Some("proactive") => {
                 if let Some(content) = parsed.get("content").and_then(|c| c.as_str()) {
                     let rendered = render_to_string(ResponseLabel::Proactive, content);
+                    let rendered = with_overwrite_prefix(rendered, status_line_pending);
                     if !rendered.is_empty() {
                         let _ = printer.print(rendered);
+                        status_line_pending = false;
                     }
                 }
             }
@@ -539,8 +588,10 @@ async fn run_reader<P: ExternalPrinter + Send + 'static>(
                     .and_then(|c| c.as_str())
                     .unwrap_or("Approval required.");
                 let rendered = render_to_string(ResponseLabel::Proactive, body);
+                let rendered = with_overwrite_prefix(rendered, status_line_pending);
                 if !rendered.is_empty() {
                     let _ = printer.print(rendered);
+                    status_line_pending = false;
                 }
             }
             Some("chunk") => {
@@ -554,10 +605,13 @@ async fn run_reader<P: ExternalPrinter + Send + 'static>(
                 let finished = std::mem::replace(&mut acc, ResponseAccumulator::new());
                 if let Some(label) = finished.label {
                     let rendered = render_to_string(label, &finished.body);
+                    let rendered = with_overwrite_prefix(rendered, status_line_pending);
                     if !rendered.is_empty() {
                         let _ = printer.print(rendered);
                     }
                 }
+                last_status_stage = None;
+                status_line_pending = false;
             }
             Some("error") => {
                 let msg = parsed
@@ -565,9 +619,12 @@ async fn run_reader<P: ExternalPrinter + Send + 'static>(
                     .and_then(|m| m.as_str())
                     .unwrap_or("Unknown error");
                 let rendered = render_to_string(ResponseLabel::Error, msg);
+                let rendered = with_overwrite_prefix(rendered, status_line_pending);
                 if !rendered.is_empty() {
                     let _ = printer.print(rendered);
                 }
+                last_status_stage = None;
+                status_line_pending = false;
             }
             _ => {}
         }
@@ -676,7 +733,7 @@ pub(crate) async fn chat_interactive(config: &brain::BrainConfig) -> anyhow::Res
                                 println!("Session cleared — starting fresh conversation.");
                                 continue;
                             }
-                            s if s.starts_with('/') => {
+                            s if looks_like_slash_command(s) => {
                                 println!("Unknown signal: {s}");
                                 println!("Available: /status  /clear  /quit");
                                 continue;
@@ -737,6 +794,19 @@ pub(crate) async fn chat_interactive(config: &brain::BrainConfig) -> anyhow::Res
     drop(input_thread);
 
     result
+}
+
+/// True when the input should be treated as a slash command rather than a
+/// chat message. An absolute file path like `/Users/foo/bar.docx ...` is
+/// not a slash command — the first token contains inner `/` separators.
+/// Short tokens like `/staus` are still flagged so typos surface instead
+/// of getting silently sent as messages.
+fn looks_like_slash_command(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix('/') else {
+        return false;
+    };
+    let first_token = rest.split_whitespace().next().unwrap_or(rest);
+    !first_token.contains('/')
 }
 
 /// Events from the blocking rustyline thread to the async loop.
@@ -854,6 +924,54 @@ mod tests {
         let s = render_to_string(ResponseLabel::Brain, "hello");
         assert!(s.contains("Brain:"));
         assert!(s.contains("hello"));
+    }
+
+    #[test]
+    fn status_for_printer_skips_overwrite_on_first_print() {
+        let s = render_status_for_printer("routing", "routing…", false);
+        assert!(!s.starts_with("\x1b[1A"));
+        assert!(s.contains("routing…"));
+    }
+
+    #[test]
+    fn status_for_printer_overwrites_subsequent_lines() {
+        let s = render_status_for_printer("thinking", "thinking…", true);
+        assert!(s.starts_with("\x1b[1A\x1b[2K"));
+        assert!(s.contains("thinking…"));
+    }
+
+    #[test]
+    fn overwrite_prefix_noop_on_empty_or_disabled() {
+        assert_eq!(with_overwrite_prefix(String::new(), true), "");
+        assert_eq!(
+            with_overwrite_prefix("Brain:\nhi\n".to_string(), false),
+            "Brain:\nhi\n"
+        );
+    }
+
+    #[test]
+    fn overwrite_prefix_prepends_when_enabled() {
+        let out = with_overwrite_prefix("Brain:\nhi\n".to_string(), true);
+        assert!(out.starts_with("\x1b[1A\x1b[2K"));
+        assert!(out.contains("Brain:"));
+    }
+
+    #[test]
+    fn slash_command_detected_for_known_form() {
+        assert!(looks_like_slash_command("/quit"));
+        assert!(looks_like_slash_command("/status"));
+        assert!(looks_like_slash_command("/staus")); // typo still flagged
+        assert!(looks_like_slash_command("/foo bar baz"));
+    }
+
+    #[test]
+    fn slash_command_rejected_for_paths_and_messages() {
+        assert!(!looks_like_slash_command("/Users/me/file.docx"));
+        assert!(!looks_like_slash_command(
+            "/Users/me/file.docx what is this?"
+        ));
+        assert!(!looks_like_slash_command("hello"));
+        assert!(!looks_like_slash_command(""));
     }
 
     #[test]
