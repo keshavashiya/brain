@@ -17,25 +17,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # Windows is intentionally omitted: both the grpc and terminal
+        # adapters pull `protobuf-src` (build dep), which builds Abseil +
+        # protoc from C++ source. MSVC's linker can't resolve ucrt
+        # intrinsics like __imp_nan / __imp_modf against the static libs
+        # cmake/abseil produces on Windows. The cli (and signal, which
+        # most crates depend on) pull terminal transitively, so there's
+        # no useful subset of the workspace that compiles on Windows
+        # without first conditionally gating protobuf-src behind
+        # `cfg(not(windows))`. Tracked separately; revisit once terminal
+        # gates its gRPC build on a non-Windows target.
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # The grpc adapter pulls in `protobuf-src`, which builds Abseil +
-      # protoc from C++ source. That toolchain doesn't link cleanly with
-      # MSVC on the GitHub Windows runner (LNK2019 against ucrt symbols
-      # like __imp_nan / __imp_modf). On Windows we exercise the binary
-      # without the grpc feature; cargo only resolves the brainos dep
-      # graph in this mode, which keeps grpcadapter out of feature
-      # unification entirely. Linux/macOS still exercise grpc.
-      - name: Binary check (Windows — no grpc)
-        if: runner.os == 'Windows'
-        run: cargo check -p brainos --no-default-features --features encryption,ganglia
-        shell: bash
-      - name: Workspace check (Unix)
-        if: runner.os != 'Windows'
-        run: cargo check --workspace
+      - run: cargo check --workspace
 
   check-minimal:
     name: Check (no default features)

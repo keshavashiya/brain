@@ -48,22 +48,36 @@ identifier (`Wave A.2`).
 
 ## Local CI parity
 
-CI runs `fmt`, `clippy`, `check`, `check-minimal`, `crate-names`, `test`,
-`security`, and `coverage` on Linux. Before pushing, run the equivalents
-locally:
+CI runs the gates below on Linux + macOS. Before pushing, run the
+equivalents locally — much faster than discovering a break in GHA:
 
 ```bash
+# Format, lints, build
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo check --workspace
 cargo check -p brainos --no-default-features
 cargo check -p brainos --no-default-features --features encryption
+
+# Project gates
 ./scripts/check-crate-names.sh
+./scripts/check-boundaries.sh
+./scripts/check-changelog.sh
+
+# Tests
 cargo test --workspace
+
+# MSRV (install once: `rustup toolchain install 1.91`)
+cargo +1.91 check --workspace --locked
+
+# License + advisory (install once: `cargo install cargo-deny --locked`)
+cargo deny check all
 ```
 
-The pre-commit hook (`./scripts/install-hooks.sh`) runs the first three of
-these on every commit so you don't ship a CI-breaking diff by accident.
+The pre-commit hook (`./scripts/install-hooks.sh`) runs fmt + clippy +
+crate-names on every commit so you don't ship a CI-breaking diff by accident.
+The MSRV and cargo-deny gates are slower (multi-minute) and intentionally
+not in the hook — run them manually before pushing a substantive change.
 
 ## Conventions
 

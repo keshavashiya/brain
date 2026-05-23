@@ -30,11 +30,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **Third-party attribution scaffolding.** `about.toml` + `about.hbs` +
   `scripts/generate-attribution.sh` produce `THIRD_PARTY_LICENSES.md`
   via `cargo-about`. License set mirrors `deny.toml`.
-- **Cross-platform CI matrix.** `check` now runs on Ubuntu, macOS, and
-  Windows; `test` runs on Ubuntu + macOS (Windows skipped pending PTY
-  portability work in the terminal adapter). Windows excludes the grpc
-  adapter — `protobuf-src` builds Abseil/protoc from C++ source, which
-  doesn't link cleanly against MSVC's ucrt.
+- **Cross-platform CI matrix.** `check` and `test` now run on Ubuntu and
+  macOS. Windows is omitted: both the grpc and terminal adapters depend
+  on `protobuf-src` (build dep), which compiles Abseil + protoc from C++
+  source and fails to link against MSVC's ucrt (`__imp_nan`,
+  `__imp_modf`, …). Since terminal is a non-optional dep of the cli and
+  most pillar crates pull it transitively, there's no useful subset of
+  the workspace that compiles on Windows without first gating protobuf
+  build deps on `cfg(not(windows))`. Tracked as v0.6.0 work.
 - **Migration regression tests.** `test_migrations_record_all_expected_versions`
   asserts every declared migration appears in the `_migrations` table
   after `migrate()`; `test_schema_snapshot_matches` compares
