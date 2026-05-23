@@ -3,6 +3,7 @@ name = "brainos-ganglia"
 description = "Proactivity engine with habit and open-loop detection for Brain OS"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true

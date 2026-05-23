@@ -1,0 +1,63 @@
+# cargo-deny configuration for Brain OS.
+#
+# Runs in CI as the `cargo-deny` job. Verifies:
+#   - licenses are on the allow-list (no GPL/AGPL/SSPL contamination)
+#   - no known security advisories (overlaps with cargo-audit; we keep both
+#     because cargo-deny also catches yanked crates and unmaintained deps)
+#   - no banned or duplicate dependencies sneaking in
+#   - source registries are limited to crates.io (no random git deps)
+#
+# Run locally:
+#   cargo install cargo-deny --locked
+#   cargo deny check
+
+[graph]
+all-features = true
+
+[licenses]
+# Brain OS itself is MIT. Permissive deps only.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "0BSD",
+    "Unlicense",
+    "BSL-1.0",
+    "OpenSSL",
+]
+confidence-threshold = 0.93
+
+# Curated per-crate exceptions for the rare crate that ships ambiguous
+# licensing metadata. Add entries only with a comment justifying each one.
+exceptions = []
+
+[advisories]
+version = 2
+ignore = []
+# `yanked = "deny"` would block the CI on any yanked transitive dep — too
+# noisy for an active dependency graph. We warn instead and surface it.
+yanked = "warn"
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# crates banned outright. Empty for now; populate as we encounter
+# specific ecosystem foot-guns.
+deny = []
+# Acceptable duplicates (deps we know transitive crates pull at multiple
+# versions and we can't fix without upstream changes). Keep this list tight.
+skip-tree = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

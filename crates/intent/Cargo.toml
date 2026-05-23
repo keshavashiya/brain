@@ -3,6 +3,7 @@ name = "brainos-intent"
 description = "Standardized Intent Token (SIT) schema and capability-routing traits for Brain OS"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true

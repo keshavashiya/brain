@@ -1,0 +1,41 @@
+# cargo-about configuration for third-party license attribution.
+#
+# Generates THIRD_PARTY_LICENSES.md, the NOTICE-style file we ship with
+# every release to satisfy permissive-license attribution requirements.
+#
+# Run:
+#   cargo install cargo-about --locked
+#   ./scripts/generate-attribution.sh
+#
+# The license set MUST stay aligned with `deny.toml` — `cargo deny check
+# licenses` is the gate, this file is the human-readable evidence.
+
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "0BSD",
+    "Unlicense",
+    "BSL-1.0",
+    "OpenSSL",
+]
+
+# Per-target filtering: we ship binaries for the matrix-tested triples.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+
+ignore-build-dependencies = true
+ignore-dev-dependencies = true

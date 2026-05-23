@@ -5,6 +5,61 @@ All notable changes to Brain OS are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Pre-commit gate.** `scripts/install-hooks.sh` installs a repo-managed
+  pre-commit hook that runs `cargo fmt --check`, `cargo clippy
+  --all-targets -D warnings`, and the crate-naming check. Opt-in;
+  bypassable with `git commit --no-verify`.
+- **CONTRIBUTING.md, PR template, and bug/feature issue templates.**
+  Codifies the commit-message style, MSRV expectations, conventions, and
+  required local CI parity steps.
+- **MSRV policy.** Workspace declares `rust-version = "1.85"`; new
+  `msrv` CI job pins to that toolchain and runs `cargo check --workspace
+  --locked` on every push/PR. Policy: support current stable + the two
+  prior minor releases.
+- **CHANGELOG validation.** `scripts/check-changelog.sh` + `changelog`
+  CI job verifies the workspace version has a matching section and
+  fails the build when source/manifest changes lack a CHANGELOG entry.
+- **`cargo-deny` license + advisory enforcement.** `deny.toml` allow-lists
+  permissive licenses, blocks unknown registries/git sources, and the
+  `deny` CI job runs `cargo deny check all` on every PR.
+- **Third-party attribution scaffolding.** `about.toml` + `about.hbs` +
+  `scripts/generate-attribution.sh` produce `THIRD_PARTY_LICENSES.md`
+  via `cargo-about`. License set mirrors `deny.toml`.
+- **Cross-platform CI matrix.** `check` now runs on Ubuntu, macOS, and
+  Windows; `test` runs on Ubuntu + macOS (Windows skipped pending PTY
+  portability work in the terminal adapter).
+- **Migration regression tests.** `test_migrations_record_all_expected_versions`
+  asserts every declared migration appears in the `_migrations` table
+  after `migrate()`; `test_schema_snapshot_matches` compares
+  post-migration `sqlite_master` against a committed snapshot to catch
+  silent schema drift in existing migrations.
+- **Module-boundary enforcement.** `scripts/check-boundaries.sh` plus
+  `boundaries` CI job verify no workspace crate depends on the `brainos`
+  CLI binary and transport adapters don't depend on each other.
+- **Multi-stage Dockerfile + `.dockerignore`.** Distroless `nonroot`
+  runtime image; default feature set enabled; documented buildx
+  command for multi-arch (linux/amd64 + linux/arm64) images.
+- **`scripts/install.sh`** — Linux/macOS one-line installer. Probes the
+  GitHub Releases binary for the host triple; falls back to
+  `cargo install brainos` or `cargo install --git` from source.
+
+### Changed
+
+- **`scripts/check-crate-names.sh`** — header comment and error footer
+  no longer reference gitignored docs paths. Rule is inlined; rationale
+  moved to `CONTRIBUTING.md`.
+
+### Removed
+
+- **`.cargo/config.toml`** — deleted. The hardcoded `PROTOC =
+  "/opt/homebrew/bin/protoc"` was stale: the grpc adapter's `build.rs`
+  already vendors protoc via `protobuf-src`, and the hardcoded path
+  broke Linux builds.
+
 ## [0.4.0] — unreleased
 
 "Wire the Pillars + Fix the Stubs" release. v0.3.0 → v0.4.0 promotes

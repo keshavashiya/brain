@@ -3,6 +3,7 @@ name = "brainos-channel"
 description = "Channel intelligence — preference learning, intelligent routing, outbound relay, and cross-channel approval correlation"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true

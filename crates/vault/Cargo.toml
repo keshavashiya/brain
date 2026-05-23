@@ -3,6 +3,7 @@ name = "brainos-vault"
 description = "Credential vault with OS keychain and encrypted-file fallback"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true

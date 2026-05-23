@@ -1,5 +1,17 @@
 use super::*;
 
+// Migration versions that must exist after a fresh `migrate()`. Gaps
+// (8, 9) are intentional — they were removed during development. Adding a
+// new migration means appending the version here AND regenerating the
+// schema snapshot below.
+const EXPECTED_MIGRATION_VERSIONS: &[i64] = &[
+    1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+];
+
+/// Committed snapshot of the post-migration `sqlite_master` schema.
+/// Regenerate by running the workspace tests with `UPDATE_SCHEMA_SNAPSHOT=1`.
+const SCHEMA_SNAPSHOT: &str = include_str!("schema.snapshot.txt");
+
 #[test]
 fn test_open_memory() {
     let pool = SqlitePool::open_memory().unwrap();
@@ -12,6 +24,74 @@ fn test_migrations_idempotent() {
     let pool = SqlitePool::open_memory().unwrap();
     pool.migrate().unwrap();
     assert_eq!(pool.schema_version().unwrap(), 22);
+}
+
+#[test]
+fn test_migrations_record_all_expected_versions() {
+    let pool = SqlitePool::open_memory().unwrap();
+    let recorded: Vec<i64> = pool
+        .with_conn(|conn| {
+            let mut stmt = conn.prepare("SELECT version FROM _migrations ORDER BY version")?;
+            let rows: Result<Vec<i64>, _> =
+                stmt.query_map([], |row| row.get::<_, i64>(0))?.collect();
+            Ok(rows?)
+        })
+        .unwrap();
+    assert_eq!(
+        recorded, EXPECTED_MIGRATION_VERSIONS,
+        "migration versions in _migrations table drifted from the declared list — \
+         did someone add/remove a migration without updating EXPECTED_MIGRATION_VERSIONS?"
+    );
+}
+
+#[test]
+fn test_schema_snapshot_matches() {
+    let pool = SqlitePool::open_memory().unwrap();
+    let actual = dump_schema(&pool);
+
+    if std::env::var("UPDATE_SCHEMA_SNAPSHOT").is_ok() {
+        // Write to the source-tree snapshot. Manifest dir is the crate root.
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sqlite/schema.snapshot.txt");
+        std::fs::write(&path, &actual)
+            .unwrap_or_else(|e| panic!("failed to update snapshot at {path:?}: {e}"));
+        return;
+    }
+
+    if SCHEMA_SNAPSHOT != actual {
+        panic!(
+            "post-migration schema drifted from snapshot.\n\
+             Run `UPDATE_SCHEMA_SNAPSHOT=1 cargo test -p brainos-storage \
+             test_schema_snapshot_matches` to regenerate, then review the diff \
+             before committing.\n\n--- expected (committed) ---\n{SCHEMA_SNAPSHOT}\n\
+             --- actual (current) ---\n{actual}"
+        );
+    }
+}
+
+/// Deterministic dump of `sqlite_master` (tables, indexes, triggers, views).
+/// Excludes auto-generated FTS shadow tables, autoindex rows, and the
+/// migration-tracking metadata table itself.
+fn dump_schema(pool: &SqlitePool) -> String {
+    pool.with_conn(|conn| {
+        let mut stmt = conn.prepare(
+            "SELECT type, name, sql FROM sqlite_master \
+             WHERE sql IS NOT NULL \
+               AND name NOT LIKE 'sqlite_%' \
+               AND name NOT LIKE '%_fts_%' \
+               AND name != '_migrations' \
+             ORDER BY type, name",
+        )?;
+        let rows: Vec<(String, String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<_, _>>()?;
+        let mut out = String::new();
+        for (ty, name, sql) in rows {
+            out.push_str(&format!("-- {ty}: {name}\n{}\n\n", sql.trim()));
+        }
+        Ok(out)
+    })
+    .unwrap()
 }
 
 #[test]

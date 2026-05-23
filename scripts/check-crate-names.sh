@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Enforce the single-word crate-name convention.
 #
-# Rules (per docs/CONVENTIONS.md):
+# Rules:
 #   - Folder names under crates/ are a single lowercase word with no
 #     underscores or hyphens. The only exception is the grouping folder
 #     `crates/adapters/` which contains transport-adapter crates.
 #   - Workspace-dependency aliases (the keys in [workspace.dependencies])
 #     are a single word with no underscores.
 #
-# Exits 0 on success, 1 on any violation.
+# Exits 0 on success, 1 on any violation. See CONTRIBUTING.md for rationale.
 
 set -euo pipefail
 
@@ -69,7 +69,7 @@ done < Cargo.toml
 if [ "$violations" -ne 0 ]; then
     echo "" >&2
     echo "Found $violations crate-naming violation(s)." >&2
-    echo "See docs/CONVENTIONS.md (Crate naming section)." >&2
+    echo "See CONTRIBUTING.md (Conventions section) for the rule." >&2
     exit 1
 fi
 

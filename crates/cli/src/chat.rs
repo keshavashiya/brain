@@ -558,10 +558,7 @@ async fn run_reader<P: ExternalPrinter + Send + 'static>(
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let message = parsed
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let message = parsed.get("message").and_then(|v| v.as_str()).unwrap_or("");
                 if last_status_stage.as_deref() != Some(stage.as_str()) {
                     let _ = printer.print(render_status_for_printer(
                         &stage,

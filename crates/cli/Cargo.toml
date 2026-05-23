@@ -3,6 +3,7 @@ name = "brainos"
 description = "Brain OS — local-first AI memory engine. Stop giving your AI amnesia."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true

@@ -3,6 +3,7 @@ name = "brainos-terminal"
 description = "Terminal Bridge gRPC adapter (PTY motor cortex) for Brain OS"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true

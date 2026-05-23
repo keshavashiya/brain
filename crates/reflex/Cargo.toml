@@ -3,6 +3,7 @@ name = "brainos-reflex"
 description = "Reactive signal sources (Reflex triggers) for Brain OS — events that emit Signals but never execute them"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true

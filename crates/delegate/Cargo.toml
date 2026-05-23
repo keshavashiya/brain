@@ -3,6 +3,7 @@ name = "brainos-delegate"
 description = "Agent delegation — hand off subtasks to specialist CLI/HTTP agents through a single subprocess-backed adapter"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true

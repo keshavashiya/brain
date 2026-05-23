@@ -19,8 +19,13 @@ It routes intents through a Thalamus, scores importance via an Amygdala, and sto
 # 1. Install Ollama first — https://ollama.com (one-line installer for macOS/Linux/Windows)
 ollama pull qwen2.5-coder:7b && ollama pull nomic-embed-text
 
-# 2. Install Brain
+# 2. Install Brain (Linux / macOS one-liner — downloads a pre-built binary
+#    when available, falls back to `cargo install` from source otherwise)
+curl -fsSL https://raw.githubusercontent.com/keshavashiya/brain/main/scripts/install.sh | sh
+
+# …or just use cargo directly on any platform:
 cargo install brainos
+
 brain init             # writes ~/.brain/config.yaml + prints your API key
 brain doctor           # verify Ollama, models, ports — fix anything red
 brain start            # wake the daemon
@@ -663,6 +668,14 @@ cargo test
 cargo run -p brainos -- chat "hello"
 cargo run -p brainos -- serve --http --mcp
 ```
+
+**MSRV:** Brain OS supports the current stable Rust release and the two prior
+minor releases. The workspace declares `rust-version = "1.85"`; CI verifies
+the workspace still compiles on that pinned toolchain. MSRV bumps are called
+out in `CHANGELOG.md` and treated as a minor-version event.
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the contribution workflow,
+pre-commit setup, and local CI parity steps.
 
 <details>
 <summary><strong>Workspace Structure</strong></summary>

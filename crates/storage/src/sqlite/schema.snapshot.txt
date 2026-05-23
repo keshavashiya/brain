@@ -1,0 +1,241 @@
+-- index: idx_audit_timestamp
+CREATE INDEX idx_audit_timestamp ON audit_log(timestamp DESC)
+
+-- index: idx_dlq_entries_recent
+CREATE INDEX idx_dlq_entries_recent
+                    ON dlq_entries(dlq_at DESC)
+
+-- index: idx_dlq_entries_tool
+CREATE INDEX idx_dlq_entries_tool
+                    ON dlq_entries(tool_id, dlq_at DESC)
+
+-- index: idx_edges_dst
+CREATE INDEX idx_edges_dst ON edges(dst_id, edge_kind)
+
+-- index: idx_edges_src
+CREATE INDEX idx_edges_src ON edges(src_id, edge_kind)
+
+-- index: idx_episodes_importance
+CREATE INDEX idx_episodes_importance ON episodes(importance DESC)
+
+-- index: idx_episodes_namespace
+CREATE INDEX idx_episodes_namespace ON episodes(namespace)
+
+-- index: idx_episodes_role_timestamp
+CREATE INDEX idx_episodes_role_timestamp
+                    ON episodes(role, timestamp)
+
+-- index: idx_episodes_session
+CREATE INDEX idx_episodes_session ON episodes(session_id)
+
+-- index: idx_episodes_timestamp
+CREATE INDEX idx_episodes_timestamp ON episodes(timestamp DESC)
+
+-- index: idx_facts_active
+CREATE INDEX idx_facts_active
+                    ON semantic_facts(superseded_by)
+                    WHERE superseded_by IS NULL
+
+-- index: idx_facts_category
+CREATE INDEX idx_facts_category ON semantic_facts(category)
+
+-- index: idx_facts_namespace
+CREATE INDEX idx_facts_namespace ON semantic_facts(namespace)
+
+-- index: idx_facts_subject
+CREATE INDEX idx_facts_subject ON semantic_facts(subject)
+
+-- index: idx_nodes_created
+CREATE INDEX idx_nodes_created
+                    ON nodes(created_at DESC)
+
+-- index: idx_nodes_namespace_kind
+CREATE INDEX idx_nodes_namespace_kind
+                    ON nodes(namespace, node_kind)
+
+-- index: idx_nodes_session_ns_kind
+CREATE INDEX idx_nodes_session_ns_kind
+                    ON nodes(session_id, namespace, node_kind)
+
+-- index: idx_outbox_pending
+CREATE INDEX idx_outbox_pending
+                    ON notification_outbox(delivered_at, priority, created_at)
+                    WHERE delivered_at IS NULL
+
+-- index: idx_procedures_trigger
+CREATE INDEX idx_procedures_trigger
+                    ON procedures(trigger_pattern)
+
+-- index: idx_scheduled_intents_namespace
+CREATE INDEX idx_scheduled_intents_namespace
+                    ON scheduled_intents(namespace)
+
+-- index: idx_scheduled_intents_status
+CREATE INDEX idx_scheduled_intents_status
+                    ON scheduled_intents(status)
+
+-- index: idx_standing_approvals_lookup
+CREATE INDEX idx_standing_approvals_lookup
+                    ON standing_approvals(agent_id, verb_ns, verb_action)
+                    WHERE revoked_at IS NULL
+
+-- index: idx_standing_approvals_recent
+CREATE INDEX idx_standing_approvals_recent
+                    ON standing_approvals(granted_at DESC)
+
+-- index: idx_task_states_task
+CREATE INDEX idx_task_states_task
+                    ON task_states(task_id, id)
+
+-- table: audit_log
+CREATE TABLE audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+                    action TEXT NOT NULL,
+                    details TEXT,
+                    prev_hash TEXT,
+                    hash TEXT NOT NULL
+                )
+
+-- table: dlq_entries
+CREATE TABLE dlq_entries (
+                    id TEXT PRIMARY KEY,
+                    tool_id TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
+                    error_message TEXT NOT NULL,
+                    attempts INTEGER NOT NULL,
+                    dlq_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+
+-- table: edges
+CREATE TABLE edges (
+                    src_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+                    dst_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
+                    edge_kind TEXT NOT NULL,
+                    weight REAL NOT NULL DEFAULT 1.0,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (src_id, dst_id, edge_kind)
+                )
+
+-- table: episode_promotions
+CREATE TABLE episode_promotions (
+                    episode_id TEXT PRIMARY KEY REFERENCES episodes(id) ON DELETE CASCADE,
+                    fact_id TEXT NOT NULL REFERENCES semantic_facts(id) ON DELETE CASCADE,
+                    promoted_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+
+-- table: episodes
+CREATE TABLE episodes (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL REFERENCES sessions(id),
+                    role TEXT NOT NULL CHECK(role IN ('user', 'assistant', 'system')),
+                    content TEXT NOT NULL,
+                    timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+                    importance REAL NOT NULL DEFAULT 0.5,
+                    decay_rate REAL NOT NULL DEFAULT 0.1,
+                    reinforcement_count INTEGER NOT NULL DEFAULT 0,
+                    last_accessed TEXT,
+                    metadata TEXT
+                , namespace TEXT NOT NULL DEFAULT 'personal', agent TEXT)
+
+-- table: episodes_fts
+CREATE VIRTUAL TABLE episodes_fts USING fts5(
+                    content,
+                    content_rowid='rowid',
+                    tokenize='porter unicode61'
+                )
+
+-- table: nodes
+CREATE TABLE nodes (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT REFERENCES sessions(id),
+                    namespace TEXT NOT NULL DEFAULT 'personal',
+                    node_kind TEXT NOT NULL,
+                    body_json TEXT NOT NULL,
+                    vector_id TEXT,
+                    weight REAL NOT NULL DEFAULT 1.0,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+
+-- table: notification_outbox
+CREATE TABLE notification_outbox (
+                    id TEXT PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    priority INTEGER NOT NULL DEFAULT 1,
+                    triggered_by TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    delivered_at TEXT,
+                    channel TEXT
+                )
+
+-- table: procedures
+CREATE TABLE procedures (
+                    id              TEXT PRIMARY KEY,
+                    trigger_pattern TEXT NOT NULL,
+                    steps_json      TEXT NOT NULL DEFAULT '[]',
+                    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                    updated_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                    use_count       INTEGER NOT NULL DEFAULT 0
+                )
+
+-- table: scheduled_intents
+CREATE TABLE scheduled_intents (
+                    id TEXT PRIMARY KEY,
+                    description TEXT NOT NULL,
+                    cron TEXT,
+                    namespace TEXT NOT NULL DEFAULT 'personal',
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    status TEXT NOT NULL DEFAULT 'scheduled',
+                    metadata TEXT
+                )
+
+-- table: semantic_facts
+CREATE TABLE semantic_facts (
+                    id TEXT PRIMARY KEY,
+                    category TEXT NOT NULL,
+                    subject TEXT NOT NULL,
+                    predicate TEXT NOT NULL,
+                    object TEXT NOT NULL,
+                    confidence REAL NOT NULL DEFAULT 1.0,
+                    source_episode_id TEXT REFERENCES episodes(id) ON DELETE SET NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    superseded_by TEXT REFERENCES semantic_facts(id) ON DELETE SET NULL
+                , namespace TEXT NOT NULL DEFAULT 'personal', agent TEXT)
+
+-- table: sessions
+CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY,
+                    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    ended_at TEXT,
+                    channel TEXT NOT NULL DEFAULT 'cli',
+                    metadata TEXT
+                )
+
+-- table: standing_approvals
+CREATE TABLE standing_approvals (
+                    id TEXT PRIMARY KEY,
+                    agent_id TEXT NOT NULL,
+                    verb_ns TEXT NOT NULL,
+                    verb_action TEXT NOT NULL,
+                    granted_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    revoked_at TEXT,
+                    note TEXT
+                )
+
+-- table: task_states
+CREATE TABLE task_states (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    state TEXT NOT NULL,
+                    entered_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+
+-- table: user_profile
+CREATE TABLE user_profile (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    source TEXT,
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+
