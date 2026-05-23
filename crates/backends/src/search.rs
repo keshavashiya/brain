@@ -5,23 +5,19 @@ use std::sync::Arc;
 
 use brain::metrics::SubsystemMetrics;
 
-use crate::resilience::{resilient_send, CircuitBreaker};
+use crate::resilience::{http_breaker, resilient_send, CircuitBreaker};
 
 fn make_cb(
     name: &str,
     resilience: &brain::config::ResilienceConfig,
     metrics: Option<Arc<SubsystemMetrics>>,
 ) -> CircuitBreaker {
-    let cb = CircuitBreaker::new(
+    http_breaker(
         name,
         resilience.circuit_breaker_threshold,
         resilience.circuit_breaker_cooldown_secs,
-    );
-    if let Some(m) = metrics {
-        cb.with_metrics(m)
-    } else {
-        cb
-    }
+        metrics,
+    )
 }
 
 /// Parse a JSON array of search results into `SearchHit`s with flexible field names.

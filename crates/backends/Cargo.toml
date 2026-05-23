@@ -17,6 +17,8 @@ cortex = { workspace = true }
 hippocampus = { workspace = true }
 storage = { workspace = true }
 signal = { workspace = true }
+observe = { workspace = true }
+resilience = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -30,10 +32,6 @@ async-trait = { workspace = true }
 criterion = { workspace = true }
 mockito = { workspace = true }
 tokio = { workspace = true }
-
-[[bench]]
-name = "circuit_breaker"
-harness = false
 
 [lints]
 workspace = true

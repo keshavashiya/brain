@@ -52,16 +52,52 @@ impl From<String> for AgentId {
     }
 }
 
-/// Authorization tier. Ordered so `>=` comparison answers "does this
+/// Authorization tier — used both as the principal's authorization level and
+/// as the tier required by an action. Ordered so `>=` answers "does this
 /// principal's tier satisfy the action's required tier?".
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+///
+/// Per-tier policy (`requires_confirmation`, `default_timeout`) mirrors
+/// VISION §6 (human in the loop): each tier maps to a distinct approval
+/// ceremony. `Read`/`Write`/`Execute` are auto-approved (with audit
+/// recording); `Destructive` and `External` block on explicit human
+/// approval.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Tier {
+    /// Read-only — never requires confirmation.
     Read,
+    /// Write — implicit confirmation, user can undo.
     Write,
+    /// Execute — sandboxed, reversible.
     Execute,
+    /// Destructive — explicit approval required.
     Destructive,
+    /// External — explicit approval + credential audit.
     External,
+}
+
+impl Tier {
+    /// Whether this tier requires explicit confirmation before execution.
+    pub fn requires_confirmation(self) -> bool {
+        matches!(self, Tier::Destructive | Tier::External)
+    }
+
+    /// Default approval timeout for this tier.
+    ///
+    /// `External` is shorter than `Destructive` (60s vs 300s): a destructive
+    /// action may legitimately need a few minutes of consideration, but an
+    /// External call is almost always issued mid-chat where the user is
+    /// either watching or has already moved on. A 5-minute deadlock there
+    /// just makes the chat feel broken.
+    pub fn default_timeout(self) -> std::time::Duration {
+        match self {
+            Tier::Read => std::time::Duration::from_secs(30),
+            Tier::Write => std::time::Duration::from_secs(60),
+            Tier::Execute => std::time::Duration::from_secs(120),
+            Tier::Destructive => std::time::Duration::from_secs(300),
+            Tier::External => std::time::Duration::from_secs(60),
+        }
+    }
 }
 
 impl fmt::Display for Tier {
@@ -220,6 +256,34 @@ mod tests {
         assert!(Tier::Execute >= Tier::Write);
         // A Read-tier principal does NOT satisfy Execute.
         assert!(Tier::Read < Tier::Execute);
+    }
+
+    #[test]
+    fn requires_confirmation_only_destructive_external() {
+        assert!(!Tier::Read.requires_confirmation());
+        assert!(!Tier::Write.requires_confirmation());
+        assert!(!Tier::Execute.requires_confirmation());
+        assert!(Tier::Destructive.requires_confirmation());
+        assert!(Tier::External.requires_confirmation());
+    }
+
+    #[test]
+    fn default_timeout_increases_with_tier() {
+        assert!(Tier::Read.default_timeout() < Tier::Execute.default_timeout());
+        assert!(Tier::Execute.default_timeout() < Tier::Destructive.default_timeout());
+    }
+
+    #[test]
+    fn external_timeout_is_shorter_than_destructive() {
+        // External lives in chat; a 5-min deadlock there feels broken.
+        assert!(Tier::External.default_timeout() < Tier::Destructive.default_timeout());
+    }
+
+    #[test]
+    fn display_matches_serde_repr() {
+        assert_eq!(Tier::Destructive.to_string(), "destructive");
+        let json = serde_json::to_string(&Tier::Destructive).unwrap();
+        assert_eq!(json, "\"destructive\"");
     }
 
     #[test]

@@ -1,105 +1,107 @@
-//! Resilience primitives — circuit breaker and retry logic for HTTP backends.
+//! Resilience helpers for HTTP backends — pairs the canonical
+//! [`resilience::CircuitBreaker`] with retry + reqwest-aware
+//! transient-error detection. Re-exports `CircuitBreaker` so existing
+//! backend code keeps the `use crate::resilience::CircuitBreaker` import
+//! shape.
+//!
+//! Metrics: each HTTP backend wires its breaker to a [`MetricsObserver`]
+//! so `BreakerStateChange` events drive the per-subsystem
+//! `inc_circuit_open` / `inc_circuit_reset` counters exported on
+//! `/metrics`. The observer also rebroadcasts via a small local channel
+//! so anything that does subscribe — today nothing — still sees the
+//! events.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
+use async_trait::async_trait;
 use brain::metrics::SubsystemMetrics;
+use observe::{BrainEvent, ObserveError, Observer};
+use resilience::BreakerConfig;
+use tokio::sync::broadcast;
 
-/// Tracks consecutive failures and opens a circuit after a threshold is reached.
-pub struct CircuitBreaker {
-    consecutive_failures: AtomicU32,
-    last_failure_epoch_ms: AtomicU64,
-    threshold: u32,
-    cooldown_ms: u64,
-    pub name: String,
+pub use resilience::CircuitBreaker;
+
+/// Default capacity for the metrics-observer rebroadcast channel. Tiny
+/// because nothing in-tree actually subscribes; the value exists only to
+/// satisfy `Observer::subscribe`.
+const REBROADCAST_CAPACITY: usize = 16;
+
+/// `Observer` that converts `BreakerStateChange` events from a circuit
+/// breaker into backend-side `SubsystemMetrics` counters. Anything else
+/// is rebroadcast unchanged so the observer composes cleanly if another
+/// listener is ever attached.
+pub struct MetricsObserver {
+    metrics: Arc<SubsystemMetrics>,
+    tx: broadcast::Sender<BrainEvent>,
+}
+
+impl MetricsObserver {
+    pub fn new(metrics: Arc<SubsystemMetrics>) -> Arc<Self> {
+        let (tx, _) = broadcast::channel(REBROADCAST_CAPACITY);
+        Arc::new(Self { metrics, tx })
+    }
+}
+
+#[async_trait]
+impl Observer for MetricsObserver {
+    async fn publish(&self, ev: BrainEvent) -> Result<(), ObserveError> {
+        if let BrainEvent::BreakerStateChange { to, .. } = &ev {
+            match to.as_str() {
+                "open" => self.metrics.inc_circuit_open(),
+                "closed" => self.metrics.inc_circuit_reset(),
+                _ => {}
+            }
+        }
+        // send() returns Err when there are no receivers; not a problem.
+        let _ = self.tx.send(ev);
+        Ok(())
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<BrainEvent> {
+        self.tx.subscribe()
+    }
+}
+
+/// Build a `CircuitBreaker` for an HTTP backend with a familiar
+/// `(name, failure_threshold, cooldown_secs)` shape and an optional
+/// metrics handle. `cooldown_secs` becomes
+/// [`BreakerConfig::open_duration`]; the half-open probe needs one
+/// success to close, matching the prior atomic-breaker semantics.
+pub fn http_breaker(
+    name: &str,
+    failure_threshold: u32,
+    cooldown_secs: u64,
     metrics: Option<Arc<SubsystemMetrics>>,
+) -> CircuitBreaker {
+    let cfg = BreakerConfig {
+        failure_threshold,
+        open_duration: Duration::from_secs(cooldown_secs),
+        half_open_required_successes: 1,
+    };
+    let mut cb = CircuitBreaker::new(name, cfg);
+    if let Some(m) = metrics {
+        cb = cb.with_observer(MetricsObserver::new(m));
+    }
+    cb
 }
 
-impl CircuitBreaker {
-    pub fn new(name: &str, threshold: u32, cooldown_secs: u64) -> Self {
-        Self {
-            consecutive_failures: AtomicU32::new(0),
-            last_failure_epoch_ms: AtomicU64::new(0),
-            threshold,
-            cooldown_ms: cooldown_secs * 1000,
-            name: name.to_string(),
-            metrics: None,
-        }
-    }
-
-    /// Attach a metrics handle so state transitions are exported.
-    pub fn with_metrics(mut self, metrics: Arc<SubsystemMetrics>) -> Self {
-        self.metrics = Some(metrics);
-        self
-    }
-
-    pub fn is_open(&self) -> bool {
-        let failures = self.consecutive_failures.load(Ordering::Relaxed);
-        if failures < self.threshold {
-            return false;
-        }
-        let last_fail = self.last_failure_epoch_ms.load(Ordering::Relaxed);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        if now.saturating_sub(last_fail) >= self.cooldown_ms {
-            // Cooldown elapsed — reset counter so a fresh probe starts clean.
-            self.consecutive_failures.store(0, Ordering::Relaxed);
-            return false;
-        }
-        true
-    }
-
-    pub fn record_success(&self) {
-        let prev = self.consecutive_failures.swap(0, Ordering::Relaxed);
-        if prev >= self.threshold {
-            tracing::info!(backend = %self.name, "Circuit breaker closed (backend recovered)");
-            if let Some(m) = &self.metrics {
-                m.inc_circuit_reset();
-            }
-        }
-    }
-
-    pub fn record_failure(&self) {
-        let prev = self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        self.last_failure_epoch_ms.store(now, Ordering::Relaxed);
-        if prev + 1 == self.threshold {
-            tracing::warn!(
-                backend = %self.name,
-                threshold = self.threshold,
-                cooldown_secs = self.cooldown_ms / 1000,
-                "Circuit breaker OPEN — backend disabled until cooldown elapses"
-            );
-            if let Some(m) = &self.metrics {
-                m.inc_circuit_open();
-            }
-        }
-    }
-}
-
-/// Returns true if the error is transient (worth retrying).
-fn is_transient(err: &reqwest::Error) -> bool {
-    if err.is_timeout() || err.is_connect() {
-        return true;
-    }
-    if let Some(status) = err.status() {
-        return status.is_server_error()
-            || status == reqwest::StatusCode::TOO_MANY_REQUESTS
-            || status == reqwest::StatusCode::REQUEST_TIMEOUT;
-    }
-    false
-}
-
-/// Returns true if the HTTP status is transient (worth retrying).
+/// Returns true if the HTTP status is transient (worth retrying):
+/// any 5xx, 408 Request Timeout, or 429 Too Many Requests.
 fn is_transient_status(status: reqwest::StatusCode) -> bool {
     status.is_server_error()
         || status == reqwest::StatusCode::TOO_MANY_REQUESTS // 429
         || status == reqwest::StatusCode::REQUEST_TIMEOUT // 408
+}
+
+/// Returns true if the request-error is transient (worth retrying).
+/// Treats timeouts and connect errors as transient; for status-bearing
+/// errors, defers to [`is_transient_status`].
+fn is_transient(err: &reqwest::Error) -> bool {
+    if err.is_timeout() || err.is_connect() {
+        return true;
+    }
+    err.status().is_some_and(is_transient_status)
 }
 
 /// Send an HTTP request with retry + circuit breaker.
@@ -112,10 +114,10 @@ pub async fn resilient_send<F>(
 where
     F: Fn() -> reqwest::RequestBuilder,
 {
-    if circuit_breaker.is_open() {
+    if circuit_breaker.is_open().await {
         return Err(cortex::actions::ActionError::ExecutionFailed(format!(
             "{} circuit breaker is open — backend disabled until cooldown elapses",
-            circuit_breaker.name
+            circuit_breaker.tool_id()
         )));
     }
 
@@ -131,12 +133,12 @@ where
         match build_request().send().await {
             Ok(response) => {
                 if response.status().is_success() || !is_transient_status(response.status()) {
-                    circuit_breaker.record_success();
+                    circuit_breaker.record_success().await;
                     return Ok(response);
                 }
                 let status = response.status();
                 tracing::debug!(
-                    backend = %circuit_breaker.name,
+                    backend = %circuit_breaker.tool_id(),
                     attempt = attempt + 1,
                     status = %status,
                     "Transient HTTP error, will retry"
@@ -145,11 +147,11 @@ where
             }
             Err(e) => {
                 if !is_transient(&e) {
-                    circuit_breaker.record_failure();
+                    circuit_breaker.record_failure().await;
                     return Err(cortex::actions::ActionError::ExecutionFailed(e.to_string()));
                 }
                 tracing::debug!(
-                    backend = %circuit_breaker.name,
+                    backend = %circuit_breaker.tool_id(),
                     attempt = attempt + 1,
                     error = %e,
                     "Transient error, will retry"
@@ -159,7 +161,7 @@ where
         }
     }
 
-    circuit_breaker.record_failure();
+    circuit_breaker.record_failure().await;
     Err(cortex::actions::ActionError::ExecutionFailed(
         last_err.unwrap_or_else(|| "all retry attempts exhausted".to_string()),
     ))
@@ -169,39 +171,55 @@ where
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_circuit_breaker_closed_by_default() {
-        let cb = CircuitBreaker::new("test", 3, 60);
-        assert!(!cb.is_open());
+    fn cfg(threshold: u32, cooldown_secs: u64) -> BreakerConfig {
+        BreakerConfig {
+            failure_threshold: threshold,
+            open_duration: Duration::from_secs(cooldown_secs),
+            half_open_required_successes: 1,
+        }
     }
 
-    #[test]
-    fn test_circuit_breaker_opens_after_threshold() {
-        let cb = CircuitBreaker::new("test", 3, 60);
-        cb.record_failure();
-        cb.record_failure();
-        assert!(!cb.is_open(), "should still be closed below threshold");
-        cb.record_failure();
-        assert!(cb.is_open(), "should be open at threshold");
+    #[tokio::test]
+    async fn http_breaker_closed_by_default() {
+        let cb = http_breaker("test", 3, 60, None);
+        assert!(!cb.is_open().await);
     }
 
-    #[test]
-    fn test_circuit_breaker_resets_on_success() {
-        let cb = CircuitBreaker::new("test", 3, 60);
-        cb.record_failure();
-        cb.record_failure();
-        cb.record_success();
-        assert!(!cb.is_open());
-        cb.record_failure();
-        cb.record_failure();
-        assert!(!cb.is_open(), "should be closed — counter was reset");
+    #[tokio::test]
+    async fn breaker_opens_after_threshold() {
+        let cb = CircuitBreaker::new("test", cfg(3, 60));
+        cb.record_failure().await;
+        cb.record_failure().await;
+        assert!(
+            !cb.is_open().await,
+            "should still be closed below threshold"
+        );
+        cb.record_failure().await;
+        assert!(cb.is_open().await, "should be open at threshold");
     }
 
-    #[test]
-    fn test_circuit_breaker_half_open_after_cooldown() {
-        let cb = CircuitBreaker::new("test", 2, 0);
-        cb.record_failure();
-        cb.record_failure();
-        assert!(!cb.is_open(), "should be half-open after zero cooldown");
+    #[tokio::test]
+    async fn breaker_resets_on_success() {
+        let cb = CircuitBreaker::new("test", cfg(3, 60));
+        cb.record_failure().await;
+        cb.record_failure().await;
+        cb.record_success().await;
+        assert!(!cb.is_open().await);
+        cb.record_failure().await;
+        cb.record_failure().await;
+        assert!(!cb.is_open().await, "should be closed — counter was reset");
+    }
+
+    #[tokio::test]
+    async fn breaker_half_open_after_cooldown() {
+        let cb = CircuitBreaker::new("test", cfg(2, 0));
+        cb.record_failure().await;
+        cb.record_failure().await;
+        // open_duration == 0 means the next is_open() call transitions to
+        // HalfOpen and returns false.
+        assert!(
+            !cb.is_open().await,
+            "should be half-open after zero cooldown"
+        );
     }
 }

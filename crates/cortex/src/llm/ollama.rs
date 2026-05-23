@@ -3,7 +3,9 @@ use std::pin::Pin;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
 
-use super::{LlmError, LlmProvider, Message, Response, ResponseChunk, Role, Usage};
+use super::{
+    build_http_client, ensure_ok, LlmError, LlmProvider, Message, Response, ResponseChunk, Usage,
+};
 
 #[derive(Serialize)]
 struct OllamaRequest {
@@ -52,13 +54,7 @@ impl OllamaProvider {
         temperature: f64,
         max_tokens: i32,
     ) -> Result<Self, LlmError> {
-        let client = reqwest::Client::builder()
-            .timeout(brain::timeouts::LLM_GENERATE)
-            .build()
-            .map_err(|e| {
-                LlmError::ProviderUnavailable(format!("Failed to create HTTP client: {e}"))
-            })?;
-
+        let client = build_http_client(brain::timeouts::LLM_GENERATE)?;
         Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -76,11 +72,7 @@ impl OllamaProvider {
         messages
             .iter()
             .map(|m| OllamaMessage {
-                role: match m.role {
-                    Role::System => "system".to_string(),
-                    Role::User => "user".to_string(),
-                    Role::Assistant => "assistant".to_string(),
-                },
+                role: m.role.as_wire_str().to_string(),
                 content: m.content.clone(),
             })
             .collect()
@@ -102,15 +94,7 @@ impl LlmProvider for OllamaProvider {
         };
 
         let resp = self.client.post(&url).json(&request).send().await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(LlmError::Api {
-                status: status.as_u16(),
-                message: body,
-            });
-        }
+        let resp = ensure_ok(resp).await?;
 
         let data: OllamaResponse = resp.json().await?;
 
@@ -142,15 +126,7 @@ impl LlmProvider for OllamaProvider {
         };
 
         let resp = self.client.post(&url).json(&request).send().await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(LlmError::Api {
-                status: status.as_u16(),
-                message: body,
-            });
-        }
+        let resp = ensure_ok(resp).await?;
 
         let byte_stream = resp.bytes_stream();
         let stream = try_unfold(
@@ -246,14 +222,7 @@ impl LlmProvider for OllamaProvider {
 
         let url = format!("{}/api/tags", self.base_url);
         let resp = self.client.get(&url).send().await?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(LlmError::Api {
-                status: status.as_u16(),
-                message: body,
-            });
-        }
+        let resp = ensure_ok(resp).await?;
         let data: Tags = resp.json().await?;
         Ok(data.models.into_iter().map(|m| m.name).collect())
     }

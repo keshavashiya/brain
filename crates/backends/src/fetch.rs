@@ -11,7 +11,7 @@ use std::time::Duration;
 use brain::metrics::SubsystemMetrics;
 use cortex::actions::{ActionError, FetchedPage, UrlFetchBackend};
 
-use crate::resilience::{resilient_send, CircuitBreaker};
+use crate::resilience::{http_breaker, resilient_send, CircuitBreaker};
 
 /// Hard cap on bytes read from any single page. Anything bigger is
 /// truncated *after* HTML stripping so most real pages still produce
@@ -48,14 +48,12 @@ impl BasicUrlFetcher {
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()
             .map_err(|e| anyhow::anyhow!("URL fetch client init failed: {e}"))?;
-        let mut cb = CircuitBreaker::new(
+        let cb = http_breaker(
             "url-fetch",
             resilience.circuit_breaker_threshold,
             resilience.circuit_breaker_cooldown_secs,
+            metrics,
         );
-        if let Some(m) = metrics {
-            cb = cb.with_metrics(m);
-        }
         Ok(Self {
             client,
             circuit_breaker: Arc::new(cb),

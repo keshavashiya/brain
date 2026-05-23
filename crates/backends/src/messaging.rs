@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use brain::metrics::SubsystemMetrics;
 
-use crate::resilience::{resilient_send, CircuitBreaker};
+use crate::resilience::{http_breaker, resilient_send, CircuitBreaker};
 
 pub const DEFAULT_MESSAGE_BODY: &str = r#"{"channel":"{{channel}}","recipient":"{{recipient}}","content":"{{content}}","namespace":"{{namespace}}","timestamp":"{{timestamp}}"}"#;
 
@@ -59,16 +59,12 @@ impl WebhookMessageBackend {
             .timeout(std::time::Duration::from_millis(timeout_ms.max(1)))
             .build()
             .map_err(|e| anyhow::anyhow!("message client init failed: {e}"))?;
-        let cb = CircuitBreaker::new(
+        let cb = http_breaker(
             "webhook-message",
             resilience.circuit_breaker_threshold,
             resilience.circuit_breaker_cooldown_secs,
+            metrics,
         );
-        let cb = if let Some(m) = metrics {
-            cb.with_metrics(m)
-        } else {
-            cb
-        };
         Ok(Self {
             channels: channels
                 .iter()

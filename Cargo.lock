@@ -692,6 +692,8 @@ dependencies = [
  "brainos-core",
  "brainos-cortex",
  "brainos-hippocampus",
+ "brainos-observe",
+ "brainos-resilience",
  "brainos-signal",
  "brainos-storage",
  "chrono",

@@ -1,98 +1,11 @@
 //! Cross-cutting security primitives shared by audit, confirm, sandbox,
-//! and orchestrator. Lives here to keep the type single-sourced — every
-//! consumer crate already depends on `brain`, so promoting these
-//! to the leaf avoids the previous three-way duplication and the manual
-//! `convert_tier()` shims that came with it.
+//! and orchestrator.
+//!
+//! `ActionTier` is an alias for [`identity::Tier`]: the same enum names
+//! both "the tier a principal holds" and "the tier an action requires",
+//! and the authorization check is a single `principal.tier >= action.tier`
+//! comparison. Keeping them as one type removes the manual `convert_tier`
+//! shims the codebase used to carry. The `ActionTier` name is preserved
+//! at this re-export site so action-side call sites read naturally.
 
-use serde::{Deserialize, Serialize};
-
-/// Action tier determines confirmation requirement and timeout policy.
-///
-/// Mirrors VISION §6 (human in the loop): each tier maps to a distinct
-/// approval ceremony. `Read`/`Write`/`Execute` are auto-approved (with
-/// audit recording); `Destructive` and `External` block on explicit
-/// human approval.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "snake_case")]
-pub enum ActionTier {
-    /// Read-only — never requires confirmation.
-    Read,
-    /// Write — implicit confirmation, user can undo.
-    Write,
-    /// Execute — sandboxed, reversible.
-    Execute,
-    /// Destructive — explicit approval required.
-    Destructive,
-    /// External — explicit approval + credential audit.
-    External,
-}
-
-impl ActionTier {
-    /// Whether this tier requires explicit confirmation before execution.
-    pub fn requires_confirmation(self) -> bool {
-        matches!(self, ActionTier::Destructive | ActionTier::External)
-    }
-
-    /// Default approval timeout for this tier.
-    ///
-    /// `External` is shorter than `Destructive` (60s vs 300s): a destructive
-    /// action may legitimately need a few minutes of consideration, but an
-    /// External call is almost always issued mid-chat where the user is
-    /// either watching or has already moved on. A 5-minute deadlock there
-    /// just makes the chat feel broken.
-    pub fn default_timeout(self) -> std::time::Duration {
-        match self {
-            ActionTier::Read => std::time::Duration::from_secs(30),
-            ActionTier::Write => std::time::Duration::from_secs(60),
-            ActionTier::Execute => std::time::Duration::from_secs(120),
-            ActionTier::Destructive => std::time::Duration::from_secs(300),
-            ActionTier::External => std::time::Duration::from_secs(60),
-        }
-    }
-}
-
-impl std::fmt::Display for ActionTier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            ActionTier::Read => "read",
-            ActionTier::Write => "write",
-            ActionTier::Execute => "execute",
-            ActionTier::Destructive => "destructive",
-            ActionTier::External => "external",
-        };
-        f.write_str(s)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn requires_confirmation_only_destructive_external() {
-        assert!(!ActionTier::Read.requires_confirmation());
-        assert!(!ActionTier::Write.requires_confirmation());
-        assert!(!ActionTier::Execute.requires_confirmation());
-        assert!(ActionTier::Destructive.requires_confirmation());
-        assert!(ActionTier::External.requires_confirmation());
-    }
-
-    #[test]
-    fn default_timeout_increases_with_tier() {
-        assert!(ActionTier::Read.default_timeout() < ActionTier::Execute.default_timeout());
-        assert!(ActionTier::Execute.default_timeout() < ActionTier::Destructive.default_timeout());
-    }
-
-    #[test]
-    fn external_timeout_is_shorter_than_destructive() {
-        // External lives in chat; a 5-min deadlock there feels broken.
-        assert!(ActionTier::External.default_timeout() < ActionTier::Destructive.default_timeout());
-    }
-
-    #[test]
-    fn display_matches_serde_repr() {
-        assert_eq!(ActionTier::Destructive.to_string(), "destructive");
-        let json = serde_json::to_string(&ActionTier::Destructive).unwrap();
-        assert_eq!(json, "\"destructive\"");
-    }
-}
+pub use identity::Tier as ActionTier;

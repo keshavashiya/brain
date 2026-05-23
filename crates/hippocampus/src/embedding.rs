@@ -53,6 +53,17 @@ pub enum EmbeddingError {
     Provider(String),
 }
 
+/// Build a `reqwest::Client` with the given timeout, mapping construction
+/// failure to [`EmbeddingError::Provider`]. Shared by Ollama + OpenAI
+/// embedding providers so the timeout/error-mapping policy stays
+/// single-sourced.
+fn build_http_client(timeout: std::time::Duration) -> Result<reqwest::Client, EmbeddingError> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|e| EmbeddingError::Provider(format!("Failed to create HTTP client: {e}")))
+}
+
 /// Deterministically generate a non-zero fallback embedding and normalize it.
 ///
 /// This is used when the embedding provider is unavailable or returns an invalid
@@ -160,10 +171,7 @@ struct OllamaEmbedResponse {
 impl OllamaProvider {
     pub fn new(base_url: &str, model: &str) -> Result<Self, EmbeddingError> {
         // Ollama may need to load the model on first call — allow up to 120s
-        let client = reqwest::Client::builder()
-            .timeout(brain::timeouts::EMBEDDING_OLLAMA)
-            .build()
-            .map_err(|e| EmbeddingError::Provider(format!("Failed to create HTTP client: {e}")))?;
+        let client = build_http_client(brain::timeouts::EMBEDDING_OLLAMA)?;
         Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -253,10 +261,7 @@ struct OpenAIEmbedData {
 
 impl OpenAIProvider {
     pub fn new(base_url: &str, model: &str, api_key: &str) -> Result<Self, EmbeddingError> {
-        let client = reqwest::Client::builder()
-            .timeout(brain::timeouts::EMBEDDING_OPENAI)
-            .build()
-            .map_err(|e| EmbeddingError::Provider(format!("Failed to create HTTP client: {e}")))?;
+        let client = build_http_client(brain::timeouts::EMBEDDING_OPENAI)?;
         Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),

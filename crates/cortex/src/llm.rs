@@ -66,6 +66,45 @@ pub enum Role {
     Assistant,
 }
 
+impl Role {
+    /// Wire-format string used by every OpenAI-shaped chat API (OpenAI,
+    /// OpenRouter, Ollama in chat mode, etc.). Centralised here so each
+    /// provider's `convert_messages` body stays a one-line `.map(...)`.
+    pub fn as_wire_str(&self) -> &'static str {
+        match self {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+        }
+    }
+}
+
+// ─── Shared HTTP helpers (used by openai + ollama submodules) ───────────────
+
+/// Build a `reqwest::Client` with the given timeout, mapping construction
+/// failure to [`LlmError::ProviderUnavailable`].
+pub(crate) fn build_http_client(timeout: std::time::Duration) -> Result<reqwest::Client, LlmError> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(|e| LlmError::ProviderUnavailable(format!("Failed to create HTTP client: {e}")))
+}
+
+/// If `resp` is non-success, drain the body and turn it into
+/// [`LlmError::Api`]. Otherwise pass the response through untouched so the
+/// caller can `.json()` / `.bytes_stream()` it.
+pub(crate) async fn ensure_ok(resp: reqwest::Response) -> Result<reqwest::Response, LlmError> {
+    if resp.status().is_success() {
+        return Ok(resp);
+    }
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    Err(LlmError::Api {
+        status: status.as_u16(),
+        message: body,
+    })
+}
+
 /// LLM response chunk (for streaming).
 #[derive(Debug, Clone)]
 pub struct ResponseChunk {
