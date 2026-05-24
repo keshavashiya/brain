@@ -4,8 +4,47 @@
 
 use uuid::Uuid;
 
+use super::dispatch::{HandlerContext, MemoryHandler, NudgeFn};
 use crate::types::*;
 use crate::SignalProcessor;
+
+#[async_trait::async_trait]
+impl MemoryHandler for SignalProcessor {
+    async fn dispatch_memory(
+        &self,
+        ctx: HandlerContext<'_>,
+        intent: thalamus::Intent,
+        prepend_nudges: &NudgeFn<'_>,
+    ) -> Result<PipelineResult, SignalError> {
+        match intent {
+            thalamus::Intent::StoreFact {
+                subject,
+                predicate,
+                object,
+            } => {
+                self.handle_store_fact(
+                    ctx.signal_id,
+                    &ctx.signal.namespace,
+                    ctx.signal.agent.as_deref(),
+                    subject,
+                    predicate,
+                    object,
+                    ctx.importance,
+                    prepend_nudges,
+                )
+                .await
+            }
+            thalamus::Intent::Forget { target } => {
+                self.handle_forget(ctx.signal_id, ctx.signal, target, prepend_nudges)
+                    .await
+            }
+            other => unreachable!(
+                "non-memory variant routed to dispatch_memory: {other:?} \
+                 (Intent::category() / dispatch table out of sync)"
+            ),
+        }
+    }
+}
 
 impl SignalProcessor {
     #[allow(clippy::too_many_arguments)]
@@ -18,7 +57,7 @@ impl SignalProcessor {
         predicate: String,
         object: String,
         importance: f32,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let fact_text = format!("{subject} {predicate} {object}");
         let vector = self.embed_text(&fact_text).await;
@@ -64,7 +103,7 @@ impl SignalProcessor {
         signal_id: Uuid,
         signal: &Signal,
         target: String,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let mut deleted_count = 0usize;
 

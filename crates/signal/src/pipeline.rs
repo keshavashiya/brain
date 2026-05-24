@@ -26,12 +26,18 @@ mod action;
 mod cancel;
 mod capability;
 mod conversation;
+mod dispatch;
 mod governance;
 mod inspection;
 mod lifecycle;
 mod memory;
 mod observe;
 mod paths;
+
+use dispatch::{
+    ActionHandler, CapabilityHandler, ConversationHandler, GovernanceHandler, HandlerContext,
+    InspectionHandler, LifecycleHandler, MemoryHandler,
+};
 
 // `crate::attachment` imports these by their historic
 // `crate::pipeline::<name>` paths — keep them re-exported so the sandbox
@@ -212,8 +218,10 @@ impl SignalProcessor {
             return Ok(PipelineResult::Complete(early));
         }
 
-        // Helper: prepend notification nudges to a response
-        let prepend_nudges = |mut resp: SignalResponse| -> SignalResponse {
+        // Closure: prepend queued notifications as nudges to a final
+        // response. Captured by reference and threaded through every
+        // category dispatcher that may produce a `Complete` result.
+        let prepend_nudges = move |mut resp: SignalResponse| -> SignalResponse {
             if !pending_notifications.is_empty() {
                 let nudge_text: String = pending_notifications
                     .iter()
@@ -226,208 +234,42 @@ impl SignalProcessor {
             }
             resp
         };
+        let prepend_nudges: &dispatch::NudgeFn<'_> = &prepend_nudges;
 
-        match classification.intent {
-            thalamus::Intent::StoreFact {
-                subject,
-                predicate,
-                object,
-            } => {
-                self.handle_store_fact(
-                    signal_id,
-                    &signal.namespace,
-                    signal.agent.as_deref(),
-                    subject,
-                    predicate,
-                    object,
-                    importance,
-                    &prepend_nudges,
-                )
-                .await
+        let ctx = HandlerContext {
+            signal_id,
+            signal,
+            importance,
+            conversation_history,
+            procedure_context: &procedure_context,
+            progress: progress.as_ref(),
+        };
+        let intent = classification.intent;
+
+        // 7-arm dispatch on category — each sibling module owns the
+        // small (≤16-arm) match over the variants in its category.
+        // Issue 111: replaces the 37-arm match that used to live here.
+        match intent.category() {
+            thalamus::IntentCategory::Inspection => {
+                self.dispatch_inspection(ctx, intent, prepend_nudges).await
             }
-            thalamus::Intent::Recall { query } => {
-                self.handle_recall(
-                    signal_id,
-                    signal,
-                    query,
-                    conversation_history,
-                    &procedure_context,
-                    &prepend_nudges,
-                    progress.as_ref(),
-                )
-                .await
+            thalamus::IntentCategory::Memory => {
+                self.dispatch_memory(ctx, intent, prepend_nudges).await
             }
-            thalamus::Intent::Chat { content } => {
-                self.handle_chat(
-                    signal_id,
-                    signal,
-                    content,
-                    importance,
-                    conversation_history,
-                    &procedure_context,
-                    &prepend_nudges,
-                    progress.as_ref(),
-                )
-                .await
+            thalamus::IntentCategory::Action => {
+                self.dispatch_action(ctx, intent, prepend_nudges).await
             }
-            thalamus::Intent::Forget { target } => {
-                self.handle_forget(signal_id, signal, target, &prepend_nudges)
-                    .await
+            thalamus::IntentCategory::Lifecycle => {
+                self.dispatch_lifecycle(ctx, intent, prepend_nudges).await
             }
-            thalamus::Intent::SystemStatus => self.handle_system_status(signal_id, &prepend_nudges),
-            thalamus::Intent::QueryAudit {
-                filter,
-                since,
-                limit,
-            } => {
-                self.handle_query_audit(signal_id, filter, since, limit, &prepend_nudges)
-                    .await
+            thalamus::IntentCategory::Governance => {
+                self.dispatch_governance(ctx, intent, prepend_nudges).await
             }
-            thalamus::Intent::PruneAudit { older_than } => {
-                self.handle_prune_audit(signal_id, older_than, &prepend_nudges)
-                    .await
+            thalamus::IntentCategory::Capability => {
+                self.dispatch_capability(ctx, intent, prepend_nudges).await
             }
-            thalamus::Intent::ListApprovals { status } => {
-                self.handle_list_approvals(signal_id, status, &prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::RespondToApproval { nonce, decision } => {
-                self.handle_respond_to_approval(signal_id, nonce, decision, &prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::ListStandingApprovals => {
-                self.handle_list_standing_approvals(signal_id, &prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::RevokeStandingApproval { id } => {
-                self.handle_revoke_standing_approval(signal_id, id, &prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::BudgetStatus { window } => {
-                self.handle_budget_status(signal_id, window, &prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::ListSchedules => {
-                self.handle_list_schedules(signal_id, &prepend_nudges).await
-            }
-            thalamus::Intent::CancelSchedule { id } => {
-                self.handle_cancel_schedule(signal_id, id, &prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::DecomposeTask { ref request } => {
-                self.handle_decompose_task(signal_id, request.clone(), &prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::ListTasks => self.handle_list_tasks(signal_id, &prepend_nudges).await,
-            thalamus::Intent::TaskStatus { task_id } => {
-                self.handle_task_status(signal_id, task_id, &prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::CancelTask { task_id } => {
-                self.handle_cancel_task(signal_id, task_id, &prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::CancelSignal {
-                signal_id: target_id,
-            } => {
-                self.handle_cancel_signal(signal_id, target_id, &prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::QueryAgents { filter } => {
-                self.handle_query_agents(signal_id, filter, &prepend_nudges)
-            }
-            thalamus::Intent::DelegateTask { agent, prompt } => {
-                self.handle_delegate_task(signal_id, agent, prompt, &prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::SetProactivity { enabled, until } => {
-                self.handle_set_proactivity(signal_id, enabled, until, &prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::ProactivityStatus => {
-                self.handle_proactivity_status(signal_id, &prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::MemorySummary => {
-                self.handle_memory_summary(signal_id, signal, conversation_history, &prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::ListChannels => {
-                self.handle_list_channels(signal_id, &prepend_nudges).await
-            }
-            thalamus::Intent::ChannelPreferences {
-                namespace: ns,
-                category,
-            } => {
-                self.handle_channel_preferences(signal_id, ns, category, &prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::SetChannelPreference {
-                channel,
-                category,
-                weight,
-                pinned,
-            } => {
-                self.handle_set_channel_preference(
-                    signal_id,
-                    channel,
-                    category,
-                    weight,
-                    pinned,
-                    &prepend_nudges,
-                )
-                .await
-            }
-            ref intent @ (thalamus::Intent::WebSearch { .. }
-            | thalamus::Intent::Schedule { .. }
-            | thalamus::Intent::SendMessage { .. }
-            | thalamus::Intent::ExecuteCommand { .. }) => {
-                self.handle_action(signal_id, signal, intent, &prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::OpenTerminalSession { program, args, cwd } => {
-                self.handle_open_terminal_session(
-                    signal_id,
-                    signal,
-                    program,
-                    args,
-                    cwd,
-                    &prepend_nudges,
-                )
-                .await
-            }
-            thalamus::Intent::ListTerminalSessions => {
-                self.handle_list_terminal_sessions(signal_id, &prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::CloseTerminalSession { session_id } => {
-                self.handle_close_terminal_session(signal_id, session_id, &prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::MountMcpServer {
-                name,
-                transport,
-                command_or_url,
-            } => {
-                self.handle_mount_mcp_server(
-                    signal_id,
-                    name,
-                    transport,
-                    command_or_url,
-                    &prepend_nudges,
-                )
-                .await
-            }
-            thalamus::Intent::UnmountMcpServer { name } => {
-                self.handle_unmount_mcp_server(signal_id, name, &prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::ListMcpServers => {
-                self.handle_list_mcp_servers(signal_id, &prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::ToolCall(token) => {
-                self.handle_tool_call(signal_id, *token, &prepend_nudges)
+            thalamus::IntentCategory::Conversation => {
+                self.dispatch_conversation(ctx, intent, prepend_nudges)
                     .await
             }
         }

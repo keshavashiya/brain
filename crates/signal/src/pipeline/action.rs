@@ -1,9 +1,10 @@
 //! Action-category intent handlers: external side effects (shell / net /
 //! agent delegation). The umbrella [`SignalProcessor::handle_action`]
-//! covers [`thalamus::Intent::WebSearch`], [`thalamus::Intent::Schedule`],
+//! covers [`thalamus::Intent::WebSearch`], [`thalamus::Intent::Schedule`]
+//! (lifecycle-categorised but transported through the same dispatcher),
 //! [`thalamus::Intent::SendMessage`], and
-//! [`thalamus::Intent::ExecuteCommand`] by routing through the
-//! configured [`cortex::actions::ActionDispatcher`].
+//! [`thalamus::Intent::ExecuteCommand`] by routing through the configured
+//! [`cortex::actions::ActionDispatcher`].
 //!
 //! Variants: [`thalamus::Intent::ExecuteCommand`],
 //! [`thalamus::Intent::WebSearch`], [`thalamus::Intent::SendMessage`],
@@ -11,8 +12,36 @@
 
 use uuid::Uuid;
 
+use super::dispatch::{ActionHandler, HandlerContext, NudgeFn};
 use crate::types::*;
 use crate::SignalProcessor;
+
+#[async_trait::async_trait]
+impl ActionHandler for SignalProcessor {
+    async fn dispatch_action(
+        &self,
+        ctx: HandlerContext<'_>,
+        intent: thalamus::Intent,
+        prepend_nudges: &NudgeFn<'_>,
+    ) -> Result<PipelineResult, SignalError> {
+        match intent {
+            thalamus::Intent::DelegateTask { agent, prompt } => {
+                self.handle_delegate_task(ctx.signal_id, agent, prompt, prepend_nudges)
+                    .await
+            }
+            intent @ (thalamus::Intent::WebSearch { .. }
+            | thalamus::Intent::SendMessage { .. }
+            | thalamus::Intent::ExecuteCommand { .. }) => {
+                self.handle_action(ctx.signal_id, ctx.signal, &intent, prepend_nudges)
+                    .await
+            }
+            other => unreachable!(
+                "non-action variant routed to dispatch_action: {other:?} \
+                 (Intent::category() / dispatch table out of sync)"
+            ),
+        }
+    }
+}
 
 impl SignalProcessor {
     pub(super) async fn handle_delegate_task(
@@ -20,7 +49,7 @@ impl SignalProcessor {
         signal_id: Uuid,
         agent: String,
         prompt: String,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let registry = match self.agent_registry() {
             Some(r) => r,
@@ -97,7 +126,7 @@ impl SignalProcessor {
         signal_id: Uuid,
         signal: &Signal,
         intent: &thalamus::Intent,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let router = thalamus::SignalRouter::new();
         let resp = match (router.intent_to_action(intent), &self.action_dispatcher) {

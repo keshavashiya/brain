@@ -1,7 +1,8 @@
 //! Lifecycle-category intent handlers: create / cancel of schedules,
 //! tasks, terminal sessions, and MCP server mounts.
 //!
-//! Variants: [`thalamus::Intent::Schedule`] (routed via `handle_action`),
+//! Variants: [`thalamus::Intent::Schedule`] (routed through
+//! `handle_action` for transport, see action.rs),
 //! [`thalamus::Intent::CancelSchedule`], [`thalamus::Intent::DecomposeTask`],
 //! [`thalamus::Intent::CancelTask`], [`thalamus::Intent::CancelSignal`],
 //! [`thalamus::Intent::OpenTerminalSession`],
@@ -11,15 +12,92 @@
 
 use uuid::Uuid;
 
+use super::dispatch::{HandlerContext, LifecycleHandler, NudgeFn};
 use crate::types::*;
 use crate::SignalProcessor;
+
+#[async_trait::async_trait]
+impl LifecycleHandler for SignalProcessor {
+    async fn dispatch_lifecycle(
+        &self,
+        ctx: HandlerContext<'_>,
+        intent: thalamus::Intent,
+        prepend_nudges: &NudgeFn<'_>,
+    ) -> Result<PipelineResult, SignalError> {
+        match intent {
+            thalamus::Intent::CancelSchedule { id } => {
+                self.handle_cancel_schedule(ctx.signal_id, id, prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::DecomposeTask { request } => {
+                self.handle_decompose_task(ctx.signal_id, request, prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::CancelTask { task_id } => {
+                self.handle_cancel_task(ctx.signal_id, task_id, prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::CancelSignal {
+                signal_id: target_id,
+            } => {
+                self.handle_cancel_signal(ctx.signal_id, target_id, prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::OpenTerminalSession { program, args, cwd } => {
+                self.handle_open_terminal_session(
+                    ctx.signal_id,
+                    ctx.signal,
+                    program,
+                    args,
+                    cwd,
+                    prepend_nudges,
+                )
+                .await
+            }
+            thalamus::Intent::CloseTerminalSession { session_id } => {
+                self.handle_close_terminal_session(ctx.signal_id, session_id, prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::MountMcpServer {
+                name,
+                transport,
+                command_or_url,
+            } => {
+                self.handle_mount_mcp_server(
+                    ctx.signal_id,
+                    name,
+                    transport,
+                    command_or_url,
+                    prepend_nudges,
+                )
+                .await
+            }
+            thalamus::Intent::UnmountMcpServer { name } => {
+                self.handle_unmount_mcp_server(ctx.signal_id, name, prepend_nudges)
+                    .await
+            }
+            // Schedule shares transport with the action umbrella —
+            // SignalRouter::intent_to_action(Schedule) → Action::ScheduleTask
+            // dispatched through ActionDispatcher. Lifecycle-categorised
+            // because it creates persistent state.
+            intent @ thalamus::Intent::Schedule { .. } => {
+                self.handle_action(ctx.signal_id, ctx.signal, &intent, prepend_nudges)
+                    .await
+            }
+            other => unreachable!(
+                "non-lifecycle variant routed to dispatch_lifecycle: {other:?} \
+                 (Intent::category() / dispatch table out of sync)"
+            ),
+        }
+    }
+}
 
 impl SignalProcessor {
     pub(super) async fn handle_cancel_schedule(
         &self,
         signal_id: Uuid,
         id: String,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let trimmed = id.trim();
         let message = if trimmed.is_empty() {
@@ -38,7 +116,7 @@ impl SignalProcessor {
         &self,
         signal_id: Uuid,
         request: String,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let orchestrator = match &self.orchestrator {
             Some(orch) => orch,
@@ -87,7 +165,7 @@ impl SignalProcessor {
         &self,
         signal_id: Uuid,
         task_id: String,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let message = match &self.orchestrator {
             Some(orch) => match orch.cancel(&task_id).await {
@@ -107,7 +185,7 @@ impl SignalProcessor {
         &self,
         signal_id: Uuid,
         target_id: String,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let message = match Uuid::parse_str(&target_id) {
             Err(_) => format!("Invalid signal id: {target_id}"),
@@ -135,7 +213,7 @@ impl SignalProcessor {
         program: String,
         args: Vec<String>,
         cwd: Option<String>,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let Some(bridge) = self.terminal_bridge() else {
             let resp = prepend_nudges(SignalResponse::ok(
@@ -176,7 +254,7 @@ impl SignalProcessor {
         &self,
         signal_id: Uuid,
         session_id: String,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let Some(bridge) = self.terminal_bridge() else {
             let resp = prepend_nudges(SignalResponse::ok(
@@ -209,7 +287,7 @@ impl SignalProcessor {
         name: String,
         transport: String,
         command_or_url: String,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let Some(host) = self.mcp_host() else {
             let resp = prepend_nudges(SignalResponse::ok(
@@ -273,7 +351,7 @@ impl SignalProcessor {
         &self,
         signal_id: Uuid,
         name: String,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let Some(host) = self.mcp_host() else {
             let resp = prepend_nudges(SignalResponse::ok(

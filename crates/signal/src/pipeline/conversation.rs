@@ -8,8 +8,39 @@
 
 use uuid::Uuid;
 
+use super::dispatch::{ConversationHandler, HandlerContext, NudgeFn};
 use crate::types::*;
 use crate::SignalProcessor;
+
+#[async_trait::async_trait]
+impl ConversationHandler for SignalProcessor {
+    async fn dispatch_conversation(
+        &self,
+        ctx: HandlerContext<'_>,
+        intent: thalamus::Intent,
+        prepend_nudges: &NudgeFn<'_>,
+    ) -> Result<PipelineResult, SignalError> {
+        match intent {
+            thalamus::Intent::Chat { content } => {
+                self.handle_chat(
+                    ctx.signal_id,
+                    ctx.signal,
+                    content,
+                    ctx.importance,
+                    ctx.conversation_history,
+                    ctx.procedure_context,
+                    prepend_nudges,
+                    ctx.progress,
+                )
+                .await
+            }
+            other => unreachable!(
+                "non-conversation variant routed to dispatch_conversation: {other:?} \
+                 (Intent::category() / dispatch table out of sync)"
+            ),
+        }
+    }
+}
 
 impl SignalProcessor {
     #[allow(clippy::too_many_arguments)]
@@ -21,7 +52,7 @@ impl SignalProcessor {
         importance: f32,
         conversation_history: Option<&[cortex::llm::Message]>,
         procedure_context: &[String],
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
         progress: Option<&tokio::sync::mpsc::Sender<&'static str>>,
     ) -> Result<PipelineResult, SignalError> {
         let top_k = self.config.memory.semantic.max_results as usize;

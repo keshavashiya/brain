@@ -9,8 +9,58 @@
 
 use uuid::Uuid;
 
+use super::dispatch::{GovernanceHandler, HandlerContext, NudgeFn};
 use crate::types::*;
 use crate::SignalProcessor;
+
+#[async_trait::async_trait]
+impl GovernanceHandler for SignalProcessor {
+    async fn dispatch_governance(
+        &self,
+        ctx: HandlerContext<'_>,
+        intent: thalamus::Intent,
+        prepend_nudges: &NudgeFn<'_>,
+    ) -> Result<PipelineResult, SignalError> {
+        match intent {
+            thalamus::Intent::RespondToApproval { nonce, decision } => {
+                self.handle_respond_to_approval(ctx.signal_id, nonce, decision, prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::RevokeStandingApproval { id } => {
+                self.handle_revoke_standing_approval(ctx.signal_id, id, prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::PruneAudit { older_than } => {
+                self.handle_prune_audit(ctx.signal_id, older_than, prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::SetChannelPreference {
+                channel,
+                category,
+                weight,
+                pinned,
+            } => {
+                self.handle_set_channel_preference(
+                    ctx.signal_id,
+                    channel,
+                    category,
+                    weight,
+                    pinned,
+                    prepend_nudges,
+                )
+                .await
+            }
+            thalamus::Intent::SetProactivity { enabled, until } => {
+                self.handle_set_proactivity(ctx.signal_id, enabled, until, prepend_nudges)
+                    .await
+            }
+            other => unreachable!(
+                "non-governance variant routed to dispatch_governance: {other:?} \
+                 (Intent::category() / dispatch table out of sync)"
+            ),
+        }
+    }
+}
 
 impl SignalProcessor {
     pub(super) async fn handle_respond_to_approval(
@@ -18,7 +68,7 @@ impl SignalProcessor {
         signal_id: Uuid,
         nonce: String,
         decision: String,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let approved = decision.to_lowercase().contains("approve");
 
@@ -121,7 +171,7 @@ impl SignalProcessor {
         &self,
         signal_id: Uuid,
         id: String,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let message = match &self.standing_approvals {
             Some(store) => match store.revoke(&id).await {
@@ -139,7 +189,7 @@ impl SignalProcessor {
         &self,
         signal_id: Uuid,
         older_than: String,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let message = match &self.audit_trail {
             Some(audit) => match parse_human_duration(&older_than) {
@@ -166,7 +216,7 @@ impl SignalProcessor {
         category: String,
         weight: f32,
         pinned: bool,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let message = match (channel::DeliveryCategory::parse(&category), &self.channel_preferences) {
             (None, _) => format!(
@@ -200,7 +250,7 @@ impl SignalProcessor {
         signal_id: Uuid,
         enabled: bool,
         until: Option<String>,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         if let Some(window) = until.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
             let message = format!(

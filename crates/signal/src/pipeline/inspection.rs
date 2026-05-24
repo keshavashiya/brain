@@ -15,8 +15,107 @@
 
 use uuid::Uuid;
 
+use super::dispatch::{HandlerContext, InspectionHandler, NudgeFn};
 use crate::types::*;
 use crate::SignalProcessor;
+
+#[async_trait::async_trait]
+impl InspectionHandler for SignalProcessor {
+    async fn dispatch_inspection(
+        &self,
+        ctx: HandlerContext<'_>,
+        intent: thalamus::Intent,
+        prepend_nudges: &NudgeFn<'_>,
+    ) -> Result<PipelineResult, SignalError> {
+        match intent {
+            thalamus::Intent::Recall { query } => {
+                self.handle_recall(
+                    ctx.signal_id,
+                    ctx.signal,
+                    query,
+                    ctx.conversation_history,
+                    ctx.procedure_context,
+                    prepend_nudges,
+                    ctx.progress,
+                )
+                .await
+            }
+            thalamus::Intent::MemorySummary => {
+                self.handle_memory_summary(
+                    ctx.signal_id,
+                    ctx.signal,
+                    ctx.conversation_history,
+                    prepend_nudges,
+                )
+                .await
+            }
+            thalamus::Intent::SystemStatus => {
+                self.handle_system_status(ctx.signal_id, prepend_nudges)
+            }
+            thalamus::Intent::ProactivityStatus => {
+                self.handle_proactivity_status(ctx.signal_id, prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::BudgetStatus { window } => {
+                self.handle_budget_status(ctx.signal_id, window, prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::ListApprovals { status } => {
+                self.handle_list_approvals(ctx.signal_id, status, prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::ListStandingApprovals => {
+                self.handle_list_standing_approvals(ctx.signal_id, prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::ListSchedules => {
+                self.handle_list_schedules(ctx.signal_id, prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::ListTasks => {
+                self.handle_list_tasks(ctx.signal_id, prepend_nudges).await
+            }
+            thalamus::Intent::TaskStatus { task_id } => {
+                self.handle_task_status(ctx.signal_id, task_id, prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::QueryAgents { filter } => {
+                self.handle_query_agents(ctx.signal_id, filter, prepend_nudges)
+            }
+            thalamus::Intent::QueryAudit {
+                filter,
+                since,
+                limit,
+            } => {
+                self.handle_query_audit(ctx.signal_id, filter, since, limit, prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::ListChannels => {
+                self.handle_list_channels(ctx.signal_id, prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::ChannelPreferences {
+                namespace,
+                category,
+            } => {
+                self.handle_channel_preferences(ctx.signal_id, namespace, category, prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::ListTerminalSessions => {
+                self.handle_list_terminal_sessions(ctx.signal_id, prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::ListMcpServers => {
+                self.handle_list_mcp_servers(ctx.signal_id, prepend_nudges)
+                    .await
+            }
+            other => unreachable!(
+                "non-inspection variant routed to dispatch_inspection: {other:?} \
+                 (Intent::category() / dispatch table out of sync)"
+            ),
+        }
+    }
+}
 
 impl SignalProcessor {
     #[allow(clippy::too_many_arguments)]
@@ -27,7 +126,7 @@ impl SignalProcessor {
         query: String,
         conversation_history: Option<&[cortex::llm::Message]>,
         procedure_context: &[String],
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
         progress: Option<&tokio::sync::mpsc::Sender<&'static str>>,
     ) -> Result<PipelineResult, SignalError> {
         let top_k = self.config.memory.semantic.max_results as usize;
@@ -101,7 +200,7 @@ impl SignalProcessor {
     pub(super) fn handle_system_status(
         &self,
         signal_id: Uuid,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let semantic_count = self
             .semantic
@@ -125,7 +224,7 @@ impl SignalProcessor {
         signal_id: Uuid,
         signal: &Signal,
         conversation_history: Option<&[cortex::llm::Message]>,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let ns = Some(signal.namespace.as_str());
         let facts = self.list_facts(ns);
@@ -223,7 +322,7 @@ impl SignalProcessor {
         _filter: Option<String>,
         _since: Option<String>,
         _limit: Option<usize>,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let message = match &self.audit_trail {
             Some(audit) => {
@@ -258,7 +357,7 @@ impl SignalProcessor {
     pub(super) async fn handle_list_standing_approvals(
         &self,
         signal_id: Uuid,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let message = match &self.standing_approvals {
             Some(store) => {
@@ -299,7 +398,7 @@ impl SignalProcessor {
         &self,
         signal_id: Uuid,
         _status: Option<String>,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let message = match &self.confirmation_engine {
             Some(engine) => {
@@ -330,7 +429,7 @@ impl SignalProcessor {
         &self,
         signal_id: Uuid,
         _window: Option<String>,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let message = match &self.cost_budget {
             Some(budget) => {
@@ -360,7 +459,7 @@ impl SignalProcessor {
     pub(super) async fn handle_list_schedules(
         &self,
         signal_id: Uuid,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let intents: Vec<_> = self
             .list_scheduled_intents(None)?
@@ -393,7 +492,7 @@ impl SignalProcessor {
         &self,
         signal_id: Uuid,
         filter: String,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let registry = match self.agent_registry() {
             Some(r) => r,
@@ -443,7 +542,7 @@ impl SignalProcessor {
     pub(super) async fn handle_list_tasks(
         &self,
         signal_id: Uuid,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let message = match &self.orchestrator {
             Some(orch) => {
@@ -470,7 +569,7 @@ impl SignalProcessor {
         &self,
         signal_id: Uuid,
         task_id: String,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let message = match &self.orchestrator {
             Some(orch) => match orch.get_task(&task_id).await {
@@ -503,7 +602,7 @@ impl SignalProcessor {
     pub(super) async fn handle_proactivity_status(
         &self,
         signal_id: Uuid,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let runtime = self
             .proactivity_enabled
@@ -539,7 +638,7 @@ impl SignalProcessor {
     pub(super) async fn handle_list_channels(
         &self,
         signal_id: Uuid,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let message = match &self.channel_router {
             Some(router) => match router.list_channels().await {
@@ -573,7 +672,7 @@ impl SignalProcessor {
         signal_id: Uuid,
         namespace: Option<String>,
         category: Option<String>,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let ns = namespace.as_deref().unwrap_or("personal");
         let message = match &self.channel_preferences {
@@ -634,7 +733,7 @@ impl SignalProcessor {
     pub(super) async fn handle_list_terminal_sessions(
         &self,
         signal_id: Uuid,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let Some(bridge) = self.terminal_bridge() else {
             let resp = prepend_nudges(SignalResponse::ok(
@@ -669,7 +768,7 @@ impl SignalProcessor {
     pub(super) async fn handle_list_mcp_servers(
         &self,
         signal_id: Uuid,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let Some(host) = self.mcp_host() else {
             let resp = prepend_nudges(SignalResponse::ok(

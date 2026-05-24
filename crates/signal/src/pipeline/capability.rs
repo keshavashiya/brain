@@ -8,15 +8,37 @@
 
 use uuid::Uuid;
 
+use super::dispatch::{CapabilityHandler, HandlerContext, NudgeFn};
 use crate::types::*;
 use crate::SignalProcessor;
+
+#[async_trait::async_trait]
+impl CapabilityHandler for SignalProcessor {
+    async fn dispatch_capability(
+        &self,
+        ctx: HandlerContext<'_>,
+        intent: thalamus::Intent,
+        prepend_nudges: &NudgeFn<'_>,
+    ) -> Result<PipelineResult, SignalError> {
+        match intent {
+            thalamus::Intent::ToolCall(token) => {
+                self.handle_tool_call(ctx.signal_id, *token, prepend_nudges)
+                    .await
+            }
+            other => unreachable!(
+                "non-capability variant routed to dispatch_capability: {other:?} \
+                 (Intent::category() / dispatch table out of sync)"
+            ),
+        }
+    }
+}
 
 impl SignalProcessor {
     pub(super) async fn handle_tool_call(
         &self,
         signal_id: Uuid,
         token: intent::IntentToken,
-        prepend_nudges: &impl Fn(SignalResponse) -> SignalResponse,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let Some(router) = self.intent_router() else {
             let message = format!(
