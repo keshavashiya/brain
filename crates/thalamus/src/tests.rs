@@ -803,3 +803,229 @@ async fn task_cancel_slash_without_id_falls_through() {
         "bare /task-cancel must not classify (id is required)"
     );
 }
+
+// ─── Intent::category (Issue 149) ───────────────────────────────────────────
+//
+// Build one representative of every variant so the category mapping is
+// driven through the exhaustive match in `Intent::category`. Catches:
+// (a) a future variant landing without a category declaration (compile
+// error via exhaustiveness in `category()`), and (b) a category landing
+// in the enum without any variant claiming it (the coverage assertion).
+
+fn every_intent_variant() -> Vec<Intent> {
+    use chrono::Utc;
+    use intent::{IntentToken, Object, Provenance, Verb};
+
+    vec![
+        // Inspection
+        Intent::Recall { query: "x".into() },
+        Intent::MemorySummary,
+        Intent::SystemStatus,
+        Intent::ProactivityStatus,
+        Intent::BudgetStatus { window: None },
+        Intent::ListApprovals { status: None },
+        Intent::ListStandingApprovals,
+        Intent::ListSchedules,
+        Intent::ListTasks,
+        Intent::TaskStatus {
+            task_id: "t".into(),
+        },
+        Intent::QueryAgents {
+            filter: String::new(),
+        },
+        Intent::QueryAudit {
+            filter: None,
+            since: None,
+            limit: None,
+        },
+        Intent::ListChannels,
+        Intent::ChannelPreferences {
+            namespace: None,
+            category: None,
+        },
+        Intent::ListTerminalSessions,
+        Intent::ListMcpServers,
+        // Memory
+        Intent::StoreFact {
+            subject: "s".into(),
+            predicate: "p".into(),
+            object: "o".into(),
+        },
+        Intent::Forget { target: "x".into() },
+        // Action
+        Intent::ExecuteCommand {
+            command: "ls".into(),
+            args: vec![],
+        },
+        Intent::WebSearch { query: "x".into() },
+        Intent::SendMessage {
+            channel: "c".into(),
+            recipient: "r".into(),
+            content: "hi".into(),
+        },
+        Intent::DelegateTask {
+            agent: "claude-code".into(),
+            prompt: "do".into(),
+        },
+        // Lifecycle
+        Intent::Schedule {
+            description: "d".into(),
+            cron: None,
+        },
+        Intent::CancelSchedule { id: "1".into() },
+        Intent::DecomposeTask {
+            request: "build".into(),
+        },
+        Intent::CancelTask {
+            task_id: "1".into(),
+        },
+        Intent::CancelSignal {
+            signal_id: "1".into(),
+        },
+        Intent::OpenTerminalSession {
+            program: "bash".into(),
+            args: vec![],
+            cwd: None,
+        },
+        Intent::CloseTerminalSession {
+            session_id: "s".into(),
+        },
+        Intent::MountMcpServer {
+            name: "m".into(),
+            transport: "stdio".into(),
+            command_or_url: "x".into(),
+        },
+        Intent::UnmountMcpServer { name: "m".into() },
+        // Governance
+        Intent::RespondToApproval {
+            nonce: "n".into(),
+            decision: "approve".into(),
+        },
+        Intent::RevokeStandingApproval { id: "g".into() },
+        Intent::PruneAudit {
+            older_than: "30d".into(),
+        },
+        Intent::SetChannelPreference {
+            channel: "c".into(),
+            category: "k".into(),
+            weight: 1.0,
+            pinned: false,
+        },
+        Intent::SetProactivity {
+            enabled: true,
+            until: None,
+        },
+        // Capability
+        Intent::ToolCall(Box::new(IntentToken::new(
+            Verb::new("memory", "store"),
+            Object {
+                kind: "intent_args".into(),
+                value: serde_json::Value::Null,
+            },
+            Provenance::User {
+                raw_input: "test".into(),
+                ui_origin: None,
+                ts: Utc::now(),
+            },
+            "personal".into(),
+        ))),
+        // Conversation
+        Intent::Chat {
+            content: "hi".into(),
+        },
+    ]
+}
+
+#[test]
+fn category_mapping_matches_intended_taxonomy() {
+    // Spot-check one representative per category. The exhaustive match in
+    // `Intent::category` covers the rest at compile time.
+    assert_eq!(
+        Intent::Recall { query: "x".into() }.category(),
+        IntentCategory::Inspection
+    );
+    assert_eq!(
+        Intent::StoreFact {
+            subject: "s".into(),
+            predicate: "p".into(),
+            object: "o".into(),
+        }
+        .category(),
+        IntentCategory::Memory
+    );
+    assert_eq!(
+        Intent::ExecuteCommand {
+            command: "ls".into(),
+            args: vec![],
+        }
+        .category(),
+        IntentCategory::Action
+    );
+    assert_eq!(
+        Intent::Schedule {
+            description: "d".into(),
+            cron: None,
+        }
+        .category(),
+        IntentCategory::Lifecycle
+    );
+    assert_eq!(
+        Intent::RespondToApproval {
+            nonce: "n".into(),
+            decision: "approve".into(),
+        }
+        .category(),
+        IntentCategory::Governance
+    );
+    assert_eq!(
+        Intent::Chat {
+            content: "hi".into(),
+        }
+        .category(),
+        IntentCategory::Conversation
+    );
+    // ToolCall → Capability
+    let token = intent::IntentToken::new(
+        intent::Verb::new("custom", "thing"),
+        intent::Object {
+            kind: "intent_args".into(),
+            value: serde_json::Value::Null,
+        },
+        intent::Provenance::User {
+            raw_input: "x".into(),
+            ui_origin: None,
+            ts: chrono::Utc::now(),
+        },
+        "personal".into(),
+    );
+    assert_eq!(
+        Intent::ToolCall(Box::new(token)).category(),
+        IntentCategory::Capability
+    );
+}
+
+#[test]
+fn every_category_has_at_least_one_variant() {
+    use std::collections::HashSet;
+
+    let categories: HashSet<IntentCategory> = every_intent_variant()
+        .iter()
+        .map(Intent::category)
+        .collect();
+
+    for expected in [
+        IntentCategory::Inspection,
+        IntentCategory::Memory,
+        IntentCategory::Action,
+        IntentCategory::Lifecycle,
+        IntentCategory::Governance,
+        IntentCategory::Capability,
+        IntentCategory::Conversation,
+    ] {
+        assert!(
+            categories.contains(&expected),
+            "no Intent variant maps to {expected:?} \
+             — either drop the category or add a variant"
+        );
+    }
+}

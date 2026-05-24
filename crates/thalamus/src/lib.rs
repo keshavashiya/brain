@@ -36,83 +36,52 @@ pub enum ThalamusError {
 // ─── Intent Types ───────────────────────────────────────────────────────────
 
 /// Classified intent for routing.
+///
+/// Variants are grouped by side-effect class. Every variant maps to exactly
+/// one [`IntentCategory`] via [`Intent::category`] (an exhaustive match —
+/// new variants get a compile-error until their category is declared).
+///
+/// The taxonomy mirrors the auth tiers in `signal::authz::intent_to_auth`
+/// so future trait-dispatch refactors (`IntentHandler`, Issue 111) and
+/// tier resolution (Issue 112) converge on the same cut of the enum.
+///
+/// JSON / serde shape is unaffected by the grouping — variant *names* are
+/// the wire identifiers and remain unchanged.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Intent {
-    /// Store a fact explicitly.
-    StoreFact {
-        subject: String,
-        predicate: String,
-        object: String,
-    },
+    // ── Inspection ─ read-only state queries; never require auth ───────────
     /// Recall/search memory.
     Recall { query: String },
-    /// Forget/delete something.
-    Forget { target: String },
-    /// Execute a command.
-    ExecuteCommand { command: String, args: Vec<String> },
-    /// Search the web.
-    WebSearch { query: String },
+    /// Dump and summarise everything stored in memory.
+    MemorySummary,
+    /// Get system status.
+    SystemStatus,
+    /// Get proactivity status and configuration.
+    ProactivityStatus,
+    /// Check LLM budget and usage status.
+    BudgetStatus { window: Option<String> },
+    /// List pending approvals.
+    ListApprovals { status: Option<String> },
+    /// List active standing approvals — every `(agent_id, verb_ns,
+    /// verb_action)` triple currently pre-granted to bypass the
+    /// human-confirm prompt. Read-only inspection so the user can
+    /// audit what their reflexes are allowed to do unattended.
+    ListStandingApprovals,
+    /// List active background schedules.
+    ListSchedules,
+    /// List active or recent tasks.
+    ListTasks,
+    /// Get the status of a specific task.
+    TaskStatus { task_id: String },
+    /// Ask about available specialist agents (delegates). Optional
+    /// `filter` narrows the answer: e.g. "rust", "aider", or "".
+    QueryAgents { filter: String },
     /// Query the audit trail.
     QueryAudit {
         filter: Option<String>,
         since: Option<String>,
         limit: Option<usize>,
     },
-    /// Prune the audit trail.
-    PruneAudit { older_than: String },
-    /// List pending approvals.
-    ListApprovals { status: Option<String> },
-    /// Respond to a pending approval.
-    RespondToApproval { nonce: String, decision: String },
-    /// Check LLM budget and usage status.
-    BudgetStatus { window: Option<String> },
-    /// Schedule something.
-    Schedule {
-        description: String,
-        cron: Option<String>,
-    },
-    /// List active background schedules.
-    ListSchedules,
-    /// Cancel a scheduled intent.
-    CancelSchedule { id: String },
-    /// Send via a channel.
-    SendMessage {
-        channel: String,
-        recipient: String,
-        content: String,
-    },
-    /// Get system status.
-    SystemStatus,
-    /// Decompose a complex request into an executable task plan.
-    DecomposeTask { request: String },
-    /// List active or recent tasks.
-    ListTasks,
-    /// Get the status of a specific task.
-    TaskStatus { task_id: String },
-    /// Cancel a running task.
-    CancelTask { task_id: String },
-    /// Cancel an in-flight signal by its id. Wires the Live-tab cancel
-    /// button in the observability UI. Distinct from `CancelTask` —
-    /// that aborts an orchestrated multi-step plan; this aborts a
-    /// single Signal's pipeline.
-    CancelSignal { signal_id: String },
-    /// Ask about available specialist agents (delegates). Optional
-    /// `filter` narrows the answer: e.g. "rust", "aider", or "".
-    QueryAgents { filter: String },
-    /// Run a single-turn delegation to a named specialist agent. Bypasses
-    /// task decomposition — used when the user explicitly asks "delegate
-    /// to claude-code: ..." or "@codex: ...". For multi-step plans the
-    /// orchestrator picks the agent itself via [`DecomposeTask`].
-    DelegateTask { agent: String, prompt: String },
-    /// Configure proactivity / nudges.
-    SetProactivity {
-        enabled: bool,
-        until: Option<String>,
-    },
-    /// Get proactivity status and configuration.
-    ProactivityStatus,
-    /// Dump and summarise everything stored in memory.
-    MemorySummary,
     /// List registered channels (router-known descriptors). The
     /// natural-language replacement for inspection CLIs.
     ListChannels,
@@ -123,14 +92,55 @@ pub enum Intent {
         namespace: Option<String>,
         category: Option<String>,
     },
-    /// Pin or unpin a channel preference. Pinned weights bypass the
-    /// min-weight threshold during routing.
-    SetChannelPreference {
-        channel: String,
-        category: String,
-        weight: f32,
-        pinned: bool,
+    /// List currently-active terminal sessions (read-only inspection).
+    ListTerminalSessions,
+    /// List currently-mounted MCP servers (read-only inspection).
+    ListMcpServers,
+
+    // ── Memory ─ episodic / semantic mutations ─────────────────────────────
+    /// Store a fact explicitly.
+    StoreFact {
+        subject: String,
+        predicate: String,
+        object: String,
     },
+    /// Forget/delete something.
+    Forget { target: String },
+
+    // ── Action ─ external side effects (shell / net / delegation) ──────────
+    /// Execute a command.
+    ExecuteCommand { command: String, args: Vec<String> },
+    /// Search the web.
+    WebSearch { query: String },
+    /// Send via a channel.
+    SendMessage {
+        channel: String,
+        recipient: String,
+        content: String,
+    },
+    /// Run a single-turn delegation to a named specialist agent. Bypasses
+    /// task decomposition — used when the user explicitly asks "delegate
+    /// to claude-code: ..." or "@codex: ...". For multi-step plans the
+    /// orchestrator picks the agent itself via [`Intent::DecomposeTask`].
+    DelegateTask { agent: String, prompt: String },
+
+    // ── Lifecycle ─ create / cancel of schedules, tasks, sessions, mounts ─
+    /// Schedule something.
+    Schedule {
+        description: String,
+        cron: Option<String>,
+    },
+    /// Cancel a scheduled intent.
+    CancelSchedule { id: String },
+    /// Decompose a complex request into an executable task plan.
+    DecomposeTask { request: String },
+    /// Cancel a running task.
+    CancelTask { task_id: String },
+    /// Cancel an in-flight signal by its id. Wires the Live-tab cancel
+    /// button in the observability UI. Distinct from `CancelTask` —
+    /// that aborts an orchestrated multi-step plan; this aborts a
+    /// single Signal's pipeline.
+    CancelSignal { signal_id: String },
     /// Open a new terminal session via the Terminal Bridge. Returns the
     /// session id so the caller can `Attach` or close it later.
     OpenTerminalSession {
@@ -138,8 +148,6 @@ pub enum Intent {
         args: Vec<String>,
         cwd: Option<String>,
     },
-    /// List currently-active terminal sessions (read-only inspection).
-    ListTerminalSessions,
     /// Close an active terminal session by id. Kills the child if still running.
     CloseTerminalSession { session_id: String },
     /// Mount an external MCP server (stdio / streamable-http / http-sse) for
@@ -154,17 +162,31 @@ pub enum Intent {
     },
     /// Unmount a previously-mounted MCP server by name.
     UnmountMcpServer { name: String },
-    /// List currently-mounted MCP servers (read-only inspection).
-    ListMcpServers,
-    /// List active standing approvals — every `(agent_id, verb_ns,
-    /// verb_action)` triple currently pre-granted to bypass the
-    /// human-confirm prompt. Read-only inspection so the user can
-    /// audit what their reflexes are allowed to do unattended.
-    ListStandingApprovals,
+
+    // ── Governance ─ approvals, audit, config mutation, proactivity ────────
+    /// Respond to a pending approval.
+    RespondToApproval { nonce: String, decision: String },
     /// Revoke a previously-granted standing approval by id. Idempotent —
     /// revoking an unknown or already-revoked id returns a friendly
     /// "not found" rather than failing.
     RevokeStandingApproval { id: String },
+    /// Prune the audit trail.
+    PruneAudit { older_than: String },
+    /// Pin or unpin a channel preference. Pinned weights bypass the
+    /// min-weight threshold during routing.
+    SetChannelPreference {
+        channel: String,
+        category: String,
+        weight: f32,
+        pinned: bool,
+    },
+    /// Configure proactivity / nudges.
+    SetProactivity {
+        enabled: bool,
+        until: Option<String>,
+    },
+
+    // ── Capability ─ kernel-routed Standardized Intent Token envelope ──────
     /// Abstract tool invocation expressed as a Standardized Intent Token.
     /// Emitted by the classifier when the requested action can't be served by
     /// any of the typed variants above and must instead be resolved against
@@ -174,11 +196,96 @@ pub enum Intent {
     /// Boxed so the enum discriminant stays compact — the SIT envelope is
     /// the heaviest variant by far.
     ToolCall(Box<IntentToken>),
+
+    // ── Conversation ─ free-form chat (catch-all) ──────────────────────────
     /// Regular chat/conversation.
     Chat { content: String },
 }
 
+/// Side-effect class of an [`Intent`]. Aligns with the auth tiers in
+/// `signal::authz::intent_to_auth` so trait-dispatch (Issue 111) and tier
+/// resolution (Issue 112) can share a single cut of the enum.
+///
+/// Every [`Intent`] variant maps to exactly one category via
+/// [`Intent::category`]; the match is exhaustive, so adding a new variant
+/// without declaring its category is a compile error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum IntentCategory {
+    /// Read-only state queries. Never require authorization.
+    Inspection,
+    /// Mutations of episodic or semantic memory.
+    Memory,
+    /// External side effects (shell / network / agent delegation).
+    Action,
+    /// Create / cancel of schedules, tasks, sessions, MCP mounts.
+    Lifecycle,
+    /// Approvals, audit, channel prefs, proactivity — meta-configuration.
+    Governance,
+    /// Capability-kernel routed Standardized Intent Token envelope.
+    Capability,
+    /// Free-form chat (catch-all classification).
+    Conversation,
+}
+
 impl Intent {
+    /// Side-effect class of this intent. Exhaustive over all variants so
+    /// adding a new variant without declaring its category is a compile
+    /// error. See [`IntentCategory`].
+    pub fn category(&self) -> IntentCategory {
+        match self {
+            // ── Inspection ────────────────────────────────────────────────
+            Intent::Recall { .. }
+            | Intent::MemorySummary
+            | Intent::SystemStatus
+            | Intent::ProactivityStatus
+            | Intent::BudgetStatus { .. }
+            | Intent::ListApprovals { .. }
+            | Intent::ListStandingApprovals
+            | Intent::ListSchedules
+            | Intent::ListTasks
+            | Intent::TaskStatus { .. }
+            | Intent::QueryAgents { .. }
+            | Intent::QueryAudit { .. }
+            | Intent::ListChannels
+            | Intent::ChannelPreferences { .. }
+            | Intent::ListTerminalSessions
+            | Intent::ListMcpServers => IntentCategory::Inspection,
+
+            // ── Memory ────────────────────────────────────────────────────
+            Intent::StoreFact { .. } | Intent::Forget { .. } => IntentCategory::Memory,
+
+            // ── Action ────────────────────────────────────────────────────
+            Intent::ExecuteCommand { .. }
+            | Intent::WebSearch { .. }
+            | Intent::SendMessage { .. }
+            | Intent::DelegateTask { .. } => IntentCategory::Action,
+
+            // ── Lifecycle ─────────────────────────────────────────────────
+            Intent::Schedule { .. }
+            | Intent::CancelSchedule { .. }
+            | Intent::DecomposeTask { .. }
+            | Intent::CancelTask { .. }
+            | Intent::CancelSignal { .. }
+            | Intent::OpenTerminalSession { .. }
+            | Intent::CloseTerminalSession { .. }
+            | Intent::MountMcpServer { .. }
+            | Intent::UnmountMcpServer { .. } => IntentCategory::Lifecycle,
+
+            // ── Governance ────────────────────────────────────────────────
+            Intent::RespondToApproval { .. }
+            | Intent::RevokeStandingApproval { .. }
+            | Intent::PruneAudit { .. }
+            | Intent::SetChannelPreference { .. }
+            | Intent::SetProactivity { .. } => IntentCategory::Governance,
+
+            // ── Capability ────────────────────────────────────────────────
+            Intent::ToolCall(_) => IntentCategory::Capability,
+
+            // ── Conversation ──────────────────────────────────────────────
+            Intent::Chat { .. } => IntentCategory::Conversation,
+        }
+    }
+
     /// Convert a typed `Intent` into a Standardized Intent Token. Returns
     /// `None` for purely conversational variants (`Chat`, inspection
     /// variants) that don't carry a capability claim. Used when re-routing
