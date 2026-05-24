@@ -152,7 +152,10 @@ impl SignalProcessor {
         prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let router = thalamus::SignalRouter::new();
-        let resp = match (router.intent_to_action(intent), &self.action_dispatcher) {
+        let resp = match (
+            router.intent_to_action(intent),
+            &self.capability.action_dispatcher,
+        ) {
             (Some(action), Some(dispatcher)) => {
                 let result = dispatcher.dispatch(&action).await;
                 if result.success {

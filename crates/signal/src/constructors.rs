@@ -151,9 +151,6 @@ impl SignalProcessor {
             search_cfg.decay_rate,
             config.memory.semantic.similarity_threshold,
         ));
-        // Capacity raised to 4096 with lag-drop semantics.
-        let (events_tx, _) = tokio::sync::broadcast::channel(4096);
-
         let classifier = thalamus::IntentClassifier::new()
             .with_llm_fallback(Arc::new(thalamus::LlmIntentFallback::new(llm.clone())));
 
@@ -172,35 +169,21 @@ impl SignalProcessor {
             llm,
             context_assembler: cortex::context::ContextAssembler::with_defaults(),
             procedures,
-            events_tx,
-            notification_router: None,
-            action_dispatcher: None,
             metrics: Arc::new(brain::metrics::SubsystemMetrics::new()),
-            // Safety infrastructure — all opt-in
-            audit_trail: None,
-            confirmation_engine: None,
-            cost_budget: None,
-            sandbox_executor: None,
-            dual_memory_reader: None,
-            dlq: None,
-            orchestrator: None,
-            channel_router: None,
-            channel_preferences: None,
-            confirmation_correlator: None,
-            channel_dispatcher: None,
-            agent_registry: None,
-            observer: None,
-            cancel_registry: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-            identity_store: None,
-            terminal_bridge: None,
-            mcp_host: None,
-            tool_registry: None,
-            intent_router: None,
-            breaker_registry: None,
-            client_rate_limits: None,
-            standing_approvals: None,
-            confirmation_timeout: None,
             proactivity_enabled,
+
+            // Opt-in bundles — all builder-wired
+            safety: crate::bundles::SafetyBundle::default(),
+            channels: crate::bundles::ChannelBundle::default(),
+            capability: crate::bundles::CapabilityBundle::default(),
+            observability: crate::bundles::ObservabilityBundle::new(),
+
+            // Top-level optionals
+            dual_memory_reader: None,
+            orchestrator: None,
+            agent_registry: None,
+            identity_store: None,
+            client_rate_limits: None,
         };
 
         // Warm up the LLM model in the background to avoid first-call timeout

@@ -19,6 +19,7 @@ pub mod types;
 
 mod attachment;
 mod budget_guard;
+mod bundles;
 mod constructors;
 mod exchange;
 mod extract;
@@ -42,6 +43,7 @@ pub use types::*;
 /// One instance is shared across all adapters. Each incoming Signal is routed
 /// through intent classification → importance scoring → memory → LLM → response.
 pub struct SignalProcessor {
+    // ── Always-on core wiring ────────────────────────────────────────────
     config: brain::BrainConfig,
     classifier: thalamus::IntentClassifier,
     importance: amygdala::ImportanceScorer,
@@ -54,120 +56,8 @@ pub struct SignalProcessor {
     llm: std::sync::Arc<dyn cortex::LlmProvider>,
     context_assembler: cortex::context::ContextAssembler,
     procedures: cerebellum::ProcedureStore,
-    events_tx: tokio::sync::broadcast::Sender<SignalProcessedEvent>,
-    /// Notification router for proactive message delivery (set via builder).
-    notification_router: Option<notification::NotificationRouter>,
-    /// Action dispatcher for executing tool intents (set via builder).
-    action_dispatcher: Option<cortex::actions::ActionDispatcher>,
     /// Cross-subsystem metrics (embedding, consolidation, circuit breaker, intent).
     metrics: std::sync::Arc<brain::metrics::SubsystemMetrics>,
-
-    // ── Safety infrastructure (opt-in via builder) ───────────────────────
-    /// Immutable audit trail — records every consequential action.
-    audit_trail: Option<std::sync::Arc<dyn audit::AuditTrail>>,
-    /// Confirmation engine — human approval gates for destructive/external actions.
-    confirmation_engine: Option<std::sync::Arc<dyn confirm::ConfirmationEngine>>,
-    /// Cost budget — per-action and rolling ceilings on LLM tokens, API calls, sandbox time.
-    cost_budget: Option<std::sync::Arc<dyn budget::CostBudget>>,
-    /// Sandbox executor — isolated command execution with resource limits.
-    sandbox_executor: Option<std::sync::Arc<dyn sandbox::SandboxExecutor>>,
-    /// Dual-memory reader — graph-first, legacy-fallback point lookups.
-    /// Wired so future read paths can resolve an id against the
-    /// episodic graph without bypassing the legacy `episodes` table for
-    /// content written before the graph schema landed.
-    dual_memory_reader: Option<hippocampus::DualMemoryReader>,
-    /// Dead-letter queue — exhausted tool-call retries land here. Held
-    /// on the processor so the serve loop's drain task and the MCP
-    /// host's decorator share one queue instance.
-    dlq: Option<std::sync::Arc<dyn resilience::DeadLetterQueue>>,
-    /// Task orchestrator — decomposes requests into executable plans.
-    orchestrator: Option<std::sync::Arc<orchestrate::TaskOrchestrator>>,
-
-    // ── Channel intelligence (opt-in via builder) ────────────────────────
-    /// Channel router — selects best-available surface for proactive delivery.
-    channel_router: Option<std::sync::Arc<dyn channel::ChannelRouter>>,
-    /// Channel preference store — learned weights per (namespace, category).
-    channel_preferences: Option<std::sync::Arc<dyn channel::ChannelPreferenceStore>>,
-    /// Confirmation correlator — resolves approve/reject messages from any channel.
-    confirmation_correlator: Option<std::sync::Arc<channel::ConfirmationCorrelator>>,
-    /// Channel dispatcher — owns transport handles and performs actual delivery.
-    channel_dispatcher: Option<std::sync::Arc<channel::ChannelDispatcher>>,
-
-    // ── Agent delegation ─────────────────────────────────────────────────
-    /// Registry of specialist agent delegates (Claude Code, custom subprocess, etc.).
-    agent_registry: Option<std::sync::Arc<delegate::AgentRegistry>>,
-
-    // ── Observability ────────────────────────────────────────────────────
-    /// Optional event bus. When set, the pipeline publishes structured
-    /// `BrainEvent`s for the Live tab, `brain tail`, and remote subscribers.
-    /// Coexists with the legacy `events_tx` `SignalProcessedEvent` bus while
-    /// callers migrate over; that bus is removed once all consumers
-    /// (httpadapter, grpcadapter) subscribe through `Observer`.
-    observer: Option<std::sync::Arc<dyn observe::Observer>>,
-    /// In-flight signal cancellation registry. `process()` registers a
-    /// `Notify` keyed by `Signal.id` at entry and removes it on completion
-    /// via the `CancelGuard` RAII. `Intent::CancelSignal` looks up the
-    /// notify and triggers it; the LLM-generation step listens via
-    /// `tokio::select!` and aborts. Structured concurrency at every
-    /// checkpoint is layered on top as the orchestrator evolves.
-    cancel_registry: std::sync::Arc<
-        tokio::sync::Mutex<
-            std::collections::HashMap<uuid::Uuid, std::sync::Arc<tokio::sync::Notify>>,
-        >,
-    >,
-    /// Authorization store. When set and the incoming `Signal` carries a
-    /// `Principal`, the pipeline gates the classified intent through
-    /// `IdentityStore::check` before executing it. Unwired = back-compat
-    /// (no enforcement).
-    identity_store: Option<std::sync::Arc<dyn identity::IdentityStore>>,
-
-    // ── Terminal Bridge (Motor cortex) ──────────────────────────────────
-    /// Optional Terminal Bridge for `OpenTerminalSession` /
-    /// `ListTerminalSessions` / `CloseTerminalSession` intents. When
-    /// unwired, those intents return a "not configured" response.
-    terminal_bridge: Option<std::sync::Arc<terminal::TerminalBridge>>,
-
-    // ── MCP Host (Motor cortex) ────────────────────────────────────────
-    /// Optional MCP host for `MountMcpServer` / `UnmountMcpServer` /
-    /// `ListMcpServers` intents. When unwired, those intents return a
-    /// "not configured" response.
-    mcp_host: Option<std::sync::Arc<dyn mcphost::MCPHost>>,
-
-    // ── Capability Kernel ──────────────────────────────────────────────
-    /// Tool registry the capability router resolves [`intent::IntentToken`]s
-    /// against. Populated by the MCP host and native backends at mount /
-    /// registration time. When unwired, `Intent::ToolCall` returns the
-    /// router-not-configured placeholder.
-    tool_registry: Option<std::sync::Arc<dyn intent::ToolRegistry>>,
-    /// Capability router that resolves [`intent::IntentToken`]s into
-    /// [`intent::ToolRoute`]s. The pipeline's `handle_tool_call` arm calls
-    /// `resolve` and dispatches the returned route. Without a router,
-    /// `Intent::ToolCall` falls back to a deterministic placeholder.
-    intent_router: Option<std::sync::Arc<dyn intent::IntentRouter>>,
-    /// Per-tool breaker registry. Wired into the router (to exclude `Open`
-    /// tools from scoring) and into the dispatch site (to record success /
-    /// failure after each MCP call). Unwired processors don't track tool
-    /// health.
-    breaker_registry: Option<std::sync::Arc<resilience::BreakerRegistry>>,
-    /// Per-client rate limiter registry (Issue 51). Wired through adapters
-    /// (HTTP/WS/gRPC) to throttle abusive callers without changing
-    /// identity resolution. Unwired processors disable rate limiting.
-    client_rate_limits: Option<std::sync::Arc<resilience::RateLimitRegistry>>,
-
-    // ── Standing approvals ──────────────────────────────────────────────
-    /// Standing-approval store, exposed to the `/approval-list` and
-    /// `/approval-revoke` handlers. The same `Arc` is wired into the
-    /// `ConfirmationEngine` at bootstrap time so the bypass check and
-    /// the slash commands see one consistent table. Unwired processors
-    /// return a deterministic "not configured" message from the slash
-    /// handlers.
-    standing_approvals: Option<std::sync::Arc<dyn confirm::StandingApprovalStore>>,
-    /// Optional override for the inline confirmation gate's per-request
-    /// timeout. Defaults to the tier-driven value
-    /// ([`brain::security::ActionTier::default_timeout`]). Tests
-    /// shorten this so the no-bypass path doesn't take 60s+.
-    confirmation_timeout: Option<std::time::Duration>,
-
     /// Runtime proactivity toggle. Initialised from
     /// `config.proactivity.enabled` and flipped by
     /// `handle_set_proactivity`. The CLI bootstrap hands a clone of this
@@ -178,6 +68,36 @@ pub struct SignalProcessor {
     /// spawned and a runtime flip to `true` cannot resurrect them —
     /// that's the v1.0 work.
     proactivity_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+
+    // ── Capability bundles (opt-in via builder) ──────────────────────────
+    /// Approval / accounting / sandbox gates. See [`bundles::SafetyBundle`].
+    pub(crate) safety: bundles::SafetyBundle,
+    /// Cross-channel routing + delivery. See [`bundles::ChannelBundle`].
+    pub(crate) channels: bundles::ChannelBundle,
+    /// Motor cortex + capability kernel. See [`bundles::CapabilityBundle`].
+    pub(crate) capability: bundles::CapabilityBundle,
+    /// Event bus + cancellation registry. See [`bundles::ObservabilityBundle`].
+    pub(crate) observability: bundles::ObservabilityBundle,
+
+    // ── Top-level optionals that didn't fit a bundle ─────────────────────
+    /// Dual-memory reader — graph-first, legacy-fallback point lookups.
+    /// Wired so future read paths can resolve an id against the
+    /// episodic graph without bypassing the legacy `episodes` table for
+    /// content written before the graph schema landed.
+    dual_memory_reader: Option<hippocampus::DualMemoryReader>,
+    /// Task orchestrator — decomposes requests into executable plans.
+    orchestrator: Option<std::sync::Arc<orchestrate::TaskOrchestrator>>,
+    /// Registry of specialist agent delegates (Claude Code, custom subprocess, etc.).
+    agent_registry: Option<std::sync::Arc<delegate::AgentRegistry>>,
+    /// Authorization store. When set and the incoming `Signal` carries a
+    /// `Principal`, the pipeline gates the classified intent through
+    /// `IdentityStore::check` before executing it. Unwired = back-compat
+    /// (no enforcement).
+    identity_store: Option<std::sync::Arc<dyn identity::IdentityStore>>,
+    /// Per-client rate limiter registry (Issue 51). Wired through adapters
+    /// (HTTP/WS/gRPC) to throttle abusive callers without changing
+    /// identity resolution. Unwired processors disable rate limiting.
+    client_rate_limits: Option<std::sync::Arc<resilience::RateLimitRegistry>>,
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

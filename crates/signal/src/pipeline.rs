@@ -302,7 +302,7 @@ impl SignalProcessor {
     /// Drain up to 10 pending proactive notifications from the outbox so
     /// the response can prepend them as nudges.
     fn drain_pending_notifications(&self) -> Vec<storage::sqlite::Notification> {
-        match &self.notification_router {
+        match &self.channels.notification_router {
             Some(router) => router.drain_pending(10),
             None => Vec::new(),
         }
@@ -337,7 +337,7 @@ impl SignalProcessor {
             "Signal classified"
         );
 
-        if let Some(observer) = &self.observer {
+        if let Some(observer) = &self.observability.observer {
             let intent_summary = observe::intent_summary_of(&classification.intent);
             let ev = ::observe::BrainEvent::IntentClassified {
                 id: signal.id,
@@ -412,7 +412,7 @@ impl SignalProcessor {
     /// vault-marked secret embedded in `Signal.content` cannot leak onto the
     /// bus.
     pub async fn publish_signal_received(&self, signal: &Signal) {
-        let Some(observer) = &self.observer else {
+        let Some(observer) = &self.observability.observer else {
             return;
         };
         const PREVIEW_BYTES: usize = 256;
@@ -459,7 +459,7 @@ impl SignalProcessor {
             episodes_used: response.memory_context.episodes_used,
             timestamp: chrono::Utc::now(),
         };
-        let _ = self.events_tx.send(event);
+        let _ = self.observability.events_tx.send(event);
     }
 
     // ── Identity + confirmation gates ────────────────────────────────────
@@ -483,7 +483,7 @@ impl SignalProcessor {
         match store.check(principal, &req, required).await {
             identity::CheckOutcome::Allow => None,
             identity::CheckOutcome::EscalateToUser { reason } => {
-                if let Some(observer) = &self.observer {
+                if let Some(observer) = &self.observability.observer {
                     let ev = ::observe::BrainEvent::ConfirmationRequested {
                         id: signal_id,
                         nonce: signal_id.to_string(),
@@ -501,7 +501,7 @@ impl SignalProcessor {
                 ))
             }
             identity::CheckOutcome::Deny { reason } => {
-                if let Some(observer) = &self.observer {
+                if let Some(observer) = &self.observability.observer {
                     let ev = ::observe::BrainEvent::Error {
                         id: signal_id,
                         source: "identity.deny".into(),
@@ -552,7 +552,7 @@ impl SignalProcessor {
             }
         }
 
-        let engine = self.confirmation_engine.as_ref()?;
+        let engine = self.safety.confirmation_engine.as_ref()?;
         let (req, identity_tier) = crate::authz::intent_to_auth(intent)?;
         let action_tier = convert_tier(identity_tier);
         if !action_tier.requires_confirmation() {
@@ -561,6 +561,7 @@ impl SignalProcessor {
 
         let description = format!("{}.{}", req.verb_ns, req.verb_action);
         let timeout = self
+            .safety
             .confirmation_timeout
             .unwrap_or_else(|| action_tier.default_timeout());
         let mut spec =
@@ -574,7 +575,7 @@ impl SignalProcessor {
         }
         let nonce = spec.nonce.clone();
 
-        if let Some(observer) = &self.observer {
+        if let Some(observer) = &self.observability.observer {
             let ev = ::observe::BrainEvent::ConfirmationRequested {
                 id: signal_id,
                 nonce: nonce.clone(),
@@ -586,7 +587,7 @@ impl SignalProcessor {
 
         let result = engine.request(spec).await;
 
-        if let Some(observer) = &self.observer {
+        if let Some(observer) = &self.observability.observer {
             let decision = match &result {
                 Ok(confirm::ApprovalOutcome::Approved) => "approved",
                 Ok(confirm::ApprovalOutcome::Rejected { .. }) => "rejected",

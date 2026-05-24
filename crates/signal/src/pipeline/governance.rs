@@ -162,7 +162,7 @@ impl SignalProcessor {
         }
 
         // Per-step approval: resolve via the confirm engine.
-        let message = match &self.confirmation_engine {
+        let message = match &self.safety.confirmation_engine {
             Some(engine) => {
                 let dec = if approved {
                     confirm::ApprovalDecision::Approve
@@ -206,7 +206,7 @@ impl SignalProcessor {
         id: String,
         prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
-        let message = match &self.standing_approvals {
+        let message = match &self.safety.standing_approvals {
             Some(store) => match store.revoke(&id).await {
                 Ok(true) => format!("Revoked standing approval `{id}`."),
                 Ok(false) => format!("Standing approval `{id}` not found or already revoked."),
@@ -224,7 +224,7 @@ impl SignalProcessor {
         older_than: String,
         prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
-        let message = match &self.audit_trail {
+        let message = match &self.safety.audit_trail {
             Some(audit) => match parse_human_duration(&older_than) {
                 Ok(duration) => match audit.prune(duration).await {
                     Ok(n) => format!("Pruned {n} entries older than {older_than}"),
@@ -251,7 +251,7 @@ impl SignalProcessor {
         pinned: bool,
         prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
-        let message = match (channel::DeliveryCategory::parse(&category), &self.channel_preferences) {
+        let message = match (channel::DeliveryCategory::parse(&category), &self.channels.channel_preferences) {
             (None, _) => format!(
                 "Unknown delivery category: {category}. Try: confirm, nudge, report, response, alert.",
             ),

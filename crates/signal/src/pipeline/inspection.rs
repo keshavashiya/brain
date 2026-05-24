@@ -333,7 +333,7 @@ impl SignalProcessor {
         _limit: Option<usize>,
         prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
-        let message = match &self.audit_trail {
+        let message = match &self.safety.audit_trail {
             Some(audit) => {
                 let entries = audit
                     .query(audit::query::AuditQuerySpec::last(10))
@@ -368,7 +368,7 @@ impl SignalProcessor {
         signal_id: Uuid,
         prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
-        let message = match &self.standing_approvals {
+        let message = match &self.safety.standing_approvals {
             Some(store) => {
                 let grants = store.list_active().await.map_err(|e| {
                     SignalError::Processing(format!("Failed to list standing approvals: {e}"))
@@ -409,7 +409,7 @@ impl SignalProcessor {
         _status: Option<String>,
         prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
-        let message = match &self.confirmation_engine {
+        let message = match &self.safety.confirmation_engine {
             Some(engine) => {
                 let pending = engine
                     .pending()
@@ -440,7 +440,7 @@ impl SignalProcessor {
         _window: Option<String>,
         prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
-        let message = match &self.cost_budget {
+        let message = match &self.safety.cost_budget {
             Some(budget) => {
                 let status = budget
                     .status()
@@ -649,7 +649,7 @@ impl SignalProcessor {
         signal_id: Uuid,
         prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
-        let message = match &self.channel_router {
+        let message = match &self.channels.channel_router {
             Some(router) => match router.list_channels().await {
                 Ok(channels) if channels.is_empty() => {
                     "No channels registered yet. Configure transports in `channel.transports[]` \
@@ -684,7 +684,7 @@ impl SignalProcessor {
         prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let ns = namespace.as_deref().unwrap_or("personal");
-        let message = match &self.channel_preferences {
+        let message = match &self.channels.channel_preferences {
             None => "Channel preferences not wired in this build.".to_string(),
             Some(store) => {
                 let cat = category.as_deref().map(channel::DeliveryCategory::parse);

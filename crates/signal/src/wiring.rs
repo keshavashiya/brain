@@ -48,18 +48,18 @@ impl SignalProcessor {
 
     /// Attach a notification router (builder pattern).
     pub fn with_notification_router(mut self, router: notification::NotificationRouter) -> Self {
-        self.notification_router = Some(router);
+        self.channels.notification_router = Some(router);
         self
     }
 
     /// Expose the notification router.
     pub fn notification_router(&self) -> Option<&notification::NotificationRouter> {
-        self.notification_router.as_ref()
+        self.channels.notification_router.as_ref()
     }
 
     /// Attach an action dispatcher for executing tool intents (builder pattern).
     pub fn with_action_dispatcher(mut self, dispatcher: cortex::actions::ActionDispatcher) -> Self {
-        self.action_dispatcher = Some(dispatcher);
+        self.capability.action_dispatcher = Some(dispatcher);
         self
     }
 
@@ -85,13 +85,13 @@ impl SignalProcessor {
 
     /// Attach an audit trail (builder pattern).
     pub fn with_audit_trail(mut self, trail: Arc<dyn audit::AuditTrail>) -> Self {
-        self.audit_trail = Some(trail);
+        self.safety.audit_trail = Some(trail);
         self
     }
 
     /// Expose the audit trail.
     pub fn audit_trail(&self) -> Option<&Arc<dyn audit::AuditTrail>> {
-        self.audit_trail.as_ref()
+        self.safety.audit_trail.as_ref()
     }
 
     /// Attach a confirmation engine (builder pattern).
@@ -99,29 +99,29 @@ impl SignalProcessor {
         mut self,
         engine: Arc<dyn confirm::ConfirmationEngine>,
     ) -> Self {
-        self.confirmation_engine = Some(engine);
+        self.safety.confirmation_engine = Some(engine);
         self
     }
 
     /// Expose the confirmation engine.
     pub fn confirmation_engine(&self) -> Option<&Arc<dyn confirm::ConfirmationEngine>> {
-        self.confirmation_engine.as_ref()
+        self.safety.confirmation_engine.as_ref()
     }
 
     /// Attach a cost budget (builder pattern).
     pub fn with_cost_budget(mut self, budget: Arc<dyn budget::CostBudget>) -> Self {
-        self.cost_budget = Some(budget);
+        self.safety.cost_budget = Some(budget);
         self
     }
 
     /// Expose the cost budget.
     pub fn cost_budget(&self) -> Option<&Arc<dyn budget::CostBudget>> {
-        self.cost_budget.as_ref()
+        self.safety.cost_budget.as_ref()
     }
 
     /// Attach a sandbox executor (builder pattern).
     pub fn with_sandbox_executor(mut self, executor: Arc<dyn sandbox::SandboxExecutor>) -> Self {
-        self.sandbox_executor = Some(executor);
+        self.safety.sandbox_executor = Some(executor);
         self
     }
 
@@ -143,13 +143,13 @@ impl SignalProcessor {
     /// the host's enqueue path and the serve loop's drain task see one
     /// consistent backlog.
     pub fn with_dlq(mut self, dlq: Arc<dyn resilience::DeadLetterQueue>) -> Self {
-        self.dlq = Some(dlq);
+        self.safety.dlq = Some(dlq);
         self
     }
 
     /// Expose the dead-letter queue.
     pub fn dlq(&self) -> Option<&Arc<dyn resilience::DeadLetterQueue>> {
-        self.dlq.as_ref()
+        self.safety.dlq.as_ref()
     }
 
     /// Attach a task orchestrator (builder pattern).
@@ -167,13 +167,13 @@ impl SignalProcessor {
 
     /// Attach a channel router (builder pattern).
     pub fn with_channel_router(mut self, router: Arc<dyn channel::ChannelRouter>) -> Self {
-        self.channel_router = Some(router);
+        self.channels.channel_router = Some(router);
         self
     }
 
     /// Expose the channel router.
     pub fn channel_router(&self) -> Option<&Arc<dyn channel::ChannelRouter>> {
-        self.channel_router.as_ref()
+        self.channels.channel_router.as_ref()
     }
 
     /// Attach a channel preference store (builder pattern).
@@ -181,13 +181,13 @@ impl SignalProcessor {
         mut self,
         preferences: Arc<dyn channel::ChannelPreferenceStore>,
     ) -> Self {
-        self.channel_preferences = Some(preferences);
+        self.channels.channel_preferences = Some(preferences);
         self
     }
 
     /// Expose the channel preference store.
     pub fn channel_preferences(&self) -> Option<&Arc<dyn channel::ChannelPreferenceStore>> {
-        self.channel_preferences.as_ref()
+        self.channels.channel_preferences.as_ref()
     }
 
     /// Attach a confirmation correlator (builder pattern).
@@ -195,13 +195,13 @@ impl SignalProcessor {
         mut self,
         correlator: Arc<channel::ConfirmationCorrelator>,
     ) -> Self {
-        self.confirmation_correlator = Some(correlator);
+        self.channels.confirmation_correlator = Some(correlator);
         self
     }
 
     /// Expose the confirmation correlator.
     pub fn confirmation_correlator(&self) -> Option<&Arc<channel::ConfirmationCorrelator>> {
-        self.confirmation_correlator.as_ref()
+        self.channels.confirmation_correlator.as_ref()
     }
 
     /// Attach a channel dispatcher (builder pattern). The dispatcher owns
@@ -209,13 +209,13 @@ impl SignalProcessor {
     /// `Notify` step and the confirm engine's approval prompts route
     /// through it.
     pub fn with_channel_dispatcher(mut self, dispatcher: Arc<channel::ChannelDispatcher>) -> Self {
-        self.channel_dispatcher = Some(dispatcher);
+        self.channels.channel_dispatcher = Some(dispatcher);
         self
     }
 
     /// Expose the channel dispatcher.
     pub fn channel_dispatcher(&self) -> Option<&Arc<channel::ChannelDispatcher>> {
-        self.channel_dispatcher.as_ref()
+        self.channels.channel_dispatcher.as_ref()
     }
 
     // ── Agent delegation ──────────────────────────────────────────────────
@@ -266,20 +266,20 @@ impl SignalProcessor {
     pub fn subscribe_events(
         &self,
     ) -> tokio::sync::broadcast::Receiver<crate::types::SignalProcessedEvent> {
-        self.events_tx.subscribe()
+        self.observability.events_tx.subscribe()
     }
 
     /// Attach an observability event bus (builder pattern). When set, the
     /// pipeline publishes structured `BrainEvent`s alongside the legacy
     /// `SignalProcessedEvent` bus.
     pub fn with_observer(mut self, observer: Arc<dyn observe::Observer>) -> Self {
-        self.observer = Some(observer);
+        self.observability.observer = Some(observer);
         self
     }
 
     /// Expose the configured observability bus, if any.
     pub fn observer(&self) -> Option<&Arc<dyn observe::Observer>> {
-        self.observer.as_ref()
+        self.observability.observer.as_ref()
     }
 
     /// Subscribe to the structured `BrainEvent` bus. Returns `None` if no
@@ -287,7 +287,7 @@ impl SignalProcessor {
     pub fn subscribe_brain_events(
         &self,
     ) -> Option<tokio::sync::broadcast::Receiver<observe::BrainEvent>> {
-        self.observer.as_ref().map(|o| o.subscribe())
+        self.observability.observer.as_ref().map(|o| o.subscribe())
     }
 
     /// Attach an `IdentityStore`. When wired and a
@@ -309,13 +309,13 @@ impl SignalProcessor {
     /// real PTY sessions. Without this, the three intents return a
     /// "Terminal Bridge not configured" response.
     pub fn with_terminal_bridge(mut self, bridge: Arc<terminal::TerminalBridge>) -> Self {
-        self.terminal_bridge = Some(bridge);
+        self.capability.terminal_bridge = Some(bridge);
         self
     }
 
     /// Expose the configured terminal bridge, if any.
     pub fn terminal_bridge(&self) -> Option<&Arc<terminal::TerminalBridge>> {
-        self.terminal_bridge.as_ref()
+        self.capability.terminal_bridge.as_ref()
     }
 
     /// Attach an MCP host so `MountMcpServer` / `UnmountMcpServer` /
@@ -323,13 +323,13 @@ impl SignalProcessor {
     /// Without this, the three intents return a "MCP host not configured"
     /// response.
     pub fn with_mcp_host(mut self, host: Arc<dyn mcphost::MCPHost>) -> Self {
-        self.mcp_host = Some(host);
+        self.capability.mcp_host = Some(host);
         self
     }
 
     /// Expose the configured MCP host, if any.
     pub fn mcp_host(&self) -> Option<&Arc<dyn mcphost::MCPHost>> {
-        self.mcp_host.as_ref()
+        self.capability.mcp_host.as_ref()
     }
 
     /// Attach a tool registry. Populated by the MCP host and native
@@ -338,13 +338,13 @@ impl SignalProcessor {
     /// the router cannot enumerate tools and falls back to the
     /// router-not-configured placeholder.
     pub fn with_tool_registry(mut self, registry: Arc<dyn intent::ToolRegistry>) -> Self {
-        self.tool_registry = Some(registry);
+        self.capability.tool_registry = Some(registry);
         self
     }
 
     /// Expose the configured tool registry, if any.
     pub fn tool_registry(&self) -> Option<&Arc<dyn intent::ToolRegistry>> {
-        self.tool_registry.as_ref()
+        self.capability.tool_registry.as_ref()
     }
 
     /// Attach a capability router. The pipeline's `Intent::ToolCall` arm
@@ -353,13 +353,13 @@ impl SignalProcessor {
     /// backends. Without a router, `Intent::ToolCall` falls back to the
     /// deterministic placeholder.
     pub fn with_intent_router(mut self, router: Arc<dyn intent::IntentRouter>) -> Self {
-        self.intent_router = Some(router);
+        self.capability.intent_router = Some(router);
         self
     }
 
     /// Expose the configured intent router, if any.
     pub fn intent_router(&self) -> Option<&Arc<dyn intent::IntentRouter>> {
-        self.intent_router.as_ref()
+        self.capability.intent_router.as_ref()
     }
 
     /// Attach a per-tool breaker registry. The pipeline records success /
@@ -368,13 +368,13 @@ impl SignalProcessor {
     /// Wiring the router and the registry separately is intentional —
     /// callers compose the two via `DefaultIntentRouter::with_breakers`.
     pub fn with_breaker_registry(mut self, registry: Arc<resilience::BreakerRegistry>) -> Self {
-        self.breaker_registry = Some(registry);
+        self.capability.breaker_registry = Some(registry);
         self
     }
 
     /// Expose the configured breaker registry, if any.
     pub fn breaker_registry(&self) -> Option<&Arc<resilience::BreakerRegistry>> {
-        self.breaker_registry.as_ref()
+        self.capability.breaker_registry.as_ref()
     }
 
     /// Attach the per-client rate-limit registry. Adapters (HTTP / WS /
@@ -399,20 +399,20 @@ impl SignalProcessor {
         mut self,
         store: Arc<dyn confirm::StandingApprovalStore>,
     ) -> Self {
-        self.standing_approvals = Some(store);
+        self.safety.standing_approvals = Some(store);
         self
     }
 
     /// Expose the configured standing-approval store, if any.
     pub fn standing_approvals(&self) -> Option<&Arc<dyn confirm::StandingApprovalStore>> {
-        self.standing_approvals.as_ref()
+        self.safety.standing_approvals.as_ref()
     }
 
     /// Override the inline confirmation gate's per-request timeout.
     /// Production leaves this `None`, deferring to the tier's default;
     /// tests pin a short value so the no-bypass path returns promptly.
     pub fn with_confirmation_timeout(mut self, t: std::time::Duration) -> Self {
-        self.confirmation_timeout = Some(t);
+        self.safety.confirmation_timeout = Some(t);
         self
     }
 }

@@ -18,7 +18,7 @@ impl SignalProcessor {
     /// for this id (re-entry), the existing one is returned so any pending
     /// cancel still fires on the new pipeline instance.
     pub async fn register_cancel(&self, signal_id: Uuid) -> std::sync::Arc<tokio::sync::Notify> {
-        let mut reg = self.cancel_registry.lock().await;
+        let mut reg = self.observability.cancel_registry.lock().await;
         reg.entry(signal_id)
             .or_insert_with(|| std::sync::Arc::new(tokio::sync::Notify::new()))
             .clone()
@@ -29,7 +29,7 @@ impl SignalProcessor {
         // Best-effort: avoid blocking the drop path on the lock. If the lock
         // is held, the entry will be GC'd by the next `register_cancel` call
         // for the same id, or stay live until the process restarts (rare).
-        let registry = std::sync::Arc::clone(&self.cancel_registry);
+        let registry = std::sync::Arc::clone(&self.observability.cancel_registry);
         tokio::spawn(async move {
             registry.lock().await.remove(&signal_id);
         });
@@ -38,7 +38,7 @@ impl SignalProcessor {
     /// Trigger cancellation for an in-flight signal. Returns `true` if a
     /// notify was registered; `false` if the target id is unknown.
     pub async fn cancel_signal(&self, signal_id: Uuid) -> bool {
-        let reg = self.cancel_registry.lock().await;
+        let reg = self.observability.cancel_registry.lock().await;
         match reg.get(&signal_id) {
             Some(notify) => {
                 notify.notify_waiters();
@@ -56,7 +56,7 @@ impl SignalProcessor {
         signal_id: Uuid,
         signal: &Signal,
     ) -> SignalResponse {
-        if let Some(observer) = &self.observer {
+        if let Some(observer) = &self.observability.observer {
             let ev = observe::BrainEvent::Error {
                 id: signal_id,
                 source: "cancelled".into(),
