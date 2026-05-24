@@ -20,7 +20,7 @@ use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
-use tracing::warn;
+use tracing::{error, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -493,7 +493,7 @@ impl TerminalSession for TerminalSvc {
         let (snapshot, mut rx) = session.attach_snapshot();
         let (tx, out) = mpsc::channel::<Result<OutputChunk, Status>>(STREAM_OUT_BUFFER);
 
-        tokio::spawn(async move {
+        tokio::spawn(supervise("attach-pump", async move {
             let mut seq: u64 = 0;
             for bytes in snapshot {
                 seq += 1;
@@ -547,7 +547,7 @@ impl TerminalSession for TerminalSvc {
                     }
                 }
             }
-        });
+        }));
 
         Ok(Response::new(ReceiverStream::new(out)))
     }
@@ -617,7 +617,7 @@ impl TerminalSession for TerminalSvc {
         let (tx, out) = mpsc::channel::<Result<ServerFrame, Status>>(STREAM_OUT_BUFFER);
         let svc = self.clone();
 
-        tokio::spawn(async move {
+        tokio::spawn(supervise("interact-bidi", async move {
             let mut bound_id: Option<String> = None;
             let mut output_task: Option<tokio::task::JoinHandle<()>> = None;
 
@@ -735,7 +735,7 @@ impl TerminalSession for TerminalSvc {
             if let Some(t) = output_task {
                 t.abort();
             }
-        });
+        }));
 
         Ok(Response::new(ReceiverStream::new(out)))
     }
@@ -744,6 +744,19 @@ impl TerminalSession for TerminalSvc {
 fn error_frame(msg: impl Into<String>) -> ServerFrame {
     ServerFrame {
         k: Some(server_frame::K::Error(msg.into())),
+    }
+}
+
+/// Wrap a fire-and-forget task body in `catch_unwind` so a panic surfaces
+/// through `tracing::error` instead of being silently swallowed by the
+/// orphaned `JoinHandle`. Each PTY pump in this file outlives no caller
+/// (per-RPC streaming task), so the JoinHandle is dropped on spawn —
+/// without this guard, a panic in the body is lost.
+async fn supervise(name: &'static str, body: impl std::future::Future<Output = ()> + Send) {
+    use futures::FutureExt;
+    let result = std::panic::AssertUnwindSafe(body).catch_unwind().await;
+    if result.is_err() {
+        error!(task = name, "terminal PTY pump panicked");
     }
 }
 
@@ -766,7 +779,7 @@ fn spawn_output_forwarder(
     session_id: String,
     tx: mpsc::Sender<Result<ServerFrame, Status>>,
 ) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    tokio::spawn(supervise("interact-output-forwarder", async move {
         let Some(session) = svc.registry.get(&session_id).await else {
             let _ = tx
                 .send(Ok(error_frame(format!(
@@ -837,7 +850,7 @@ fn spawn_output_forwarder(
                 }
             }
         }
-    })
+    }))
 }
 
 /// Blocking PTY reader pump. Runs on its own `spawn_blocking` task.
