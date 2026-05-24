@@ -24,7 +24,7 @@ pub use consolidation::{
     ConsolidationConfig, ConsolidationReport, Consolidator, PromotionCandidate,
 };
 pub use dual_memory::{DualMemoryError, DualMemoryReader, MemoryEntry};
-pub use embedding::{Embedder, EmbeddingError};
+pub use embedding::{Embedder, EmbeddingError, EmbeddingProvider};
 pub use episodic::{Episode, EpisodicStore, Session};
 pub use graph::{Edge, EdgeKind, EpisodicGraph, GraphError, Node, NodeKind, SqliteGraph};
 pub use importance::{ImportanceScorer, ImportanceSignals};

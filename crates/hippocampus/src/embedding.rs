@@ -28,6 +28,7 @@
 //!   dimensions: 1536
 //! ```
 
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::info;
@@ -144,6 +145,22 @@ fn normalize_or_unit(mut vector: Vec<f32>) -> Vec<f32> {
     vector
 }
 
+// ─── EmbeddingProvider trait ─────────────────────────────────────────────────
+
+/// Pluggable embedding backend.
+///
+/// New providers (Voyage, Cohere, …) implement this trait and register in
+/// [`Embedder::from_config`] — no other call site changes.
+#[async_trait]
+pub trait EmbeddingProvider: Send + Sync + std::fmt::Debug {
+    /// Embed a batch of texts. Implementations preserve input order.
+    async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError>;
+
+    /// Stable lower-case identifier used in logs and metrics
+    /// (e.g. `"ollama"`, `"openai"`).
+    fn provider_name(&self) -> &str;
+}
+
 // ─── Ollama Provider ─────────────────────────────────────────────────────────
 
 /// Ollama embedding provider — calls `POST /api/embed`.
@@ -189,8 +206,11 @@ impl OllamaProvider {
             .map(|r| r.status().is_success())
             .unwrap_or(false)
     }
+}
 
-    pub async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+#[async_trait]
+impl EmbeddingProvider for OllamaProvider {
+    async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
@@ -225,6 +245,10 @@ impl OllamaProvider {
             )));
         }
         Ok(parsed.embeddings)
+    }
+
+    fn provider_name(&self) -> &str {
+        "ollama"
     }
 }
 
@@ -269,8 +293,11 @@ impl OpenAIProvider {
             api_key: api_key.to_string(),
         })
     }
+}
 
-    pub async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
+#[async_trait]
+impl EmbeddingProvider for OpenAIProvider {
+    async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
@@ -309,40 +336,49 @@ impl OpenAIProvider {
         parsed.data.sort_by_key(|d| d.index);
         Ok(parsed.data.into_iter().map(|d| d.embedding).collect())
     }
+
+    fn provider_name(&self) -> &str {
+        "openai"
+    }
 }
 
 // ─── Embedder ─────────────────────────────────────────────────────────────────
 
-/// Active embedding backend.
+/// Active embedding backend — owns a trait object so new providers can be
+/// added without touching this type.
 ///
-/// Constructed once at startup via [`Embedder::for_ollama`] or [`Embedder::for_openai`],
-/// then shared (behind `tokio::sync::Mutex`) across the signal pipeline.
-#[allow(clippy::large_enum_variant)]
-pub enum Embedder {
-    Ollama(OllamaProvider),
-    OpenAI(OpenAIProvider),
+/// Constructed once at startup via [`Embedder::for_ollama`], [`Embedder::for_openai`]
+/// or [`Embedder::from_config`], then shared (behind `tokio::sync::Mutex`)
+/// across the signal pipeline.
+pub struct Embedder {
+    inner: Box<dyn EmbeddingProvider>,
 }
 
 impl std::fmt::Debug for Embedder {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Ollama(_) => write!(f, "Embedder::Ollama"),
-            Self::OpenAI(_) => write!(f, "Embedder::OpenAI"),
-        }
+        write!(f, "Embedder({})", self.inner.provider_name())
     }
 }
 
 impl Embedder {
+    /// Wrap any provider impl. Lets crates outside this module register
+    /// custom backends (Voyage, Cohere, in-process test doubles, …).
+    pub fn new(inner: Box<dyn EmbeddingProvider>) -> Self {
+        Self { inner }
+    }
+
     /// Create an Ollama-backed embedder.
     pub fn for_ollama(base_url: &str, model: &str) -> Result<Self, EmbeddingError> {
         info!(model, "Embedding provider: Ollama");
-        Ok(Self::Ollama(OllamaProvider::new(base_url, model)?))
+        Ok(Self::new(Box::new(OllamaProvider::new(base_url, model)?)))
     }
 
     /// Create an OpenAI-compatible embedder.
     pub fn for_openai(base_url: &str, model: &str, api_key: &str) -> Result<Self, EmbeddingError> {
         info!(model, base_url, "Embedding provider: OpenAI-compatible");
-        Ok(Self::OpenAI(OpenAIProvider::new(base_url, model, api_key)?))
+        Ok(Self::new(Box::new(OpenAIProvider::new(
+            base_url, model, api_key,
+        )?)))
     }
 
     /// Create an embedder from Brain config settings.
@@ -369,18 +405,12 @@ impl Embedder {
 
     /// Embed a batch of texts for throughput.
     pub async fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>, EmbeddingError> {
-        match self {
-            Self::Ollama(p) => p.embed_batch(texts).await,
-            Self::OpenAI(p) => p.embed_batch(texts).await,
-        }
+        self.inner.embed_batch(texts).await
     }
 
     /// Provider name for logging.
     pub fn provider_name(&self) -> &str {
-        match self {
-            Self::Ollama(_) => "ollama",
-            Self::OpenAI(_) => "openai",
-        }
+        self.inner.provider_name()
     }
 }
 
