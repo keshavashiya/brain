@@ -84,3 +84,31 @@ pub(crate) fn resolve_encryptor(
 
     Ok(Some(encryptor))
 }
+
+/// Resolve the daemon passphrase before spawning the background daemon.
+///
+/// `brain start` runs in the foreground, so prompting on the TTY is fine.
+/// The returned passphrase is forwarded into the child via `BRAIN_PASSPHRASE`.
+/// Returns `Ok(None)` when encryption is disabled at the config level.
+#[cfg(feature = "encryption")]
+pub(crate) fn resolve_start_passphrase(config: &BrainConfig) -> anyhow::Result<Option<String>> {
+    if !config.encryption.enabled {
+        return Ok(None);
+    }
+
+    if let Ok(p) = std::env::var("BRAIN_PASSPHRASE") {
+        return Ok(Some(p));
+    }
+
+    let salt = load_salt(config).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Encryption is enabled but no salt file found.\n\
+             Run `brain init --encrypt` to generate one."
+        )
+    })?;
+    let p = rpassword::prompt_password("Brain passphrase: ")
+        .map_err(|e| anyhow::anyhow!("Failed to read passphrase: {e}"))?;
+    storage::Encryptor::from_passphrase(&p, &salt)
+        .map_err(|e| anyhow::anyhow!("Key derivation failed: {e}"))?;
+    Ok(Some(p))
+}

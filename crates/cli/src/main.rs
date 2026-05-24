@@ -7,13 +7,12 @@ mod doctor;
 mod encryption;
 mod errors;
 mod export;
+mod init;
 mod serve;
 mod service;
 mod status;
 mod tail;
 mod vault;
-
-use crate::doctor::check_ollama_models;
 
 use clap::{Parser, Subcommand};
 
@@ -277,295 +276,27 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     config.ensure_data_dirs()?;
 
     match cli.command {
-        // ── init ──────────────────────────────────────────────────────────────
         Commands::Init {
             force,
             #[cfg(feature = "encryption")]
             encrypt,
         } => {
-            let data_dir = config.data_dir();
-            println!("Forming neural pathways...");
-            println!("  Cortex (data dir):  {}", data_dir.display());
-
-            let generated_key = match brain::BrainConfig::write_default_config(force)? {
-                Some((path, key)) => {
-                    println!("  Genome (config):    {} (written)", path.display());
-                    Some(key)
-                }
-                None => {
-                    println!(
-                        "  Genome (config):    {} (exists, --force to overwrite)",
-                        brain::BrainConfig::user_config_path().display()
-                    );
-                    None
-                }
-            };
-
-            let subdirs = ["db", "ruvector", "models", "logs", "exports"];
-            for sub in &subdirs {
-                println!("  Region:             {}", data_dir.join(sub).display());
-            }
-
-            // Probe Ollama and only warn about the embedding model when it's
-            // actually missing. Avoids the previous "(pull with `ollama
-            // pull`)" hint firing even when the model was already installed.
-            check_ollama_models(&config).await;
-
-            #[cfg(feature = "encryption")]
-            if encrypt {
-                let salt = storage::Encryptor::generate_salt();
-                encryption::write_salt(&config, &salt)?;
-
-                let config_path = brain::BrainConfig::user_config_path();
-                if let Ok(yaml) = std::fs::read_to_string(&config_path) {
-                    let patched = yaml.replace(
-                        "enabled: false               # Run `brain init --encrypt` to generate a salt and enable",
-                        "enabled: true                # Activated by `brain init --encrypt`",
-                    );
-                    let _ = std::fs::write(&config_path, patched);
-                }
-
-                println!(
-                    "\n  Blood-brain barrier: sealed (salt → {})",
-                    encryption::salt_path(&config).display()
-                );
-                println!("  Set BRAIN_PASSPHRASE env var for the daemon, or");
-                println!("  Brain will prompt you for a passphrase on startup.");
-            }
-
-            if let Some(key) = generated_key {
-                println!("\n  API key:   {}", key);
-                println!("  Use this key for HTTP/WS/MCP authentication.");
-            }
-
-            println!(
-                "\nNeural pathways formed. Edit {} to customize your genome.",
-                brain::BrainConfig::user_config_path().display()
-            );
+            init::cmd_init(
+                &config,
+                force,
+                #[cfg(feature = "encryption")]
+                encrypt,
+            )
+            .await?
         }
-
-        // ── chat ──────────────────────────────────────────────────────────────
-        Commands::Chat { message } => {
-            if let Some(msg) = message {
-                chat::chat_non_interactive(&config, &msg).await?;
-            } else {
-                chat::chat_interactive(&config).await?;
-            }
-        }
-
-        // ── status ────────────────────────────────────────────────────────────
-        Commands::Status => {
-            status::show_status(&config).await?;
-        }
-
-        // ── doctor ────────────────────────────────────────────────────────────
-        Commands::Doctor => {
-            doctor::cmd_doctor(&config).await?;
-        }
-
-        // ── start (daemon) ────────────────────────────────────────────────────
-        Commands::Start => {
-            match config.validate() {
-                Err(hard_err) => anyhow::bail!("Configuration error: {}", hard_err),
-                Ok(warnings) => {
-                    for w in &warnings {
-                        eprintln!("WARNING: {w}");
-                    }
-                }
-            }
-
-            // Check for running daemon via HTTP health probe — the only reliable
-            // indicator. PID files can drift on macOS with process_group(0).
-            if let Some(url) = bootstrap::detect_running_daemon(&config).await {
-                println!("Brain is already awake ({url}).");
-                println!(
-                    "  Logs → {}",
-                    config.data_dir().join("logs/brain.log").display()
-                );
-                println!("Run `brain stop` to put it to sleep first.");
-                return Ok(());
-            }
-
-            // If a login service is installed, start it instead of spawning directly.
-            // The service manager (launchd/systemd) will handle the process lifecycle.
-            #[cfg(target_os = "macos")]
-            {
-                use std::path::Path;
-                let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-                if let Some(home) = home {
-                    let plist = home
-                        .join("Library")
-                        .join("LaunchAgents")
-                        .join("com.brain.plist");
-                    if Path::exists(&plist) {
-                        let plist_str = plist.to_str().unwrap_or("");
-
-                        // Check if the service is loaded (managed by launchd)
-                        let list_out = std::process::Command::new("launchctl")
-                            .arg("list")
-                            .output()
-                            .ok();
-                        let service_loaded = list_out
-                            .map(|o| String::from_utf8_lossy(&o.stdout).contains("com.brain"))
-                            .unwrap_or(false);
-
-                        if service_loaded {
-                            // Service is loaded — check if daemon is actually responding
-                            if bootstrap::detect_running_daemon(&config).await.is_some() {
-                                println!("Brain is already awake (launchd service).");
-                                println!(
-                                    "  Logs → {}",
-                                    config.data_dir().join("logs/brain.log").display()
-                                );
-                                println!("Run `brain stop` to put it to sleep first.");
-                                return Ok(());
-                            }
-                        }
-
-                        // Service plist exists but daemon not running — load and start it.
-                        // Uses `load -w` so it works even if the service was unloaded by `brain stop`.
-                        let _ = std::process::Command::new("launchctl")
-                            .args(["load", "-w", plist_str])
-                            .output();
-
-                        // Wait for service to come alive
-                        for _ in 0..10 {
-                            std::thread::sleep(std::time::Duration::from_millis(500));
-                            if bootstrap::detect_running_daemon(&config).await.is_some() {
-                                println!("Brain started via launchd service.");
-                                println!(
-                                    "  Logs → {}",
-                                    config.data_dir().join("logs/brain.log").display()
-                                );
-                                return Ok(());
-                            }
-                        }
-
-                        // Service failed to start — fall through to direct spawn
-                        tracing::warn!(
-                            "launchd service failed to start — falling back to direct spawn"
-                        );
-                    }
-                }
-            }
-
-            // No service installed — spawn daemon directly.
-            // First, kill any stale process holding the ports.
-            if let Some(pid) = daemon::read_pid(&config) {
-                if daemon::is_process_running(pid) {
-                    tracing::warn!(pid, "Stale daemon PID found — killing");
-                    let _ = daemon::stop_process(pid);
-                    // Wait for the daemon to release ports (max 5s).
-                    for _ in 0..10 {
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                        if bootstrap::detect_running_daemon(&config).await.is_none() {
-                            break;
-                        }
-                    }
-                }
-                daemon::remove_pid(&config);
-            }
-
-            #[cfg(feature = "encryption")]
-            let passphrase = if config.encryption.enabled {
-                if let Ok(p) = std::env::var("BRAIN_PASSPHRASE") {
-                    Some(p)
-                } else {
-                    let salt = encryption::load_salt(&config).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "Encryption is enabled but no salt file found.\n\
-                             Run `brain init --encrypt` to generate one."
-                        )
-                    })?;
-                    let p = rpassword::prompt_password("Brain passphrase: ")
-                        .map_err(|e| anyhow::anyhow!("Failed to read passphrase: {e}"))?;
-                    storage::Encryptor::from_passphrase(&p, &salt)
-                        .map_err(|e| anyhow::anyhow!("Key derivation failed: {e}"))?;
-                    Some(p)
-                }
-            } else {
-                None
-            };
-            #[cfg(not(feature = "encryption"))]
-            let passphrase: Option<String> = None;
-
-            let log_path = config.data_dir().join("logs/brain.log");
-            let pid = daemon::spawn_daemon(&log_path, passphrase.as_deref())?;
-            daemon::write_pid(&config, pid)?;
-
-            println!("Brain is awake (PID {}).", pid);
-            println!(
-                "  Synapse HTTP  → http://127.0.0.1:{}",
-                config.adapters.http.port
-            );
-            println!(
-                "  Synapse WS    → ws://127.0.0.1:{}",
-                config.adapters.ws.port
-            );
-            println!(
-                "  Synapse MCP   → http://127.0.0.1:{}",
-                config.adapters.mcp.port
-            );
-            println!("  Synapse gRPC  → 127.0.0.1:{}", config.adapters.grpc.port);
-            println!("  Logs          → {}", log_path.display());
-            println!("\nRun `brain stop` to put it to sleep.");
-        }
-
-        // ── stop (daemon) ─────────────────────────────────────────────────────
-        Commands::Stop => {
-            // Check if daemon is running BEFORE stopping the service, so we can
-            // report accurately whether we stopped something or it was already down.
-            let was_running = daemon::is_daemon_running(&config).await;
-
-            // Always stop the service manager first (if installed) to prevent respawn.
-            // This unloads/disables the service so it doesn't restart the daemon.
-            if daemon::is_service_installed() {
-                daemon::stop_service();
-                // Give the service manager time to propagate the stop
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            }
-
-            match daemon::read_pid(&config) {
-                Some(pid) if daemon::is_process_running(pid) => {
-                    daemon::stop_process(pid)?;
-                    // Wait for process to exit (max 5s).
-                    for _ in 0..10 {
-                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                        if !daemon::is_process_running(pid) {
-                            break;
-                        }
-                    }
-                    daemon::remove_pid(&config);
-                    println!("Brain is asleep (PID {}).", pid);
-                }
-                Some(_) => {
-                    daemon::remove_pid(&config);
-                    println!("Brain was already asleep (stale PID file cleaned up).");
-                }
-                None => {
-                    // No PID file — daemon may have been started by service manager.
-                    // Check HTTP to determine if it was running.
-                    if was_running {
-                        // It was running — wait for the service stop to take effect.
-                        for _ in 0..10 {
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                            if !daemon::is_daemon_running(&config).await {
-                                break;
-                            }
-                        }
-                        if daemon::is_daemon_running(&config).await {
-                            println!("Brain stop requested but daemon did not exit cleanly.");
-                        } else {
-                            println!("Brain is asleep.");
-                        }
-                    } else {
-                        println!("Brain is already asleep.");
-                    }
-                }
-            }
-        }
-
-        // ── serve (foreground) ────────────────────────────────────────────────
+        Commands::Chat { message } => match message {
+            Some(msg) => chat::chat_non_interactive(&config, &msg).await?,
+            None => chat::chat_interactive(&config).await?,
+        },
+        Commands::Status => status::show_status(&config).await?,
+        Commands::Doctor => doctor::cmd_doctor(&config).await?,
+        Commands::Start => daemon::cmd_start(&config).await?,
+        Commands::Stop => daemon::cmd_stop(&config).await?,
         Commands::Serve {
             http,
             ws,
@@ -573,60 +304,19 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             mcp,
             terminal,
             host,
-        } => {
-            serve::cmd_serve(&config, http, ws, grpc, mcp, terminal, host).await?;
-        }
-
-        // ── mcp stdio ─────────────────────────────────────────────────────────
-        Commands::Mcp => {
-            // Always proxy through the daemon's MCP HTTP transport.
-            // This ensures a single shared SignalProcessor — no ruvector lock
-            // contention, no memory isolation, no passphrase prompts.
-            //
-            // Retry daemon detection a few times — the daemon might still be
-            // booting when an MCP client spawns `brain mcp`.
-            // Detect the daemon via the HTTP adapter's health endpoint…
-            let _daemon_url = bootstrap::require_daemon(&config).await?;
-            // …but proxy to the MCP adapter's own HTTP port (separate from the REST API).
-            let mcp_host = &config.adapters.http.host;
-            let mcp_port = config.adapters.mcp.port;
-            let mcp_url = format!("http://{mcp_host}:{mcp_port}/mcp");
-            tracing::info!(url = %mcp_url, "Daemon detected — proxying MCP stdio through HTTP");
-            bootstrap::proxy_mcp_stdio(&mcp_url, &config).await?;
-        }
-
-        // ── export ────────────────────────────────────────────────────────────
-        Commands::Export { output } => {
-            export::cmd_export(&config, output.as_deref()).await?;
-        }
-
-        // ── import ────────────────────────────────────────────────────────────
-        Commands::Import { file, dry_run } => {
-            export::cmd_import(&config, &file, dry_run).await?;
-        }
-
-        // ── service ───────────────────────────────────────────────────────────
+        } => serve::cmd_serve(&config, http, ws, grpc, mcp, terminal, host).await?,
+        Commands::Mcp => cmd_mcp(&config).await?,
+        Commands::Export { output } => export::cmd_export(&config, output.as_deref()).await?,
+        Commands::Import { file, dry_run } => export::cmd_import(&config, &file, dry_run).await?,
         Commands::Service { action } => match action {
             service::ServiceAction::Install => service::cmd_service_install().await?,
             service::ServiceAction::Uninstall => service::cmd_service_uninstall()?,
         },
-
-        // ── deps ─────────────────────────────────────────────────────────────
-        Commands::Deps { action } => {
-            deps::cmd_deps(action)?;
-        }
-
-        // ── bridge ─────────────────────────────────────────────────────────
+        Commands::Deps { action } => deps::cmd_deps(action)?,
         Commands::Bridge { url, api_key } => {
-            bridge::cmd_bridge(&config, &url, api_key.as_deref()).await?;
+            bridge::cmd_bridge(&config, &url, api_key.as_deref()).await?
         }
-
-        // ── vault ───────────────────────────────────────────────────────────
-        Commands::Vault { action } => {
-            vault::cmd_vault(&config, action).await?;
-        }
-
-        // ── tail ────────────────────────────────────────────────────────────
+        Commands::Vault { action } => vault::cmd_vault(&config, action).await?,
         Commands::Tail {
             kind,
             tool_id,
@@ -642,9 +332,25 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                     since,
                 },
             )
-            .await?;
+            .await?
         }
     }
 
     Ok(())
+}
+
+/// `brain mcp` — proxy stdio JSON-RPC through the daemon's MCP HTTP transport.
+///
+/// Routing everything through the daemon keeps a single shared `SignalProcessor`
+/// (no ruvector lock contention, no memory isolation, no double passphrase
+/// prompts when an MCP client spawns us as a subprocess).
+async fn cmd_mcp(config: &brain::BrainConfig) -> anyhow::Result<()> {
+    // Detect the daemon via the HTTP adapter's /health endpoint…
+    let _daemon_url = bootstrap::require_daemon(config).await?;
+    // …but proxy to the MCP adapter's own HTTP port (separate from REST).
+    let mcp_host = &config.adapters.http.host;
+    let mcp_port = config.adapters.mcp.port;
+    let mcp_url = format!("http://{mcp_host}:{mcp_port}/mcp");
+    tracing::info!(url = %mcp_url, "Daemon detected — proxying MCP stdio through HTTP");
+    bootstrap::proxy_mcp_stdio(&mcp_url, config).await
 }
