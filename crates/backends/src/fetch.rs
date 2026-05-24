@@ -5,6 +5,7 @@
 //! its own timeout and body cap so a runaway page can't blow the
 //! LLM context window or stall the answer.
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,6 +32,11 @@ pub struct BasicUrlFetcher {
     circuit_breaker: Arc<CircuitBreaker>,
     max_retries: u32,
     retry_base_ms: u64,
+    /// When false (production default), `assert_url_safe` rejects URLs whose
+    /// resolved address is in any reserved range — loopback, private,
+    /// link-local, etc. Tests and a deployment that legitimately points the
+    /// LLM at a localhost service flip this on.
+    allow_internal: bool,
 }
 
 impl BasicUrlFetcher {
@@ -59,18 +65,23 @@ impl BasicUrlFetcher {
             circuit_breaker: Arc::new(cb),
             max_retries: resilience.max_retries,
             retry_base_ms: resilience.retry_base_ms,
+            allow_internal: false,
         })
+    }
+
+    /// Opt out of the SSRF guard for reserved-range targets. Used by tests
+    /// (mockito binds 127.0.0.1) and by deployments pointing the LLM at a
+    /// trusted internal service.
+    pub fn with_allow_internal(mut self, allow: bool) -> Self {
+        self.allow_internal = allow;
+        self
     }
 }
 
 #[async_trait::async_trait]
 impl UrlFetchBackend for BasicUrlFetcher {
     async fn fetch(&self, url: &str) -> Result<FetchedPage, ActionError> {
-        if !(url.starts_with("http://") || url.starts_with("https://")) {
-            return Err(ActionError::InvalidArguments(format!(
-                "url-fetch requires http(s):// scheme, got {url}"
-            )));
-        }
+        assert_url_safe(url, self.allow_internal).await?;
         let client = self.client.clone();
         let url_owned = url.to_string();
         let response = resilient_send(
@@ -111,6 +122,125 @@ impl UrlFetchBackend for BasicUrlFetcher {
             title,
             text,
         })
+    }
+}
+
+/// Issue 122: SSRF guard. The fetcher is reachable from LLM-controlled
+/// inputs (web-search hits, user-pasted URLs in chat) so we have to assume
+/// the URL is adversarial. Reject:
+///   * non-`http(s)` schemes (file:, gopher:, ftp:, …)
+///   * embedded credentials (`user:pass@`) which most reqwest builds honor
+///   * IP-literal hosts in any reserved range
+///   * DNS hostnames whose resolved addresses include any reserved range
+///
+/// Remaining gap: a TOCTOU between this resolve and reqwest's own resolve
+/// could theoretically be exploited by DNS rebinding. Closing it would
+/// require pinning the connect target to a vetted IP via a custom
+/// reqwest::dns::Resolve — deferred. The current resolver still raises
+/// the floor materially.
+pub(crate) async fn assert_url_safe(url: &str, allow_internal: bool) -> Result<(), ActionError> {
+    let parsed = url::Url::parse(url)
+        .map_err(|e| ActionError::InvalidArguments(format!("invalid url '{url}': {e}")))?;
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(ActionError::InvalidArguments(format!(
+                "url-fetch requires http(s):// scheme, got {other}://"
+            )));
+        }
+    }
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ActionError::InvalidArguments(
+            "url-fetch refuses URLs with embedded credentials".into(),
+        ));
+    }
+
+    let host = parsed
+        .host()
+        .ok_or_else(|| ActionError::InvalidArguments("url-fetch requires a host".into()))?;
+
+    match host {
+        url::Host::Ipv4(v4) => reject_reserved_ip(IpAddr::V4(v4), &host.to_string(), allow_internal),
+        url::Host::Ipv6(v6) => reject_reserved_ip(IpAddr::V6(v6), &host.to_string(), allow_internal),
+        url::Host::Domain(name) => {
+            // Hostname — resolve and reject if any answer is reserved.
+            // `lookup_host` needs a `host:port` string; synthesise a port
+            // if the URL omits one.
+            let port = parsed.port_or_known_default().unwrap_or(0);
+            let addrs = tokio::net::lookup_host((name, port))
+                .await
+                .map_err(|e| {
+                    ActionError::ExecutionFailed(format!("dns lookup for {name} failed: {e}"))
+                })?
+                .collect::<Vec<_>>();
+
+            if addrs.is_empty() {
+                return Err(ActionError::ExecutionFailed(format!(
+                    "dns lookup for {name} returned no addresses"
+                )));
+            }
+            for sa in addrs {
+                reject_reserved_ip(sa.ip(), name, allow_internal)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+fn reject_reserved_ip(ip: IpAddr, host: &str, allow_internal: bool) -> Result<(), ActionError> {
+    if allow_internal {
+        return Ok(());
+    }
+    if is_reserved(ip) {
+        return Err(ActionError::InvalidArguments(format!(
+            "url-fetch refuses host '{host}' resolving to reserved address {ip}"
+        )));
+    }
+    Ok(())
+}
+
+fn is_reserved(ip: IpAddr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+        return true;
+    }
+    match ip {
+        IpAddr::V4(v4) => {
+            if v4.is_private() || v4.is_link_local() || v4.is_broadcast() || v4.is_documentation() {
+                return true;
+            }
+            // Cloud metadata endpoints (AWS / GCP / Azure all live at 169.254.169.254).
+            // 169.254.0.0/16 is link-local and already caught above; explicit for clarity.
+            if v4.octets()[0] == 169 && v4.octets()[1] == 254 {
+                return true;
+            }
+            // Carrier-grade NAT (RFC 6598).
+            if v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1]) {
+                return true;
+            }
+            // Reserved for future use (240.0.0.0/4) — `is_reserved` is unstable; check manually.
+            if v4.octets()[0] >= 240 {
+                return true;
+            }
+            false
+        }
+        IpAddr::V6(v6) => {
+            // Unique local (fc00::/7).
+            if (v6.segments()[0] & 0xfe00) == 0xfc00 {
+                return true;
+            }
+            // Link-local (fe80::/10).
+            if (v6.segments()[0] & 0xffc0) == 0xfe80 {
+                return true;
+            }
+            // IPv4-mapped — recurse on the embedded IPv4 so we reject
+            // ::ffff:127.0.0.1 etc.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_reserved(IpAddr::V4(v4));
+            }
+            false
+        }
     }
 }
 
@@ -296,7 +426,9 @@ mod tests {
             .create_async()
             .await;
 
-        let fetcher = BasicUrlFetcher::new(&fast_resilience()).unwrap();
+        let fetcher = BasicUrlFetcher::new(&fast_resilience())
+            .unwrap()
+            .with_allow_internal(true);
         let url = format!("{}/page", server.url());
         let page = fetcher.fetch(&url).await.unwrap();
         assert_eq!(page.title, "Demo Page");
@@ -320,8 +452,55 @@ mod tests {
             .with_status(404)
             .create_async()
             .await;
-        let fetcher = BasicUrlFetcher::new(&fast_resilience()).unwrap();
+        let fetcher = BasicUrlFetcher::new(&fast_resilience())
+            .unwrap()
+            .with_allow_internal(true);
         let url = format!("{}/missing", server.url());
         assert!(fetcher.fetch(&url).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_loopback_by_default() {
+        let fetcher = BasicUrlFetcher::new(&fast_resilience()).unwrap();
+        let err = fetcher.fetch("http://127.0.0.1:9").await.unwrap_err();
+        assert!(matches!(err, ActionError::InvalidArguments(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_private_ranges() {
+        let fetcher = BasicUrlFetcher::new(&fast_resilience()).unwrap();
+        for url in [
+            "http://10.0.0.1/",
+            "http://192.168.1.1/",
+            "http://172.16.0.1/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::1]/",
+            "http://[::ffff:127.0.0.1]/",
+        ] {
+            let err = fetcher.fetch(url).await.unwrap_err();
+            assert!(
+                matches!(err, ActionError::InvalidArguments(_)),
+                "{url} should have been rejected (got {err:?})"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_embedded_credentials() {
+        let fetcher = BasicUrlFetcher::new(&fast_resilience())
+            .unwrap()
+            .with_allow_internal(true);
+        let err = fetcher
+            .fetch("http://user:pass@127.0.0.1:9/")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ActionError::InvalidArguments(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_unspecified_address() {
+        let fetcher = BasicUrlFetcher::new(&fast_resilience()).unwrap();
+        let err = fetcher.fetch("http://0.0.0.0/").await.unwrap_err();
+        assert!(matches!(err, ActionError::InvalidArguments(_)), "{err:?}");
     }
 }

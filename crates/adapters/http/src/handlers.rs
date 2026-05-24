@@ -16,6 +16,7 @@ use uuid::Uuid;
 use crate::auth;
 use crate::state::AppState;
 use crate::types::*;
+use crate::validate;
 
 // ─── Embedded assets ─────────────────────────────────────────────────────────
 
@@ -76,6 +77,26 @@ pub async fn post_signal_handler(
     Json(body): Json<SignalRequest>,
 ) -> Result<Json<signal::SignalResponse>, (StatusCode, String)> {
     auth::check_auth(&state, &headers, "write")?;
+
+    validate::check_content(&body.content)?;
+    if let Some(ns) = body.namespace.as_deref() {
+        validate::check_short_ident("namespace", ns)?;
+    }
+    if let Some(agent) = body.agent.as_deref() {
+        validate::check_short_ident("agent", agent)?;
+    }
+    if let Some(sid) = body.session_id.as_deref() {
+        validate::check_short_ident("session_id", sid)?;
+    }
+    if let Some(sender) = body.sender.as_deref() {
+        validate::check_short_ident("sender", sender)?;
+    }
+    if let Some(channel) = body.channel.as_deref() {
+        validate::check_short_ident("channel", channel)?;
+    }
+    if let Some(source) = body.source.as_deref() {
+        validate::check_short_ident("source", source)?;
+    }
 
     let t0 = Instant::now();
     state.metrics.signals_total.fetch_add(1, Ordering::Relaxed);
@@ -171,6 +192,12 @@ pub async fn search_memory_handler(
     Json(body): Json<SearchRequest>,
 ) -> Result<Json<Vec<FactJson>>, (StatusCode, String)> {
     auth::check_auth(&state, &headers, "read")?;
+
+    validate::check_query(&body.query)?;
+    validate::check_top_k(body.top_k)?;
+    if let Some(ns) = body.namespace.as_deref() {
+        validate::check_short_ident("namespace", ns)?;
+    }
 
     state.metrics.search_total.fetch_add(1, Ordering::Relaxed);
     let t0 = Instant::now();
@@ -480,6 +507,9 @@ pub async fn sse_events_handler(
     let mut signal_rx = state.processor.subscribe_events();
     let mut notif_rx = state.processor.notification_router().map(|r| r.subscribe());
     let mut brain_rx = state.processor.subscribe_brain_events();
+    // Issue 131: when on, content previews are scrubbed before serialization
+    // so a read-scoped observer only sees the event shape.
+    let redact = state.processor.config().adapters.http.sse_redact_previews;
 
     let stream = async_stream::stream! {
         loop {
@@ -512,12 +542,17 @@ pub async fn sse_events_handler(
                 result = signal_rx.recv() => {
                     match result {
                         Ok(event) => {
+                            let response_field = if redact {
+                                serde_json::json!({ "redacted": true, "len": event.response.len() })
+                            } else {
+                                serde_json::Value::String(event.response.clone())
+                            };
                             let payload = serde_json::json!({
                                 "type": "signal",
                                 "signal_id": event.signal_id.to_string(),
                                 "source": format!("{:?}", event.source),
                                 "status": format!("{:?}", event.status),
-                                "response": event.response,
+                                "response": response_field,
                                 "facts_used": event.facts_used,
                                 "episodes_used": event.episodes_used,
                             });
@@ -543,9 +578,14 @@ pub async fn sse_events_handler(
                 } => {
                     match result {
                         Ok(notification) => {
+                            let content_field = if redact {
+                                serde_json::json!({ "redacted": true, "len": notification.content.len() })
+                            } else {
+                                serde_json::Value::String(notification.content.clone())
+                            };
                             let payload = serde_json::json!({
                                 "type": "proactive",
-                                "content": notification.content,
+                                "content": content_field,
                                 "triggered_by": notification.triggered_by,
                                 "priority": notification.priority,
                                 "agent": notification.agent,

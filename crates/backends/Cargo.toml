@@ -21,6 +21,7 @@ observe = { workspace = true }
 resilience = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
+url = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

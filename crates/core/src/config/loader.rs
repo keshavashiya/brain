@@ -436,6 +436,7 @@ impl Default for BrainConfig {
                     host: "127.0.0.1".to_string(),
                     port: 19789,
                     cors: true,
+                    sse_redact_previews: false,
                 },
                 ws: WebSocketAdapterConfig {
                     enabled: true,

@@ -135,11 +135,14 @@ enum PreparedVerifier {
         key: Vec<u8>,
         header: String,
         prefix: Option<String>,
+        timestamp_header: Option<String>,
+        max_skew_secs: u64,
     },
     Ed25519 {
         pubkey: VerifyingKey,
         sig_header: String,
         ts_header: String,
+        max_skew_secs: u64,
     },
 }
 
@@ -350,12 +353,20 @@ impl WebhookInboundTransport {
     }
 
     fn verify(&self, headers: &HeaderMap, body: &[u8]) -> Result<(), String> {
+        self.verify_at(headers, body, Utc::now().timestamp())
+    }
+
+    /// Internal variant accepting an injected "now" so the skew window
+    /// is testable without time-traveling the clock.
+    fn verify_at(&self, headers: &HeaderMap, body: &[u8], now_secs: i64) -> Result<(), String> {
         match &self.verifier {
             PreparedVerifier::None => Ok(()),
             PreparedVerifier::Hmac {
                 key,
                 header,
                 prefix,
+                timestamp_header,
+                max_skew_secs,
             } => {
                 let sig_header = header_str(headers, header)
                     .ok_or_else(|| format!("missing header {header}"))?;
@@ -367,16 +378,21 @@ impl WebhookInboundTransport {
                     <HmacSha256 as Mac>::new_from_slice(key).map_err(|e| format!("hmac: {e}"))?;
                 mac.update(body);
                 let expected = hex::encode(mac.finalize().into_bytes());
-                if constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
-                    Ok(())
-                } else {
-                    Err("hmac mismatch".into())
+                if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
+                    return Err("hmac mismatch".into());
                 }
+                if let Some(ts_header) = timestamp_header.as_deref() {
+                    let ts = header_str(headers, ts_header)
+                        .ok_or_else(|| format!("missing header {ts_header}"))?;
+                    check_timestamp_skew(ts, now_secs, *max_skew_secs)?;
+                }
+                Ok(())
             }
             PreparedVerifier::Ed25519 {
                 pubkey,
                 sig_header,
                 ts_header,
+                max_skew_secs,
             } => {
                 let sig_hex = header_str(headers, sig_header)
                     .ok_or_else(|| format!("missing header {sig_header}"))?;
@@ -392,10 +408,29 @@ impl WebhookInboundTransport {
                 signed.extend_from_slice(body);
                 pubkey
                     .verify(&signed, &signature)
-                    .map_err(|e| format!("ed25519: {e}"))
+                    .map_err(|e| format!("ed25519: {e}"))?;
+                check_timestamp_skew(ts, now_secs, *max_skew_secs)?;
+                Ok(())
             }
         }
     }
+}
+
+/// Reject timestamps further than `max_skew_secs` from `now_secs`. Accepts
+/// integer seconds; Discord and Slack both use that wire shape. Replay
+/// protection on signed-but-stale messages.
+fn check_timestamp_skew(ts: &str, now_secs: i64, max_skew_secs: u64) -> Result<(), String> {
+    let ts_secs: i64 = ts
+        .trim()
+        .parse()
+        .map_err(|_| format!("timestamp '{ts}' is not an integer"))?;
+    let skew = (now_secs - ts_secs).unsigned_abs();
+    if skew > max_skew_secs {
+        return Err(format!(
+            "timestamp skew {skew}s exceeds {max_skew_secs}s window"
+        ));
+    }
+    Ok(())
 }
 
 fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
@@ -419,7 +454,12 @@ fn prepare_verifier(
 ) -> Result<PreparedVerifier, ChannelError> {
     match spec {
         None | Some(VerifierSpec::None) => Ok(PreparedVerifier::None),
-        Some(VerifierSpec::HmacSha256 { header, prefix }) => {
+        Some(VerifierSpec::HmacSha256 {
+            header,
+            prefix,
+            timestamp_header,
+            max_skew_secs,
+        }) => {
             let key_str = secret.ok_or_else(|| {
                 ChannelError::Relay("HmacSha256 verifier requires signing_secret".into())
             })?;
@@ -427,11 +467,14 @@ fn prepare_verifier(
                 key: key_str.as_bytes().to_vec(),
                 header: header.clone(),
                 prefix: prefix.clone(),
+                timestamp_header: timestamp_header.clone(),
+                max_skew_secs: *max_skew_secs,
             })
         }
         Some(VerifierSpec::DiscordEd25519 {
             signature_header,
             timestamp_header,
+            max_skew_secs,
         }) => {
             let pub_hex = secret.ok_or_else(|| {
                 ChannelError::Relay(
@@ -449,6 +492,7 @@ fn prepare_verifier(
                 pubkey,
                 sig_header: signature_header.clone(),
                 ts_header: timestamp_header.clone(),
+                max_skew_secs: *max_skew_secs,
             })
         }
     }
@@ -573,6 +617,8 @@ mod tests {
             Some(VerifierSpec::HmacSha256 {
                 header: "X-Sig".into(),
                 prefix: Some("sha256=".into()),
+                timestamp_header: None,
+                max_skew_secs: 300,
             }),
             None,
         );
@@ -595,6 +641,8 @@ mod tests {
             Some(VerifierSpec::HmacSha256 {
                 header: "X-Sig".into(),
                 prefix: Some("sha256=".into()),
+                timestamp_header: None,
+                max_skew_secs: 300,
             }),
             None,
         );
@@ -634,6 +682,7 @@ mod tests {
             Some(VerifierSpec::DiscordEd25519 {
                 signature_header: "X-Signature-Ed25519".into(),
                 timestamp_header: "X-Signature-Timestamp".into(),
+                max_skew_secs: 1_000_000_000,
             }),
             Some(r#"{"type": 1}"#),
         );
@@ -678,6 +727,7 @@ mod tests {
             Some(VerifierSpec::DiscordEd25519 {
                 signature_header: "X-Signature-Ed25519".into(),
                 timestamp_header: "X-Signature-Timestamp".into(),
+                max_skew_secs: 1_000_000_000,
             }),
             Some(r#"{"type": 1}"#),
         );
@@ -701,4 +751,123 @@ mod tests {
         let resp = t.handle_request(&headers, body).await;
         assert_eq!(resp.status, 401);
     }
+
+    // ─── Replay-protection (Issue 58) ────────────────────────────────────
+
+    impl WebhookInboundTransport {
+        /// Test-only accessor so the replay-protection unit tests can read
+        /// the raw verifier verdict without round-tripping through
+        /// `handle_request` (which translates errors into HTTP responses).
+        fn verifier_verify(&self, headers: &HeaderMap, body: &[u8]) -> Result<(), String> {
+            self.verify(headers, body)
+        }
+    }
+
+    #[tokio::test]
+    async fn hmac_with_timestamp_rejects_stale_signature() {
+        let preset = make_preset(
+            Some(VerifierSpec::HmacSha256 {
+                header: "X-Sig".into(),
+                prefix: None,
+                timestamp_header: Some("X-Ts".into()),
+                max_skew_secs: 60,
+            }),
+            None,
+        );
+        let cfg = WebhookInboundConfig::new("w", "w", preset).with_signing_secret("topsecret");
+        let t = WebhookInboundTransport::new(cfg).unwrap();
+
+        let body = br#"{"id":"m1","text":"hi","user":"u1"}"#;
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(b"topsecret").unwrap();
+        mac.update(body);
+        let sig = hex::encode(mac.finalize().into_bytes());
+
+        let now = Utc::now().timestamp();
+        let stale_ts = (now - 3600).to_string();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-sig"),
+            HeaderValue::from_str(&sig).unwrap(),
+        );
+        headers.insert(
+            HeaderName::from_static("x-ts"),
+            HeaderValue::from_str(&stale_ts).unwrap(),
+        );
+
+        let err = t.verifier_verify(&headers, body).unwrap_err();
+        assert!(err.contains("skew"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn hmac_with_timestamp_accepts_fresh_signature() {
+        let preset = make_preset(
+            Some(VerifierSpec::HmacSha256 {
+                header: "X-Sig".into(),
+                prefix: None,
+                timestamp_header: Some("X-Ts".into()),
+                max_skew_secs: 60,
+            }),
+            None,
+        );
+        let cfg = WebhookInboundConfig::new("w", "w", preset).with_signing_secret("topsecret");
+        let t = WebhookInboundTransport::new(cfg).unwrap();
+
+        let body = br#"{"id":"m1","text":"hi","user":"u1"}"#;
+        let mut mac = <HmacSha256 as Mac>::new_from_slice(b"topsecret").unwrap();
+        mac.update(body);
+        let sig = hex::encode(mac.finalize().into_bytes());
+
+        let now = Utc::now().timestamp();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-sig"),
+            HeaderValue::from_str(&sig).unwrap(),
+        );
+        headers.insert(
+            HeaderName::from_static("x-ts"),
+            HeaderValue::from_str(&now.to_string()).unwrap(),
+        );
+
+        assert!(t.verifier_verify(&headers, body).is_ok());
+    }
+
+    #[tokio::test]
+    async fn ed25519_rejects_stale_timestamp() {
+        let mut seed = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut seed);
+        let signing = SigningKey::from_bytes(&seed);
+        let pub_hex = hex::encode(signing.verifying_key().to_bytes());
+
+        let preset = make_preset(
+            Some(VerifierSpec::DiscordEd25519 {
+                signature_header: "X-Signature-Ed25519".into(),
+                timestamp_header: "X-Signature-Timestamp".into(),
+                max_skew_secs: 60,
+            }),
+            None,
+        );
+        let cfg = WebhookInboundConfig::new("w", "w", preset).with_signing_secret(pub_hex);
+        let t = WebhookInboundTransport::new(cfg).unwrap();
+
+        let body = br#"{"id":"m1","text":"hi","user":"u1"}"#;
+        let stale_ts = (Utc::now().timestamp() - 3600).to_string();
+        let mut signed = Vec::new();
+        signed.extend_from_slice(stale_ts.as_bytes());
+        signed.extend_from_slice(body);
+        let sig = signing.sign(&signed);
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-signature-ed25519"),
+            HeaderValue::from_str(&hex::encode(sig.to_bytes())).unwrap(),
+        );
+        headers.insert(
+            HeaderName::from_static("x-signature-timestamp"),
+            HeaderValue::from_str(&stale_ts).unwrap(),
+        );
+
+        let err = t.verifier_verify(&headers, body).unwrap_err();
+        assert!(err.contains("skew"), "{err}");
+    }
 }
+

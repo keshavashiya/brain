@@ -785,6 +785,13 @@ pub struct HttpAdapterConfig {
     pub host: String,
     pub port: u16,
     pub cors: bool,
+    /// Issue 131: when true, the SSE `/v1/events` stream replaces
+    /// content-bearing fields (LLM responses, notification bodies) with a
+    /// `[redacted]` marker so an observer with `read` scope sees event
+    /// shape and counts but no message text. Default `false` to preserve
+    /// the existing local-dev behavior; flip on for shared deployments.
+    #[serde(default)]
+    pub sse_redact_previews: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

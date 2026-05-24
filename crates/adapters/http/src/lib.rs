@@ -25,6 +25,7 @@ pub mod middleware;
 pub mod server;
 pub mod state;
 pub mod types;
+pub mod validate;
 
 // Re-export primary public types for convenience.
 pub use server::{create_router, serve};

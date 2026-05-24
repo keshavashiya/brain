@@ -207,6 +207,17 @@ pub enum VerifierSpec {
         /// Optional prefix to strip (`sha256=`).
         #[serde(default)]
         prefix: Option<String>,
+        /// Optional header carrying a unix-seconds timestamp the signature
+        /// was generated at. When configured the receiver enforces
+        /// `max_skew_secs` against the current clock — this is the replay
+        /// window. Presets without a signed timestamp leave this `None`
+        /// and remain vulnerable to replay on the signature alone.
+        #[serde(default)]
+        timestamp_header: Option<String>,
+        /// Replay window in seconds — only consulted when `timestamp_header`
+        /// is set. Default 300 (industry standard for HMAC webhooks).
+        #[serde(default = "default_max_skew_secs")]
+        max_skew_secs: u64,
     },
     /// Discord Interactions Ed25519 signature — pubkey-verified.
     DiscordEd25519 {
@@ -216,7 +227,17 @@ pub enum VerifierSpec {
         /// Header carrying the timestamp.
         #[serde(default = "default_discord_ts_header")]
         timestamp_header: String,
+        /// Replay window in seconds. The Ed25519 signature already binds
+        /// the timestamp into the signed payload, so a stale timestamp
+        /// cannot be tampered with — but it CAN be re-sent. Reject anything
+        /// older than this window.
+        #[serde(default = "default_max_skew_secs")]
+        max_skew_secs: u64,
     },
+}
+
+fn default_max_skew_secs() -> u64 {
+    300
 }
 
 fn default_discord_sig_header() -> String {
