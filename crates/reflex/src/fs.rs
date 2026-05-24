@@ -108,21 +108,21 @@ impl ReflexSource for FsReflex {
         // Channel from the OS-watcher callback into the async world.
         // Bound is loose — debouncer batches handle bursts.
         let (out_tx, out_rx) = mpsc::channel::<ReflexEvent>(64);
-        // Capture in std::sync::mpsc-style channel that notify-debouncer-full
-        // uses as its callback sink. We pump from there into our tokio mpsc.
+        // Sink for the debouncer callback. `notify-debouncer-full` invokes
+        // the closure from a synchronous watcher thread, so we use an
+        // unbounded tokio mpsc — its `send` is non-async and won't block
+        // the watcher. The pump task reads via async `recv().await`,
+        // which exits cleanly when the watcher thread drops `raw_tx`.
         let debounce = self.config.debounce;
         let paths = self.config.paths.clone();
         let recursive = self.config.recursive;
 
-        let (raw_tx, raw_rx) = std::sync::mpsc::channel();
-        // Construct the debouncer on a blocking thread because
-        // `notify` opens platform handles synchronously and we don't
-        // want to occupy the reactor while it boots.
+        let (raw_tx, mut raw_rx) = mpsc::unbounded_channel();
         let mut debouncer = new_debouncer(debounce, None, move |res| {
-            // The watcher thread calls back into this closure. We
-            // forward the raw `Result<Vec<DebouncedEvent>, _>` to
-            // the pump task; that task converts to `ReflexEvent`s
-            // and pushes through the async mpsc.
+            // The watcher thread calls back into this closure. Forward
+            // the raw `Result<Vec<DebouncedEvent>, _>` to the pump task;
+            // that task converts to `ReflexEvent`s and pushes through
+            // the async mpsc.
             let _ = raw_tx.send(res);
         })
         .map_err(|e| ReflexError::Backend(format!("debouncer init: {e}")))?;
@@ -139,19 +139,14 @@ impl ReflexSource for FsReflex {
         }
 
         // Pump task — owns the debouncer (drop = stop watching) and
-        // forwards each debounced batch into the async stream. We
-        // poll the std::sync::mpsc receiver with a short timeout so
-        // we can exit promptly when the subscriber drops `out_rx`
-        // (otherwise the blocking thread sits in `recv()` forever
-        // and prevents cargo's test process from exiting).
-        tokio::task::spawn_blocking(move || {
+        // forwards each debounced batch into the async stream.
+        // `recv().await` returns `None` once the watcher thread drops
+        // `raw_tx`, so the task exits cleanly without polling.
+        tokio::spawn(async move {
             let _debouncer = debouncer; // keep alive for the loop
-            loop {
-                if out_tx.is_closed() {
-                    return;
-                }
-                match raw_rx.recv_timeout(Duration::from_millis(100)) {
-                    Ok(Ok(events)) => {
+            while let Some(res) = raw_rx.recv().await {
+                match res {
+                    Ok(events) => {
                         for ev in events {
                             for path in &ev.event.paths {
                                 let change = FsChange {
@@ -162,19 +157,17 @@ impl ReflexSource for FsReflex {
                                 let payload = serde_json::to_value(&change)
                                     .unwrap_or(serde_json::Value::Null);
                                 let evt = ReflexEvent::new(trigger, payload);
-                                if out_tx.blocking_send(evt).is_err() {
+                                if out_tx.send(evt).await.is_err() {
                                     return; // subscriber dropped
                                 }
                             }
                         }
                     }
-                    Ok(Err(errs)) => {
+                    Err(errs) => {
                         for e in errs {
                             warn!(error = ?e, "fs reflex backend error");
                         }
                     }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
                 }
             }
         });
