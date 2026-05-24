@@ -12,9 +12,32 @@
 
 use uuid::Uuid;
 
-use super::dispatch::{ActionHandler, HandlerContext, NudgeFn};
+use identity::{AuthorizationRequest, Tier};
+
+use super::dispatch::{ActionAuth, ActionHandler, HandlerContext, NudgeFn};
 use crate::types::*;
 use crate::SignalProcessor;
+
+impl ActionAuth for SignalProcessor {
+    fn auth_action(intent: &thalamus::Intent) -> Option<(AuthorizationRequest, Tier)> {
+        match intent {
+            thalamus::Intent::ExecuteCommand { .. } => {
+                Some((AuthorizationRequest::new("shell", "exec"), Tier::Execute))
+            }
+            thalamus::Intent::WebSearch { .. } => {
+                Some((AuthorizationRequest::new("net", "http"), Tier::External))
+            }
+            thalamus::Intent::SendMessage { .. } => {
+                Some((AuthorizationRequest::new("notify", "send"), Tier::External))
+            }
+            thalamus::Intent::DelegateTask { .. } => Some((
+                AuthorizationRequest::new("agent", "delegate"),
+                Tier::Execute,
+            )),
+            _ => None,
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl ActionHandler for SignalProcessor {

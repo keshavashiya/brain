@@ -4,9 +4,26 @@
 
 use uuid::Uuid;
 
-use super::dispatch::{HandlerContext, MemoryHandler, NudgeFn};
+use identity::{AuthorizationRequest, Tier};
+
+use super::dispatch::{HandlerContext, MemoryAuth, MemoryHandler, NudgeFn};
 use crate::types::*;
 use crate::SignalProcessor;
+
+impl MemoryAuth for SignalProcessor {
+    fn auth_memory(intent: &thalamus::Intent) -> Option<(AuthorizationRequest, Tier)> {
+        match intent {
+            thalamus::Intent::StoreFact { .. } => {
+                Some((AuthorizationRequest::new("memory", "store"), Tier::Write))
+            }
+            thalamus::Intent::Forget { .. } => Some((
+                AuthorizationRequest::new("memory", "delete"),
+                Tier::Destructive,
+            )),
+            _ => None,
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl MemoryHandler for SignalProcessor {

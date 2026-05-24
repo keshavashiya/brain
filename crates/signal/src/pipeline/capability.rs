@@ -8,9 +8,31 @@
 
 use uuid::Uuid;
 
-use super::dispatch::{CapabilityHandler, HandlerContext, NudgeFn};
+use identity::{AuthorizationRequest, Tier};
+
+use super::dispatch::{CapabilityAuth, CapabilityHandler, HandlerContext, NudgeFn};
 use crate::types::*;
 use crate::SignalProcessor;
+
+impl CapabilityAuth for SignalProcessor {
+    fn auth_capability(intent: &thalamus::Intent) -> Option<(AuthorizationRequest, Tier)> {
+        match intent {
+            // Derive verb_ns / action from the SIT, infer tier from the verb.
+            // Conservative defaults (see `tier_for_verb`): destructive verbs
+            // bump to `Destructive`; HTTP / mount verbs bump to `External`;
+            // unknown lands at `Execute` so the gate prompts the user.
+            thalamus::Intent::ToolCall(token) => {
+                let verb_ns = token.verb.namespace.as_str();
+                let verb_action = token.verb.action.as_str();
+                let tier = crate::authz::tier_for_verb(verb_ns, verb_action);
+                let req = AuthorizationRequest::new(verb_ns, verb_action)
+                    .with_modifiers(token.object.value.clone());
+                Some((req, tier))
+            }
+            _ => None,
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl CapabilityHandler for SignalProcessor {

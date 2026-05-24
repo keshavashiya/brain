@@ -9,9 +9,42 @@
 
 use uuid::Uuid;
 
-use super::dispatch::{GovernanceHandler, HandlerContext, NudgeFn};
+use identity::{AuthorizationRequest, Tier};
+
+use super::dispatch::{GovernanceAuth, GovernanceHandler, HandlerContext, NudgeFn};
 use crate::types::*;
 use crate::SignalProcessor;
+
+impl GovernanceAuth for SignalProcessor {
+    fn auth_governance(intent: &thalamus::Intent) -> Option<(AuthorizationRequest, Tier)> {
+        match intent {
+            thalamus::Intent::RespondToApproval { .. } => Some((
+                AuthorizationRequest::new("approval", "respond"),
+                Tier::Write,
+            )),
+            // Granting a standing approval is config-declared at startup, not
+            // slash-driven; only revoke is exposed as a runtime intent.
+            thalamus::Intent::RevokeStandingApproval { id } => Some((
+                AuthorizationRequest::new("approval", "revoke")
+                    .with_modifiers(serde_json::json!({ "id": id })),
+                Tier::Write,
+            )),
+            thalamus::Intent::PruneAudit { .. } => Some((
+                AuthorizationRequest::new("audit", "prune"),
+                Tier::Destructive,
+            )),
+            thalamus::Intent::SetChannelPreference { .. } => Some((
+                AuthorizationRequest::new("channel", "configure"),
+                Tier::Write,
+            )),
+            thalamus::Intent::SetProactivity { .. } => Some((
+                AuthorizationRequest::new("proactivity", "configure"),
+                Tier::Write,
+            )),
+            _ => None,
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl GovernanceHandler for SignalProcessor {

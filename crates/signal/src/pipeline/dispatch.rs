@@ -20,6 +20,8 @@
 //! out of sync with the per-category dispatch (a bug in either the
 //! `Intent::category` map or in a sibling dispatch).
 
+use identity::{AuthorizationRequest, Tier};
+use thalamus::{Intent, IntentCategory};
 use uuid::Uuid;
 
 use crate::types::*;
@@ -143,5 +145,86 @@ impl<T> IntentHandler for T where
         + GovernanceHandler
         + CapabilityHandler
         + ConversationHandler
+{
+}
+
+// ── Per-category authorization traits (Issue 112) ──────────────────────
+//
+// Parallel to the `<Category>Handler` traits above: each category owns
+// its own intent → (AuthorizationRequest, Tier) mapping, colocated with
+// the dispatch impl in `pipeline/<category>.rs`. Trait methods are
+// associated functions (no `&self`) because auth is a pure mapping
+// with no processor state.
+//
+// The [`IntentAuthorizer`] super-trait bundles them and provides a
+// default [`IntentAuthorizer::intent_to_auth`] that dispatches on
+// [`thalamus::Intent::category`]. The blanket impl on every `T` that
+// satisfies all seven sub-traits means a single bound — `T: IntentAuthorizer`
+// — is enough to express "T can authorize every intent variant". Adding
+// a new category grows the bound list; every site fails to compile until
+// the new sub-trait is implemented.
+//
+// `intent_to_auth` returning `Option` keeps the historical signature:
+// `None` means unguarded (pure-conversation intents and inspection of
+// internal state) — the identity gate skips them entirely.
+
+pub(crate) trait InspectionAuth {
+    fn auth_inspection(intent: &Intent) -> Option<(AuthorizationRequest, Tier)>;
+}
+
+pub(crate) trait MemoryAuth {
+    fn auth_memory(intent: &Intent) -> Option<(AuthorizationRequest, Tier)>;
+}
+
+pub(crate) trait ActionAuth {
+    fn auth_action(intent: &Intent) -> Option<(AuthorizationRequest, Tier)>;
+}
+
+pub(crate) trait LifecycleAuth {
+    fn auth_lifecycle(intent: &Intent) -> Option<(AuthorizationRequest, Tier)>;
+}
+
+pub(crate) trait GovernanceAuth {
+    fn auth_governance(intent: &Intent) -> Option<(AuthorizationRequest, Tier)>;
+}
+
+pub(crate) trait CapabilityAuth {
+    fn auth_capability(intent: &Intent) -> Option<(AuthorizationRequest, Tier)>;
+}
+
+pub(crate) trait ConversationAuth {
+    fn auth_conversation(intent: &Intent) -> Option<(AuthorizationRequest, Tier)>;
+}
+
+pub(crate) trait IntentAuthorizer:
+    InspectionAuth
+    + MemoryAuth
+    + ActionAuth
+    + LifecycleAuth
+    + GovernanceAuth
+    + CapabilityAuth
+    + ConversationAuth
+{
+    fn intent_to_auth(intent: &Intent) -> Option<(AuthorizationRequest, Tier)> {
+        match intent.category() {
+            IntentCategory::Inspection => Self::auth_inspection(intent),
+            IntentCategory::Memory => Self::auth_memory(intent),
+            IntentCategory::Action => Self::auth_action(intent),
+            IntentCategory::Lifecycle => Self::auth_lifecycle(intent),
+            IntentCategory::Governance => Self::auth_governance(intent),
+            IntentCategory::Capability => Self::auth_capability(intent),
+            IntentCategory::Conversation => Self::auth_conversation(intent),
+        }
+    }
+}
+
+impl<T> IntentAuthorizer for T where
+    T: InspectionAuth
+        + MemoryAuth
+        + ActionAuth
+        + LifecycleAuth
+        + GovernanceAuth
+        + CapabilityAuth
+        + ConversationAuth
 {
 }

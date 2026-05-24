@@ -15,9 +15,18 @@
 
 use uuid::Uuid;
 
-use super::dispatch::{HandlerContext, InspectionHandler, NudgeFn};
+use identity::{AuthorizationRequest, Tier};
+
+use super::dispatch::{HandlerContext, InspectionAuth, InspectionHandler, NudgeFn};
 use crate::types::*;
 use crate::SignalProcessor;
+
+impl InspectionAuth for SignalProcessor {
+    fn auth_inspection(_intent: &thalamus::Intent) -> Option<(AuthorizationRequest, Tier)> {
+        // Read-only state queries. Identity gate is skipped entirely.
+        None
+    }
+}
 
 #[async_trait::async_trait]
 impl InspectionHandler for SignalProcessor {

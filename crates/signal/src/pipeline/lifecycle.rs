@@ -12,9 +12,67 @@
 
 use uuid::Uuid;
 
-use super::dispatch::{HandlerContext, LifecycleHandler, NudgeFn};
+use identity::{AuthorizationRequest, Tier};
+
+use super::dispatch::{HandlerContext, LifecycleAuth, LifecycleHandler, NudgeFn};
 use crate::types::*;
 use crate::SignalProcessor;
+
+impl LifecycleAuth for SignalProcessor {
+    fn auth_lifecycle(intent: &thalamus::Intent) -> Option<(AuthorizationRequest, Tier)> {
+        match intent {
+            thalamus::Intent::Schedule { .. } => {
+                Some((AuthorizationRequest::new("schedule", "create"), Tier::Write))
+            }
+            thalamus::Intent::CancelSchedule { .. } => {
+                Some((AuthorizationRequest::new("schedule", "cancel"), Tier::Write))
+            }
+            thalamus::Intent::DecomposeTask { .. } => Some((
+                AuthorizationRequest::new("task", "decompose"),
+                Tier::Execute,
+            )),
+            thalamus::Intent::CancelTask { .. } => {
+                Some((AuthorizationRequest::new("task", "cancel"), Tier::Write))
+            }
+            thalamus::Intent::CancelSignal { .. } => {
+                Some((AuthorizationRequest::new("signal", "cancel"), Tier::Write))
+            }
+            thalamus::Intent::OpenTerminalSession { program, cwd, .. } => Some((
+                AuthorizationRequest::new("terminal", "open").with_modifiers(serde_json::json!({
+                    "program": program,
+                    "cwd": cwd,
+                })),
+                Tier::Execute,
+            )),
+            thalamus::Intent::CloseTerminalSession { session_id } => Some((
+                AuthorizationRequest::new("terminal", "close")
+                    .with_modifiers(serde_json::json!({ "session_id": session_id })),
+                Tier::Write,
+            )),
+            // MCP host control: mounting any server is External (HTTP transports
+            // egress, stdio transports load untrusted tool descriptions into the
+            // planning context). Unmount drops state and is a Write.
+            thalamus::Intent::MountMcpServer {
+                name,
+                transport,
+                command_or_url,
+            } => Some((
+                AuthorizationRequest::new("mcp", "mount").with_modifiers(serde_json::json!({
+                    "name": name,
+                    "transport": transport,
+                    "command_or_url": command_or_url,
+                })),
+                Tier::External,
+            )),
+            thalamus::Intent::UnmountMcpServer { name } => Some((
+                AuthorizationRequest::new("mcp", "unmount")
+                    .with_modifiers(serde_json::json!({ "name": name })),
+                Tier::Write,
+            )),
+            _ => None,
+        }
+    }
+}
 
 #[async_trait::async_trait]
 impl LifecycleHandler for SignalProcessor {

@@ -8,9 +8,18 @@
 
 use uuid::Uuid;
 
-use super::dispatch::{ConversationHandler, HandlerContext, NudgeFn};
+use identity::{AuthorizationRequest, Tier};
+
+use super::dispatch::{ConversationAuth, ConversationHandler, HandlerContext, NudgeFn};
 use crate::types::*;
 use crate::SignalProcessor;
+
+impl ConversationAuth for SignalProcessor {
+    fn auth_conversation(_intent: &thalamus::Intent) -> Option<(AuthorizationRequest, Tier)> {
+        // Pure conversation — no authorization needed.
+        None
+    }
+}
 
 #[async_trait::async_trait]
 impl ConversationHandler for SignalProcessor {

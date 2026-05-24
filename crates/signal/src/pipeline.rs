@@ -39,6 +39,8 @@ use dispatch::{
     InspectionHandler, LifecycleHandler, MemoryHandler,
 };
 
+pub(crate) use dispatch::IntentAuthorizer;
+
 // `crate::attachment` imports these by their historic
 // `crate::pipeline::<name>` paths — keep them re-exported so the sandbox
 // gate API doesn't churn while we move code around.

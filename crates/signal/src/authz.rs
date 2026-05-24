@@ -7,6 +7,12 @@
 //! intents that touch nothing destructive (ListChannels, BudgetStatus,
 //! SystemStatus).
 //!
+//! Per-category mappings live alongside their dispatchers in
+//! `pipeline/<category>.rs`, behind the `<Category>Auth` traits in
+//! `pipeline/dispatch.rs`. This module is the public free-function
+//! entry point — call sites stay verb-stable while the actual logic
+//! distributes across the seven sibling modules.
+//!
 //! The mapping is intentionally conservative: when in doubt, classify
 //! as `Execute` or higher and let the identity gate escalate to the user.
 //! CapabilityIndex routing refines verbs at dispatch time; standing
@@ -14,6 +20,9 @@
 
 use identity::{AuthorizationRequest, Tier};
 use thalamus::Intent;
+
+use crate::pipeline::IntentAuthorizer;
+use crate::SignalProcessor;
 
 /// Map a classified [`Intent`] to a verb/tier authorization request.
 ///
@@ -24,159 +33,21 @@ use thalamus::Intent;
 /// are NOT populated here — they're filled in at the call site once the
 /// concrete path is extracted from the intent payload. The intent router
 /// folds this into its `abstract_from_signal` step at dispatch time.
+///
+/// The body dispatches on [`thalamus::Intent::category`] via the
+/// [`IntentAuthorizer`] super-trait, which fans out to seven per-category
+/// `<Category>Auth` impls colocated with their dispatch impls. Adding a
+/// new [`thalamus::IntentCategory`] forces every sub-trait impl site to
+/// fail compilation until the new variant is handled.
 pub fn intent_to_auth(intent: &Intent) -> Option<(AuthorizationRequest, Tier)> {
-    match intent {
-        // ── Pure conversation — no authorization needed ────────────────
-        Intent::Chat { .. }
-        | Intent::Recall { .. }
-        | Intent::MemorySummary
-        | Intent::SystemStatus
-        | Intent::ProactivityStatus
-        | Intent::ListApprovals { .. }
-        | Intent::BudgetStatus { .. }
-        | Intent::ListSchedules
-        | Intent::ListTasks
-        | Intent::TaskStatus { .. }
-        | Intent::QueryAgents { .. }
-        | Intent::QueryAudit { .. }
-        | Intent::ListChannels
-        | Intent::ChannelPreferences { .. }
-        | Intent::ListTerminalSessions
-        | Intent::ListMcpServers
-        | Intent::ListStandingApprovals => None,
-
-        // ── Memory mutations — Write tier under `memory.*` ─────────────
-        Intent::StoreFact { .. } => {
-            Some((AuthorizationRequest::new("memory", "store"), Tier::Write))
-        }
-        Intent::Forget { .. } => Some((
-            AuthorizationRequest::new("memory", "delete"),
-            Tier::Destructive,
-        )),
-
-        // ── Shell execution — Execute tier ─────────────────────────────
-        Intent::ExecuteCommand { .. } => {
-            Some((AuthorizationRequest::new("shell", "exec"), Tier::Execute))
-        }
-
-        // ── Network — External tier (any HTTP egress is External) ─────
-        Intent::WebSearch { .. } => {
-            Some((AuthorizationRequest::new("net", "http"), Tier::External))
-        }
-        Intent::SendMessage { .. } => {
-            Some((AuthorizationRequest::new("notify", "send"), Tier::External))
-        }
-
-        // ── Schedules / tasks (creation) — Write tier ──────────────────
-        Intent::Schedule { .. } => {
-            Some((AuthorizationRequest::new("schedule", "create"), Tier::Write))
-        }
-        Intent::CancelSchedule { .. } => {
-            Some((AuthorizationRequest::new("schedule", "cancel"), Tier::Write))
-        }
-        Intent::DecomposeTask { .. } => Some((
-            AuthorizationRequest::new("task", "decompose"),
-            Tier::Execute,
-        )),
-        Intent::CancelTask { .. } => {
-            Some((AuthorizationRequest::new("task", "cancel"), Tier::Write))
-        }
-        Intent::CancelSignal { .. } => {
-            Some((AuthorizationRequest::new("signal", "cancel"), Tier::Write))
-        }
-
-        // ── Agent delegation — Execute (delegate may run code) ────────
-        Intent::DelegateTask { .. } => Some((
-            AuthorizationRequest::new("agent", "delegate"),
-            Tier::Execute,
-        )),
-
-        // ── Approval response — Write (state mutation of approval queue) ─
-        Intent::RespondToApproval { .. } => Some((
-            AuthorizationRequest::new("approval", "respond"),
-            Tier::Write,
-        )),
-        Intent::PruneAudit { .. } => Some((
-            AuthorizationRequest::new("audit", "prune"),
-            Tier::Destructive,
-        )),
-
-        // ── Channel config mutation — Write ────────────────────────────
-        Intent::SetChannelPreference { .. } => Some((
-            AuthorizationRequest::new("channel", "configure"),
-            Tier::Write,
-        )),
-
-        // ── Proactivity toggle — Write (modifies behavior) ────────────
-        Intent::SetProactivity { .. } => Some((
-            AuthorizationRequest::new("proactivity", "configure"),
-            Tier::Write,
-        )),
-
-        // ── Terminal Bridge — same Execute tier as shell.exec ──────────
-        Intent::OpenTerminalSession { program, cwd, .. } => Some((
-            AuthorizationRequest::new("terminal", "open").with_modifiers(serde_json::json!({
-                "program": program,
-                "cwd": cwd,
-            })),
-            Tier::Execute,
-        )),
-        Intent::CloseTerminalSession { session_id } => Some((
-            AuthorizationRequest::new("terminal", "close")
-                .with_modifiers(serde_json::json!({ "session_id": session_id })),
-            Tier::Write,
-        )),
-
-        // ── MCP host control — mounting any server is External (HTTP
-        // transports egress the network; stdio transports load untrusted
-        // tool descriptions into the planning context). Unmount drops state
-        // and is a Write. ListMcpServers is unguarded (see above).
-        Intent::MountMcpServer {
-            name,
-            transport,
-            command_or_url,
-        } => Some((
-            AuthorizationRequest::new("mcp", "mount").with_modifiers(serde_json::json!({
-                "name": name,
-                "transport": transport,
-                "command_or_url": command_or_url,
-            })),
-            Tier::External,
-        )),
-        Intent::UnmountMcpServer { name } => Some((
-            AuthorizationRequest::new("mcp", "unmount")
-                .with_modifiers(serde_json::json!({ "name": name })),
-            Tier::Write,
-        )),
-
-        // ── Standing-approval revoke — Write tier. Granting is config-
-        // declared at startup, not slash-driven; only revoke is exposed
-        // as a runtime intent.
-        Intent::RevokeStandingApproval { id } => Some((
-            AuthorizationRequest::new("approval", "revoke")
-                .with_modifiers(serde_json::json!({ "id": id })),
-            Tier::Write,
-        )),
-
-        // ── ToolCall — derive verb_ns / action from the SIT, infer tier
-        // from the verb. Conservative defaults: destructive verbs bump to
-        // `Destructive`; HTTP / mount verbs bump to `External`; everything
-        // else lands at `Execute` so the gate can prompt the user.
-        Intent::ToolCall(token) => {
-            let verb_ns = token.verb.namespace.as_str();
-            let verb_action = token.verb.action.as_str();
-            let tier = tier_for_verb(verb_ns, verb_action);
-            let req = AuthorizationRequest::new(verb_ns, verb_action)
-                .with_modifiers(token.object.value.clone());
-            Some((req, tier))
-        }
-    }
+    <SignalProcessor as IntentAuthorizer>::intent_to_auth(intent)
 }
 
 /// Conservative tier inference from a verb pair. Mirrors the per-variant
-/// mapping above so the typed and abstract paths converge on the same tier
-/// once the router lands.
-fn tier_for_verb(verb_ns: &str, verb_action: &str) -> Tier {
+/// mappings in `pipeline/<category>.rs` so the typed and abstract paths
+/// converge on the same tier once the router lands. Used by
+/// [`crate::pipeline::dispatch::CapabilityAuth`] for the `ToolCall` envelope.
+pub(crate) fn tier_for_verb(verb_ns: &str, verb_action: &str) -> Tier {
     match (verb_ns, verb_action) {
         ("memory", "delete") | ("audit", "prune") => Tier::Destructive,
         (_, "delete") | (_, "drop") | (_, "destroy") => Tier::Destructive,
