@@ -121,14 +121,29 @@ pub(super) async fn wire_preset_transports(
     let mut webhook_handlers = std::collections::HashMap::new();
 
     for entry in entries {
-        let preset = match preset::load(&entry.preset) {
-            Ok(p) => p,
-            Err(e) => {
+        // `preset::load` does a blocking `std::fs::read_to_string` for the
+        // user-override file at `~/.brain/presets/<id>.yaml`. Off-load so a
+        // slow filesystem doesn't stall the reactor while we wire each
+        // transport at startup.
+        let preset_id = entry.preset.clone();
+        let load_result = tokio::task::spawn_blocking(move || preset::load(&preset_id)).await;
+        let preset = match load_result {
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => {
                 tracing::warn!(
                     transport = %entry.id,
                     preset = %entry.preset,
                     error = %e,
                     "Preset load failed — skipping transport"
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    transport = %entry.id,
+                    preset = %entry.preset,
+                    error = %e,
+                    "Preset load task panicked — skipping transport"
                 );
                 continue;
             }
