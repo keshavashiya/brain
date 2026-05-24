@@ -6,12 +6,22 @@ use crate::types::*;
 use crate::SignalProcessor;
 
 /// Resolve the LLM API key from config, with env var fallback for backwards compatibility.
-fn resolve_llm_api_key(config: &brain::BrainConfig) -> String {
+///
+/// An empty/whitespace-only `BRAIN_LLM__API_KEY` is treated as a user error
+/// (e.g. unset-but-exported in a shell profile) and reported as a clear
+/// init-time failure rather than silently falling back to an empty key.
+fn resolve_llm_api_key(config: &brain::BrainConfig) -> Result<String, SignalError> {
     let from_config = config.llm.api_key.trim().to_string();
     if !from_config.is_empty() {
-        return from_config;
+        return Ok(from_config);
     }
-    std::env::var("BRAIN_LLM__API_KEY").unwrap_or_default()
+    match std::env::var("BRAIN_LLM__API_KEY") {
+        Ok(v) if v.trim().is_empty() => Err(SignalError::Init(
+            "BRAIN_LLM__API_KEY is set but empty — unset it or provide a real key".to_string(),
+        )),
+        Ok(v) => Ok(v),
+        Err(_) => Ok(String::new()),
+    }
 }
 
 impl SignalProcessor {
@@ -64,7 +74,7 @@ impl SignalProcessor {
         // otherwise synthesised from the legacy single-provider fields) and
         // select the first reachable one. Env-var API key stays backfilled
         // onto the legacy field for single-provider configs.
-        let llm_api_key = resolve_llm_api_key(&config);
+        let llm_api_key = resolve_llm_api_key(&config)?;
         let mut llm_cfg = config.llm.clone();
         if llm_cfg.providers.is_empty() {
             llm_cfg.api_key = llm_api_key.clone();
@@ -189,8 +199,13 @@ impl SignalProcessor {
         // Warm up the LLM model in the background to avoid first-call timeout
         // (cold Ollama starts can exceed the 15s classification timeout while
         // loading weights into VRAM).
+        //
+        // Fire-and-forget by design — the daemon must boot whether or not
+        // the warm-up succeeds. We still want panics surfaced rather than
+        // silently dropped, so the inner spawn awaits the handle and logs
+        // anything other than a clean exit.
         let warmup_llm = processor.llm.clone();
-        tokio::spawn(async move {
+        let warmup_handle = tokio::spawn(async move {
             let warmup = vec![cortex::llm::Message {
                 role: cortex::llm::Role::User,
                 content: "hi".to_string(),
@@ -198,6 +213,13 @@ impl SignalProcessor {
             match warmup_llm.generate(&warmup).await {
                 Ok(_) => tracing::info!("LLM warm-up complete"),
                 Err(e) => tracing::debug!("LLM warm-up skipped (provider unavailable): {e}"),
+            }
+        });
+        tokio::spawn(async move {
+            if let Err(e) = warmup_handle.await {
+                if e.is_panic() {
+                    tracing::error!("LLM warm-up task panicked: {e}");
+                }
             }
         });
 

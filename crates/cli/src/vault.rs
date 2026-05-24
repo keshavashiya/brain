@@ -141,8 +141,7 @@ async fn cmd_get(tool: &str, key: &str, reveal: bool) -> Result<()> {
     let injected = match vault.get(tool, key).await {
         Ok(i) => i,
         Err(VaultError::NotFound { .. }) => {
-            eprintln!("Not found: {tool}:{key}");
-            std::process::exit(1);
+            return Err(anyhow!("Not found: {tool}:{key}"));
         }
         Err(e) => return Err(anyhow::Error::from(e)),
     };
@@ -165,10 +164,7 @@ async fn cmd_delete(tool: &str, key: &str) -> Result<()> {
             println!("Deleted {tool}:{key}");
             Ok(())
         }
-        Err(VaultError::NotFound { .. }) => {
-            eprintln!("Not found: {tool}:{key}");
-            std::process::exit(1);
-        }
+        Err(VaultError::NotFound { .. }) => Err(anyhow!("Not found: {tool}:{key}")),
         Err(e) => Err(anyhow::Error::from(e)),
     }
 }

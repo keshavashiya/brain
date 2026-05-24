@@ -521,7 +521,7 @@ fn build_action_dispatcher(
     processor: &signal::SignalProcessor,
 ) -> anyhow::Result<cortex::actions::ActionDispatcher> {
     let embedding_dim = processor.embedding_dim();
-    let llm_api_key = resolve_llm_api_key(config);
+    let llm_api_key = resolve_llm_api_key(config)?;
     // `Embedder::from_config` still keys off `llm.provider`. The field is
     // #[deprecated] (Issue 40) but load-bearing here until embedder
     // selection learns to read `providers[]`; the explicit read is

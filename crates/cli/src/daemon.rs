@@ -351,7 +351,7 @@ async fn try_start_via_launchd(config: &BrainConfig) -> bool {
 
     // Wait for it to come alive (max ~5s).
     for _ in 0..10 {
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         if bootstrap::detect_running_daemon(config).await.is_some() {
             println!("Brain started via launchd service.");
             println!(
@@ -405,7 +405,7 @@ pub(crate) async fn cmd_start(config: &BrainConfig) -> anyhow::Result<()> {
             tracing::warn!(pid, "Stale daemon PID found — killing");
             let _ = stop_process(pid);
             for _ in 0..10 {
-                std::thread::sleep(std::time::Duration::from_millis(500));
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                 if bootstrap::detect_running_daemon(config).await.is_none() {
                     break;
                 }

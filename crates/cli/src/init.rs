@@ -43,14 +43,32 @@ pub(crate) async fn cmd_init(
         let salt = storage::Encryptor::generate_salt();
         encryption::write_salt(config, &salt)?;
 
+        // Silently failing to flip `enabled: false` → `enabled: true` would
+        // leave encryption off after we told the user the barrier is sealed.
         let config_path = BrainConfig::user_config_path();
-        if let Ok(yaml) = std::fs::read_to_string(&config_path) {
-            let patched = yaml.replace(
-                "enabled: false               # Run `brain init --encrypt` to generate a salt and enable",
-                "enabled: true                # Activated by `brain init --encrypt`",
+        let yaml = std::fs::read_to_string(&config_path).map_err(|e| {
+            anyhow::anyhow!(
+                "Salt written, but failed to read {} to enable encryption: {e}",
+                config_path.display()
+            )
+        })?;
+        let patched = yaml.replace(
+            "enabled: false               # Run `brain init --encrypt` to generate a salt and enable",
+            "enabled: true                # Activated by `brain init --encrypt`",
+        );
+        if patched == yaml {
+            anyhow::bail!(
+                "Salt written, but `encryption.enabled: false` line not found in {}. \
+                 Set `encryption.enabled: true` manually before starting Brain.",
+                config_path.display()
             );
-            let _ = std::fs::write(&config_path, patched);
         }
+        std::fs::write(&config_path, &patched).map_err(|e| {
+            anyhow::anyhow!(
+                "Salt written, but failed to write {} to enable encryption: {e}",
+                config_path.display()
+            )
+        })?;
 
         println!(
             "\n  Blood-brain barrier: sealed (salt → {})",

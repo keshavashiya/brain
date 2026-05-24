@@ -24,8 +24,11 @@ impl SignalProcessor {
             .clone()
     }
 
-    /// Remove the cancellation notify for a signal. Called from `CancelGuard::drop`.
-    pub(super) fn unregister_cancel(&self, signal_id: Uuid) {
+    /// Remove the cancellation notify for a signal. Called from `CancelGuard::drop`
+    /// inside the standard pipeline; adapters that drive their own LLM loop
+    /// (e.g. WS streaming) also call this when their stream finishes so the
+    /// registry entry doesn't leak.
+    pub fn unregister_cancel(&self, signal_id: Uuid) {
         // Best-effort: avoid blocking the drop path on the lock. If the lock
         // is held, the entry will be GC'd by the next `register_cancel` call
         // for the same id, or stay live until the process restarts (rare).

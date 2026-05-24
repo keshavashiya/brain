@@ -32,7 +32,7 @@ pub(crate) async fn show_status(config: &brain::BrainConfig) -> anyhow::Result<(
 
     // Resolve the actual provider once (same logic as daemon boot) so both
     // the display label and the health check reflect the selected entry.
-    let llm_api_key = resolve_llm_api_key(config);
+    let llm_api_key = resolve_llm_api_key(config)?;
     let mut llm_cfg = config.llm.clone();
     if llm_cfg.providers.is_empty() {
         llm_cfg.api_key = llm_api_key;

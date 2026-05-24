@@ -86,6 +86,21 @@ async fn send_json_frame_to_sink(
     }
 }
 
+/// RAII drop guard that removes the per-signal cancel registry entry when
+/// the streaming handler returns — whether normally, via early-return, or
+/// via panic. Mirrors `signal::pipeline::CancelGuard` for adapters that
+/// bypass `SignalProcessor::process()` and drive the pipeline themselves.
+struct WsCancelGuard {
+    processor: Arc<signal::SignalProcessor>,
+    signal_id: Uuid,
+}
+
+impl Drop for WsCancelGuard {
+    fn drop(&mut self) {
+        self.processor.unregister_cancel(self.signal_id);
+    }
+}
+
 /// Guarantees that `finalize_streaming()` is called even if the client
 /// disconnects mid-stream.
 struct StreamFinalizer {
@@ -125,7 +140,12 @@ impl Drop for StreamFinalizer {
         if self.committed {
             return;
         }
-        let acc = self.acc.lock().unwrap();
+        // Drop runs on cancellation paths; a poisoned mutex must not panic
+        // a second time. Recover the inner String either way.
+        let acc = self
+            .acc
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if acc.is_empty() {
             return;
         }
@@ -177,6 +197,17 @@ pub(crate) async fn handle_streaming_request(
     // round-trip emits zero BrainEvents and `brain tail` looks broken.
     processor.publish_signal_received(&signal).await;
 
+    // Register a cancellation notify so a concurrent `Intent::CancelSignal`
+    // for this id reaches the prepare/chunk loops below. The standard
+    // pipeline installs this via `CancelGuard` inside `process()`, but
+    // streaming bypasses `process()`, so we own the lifecycle here — the
+    // `WsCancelGuard` mirrors that RAII removal on every return path.
+    let cancel_notify = processor.register_cancel(signal_id).await;
+    let _cancel_guard = WsCancelGuard {
+        processor: processor.clone(),
+        signal_id,
+    };
+
     // Surface progress while the pipeline runs — otherwise the client just
     // sees nothing until the first LLM token. These frames are advisory.
     let _ = send_json_frame_to_sink(
@@ -193,6 +224,20 @@ pub(crate) async fn handle_streaming_request(
 
     let prepared = loop {
         tokio::select! {
+            biased;
+            _ = cancel_notify.notified() => {
+                let _ = send_json_frame_to_sink(
+                    ws_tx,
+                    &serde_json::json!({
+                        "type": "error",
+                        "code": "cancelled",
+                        "message": format!("signal {signal_id} cancelled before LLM dispatch"),
+                    }),
+                    conn_id,
+                )
+                .await;
+                return;
+            }
             result = &mut prepare_fut => {
                 match result {
                     Ok(p) => break p,
@@ -285,7 +330,27 @@ pub(crate) async fn handle_streaming_request(
             let mut stream = llm_stream;
             let finalizer = finalizer;
 
-            while let Some(chunk_result) = stream.next().await {
+            loop {
+                let chunk_result = tokio::select! {
+                    biased;
+                    _ = cancel_notify.notified() => {
+                        let _ = send_json_frame_to_sink(
+                            ws_tx,
+                            &serde_json::json!({
+                                "type": "error",
+                                "code": "cancelled",
+                                "message": format!("signal {signal_id} cancelled mid-stream"),
+                            }),
+                            conn_id,
+                        )
+                        .await;
+                        return;
+                    }
+                    next = stream.next() => match next {
+                        Some(r) => r,
+                        None => break,
+                    },
+                };
                 let chunk = match chunk_result {
                     Ok(c) => c,
                     Err(e) => {
@@ -303,7 +368,9 @@ pub(crate) async fn handle_streaming_request(
                     }
                 };
 
-                acc.lock().unwrap().push_str(&chunk.content);
+                acc.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push_str(&chunk.content);
 
                 let chunk_frame = serde_json::json!({
                     "type": "chunk",
@@ -322,7 +389,10 @@ pub(crate) async fn handle_streaming_request(
             }
 
             {
-                let acc_content = acc.lock().unwrap().clone();
+                let acc_content = acc
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
                 if let Err(e) = processor.finalize_streaming(
                     session_id.as_deref().unwrap_or("unknown"),
                     &acc_content,
@@ -337,7 +407,11 @@ pub(crate) async fn handle_streaming_request(
             let resp = signal::SignalResponse {
                 signal_id,
                 status: signal::ResponseStatus::Ok,
-                response: signal::ResponseContent::Text(acc.lock().unwrap().clone()),
+                response: signal::ResponseContent::Text(
+                    acc.lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone(),
+                ),
                 memory_context,
                 session_id,
             };

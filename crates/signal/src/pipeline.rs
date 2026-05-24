@@ -85,11 +85,21 @@ impl SignalProcessor {
 
         self.publish_signal_received(&signal).await;
 
-        // The fast-classify path inside prepare() may return Complete; the slow
-        // LLM-generation path returns LlmReady. Both are protected by the
-        // cancel notify below for any awaits that would otherwise block.
-        let _ = &cancel; // silence unused warning when there's no await checkpoint
-        match self.prepare(&signal, None, None).await? {
+        // Both prepare() and the LLM-generation branch below are wrapped in a
+        // `tokio::select!` against the registered cancel notify so an
+        // `Intent::CancelSignal` for this id aborts whichever phase is
+        // running. Issue 97: previously only the LlmReady branch was
+        // cancel-aware, so a cancel mid-`handle_action` (WebSearch grounding
+        // LLM) or mid-`handle_decompose` (orchestrator.plan) had to wait for
+        // the await to return on its own.
+        let prepared = tokio::select! {
+            biased;
+            _ = cancel.notified() => {
+                return Ok(self.cancelled_response(signal_id, &signal).await);
+            }
+            r = self.prepare(&signal, None, None) => r?,
+        };
+        match prepared {
             PipelineResult::Complete(resp) => {
                 self.publish_event(&signal, &resp);
                 Ok(resp)
@@ -391,7 +401,12 @@ impl SignalProcessor {
                 );
                 let mut steps: Vec<String> = Vec::new();
                 for proc in &procs {
-                    let _ = self.procedures.record_execution(&proc.id);
+                    if let Err(e) = self.procedures.record_execution(&proc.id) {
+                        tracing::warn!(
+                            procedure_id = %proc.id,
+                            "Failed to persist procedure execution count: {e}"
+                        );
+                    }
                     steps.extend(proc.steps.clone());
                 }
                 steps

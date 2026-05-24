@@ -645,7 +645,7 @@ pub(crate) async fn chat_interactive(config: &brain::BrainConfig) -> anyhow::Res
     println!("╚═{}═╝", "═".repeat(width));
     println!();
     let cortex_model = {
-        let llm_key = resolve_llm_api_key(config);
+        let llm_key = resolve_llm_api_key(config)?;
         let mut llm_cfg = config.llm.clone();
         if llm_cfg.providers.is_empty() {
             llm_cfg.api_key = llm_key;

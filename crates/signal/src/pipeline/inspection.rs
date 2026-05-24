@@ -145,7 +145,7 @@ impl SignalProcessor {
         let query_vector = self.embed_text(&query).await;
         let (memories, facts_used, episodes_used) = self
             .do_recall(&query, query_vector, top_k, Some(&signal.namespace))
-            .await;
+            .await?;
 
         // Agent callers get structured data
         if signal.agent.is_some() {

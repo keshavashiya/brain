@@ -147,7 +147,13 @@ pub(super) fn spawn_scheduled_intent_poller(
                     };
                     router.deliver(notif).await;
                 }
-                let _ = db.update_scheduled_intent_status(&intent.id, "fired");
+                if let Err(e) = db.update_scheduled_intent_status(&intent.id, "fired") {
+                    tracing::warn!(
+                        intent_id = %intent.id,
+                        "Scheduled intent fired but status update to 'fired' failed: {e} — \
+                         the intent will re-fire on the next poll until status persists"
+                    );
+                }
             }
         }
     });

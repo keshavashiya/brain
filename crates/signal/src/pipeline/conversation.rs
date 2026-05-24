@@ -71,7 +71,7 @@ impl SignalProcessor {
         let query_vector = self.embed_text(&content).await;
         let (memories, facts_used, episodes_used) = self
             .do_recall(&content, query_vector, top_k, Some(&signal.namespace))
-            .await;
+            .await?;
 
         // Reuse caller-supplied session or create a new one
         let session_id = if let Some(ref sid) = signal.session_id {
@@ -148,10 +148,20 @@ impl SignalProcessor {
         // local paths in `content`, read each on their behalf and pass
         // the snapshots to the assembler. Replaces the old
         // `Intent::ProjectInspect` branch that bypassed SOUL entirely.
-        let attachments = crate::attachment::build_chat_attachments(
-            &content,
-            &self.config.security.allowed_paths,
-        );
+        //
+        // The snapshot pipeline performs blocking `std::fs::*` calls
+        // (canonicalize, metadata, read_dir, read). Off-load to the
+        // blocking pool so other async tasks on this runtime aren't
+        // stalled while we read a directory.
+        let attachments = {
+            let content_owned = content.clone();
+            let allowed = self.config.security.allowed_paths.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::attachment::build_chat_attachments(&content_owned, &allowed)
+            })
+            .await
+            .map_err(|e| SignalError::Processing(format!("attachment task panicked: {e}")))?
+        };
         if !attachments.is_empty() {
             tracing::debug!(
                 attached = attachments.attached.len(),

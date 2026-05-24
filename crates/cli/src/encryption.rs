@@ -35,12 +35,22 @@ pub(crate) fn write_salt(config: &BrainConfig, salt: &[u8; 16]) -> anyhow::Resul
 }
 
 /// Resolve the LLM API key from config, with env var fallback for backwards compatibility.
-pub(crate) fn resolve_llm_api_key(config: &BrainConfig) -> String {
+///
+/// An empty/whitespace-only `BRAIN_LLM__API_KEY` is treated as a user error
+/// (e.g. unset-but-exported in a shell profile) and reported up the stack
+/// rather than silently producing an empty key the LLM call will reject.
+pub(crate) fn resolve_llm_api_key(config: &BrainConfig) -> anyhow::Result<String> {
     let from_config = config.llm.api_key.trim().to_string();
     if !from_config.is_empty() {
-        return from_config;
+        return Ok(from_config);
     }
-    std::env::var("BRAIN_LLM__API_KEY").unwrap_or_default()
+    match std::env::var("BRAIN_LLM__API_KEY") {
+        Ok(v) if v.trim().is_empty() => Err(anyhow::anyhow!(
+            "BRAIN_LLM__API_KEY is set but empty — unset it or provide a real key"
+        )),
+        Ok(v) => Ok(v),
+        Err(_) => Ok(String::new()),
+    }
 }
 
 /// Build an `Encryptor` from config + passphrase, or `None` when encryption is disabled.

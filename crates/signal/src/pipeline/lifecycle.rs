@@ -194,7 +194,18 @@ impl SignalProcessor {
         // against real content instead of guessing. This is the general
         // fix for "user said run CI from .github/workflows/ci.yml and the
         // planner invented `gh run view` because it never saw the file".
-        let relevant_facts = super::paths::collect_path_excerpts(&request);
+        //
+        // Off-load to the blocking pool — `collect_path_excerpts` runs a
+        // chain of `std::fs::metadata` / `read_dir` / `read` calls per
+        // referenced path.
+        let relevant_facts = {
+            let request_owned = request.clone();
+            tokio::task::spawn_blocking(move || super::paths::collect_path_excerpts(&request_owned))
+                .await
+                .map_err(|e| {
+                    SignalError::Processing(format!("decompose excerpt task panicked: {e}"))
+                })?
+        };
 
         // Build decomposition context from config + memory so the
         // decomposer LLM sees the actual sandbox allowlist and won't

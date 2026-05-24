@@ -52,14 +52,17 @@ impl SignalProcessor {
 
     /// Run hybrid recall (BM25 + ANN via RecallEngine) and return memories with counts.
     ///
-    /// If the semantic store is unavailable, falls back to BM25-only episodic search.
+    /// If the semantic store is unavailable or fails, falls back to BM25-only
+    /// episodic search. If BM25 also fails, returns the storage error rather
+    /// than masking it as an empty result set — callers downgrade the request
+    /// rather than silently serving stale context.
     pub(super) async fn do_recall(
         &self,
         query: &str,
         query_vector: Vec<f32>,
         top_k: usize,
         namespace: Option<&str>,
-    ) -> (Vec<hippocampus::Memory>, usize, usize) {
+    ) -> Result<(Vec<hippocampus::Memory>, usize, usize), crate::SignalError> {
         if let Some(semantic) = &self.semantic {
             match self
                 .recall_engine
@@ -83,31 +86,23 @@ impl SignalProcessor {
                         .iter()
                         .filter(|m| m.source == hippocampus::MemorySource::Episodic)
                         .count();
-                    (memories, facts_used, episodes_used)
+                    return Ok((memories, facts_used, episodes_used));
                 }
                 Err(e) => {
                     tracing::warn!(
                         "Recall engine failed, falling back to BM25-only episodic search: {e}"
                     );
-                    let bm25 = self
-                        .episodic
-                        .search_bm25(query, top_k, namespace, None)
-                        .unwrap_or_default();
-                    let episodes_used = bm25.len();
-                    let memories = Self::bm25_to_memories(bm25);
-                    (memories, 0, episodes_used)
                 }
             }
-        } else {
-            // Semantic store unavailable — fall back to episodic BM25 only
-            let bm25 = self
-                .episodic
-                .search_bm25(query, top_k, namespace, None)
-                .unwrap_or_default();
-            let episodes_used = bm25.len();
-            let memories = Self::bm25_to_memories(bm25);
-            (memories, 0, episodes_used)
         }
+        // Either semantic store is unavailable or hybrid recall failed.
+        let bm25 = self
+            .episodic
+            .search_bm25(query, top_k, namespace, None)
+            .map_err(|e| crate::SignalError::Storage(e.to_string()))?;
+        let episodes_used = bm25.len();
+        let memories = Self::bm25_to_memories(bm25);
+        Ok((memories, 0, episodes_used))
     }
 
     /// Search semantic facts by text query (embed → vector ANN search).

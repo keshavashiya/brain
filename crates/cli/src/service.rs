@@ -110,7 +110,7 @@ pub(crate) async fn cmd_service_install() -> anyhow::Result<()> {
                 if daemon::is_process_running(pid) {
                     let _ = daemon::stop_process(pid);
                     for _ in 0..10 {
-                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                         if !daemon::is_process_running(pid) {
                             break;
                         }
