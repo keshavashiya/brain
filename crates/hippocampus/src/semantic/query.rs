@@ -326,6 +326,46 @@ impl SemanticStore {
         Ok(())
     }
 
+    /// Delete many facts from both SQLite and RuVector in one round-trip
+    /// each. Used by `handle_forget` so an N-result match collapses from
+    /// N pool-lock acquisitions to one SQL `DELETE … WHERE id IN (…)`
+    /// plus one batched RuVector pass. Returns the number of rows the
+    /// SQL DELETE actually removed (may be smaller than `ids.len()` if a
+    /// fact was already gone). Per-id RuVector failures are logged but
+    /// don't fail the call — the deferred re-sync on next startup
+    /// reconciles divergence, same as `delete_fact` already does.
+    pub async fn delete_facts_batch(
+        &self,
+        ids: &[&str],
+    ) -> Result<usize, SemanticError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let deleted = self.db.with_conn(|conn| {
+            let placeholders = std::iter::repeat_n("?", ids.len())
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!("DELETE FROM semantic_facts WHERE id IN ({placeholders})");
+            let params: Vec<&dyn rusqlite::ToSql> =
+                ids.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+            let rows = conn.execute(&sql, params.as_slice())?;
+            Ok(rows)
+        })?;
+
+        let failures = self
+            .ruv
+            .delete_batch("facts_vec", ids)
+            .await
+            .map_err(SemanticError::RuVector)?;
+        for (id, e) in failures {
+            tracing::warn!(
+                fact_id = %id,
+                "RuVector delete failed (batch), re-syncing on next startup: {e}"
+            );
+        }
+        Ok(deleted)
+    }
+
     /// Find facts whose subject, predicate, or object contains the query string.
     ///
     /// Used by the Forget intent to find facts matching a target description.

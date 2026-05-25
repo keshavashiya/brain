@@ -301,6 +301,33 @@ impl RuVectorStore {
         Ok(())
     }
 
+    /// Delete many vectors by ID in one read-lock cycle. Used by
+    /// `handle_forget` so a batch of N matched facts collapses from N
+    /// `delete` calls (each grabbing + releasing the tables lock) to
+    /// one. Per-id failures are collected and returned as a `Vec` of
+    /// `(id, error)` pairs so the caller can decide whether to abort or
+    /// continue; the SQLite side has its own batch flow that doesn't
+    /// short-circuit on a single failure either.
+    pub async fn delete_batch(
+        &self,
+        table_name: &str,
+        ids: &[&str],
+    ) -> Result<Vec<(String, RuVectorError)>, RuVectorError> {
+        let tables = self
+            .tables
+            .read()
+            .map_err(|_| RuVectorError::LockPoisoned)?;
+        let mut failures = Vec::new();
+        if let Some(db) = tables.get(table_name) {
+            for id in ids {
+                if let Err(e) = db.delete(id) {
+                    failures.push(((*id).to_string(), RuVectorError::from(e)));
+                }
+            }
+        }
+        Ok(failures)
+    }
+
     /// Get the row count for a table.
     pub async fn table_count(&self, table_name: &str) -> Result<usize, RuVectorError> {
         let tables = self

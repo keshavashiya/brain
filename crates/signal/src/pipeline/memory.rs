@@ -127,11 +127,11 @@ impl SignalProcessor {
         if let Some(semantic) = &self.semantic {
             match semantic.find_facts_matching(&target, Some(&signal.namespace)) {
                 Ok(facts) if !facts.is_empty() => {
-                    for fact in &facts {
-                        if let Err(e) = semantic.delete_fact(&fact.id).await {
-                            tracing::warn!(fact_id = %fact.id, "Failed to delete fact: {e}");
-                        } else {
-                            deleted_count += 1;
+                    let ids: Vec<&str> = facts.iter().map(|f| f.id.as_str()).collect();
+                    match semantic.delete_facts_batch(&ids).await {
+                        Ok(n) => deleted_count = n,
+                        Err(e) => {
+                            tracing::warn!("Forget batch delete failed: {e}");
                         }
                     }
                 }
