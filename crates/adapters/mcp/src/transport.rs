@@ -22,6 +22,14 @@ pub(crate) fn extract_meta_key(req: &JsonRpcRequest) -> Option<&str> {
 
 /// Run the MCP server over stdio (line-delimited JSON-RPC).
 ///
+/// This is the library entry point for embedders that want to serve MCP
+/// directly from their own process. The `brain` CLI does *not* call
+/// this — its `brain mcp` subcommand proxies stdin/stdout to the running
+/// daemon's HTTP MCP port so that every MCP client subprocess shares one
+/// [`signal::SignalProcessor`]. Use [`serve_stdio`] when you're embedding
+/// `brainos-mcp` in a different host (e.g. a desktop app that owns its
+/// own `SignalProcessor`) and have no separate daemon to forward to.
+///
 /// ## Authentication
 ///
 /// Stdio clients authenticate in one of two ways:

@@ -3,8 +3,21 @@
 //! Exposes Brain's memory tools as an MCP (Model Context Protocol) server.
 //!
 //! ## Transports
-//! - **stdio** (`brain mcp --stdio`): line-delimited JSON-RPC on stdin/stdout
-//! - **HTTP** (`brain mcp --http`): JSON-RPC over HTTP POST on port 19791
+//!
+//! The crate ships two transport entry points:
+//!
+//! - [`serve_http`]: JSON-RPC over HTTP POST on the configured MCP port
+//!   (default 19791). The daemon runs this when `adapters.mcp.enabled =
+//!   true` is set in config; it is what `brain mcp` proxies into.
+//! - [`serve_stdio`]: line-delimited JSON-RPC on stdin/stdout. Exposed
+//!   for library consumers that want to surface MCP from their own
+//!   process with their own [`signal::SignalProcessor`].
+//!
+//! The `brain mcp` CLI subcommand intentionally does *not* invoke
+//! [`serve_stdio`] directly — it forwards stdin/stdout to the daemon's
+//! HTTP MCP port instead, so a single shared `SignalProcessor` (and one
+//! passphrase prompt, one ruvector lock, etc.) services every MCP
+//! client that spawns the binary.
 //!
 //! ## Authentication
 //! - **HTTP**: `x-api-key: <key>` HTTP header on every request.
