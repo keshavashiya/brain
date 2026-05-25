@@ -1153,6 +1153,7 @@ dependencies = [
  "brainos-thalamus",
  "chrono",
  "futures",
+ "lru",
  "pdf-extract",
  "proptest",
  "rusqlite",

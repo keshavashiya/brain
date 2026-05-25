@@ -380,6 +380,34 @@ impl EpisodicStore {
         })?)
     }
 
+    /// Cheap existence probe used by `namespace_is_empty` callers (chat /
+    /// recall onboarding hints). Replaces a `recent(1, ns)` call that
+    /// would otherwise fetch + decrypt an episode just to ask "any row?".
+    pub fn has_episodes_in_namespace(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<bool, EpisodicError> {
+        Ok(self.db.with_conn(|conn| {
+            let exists: i64 = if let Some(ns) = namespace {
+                let prefix = format!("{ns}/%");
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM episodes
+                                   WHERE namespace = ?1 OR namespace LIKE ?2
+                                   LIMIT 1)",
+                    rusqlite::params![ns, &prefix],
+                    |row| row.get(0),
+                )?
+            } else {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM episodes LIMIT 1)",
+                    [],
+                    |row| row.get(0),
+                )?
+            };
+            Ok(exists != 0)
+        })?)
+    }
+
     /// Get recent episodes across all sessions.
     pub fn recent(
         &self,

@@ -136,9 +136,7 @@ impl SignalProcessor {
             })
             .collect();
         let history = conversation_history.unwrap_or(&proc_history);
-        let namespace_is_empty = self.list_facts(Some(&signal.namespace)).is_empty()
-            && self.recent_episodes(1, Some(&signal.namespace)).is_empty();
-        let addendum = if namespace_is_empty {
+        let addendum = if self.namespace_is_empty(&signal.namespace) {
             Some(cortex::context::ONBOARDING_ADDENDUM)
         } else {
             None

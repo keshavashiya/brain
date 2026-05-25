@@ -234,6 +234,37 @@ impl SemanticStore {
         })?)
     }
 
+    /// Cheap existence probe used by `namespace_is_empty` callers (chat /
+    /// recall onboarding hints). Avoids loading + decrypting every fact in
+    /// the namespace just to check `.is_empty()`.
+    pub fn has_facts_in_namespace(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<bool, SemanticError> {
+        Ok(self.db.with_conn(|conn| {
+            let exists: i64 = if let Some(ns) = namespace {
+                let prefix = format!("{ns}/%");
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM semantic_facts
+                                   WHERE superseded_by IS NULL
+                                     AND (namespace = ?1 OR namespace LIKE ?2)
+                                   LIMIT 1)",
+                    rusqlite::params![ns, &prefix],
+                    |row| row.get(0),
+                )?
+            } else {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM semantic_facts
+                                   WHERE superseded_by IS NULL
+                                   LIMIT 1)",
+                    [],
+                    |row| row.get(0),
+                )?
+            };
+            Ok(exists != 0)
+        })?)
+    }
+
     /// List all namespaces with their fact and episode counts.
     pub fn list_namespaces(&self) -> Result<Vec<NamespaceStats>, SemanticError> {
         Ok(self.db.with_conn(|conn| {

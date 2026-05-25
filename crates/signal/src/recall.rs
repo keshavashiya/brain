@@ -157,6 +157,28 @@ impl SignalProcessor {
         }
     }
 
+    /// Quick existence probe — no rows materialized, no decryption. Used
+    /// by chat / recall to decide whether to attach the onboarding
+    /// addendum. Returns `true` when there are no facts *and* no episodes
+    /// for `namespace`; storage errors fail closed (treat as non-empty so
+    /// we don't show a misleading onboarding hint on a transient DB blip).
+    pub fn namespace_is_empty(&self, namespace: &str) -> bool {
+        let has_facts = match &self.semantic {
+            Some(semantic) => semantic
+                .has_facts_in_namespace(Some(namespace))
+                .unwrap_or(true),
+            None => false,
+        };
+        if has_facts {
+            return false;
+        }
+        let has_episodes = self
+            .episodic
+            .has_episodes_in_namespace(Some(namespace))
+            .unwrap_or(true);
+        !has_episodes
+    }
+
     /// List all active semantic facts (non-superseded), optionally scoped to a namespace.
     pub fn list_facts(&self, namespace: Option<&str>) -> Vec<hippocampus::Fact> {
         if let Some(semantic) = &self.semantic {
