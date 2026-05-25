@@ -17,6 +17,7 @@ use tokio::time::timeout;
 
 use crate::traits::{
     AgentCapabilities, AgentDelegate, AgentError, AgentResult, AgentTask, AgentTaskStatus,
+    Artifact,
 };
 
 /// How many bytes of stdout/stderr we keep — beyond this we truncate
@@ -249,11 +250,13 @@ impl AgentDelegate for SubprocessAgentDelegate {
             format!("{} failed (exit {})", self.config.name, code)
         };
 
+        let artifacts = extract_artifacts(&stdout, &stderr);
+
         Ok(AgentResult {
             task_id: task.id,
             status,
             summary,
-            artifacts: vec![],
+            artifacts,
             stdout,
             stderr,
             exit_code: Some(code),
@@ -302,6 +305,79 @@ fn first_line(stdout: &str, fallback: &str) -> String {
         .unwrap_or_else(|| format!("completed: {fallback}"))
 }
 
+/// Scan combined stdout + stderr for URLs the agent printed (PR links,
+/// gists, deploy URLs, dashboard pointers) and emit one [`Artifact`] per
+/// distinct URL. URLs are the only generic, low-noise signal we can
+/// reliably extract across every CLI agent — file paths appear in too
+/// many false-positive contexts (error traces, log lines, doc
+/// references). Per-agent structured parsers (claude-code, aider,
+/// codex, etc.) can plug in later by replacing this function with an
+/// agent-aware variant.
+fn extract_artifacts(stdout: &str, stderr: &str) -> Vec<Artifact> {
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut out = Vec::new();
+    for source in [stdout, stderr] {
+        extract_urls_into(source, &mut seen, &mut out);
+    }
+    out
+}
+
+fn extract_urls_into(
+    haystack: &str,
+    seen: &mut std::collections::BTreeSet<String>,
+    out: &mut Vec<Artifact>,
+) {
+    // Walk byte-wise so multi-byte chars before/after a URL don't trip
+    // us up. URL-character set is the conservative RFC 3986 unreserved
+    // + sub-delims minus characters that commonly trail a URL in prose
+    // (`.`, `,`, `;`, `:`, `)`, `]`, `}`, `>`, `"`, `'`).
+    let bytes = haystack.as_bytes();
+    let needles = ["http://", "https://"];
+    for needle in needles {
+        let mut start = 0;
+        while let Some(found) = haystack[start..].find(needle) {
+            let begin = start + found;
+            let mut end = begin + needle.len();
+            while end < bytes.len() && is_url_byte(bytes[end]) {
+                end += 1;
+            }
+            // Strip common trailing punctuation that's almost always
+            // part of surrounding prose, not the URL.
+            while end > begin + needle.len() {
+                let last = bytes[end - 1];
+                if matches!(last, b'.' | b',' | b';' | b':' | b')' | b']' | b'}' | b'>') {
+                    end -= 1;
+                } else {
+                    break;
+                }
+            }
+            if end > begin + needle.len() {
+                let url = haystack[begin..end].to_string();
+                if seen.insert(url.clone()) {
+                    out.push(Artifact {
+                        kind: "url".to_string(),
+                        reference: url,
+                        summary: None,
+                    });
+                }
+            }
+            start = end.max(begin + needle.len());
+        }
+    }
+}
+
+fn is_url_byte(b: u8) -> bool {
+    // ASCII letters/digits + RFC 3986 mark / sub-delims / pchar
+    // extras. Whitespace and control bytes terminate.
+    matches!(b,
+        b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
+        | b'-' | b'.' | b'_' | b'~'
+        | b':' | b'/' | b'?' | b'#' | b'[' | b']' | b'@'
+        | b'!' | b'$' | b'&' | b'\'' | b'(' | b')'
+        | b'*' | b'+' | b',' | b';' | b'=' | b'%'
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,6 +404,38 @@ mod tests {
         let out = truncate(s);
         assert!(out.ends_with("…[truncated]"));
         assert!(out.len() <= CAPTURE_CAP + "\n…[truncated]".len());
+    }
+
+    #[test]
+    fn extract_artifacts_picks_distinct_urls_from_stdout_and_stderr() {
+        let stdout = "PR opened: https://github.com/foo/bar/pull/42.\n\
+                      Already covered: HTTPS://EXAMPLE.COM ignored (case mismatch on scheme).\n\
+                      Dup: https://github.com/foo/bar/pull/42 again.";
+        let stderr = "warning: deploy failed at http://staging.local:8080/health,\n\
+                      see (https://docs.example.com/runbooks/deploy)";
+        let arts = extract_artifacts(stdout, stderr);
+        let refs: Vec<&str> = arts.iter().map(|a| a.reference.as_str()).collect();
+        assert_eq!(arts.len(), 3, "got {refs:?}");
+        assert!(refs.contains(&"https://github.com/foo/bar/pull/42"));
+        assert!(refs.contains(&"http://staging.local:8080/health"));
+        assert!(refs.contains(&"https://docs.example.com/runbooks/deploy"));
+        for a in &arts {
+            assert_eq!(a.kind, "url");
+            assert!(a.summary.is_none());
+        }
+    }
+
+    #[test]
+    fn extract_artifacts_empty_when_no_urls() {
+        let arts = extract_artifacts("just text\nno links here", "stderr too");
+        assert!(arts.is_empty());
+    }
+
+    #[test]
+    fn extract_artifacts_strips_trailing_punctuation() {
+        let arts = extract_artifacts("see https://example.com/x.", "");
+        assert_eq!(arts.len(), 1);
+        assert_eq!(arts[0].reference, "https://example.com/x");
     }
 
     #[test]
