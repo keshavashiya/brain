@@ -5,12 +5,32 @@
 //! signal processing pipeline.
 //!
 //! ## Protocol
-//! 1. `BridgeClient` connects to the configured `url` via WebSocket.
-//! 2. Each inbound text frame must be a JSON-encoded [`BridgeMessage`].
-//! 3. A caller-supplied `handler` function processes the message and returns
-//!    a [`BridgeMessage`] response.
-//! 4. The response is serialised and sent back as a text frame.
-//! 5. On disconnect, the client reconnects with exponential backoff.
+//!
+//! 1. [`BridgeClient`] connects to the configured `url` via WebSocket.
+//! 2. Each inbound text frame is parsed as a JSON-encoded [`BridgeMessage`].
+//!    Unparseable text frames are logged and skipped; the connection stays
+//!    open. Binary frames are silently ignored.
+//! 3. WebSocket `Ping` frames are answered with `Pong` automatically.
+//!    `Close` frames trigger the reconnect loop after the configured
+//!    backoff.
+//! 4. A caller-supplied `handler` is invoked for each parsed message and
+//!    must return a [`BridgeMessage`] response (the response keeps the
+//!    original message's `id` if built via [`BridgeMessage::reply`]).
+//! 5. The response is serialised and sent back as a text frame. Failure
+//!    to send tears down the connection and triggers the reconnect loop;
+//!    serialisation failure logs and drops the response only.
+//! 6. On disconnect, the client waits `initial_backoff_ms * 2^attempt`
+//!    (capped at `max_backoff_ms`) before retrying. With
+//!    [`BridgeConfig::max_reconnect_attempts`] set, the loop returns
+//!    [`BridgeError::MaxRetriesExceeded`] once the cap is reached; with
+//!    `None`, retries continue indefinitely.
+//!
+//! [`BridgeClient::connect_and_relay_bidirectional`] adds an optional
+//! proactive-push channel: each [`BridgeMessage`] received on
+//! `proactive_rx` is serialised and pushed to the gateway alongside the
+//! normal request/response flow. If the broadcast channel lags, lagged
+//! events are logged and dropped; if it closes, the client continues in
+//! relay-only mode.
 //!
 //! ## Usage
 //! ```no_run
@@ -45,11 +65,20 @@ pub enum BridgeError {
 /// Configuration for [`BridgeClient`] reconnection behaviour.
 #[derive(Debug, Clone)]
 pub struct BridgeConfig {
-    /// Initial delay before first retry (milliseconds). Default: 1 000 ms.
+    /// Base delay used to compute backoff (milliseconds). Default: 1 000 ms.
+    /// The actual wait before retry `n` (counting from 0 after the most
+    /// recent successful connection) is
+    /// `min(initial_backoff_ms * 2^n, max_backoff_ms)`.
     pub initial_backoff_ms: u64,
-    /// Maximum delay between retries (milliseconds). Default: 60 000 ms.
+    /// Upper bound on the per-retry backoff delay (milliseconds).
+    /// Default: 60 000 ms.
     pub max_backoff_ms: u64,
-    /// Maximum total reconnection attempts. `None` = reconnect forever.
+    /// Maximum number of *consecutive* failed reconnect attempts before
+    /// the relay loop gives up with [`BridgeError::MaxRetriesExceeded`].
+    /// The counter resets to zero on every successful WebSocket connect,
+    /// so a flaky link can still recover indefinitely as long as it
+    /// occasionally succeeds. `None` (the default) means keep retrying
+    /// forever.
     pub max_reconnect_attempts: Option<u32>,
 }
 
