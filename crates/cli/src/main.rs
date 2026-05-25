@@ -1,6 +1,7 @@
 mod bootstrap;
 mod bridge;
 mod chat;
+mod config;
 mod daemon;
 mod deps;
 mod doctor;
@@ -222,6 +223,19 @@ enum Commands {
         #[command(subcommand)]
         action: vault::VaultAction,
     },
+
+    /// Inspect, validate, and discover the runtime config.
+    ///
+    /// Examples:
+    ///   brain config validate                 # validate the resolved config
+    ///   brain config validate --file new.yaml # dry-run a file before installing
+    ///   brain config show                     # print the resolved effective config
+    ///   brain config show --defaults          # print the embedded default (schema-by-example)
+    ///   brain config path                     # print ~/.brain/config.yaml (BRAIN_CONFIG-aware)
+    Config {
+        #[command(subcommand)]
+        action: config::ConfigAction,
+    },
 }
 
 #[tokio::main]
@@ -317,6 +331,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             bridge::cmd_bridge(&config, &url, api_key.as_deref()).await?
         }
         Commands::Vault { action } => vault::cmd_vault(&config, action).await?,
+        Commands::Config { action } => config::cmd_config(&config, action)?,
         Commands::Tail {
             kind,
             tool_id,

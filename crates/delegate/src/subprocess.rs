@@ -16,8 +16,7 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use crate::traits::{
-    AgentCapabilities, AgentDelegate, AgentError, AgentResult, AgentTask, AgentTaskStatus,
-    Artifact,
+    AgentCapabilities, AgentDelegate, AgentError, AgentResult, AgentTask, AgentTaskStatus, Artifact,
 };
 
 /// How many bytes of stdout/stderr we keep — beyond this we truncate
