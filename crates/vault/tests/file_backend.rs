@@ -209,3 +209,237 @@ async fn audit_never_logs_credential_value() {
     assert!(actions.iter().any(|a| a.contains("vault.get")));
     assert!(actions.iter().any(|a| a.contains("vault.delete")));
 }
+
+/// Storing under an existing (tool, key) overwrites: subsequent `get`
+/// returns the new value, not the original.
+#[tokio::test]
+async fn store_overwrites_existing_entry() {
+    let dir = TempDir::new().unwrap();
+    init(&dir, "pw").await;
+    let vault = make_vault(&dir, "pw");
+
+    vault
+        .store(
+            "github",
+            "token",
+            CredentialValue::new("old".into()),
+            InjectionShape::EnvVar {
+                name: "GH".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+    vault
+        .store(
+            "github",
+            "token",
+            CredentialValue::new("new".into()),
+            InjectionShape::Header {
+                name: "X-Token".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let got = vault.get("github", "token").await.unwrap();
+    assert_eq!(got.value.as_str(), "new");
+    assert!(matches!(got.shape, InjectionShape::Header { ref name } if name == "X-Token"));
+}
+
+#[tokio::test]
+async fn get_missing_key_returns_not_found() {
+    let dir = TempDir::new().unwrap();
+    init(&dir, "pw").await;
+    let vault = make_vault(&dir, "pw");
+    match vault.get("ghost", "nope").await {
+        Err(VaultError::NotFound { tool, key }) => {
+            assert_eq!(tool, "ghost");
+            assert_eq!(key, "nope");
+        }
+        other => panic!("expected NotFound, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn delete_missing_key_returns_not_found() {
+    let dir = TempDir::new().unwrap();
+    init(&dir, "pw").await;
+    let vault = make_vault(&dir, "pw");
+    match vault.delete("ghost", "nope").await {
+        Err(VaultError::NotFound { .. }) => {}
+        other => panic!("expected NotFound, got {other:?}"),
+    }
+}
+
+/// `FileBackend::init` is idempotent: calling twice with the same
+/// passphrase is a no-op. Calling twice with a different passphrase
+/// returns `BadPassphrase` and leaves the original verifier in place.
+#[tokio::test]
+async fn init_is_idempotent_for_matching_passphrase() {
+    use brainos_vault::file::{FileBackend, PassphraseSource};
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().to_path_buf();
+    let b1 = FileBackend::new(path.clone(), PassphraseSource::Direct("pw".into()));
+    b1.init().await.unwrap();
+    // Second init with same passphrase must succeed.
+    let b2 = FileBackend::new(path.clone(), PassphraseSource::Direct("pw".into()));
+    b2.init().await.unwrap();
+
+    // Different passphrase fails fast on verifier.
+    let b3 = FileBackend::new(path, PassphraseSource::Direct("other".into()));
+    match b3.init().await {
+        Err(VaultError::BadPassphrase) => {}
+        other => panic!("expected BadPassphrase on re-init, got {other:?}"),
+    }
+}
+
+/// AES-GCM is authenticated: flipping a byte in the ciphertext is
+/// detectable on read. The vault must surface a `Crypto` (or
+/// `InvalidData` for length corruption) error rather than silently
+/// returning garbage.
+#[tokio::test]
+async fn tampered_blob_fails_to_decrypt() {
+    let dir = TempDir::new().unwrap();
+    init(&dir, "pw").await;
+    let vault = make_vault(&dir, "pw");
+
+    vault
+        .store(
+            "github",
+            "token",
+            CredentialValue::new("valid".into()),
+            InjectionShape::EnvVar { name: "G".into() },
+        )
+        .await
+        .unwrap();
+
+    // Locate and corrupt the .enc blob by flipping the last byte
+    // (inside the GCM tag).
+    let enc = dir.path().join("github").join("token.enc");
+    let mut bytes = std::fs::read(&enc).unwrap();
+    let last = bytes.last_mut().expect("non-empty blob");
+    *last ^= 0x01;
+    std::fs::write(&enc, &bytes).unwrap();
+
+    match vault.get("github", "token").await {
+        Err(VaultError::Crypto(_)) => {}
+        other => panic!("expected Crypto error after tamper, got {other:?}"),
+    }
+}
+
+/// Truncating the blob below the 12-byte nonce length surfaces as
+/// `InvalidData`, not a panic.
+#[tokio::test]
+async fn truncated_blob_returns_invalid_data() {
+    let dir = TempDir::new().unwrap();
+    init(&dir, "pw").await;
+    let vault = make_vault(&dir, "pw");
+    vault
+        .store(
+            "t",
+            "k",
+            CredentialValue::new("v".into()),
+            InjectionShape::EnvVar { name: "X".into() },
+        )
+        .await
+        .unwrap();
+    let enc = dir.path().join("t").join("k.enc");
+    std::fs::write(&enc, [0u8; 4]).unwrap();
+    match vault.get("t", "k").await {
+        Err(VaultError::InvalidData(msg)) => assert!(msg.contains("too short")),
+        other => panic!("expected InvalidData for short blob, got {other:?}"),
+    }
+}
+
+/// Tool/key names with FS-unsafe characters route through `sanitize`
+/// (anything outside `[A-Za-z0-9._-]` becomes `_`). The entry must
+/// still be retrievable using the original unsanitized name, and the
+/// `list` filter must match both the raw and sanitized form.
+#[tokio::test]
+async fn names_with_unsafe_chars_are_sanitized_round_trip() {
+    let dir = TempDir::new().unwrap();
+    init(&dir, "pw").await;
+    let vault = make_vault(&dir, "pw");
+
+    let tool = "git/hub";
+    let key = "tok en";
+    vault
+        .store(
+            tool,
+            key,
+            CredentialValue::new("v".into()),
+            InjectionShape::EnvVar { name: "X".into() },
+        )
+        .await
+        .unwrap();
+
+    let got = vault.get(tool, key).await.unwrap();
+    assert_eq!(got.value.as_str(), "v");
+
+    // On-disk dirname is sanitized.
+    assert!(dir.path().join("git_hub").exists());
+
+    // list(Some(unsanitized)) must still match (the impl tries both).
+    let listed = vault.list(Some(tool)).await.unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].tool, "git_hub");
+}
+
+/// After `get`, the entry's `last_used_at` is populated.
+#[tokio::test]
+async fn last_used_at_populates_after_first_get() {
+    let dir = TempDir::new().unwrap();
+    init(&dir, "pw").await;
+    let vault = make_vault(&dir, "pw");
+    vault
+        .store(
+            "t",
+            "k",
+            CredentialValue::new("v".into()),
+            InjectionShape::EnvVar { name: "X".into() },
+        )
+        .await
+        .unwrap();
+
+    let before = vault.list(Some("t")).await.unwrap();
+    assert_eq!(before.len(), 1);
+    assert!(before[0].last_used_at.is_none());
+
+    vault.get("t", "k").await.unwrap();
+
+    let after = vault.list(Some("t")).await.unwrap();
+    assert_eq!(after.len(), 1);
+    assert!(after[0].last_used_at.is_some(), "{:?}", after[0]);
+}
+
+#[tokio::test]
+async fn list_on_empty_uninitialised_dir_returns_empty() {
+    // No init(), no store — list against an empty dir is `Ok([])`,
+    // not an error. (The init-check only gates store/get/delete.)
+    let dir = TempDir::new().unwrap();
+    let vault = make_vault(&dir, "pw");
+    let listed = vault.list(None).await.unwrap();
+    assert!(listed.is_empty());
+}
+
+/// Non-ASCII / multi-byte values survive the encrypt/decrypt round
+/// trip and the `From<u8>`-style String→bytes path doesn't corrupt them.
+#[tokio::test]
+async fn non_ascii_value_round_trips() {
+    let dir = TempDir::new().unwrap();
+    init(&dir, "pw").await;
+    let vault = make_vault(&dir, "pw");
+    let secret = "café-🔑-Ω";
+    vault
+        .store(
+            "t",
+            "k",
+            CredentialValue::new(secret.to_string()),
+            InjectionShape::EnvVar { name: "X".into() },
+        )
+        .await
+        .unwrap();
+    let got = vault.get("t", "k").await.unwrap();
+    assert_eq!(got.value.as_str(), secret);
+}
