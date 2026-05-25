@@ -20,8 +20,26 @@ fn random_port() -> u16 {
         .port()
 }
 
+/// Poll a TCP port until something accepts a connection (or fail after
+/// `timeout`). Replaces the previous fixed `sleep(150ms)`, which raced
+/// the spawned servers' `bind()` under loaded CI.
+async fn wait_port_ready(port: u16, timeout: std::time::Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("port {port} not ready within {timeout:?}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test]
-#[ignore = "Requires local TCP listener permissions in the runtime environment"]
 async fn test_cross_protocol_memory_parity() {
     let temp = tempfile::tempdir().unwrap();
     let mut config = brain::BrainConfig::default();
@@ -43,7 +61,10 @@ async fn test_cross_protocol_memory_parity() {
     let ws_task = tokio::spawn(wsadapter::serve(processor.clone(), "127.0.0.1", ws_port));
     let mcp_task = tokio::spawn(mcp::serve_http(processor.clone(), "127.0.0.1", mcp_port));
 
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let ready = std::time::Duration::from_secs(5);
+    wait_port_ready(http_port, ready).await;
+    wait_port_ready(ws_port, ready).await;
+    wait_port_ready(mcp_port, ready).await;
 
     let client = reqwest::Client::new();
 
