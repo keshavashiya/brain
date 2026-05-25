@@ -49,9 +49,17 @@ pub struct SignalProcessor {
     importance: amygdala::ImportanceScorer,
     episodic: hippocampus::EpisodicStore,
     semantic: Option<hippocampus::SemanticStore>,
-    embedder: tokio::sync::Mutex<Option<hippocampus::Embedder>>,
+    /// Embedding provider. `Embedder::embed` takes `&self`, so no external
+    /// lock is needed — concurrent embed calls are safe and the HTTP client
+    /// inside the provider already serializes appropriately.
+    embedder: Option<hippocampus::Embedder>,
     /// Actual output dimension of the active embedding provider (probed at startup).
     embedding_dim: usize,
+    /// LRU cache for embedded query/text vectors. Keyed by a fast hash of
+    /// the input text; only successful embeddings are cached (fallback
+    /// vectors are deterministic and skipped to avoid polluting the cache
+    /// during transient provider outages).
+    embedding_cache: std::sync::Mutex<lru::LruCache<u64, std::sync::Arc<Vec<f32>>>>,
     recall_engine: hippocampus::RecallEngine,
     llm: std::sync::Arc<dyn cortex::LlmProvider>,
     context_assembler: cortex::context::ContextAssembler,

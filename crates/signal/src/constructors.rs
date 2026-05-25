@@ -99,14 +99,13 @@ impl SignalProcessor {
             dim = embedding_dim,
             "Embedding provider selected"
         );
-        let embedder_inner = hippocampus::Embedder::from_config(
+        let embedder = hippocampus::Embedder::from_config(
             &embed_provider,
             &config.llm.base_url,
             &config.embedding.model,
             &llm_api_key,
         )
         .map_err(|e| SignalError::Init(format!("Failed to create embedding provider: {e}")))?;
-        let embedder = tokio::sync::Mutex::new(embedder_inner);
 
         // Create semantic store (optional — fails gracefully if RuVector unavailable).
         // Pass the probed embedding_dim so VectorDB is sized to match the provider.
@@ -175,6 +174,9 @@ impl SignalProcessor {
             semantic,
             embedder,
             embedding_dim,
+            embedding_cache: std::sync::Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(256).expect("256 is non-zero"),
+            )),
             recall_engine,
             llm,
             context_assembler: cortex::context::ContextAssembler::with_defaults(),

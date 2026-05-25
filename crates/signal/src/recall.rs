@@ -1,35 +1,62 @@
 //! Recall helpers for SignalProcessor — embedding, BM25 conversion, hybrid recall.
 
 use crate::SignalProcessor;
+use std::hash::{Hash, Hasher};
+
+fn embedding_cache_key(text: &str) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    h.finish()
+}
 
 impl SignalProcessor {
     /// Generate a vector embedding for text.
     ///
     /// Uses whichever provider was selected at startup (Ollama or OpenAI-compatible).
     /// Falls back to a deterministic, non-zero normalized vector if no provider
-    /// is available or if the call fails.
+    /// is available or if the call fails. Successful embeddings flow through
+    /// an LRU cache keyed by text hash so repeated recall/chat queries don't
+    /// re-hit the provider.
     pub(super) async fn embed_text(&self, text: &str) -> Vec<f32> {
         self.metrics.inc_embedding_request();
-        let mut guard = self.embedder.lock().await;
-        match &mut *guard {
+        let key = embedding_cache_key(text);
+        if let Some(cached) = self.embedding_cache.lock().unwrap().get(&key).cloned() {
+            return (*cached).clone();
+        }
+        let (vector, cacheable) = match &self.embedder {
             Some(embedder) => match embedder.embed(text).await {
-                Ok(vec) => {
-                    hippocampus::embedding::sanitize_embedding(vec, self.embedding_dim, text)
-                }
+                Ok(vec) => (
+                    hippocampus::embedding::sanitize_embedding(vec, self.embedding_dim, text),
+                    true,
+                ),
                 Err(e) => {
                     tracing::warn!("Embedding failed, using deterministic fallback vector: {e}");
                     self.metrics.inc_embedding_fallback();
-                    hippocampus::embedding::deterministic_fallback_embedding(
-                        text,
-                        self.embedding_dim,
+                    (
+                        hippocampus::embedding::deterministic_fallback_embedding(
+                            text,
+                            self.embedding_dim,
+                        ),
+                        false,
                     )
                 }
             },
             None => {
                 self.metrics.inc_embedding_fallback();
-                hippocampus::embedding::deterministic_fallback_embedding(text, self.embedding_dim)
+                (
+                    hippocampus::embedding::deterministic_fallback_embedding(
+                        text,
+                        self.embedding_dim,
+                    ),
+                    false,
+                )
             }
+        };
+        if cacheable {
+            let shared = std::sync::Arc::new(vector.clone());
+            self.embedding_cache.lock().unwrap().put(key, shared);
         }
+        vector
     }
 
     /// Convert BM25 search results to Memory objects.
