@@ -236,9 +236,25 @@ pub async fn get_facts_handler(
 
     state.metrics.facts_total.fetch_add(1, Ordering::Relaxed);
     let namespace = params.get("namespace").map(|s| s.as_str());
+    // Default page size protects an unscoped GET from streaming the
+    // whole fact table on a multi-thousand-row store. Callers can pass
+    // `?limit=N&offset=M` (limit capped at 1000) to walk pages, or
+    // `?limit=0` to opt back into the unbounded list.
+    const DEFAULT_LIMIT: usize = 100;
+    const MAX_LIMIT: usize = 1000;
+    let limit_param = params.get("limit").and_then(|s| s.parse::<usize>().ok());
+    let offset = params
+        .get("offset")
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(0);
+    let limit = match limit_param {
+        Some(0) => None,
+        Some(n) => Some(n.min(MAX_LIMIT)),
+        None => Some(DEFAULT_LIMIT),
+    };
     let facts = state
         .processor
-        .list_facts(namespace)
+        .list_facts_paginated(namespace, limit, offset)
         .into_iter()
         .map(|f| FactJson {
             id: f.id,

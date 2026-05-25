@@ -180,9 +180,32 @@ impl SignalProcessor {
     }
 
     /// List all active semantic facts (non-superseded), optionally scoped to a namespace.
+    ///
+    /// **Unbounded.** Kept for callers (memory summary, gRPC `get_facts`)
+    /// that need the full set. New HTTP surface should prefer
+    /// [`list_facts_paginated`] so a multi-thousand-fact store doesn't
+    /// emit a single mega-response.
     pub fn list_facts(&self, namespace: Option<&str>) -> Vec<hippocampus::Fact> {
         if let Some(semantic) = &self.semantic {
             semantic.list_by_namespace(namespace).unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Paginated fact listing. `limit = None` matches the unbounded
+    /// [`list_facts`] behavior; `Some(n)` translates to a SQL
+    /// `LIMIT n OFFSET offset` at the storage layer.
+    pub fn list_facts_paginated(
+        &self,
+        namespace: Option<&str>,
+        limit: Option<usize>,
+        offset: usize,
+    ) -> Vec<hippocampus::Fact> {
+        if let Some(semantic) = &self.semantic {
+            semantic
+                .list_by_namespace_paginated(namespace, limit, offset)
+                .unwrap_or_default()
         } else {
             Vec::new()
         }

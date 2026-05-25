@@ -177,8 +177,25 @@ impl SemanticStore {
         self.list_by_namespace(None)
     }
 
-    /// List all active facts in a specific namespace.
+    /// List all active facts in a namespace. **Unbounded** — kept for
+    /// callers that genuinely need the full set (memory-summary
+    /// inspection). New API surface (HTTP/gRPC) should use
+    /// [`list_by_namespace_paginated`] so a multi-thousand-fact store
+    /// doesn't return a single mega-response.
     pub fn list_by_namespace(&self, namespace: Option<&str>) -> Result<Vec<Fact>, SemanticError> {
+        self.list_by_namespace_paginated(namespace, None, 0)
+    }
+
+    /// Paginated variant of [`list_by_namespace`]. `limit = None` means
+    /// "no LIMIT clause" (matches the legacy unbounded behavior);
+    /// `Some(n)` appends `LIMIT n OFFSET offset`. `offset` is ignored
+    /// when `limit` is `None`.
+    pub fn list_by_namespace_paginated(
+        &self,
+        namespace: Option<&str>,
+        limit: Option<usize>,
+        offset: usize,
+    ) -> Result<Vec<Fact>, SemanticError> {
         let pool = &self.db;
         Ok(self.db.with_conn(|conn| {
             let row_to_raw_fact = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(Fact, String)> {
@@ -205,30 +222,36 @@ impl SemanticStore {
                 Some(fact)
             };
 
+            let limit_clause = match limit {
+                Some(n) => format!(" LIMIT {n} OFFSET {offset}"),
+                None => String::new(),
+            };
             let facts: Vec<Fact> = if let Some(ns) = namespace {
-                let mut stmt = conn.prepare(
+                let sql = format!(
                     "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
                      FROM semantic_facts
                      WHERE superseded_by IS NULL AND (namespace = ?1 OR namespace LIKE ?2)
-                     ORDER BY rowid DESC",
-                )?;
+                     ORDER BY rowid DESC{limit_clause}"
+                );
+                let mut stmt = conn.prepare(&sql)?;
                 let prefix = format!("{ns}/%");
-                let result = stmt
+                let rows: Vec<Fact> = stmt
                     .query_map(rusqlite::params![ns, &prefix], row_to_raw_fact)?
                     .filter_map(decrypt_filter)
                     .collect();
-                result
+                rows
             } else {
-                let mut stmt = conn.prepare(
+                let sql = format!(
                     "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
                      FROM semantic_facts WHERE superseded_by IS NULL
-                     ORDER BY rowid DESC",
-                )?;
-                let result = stmt
+                     ORDER BY rowid DESC{limit_clause}"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows: Vec<Fact> = stmt
                     .query_map([], row_to_raw_fact)?
                     .filter_map(decrypt_filter)
                     .collect();
-                result
+                rows
             };
             Ok(facts)
         })?)
