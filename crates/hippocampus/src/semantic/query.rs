@@ -289,44 +289,41 @@ impl SemanticStore {
     }
 
     /// List all namespaces with their fact and episode counts.
+    ///
+    /// SQLite doesn't have `FULL OUTER JOIN`, so the merge is done with
+    /// a `UNION ALL` of two per-table count queries reaggregated by
+    /// `SUM`. One prepared statement, one round-trip, no Rust-side
+    /// HashMap merge — replaces the previous two-query + merge shape
+    /// that O(namespaces × hash) was paying for at every call.
     pub fn list_namespaces(&self) -> Result<Vec<NamespaceStats>, SemanticError> {
         Ok(self.db.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT namespace, COUNT(*) as fact_count FROM semantic_facts
-                 WHERE superseded_by IS NULL
-                 GROUP BY namespace ORDER BY namespace",
+                "SELECT namespace,
+                        SUM(fact_count)    AS fact_count,
+                        SUM(episode_count) AS episode_count
+                 FROM (
+                     SELECT namespace, COUNT(*) AS fact_count, 0 AS episode_count
+                     FROM semantic_facts
+                     WHERE superseded_by IS NULL
+                     GROUP BY namespace
+                     UNION ALL
+                     SELECT namespace, 0 AS fact_count, COUNT(*) AS episode_count
+                     FROM episodes
+                     GROUP BY namespace
+                 )
+                 GROUP BY namespace
+                 ORDER BY namespace",
             )?;
-            let fact_ns: Vec<(String, i64)> = stmt
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            let rows: Vec<NamespaceStats> = stmt
+                .query_map([], |row| {
+                    Ok(NamespaceStats {
+                        namespace: row.get(0)?,
+                        fact_count: row.get(1)?,
+                        episode_count: row.get(2)?,
+                    })
+                })?
                 .collect::<Result<Vec<_>, _>>()?;
-
-            let mut stmt2 = conn.prepare(
-                "SELECT namespace, COUNT(*) as ep_count FROM episodes
-                 GROUP BY namespace ORDER BY namespace",
-            )?;
-            let ep_ns: Vec<(String, i64)> = stmt2
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-                .collect::<Result<Vec<_>, _>>()?;
-
-            let mut map: std::collections::HashMap<String, (i64, i64)> =
-                std::collections::HashMap::new();
-            for (ns, cnt) in &fact_ns {
-                map.entry(ns.clone()).or_default().0 = *cnt;
-            }
-            for (ns, cnt) in &ep_ns {
-                map.entry(ns.clone()).or_default().1 = *cnt;
-            }
-
-            let mut result: Vec<NamespaceStats> = map
-                .into_iter()
-                .map(|(namespace, (fact_count, episode_count))| NamespaceStats {
-                    namespace,
-                    fact_count,
-                    episode_count,
-                })
-                .collect();
-            result.sort_by(|a, b| a.namespace.cmp(&b.namespace));
-            Ok(result)
+            Ok(rows)
         })?)
     }
 
