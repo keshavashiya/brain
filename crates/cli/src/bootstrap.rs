@@ -687,6 +687,31 @@ fn build_action_dispatcher(
 
 /// Check if a Brain daemon is already running by probing its health endpoint.
 ///
+/// Shared `reqwest::Client` for CLI control-plane calls.
+///
+/// `detect_running_daemon` runs up to four times per `require_daemon`
+/// invocation, and `proxy_mcp_stdio` previously built a second client
+/// for the entire MCP proxy session. Each `Client::builder().build()`
+/// constructs a fresh connection pool — wasteful when we're hitting
+/// the same loopback origin every time.
+///
+/// One process-wide client, no `.timeout()` baked in (per-call
+/// `RequestBuilder::timeout` overrides differ between the
+/// health-check path and the long-lived MCP proxy path).
+fn shared_client() -> Option<&'static reqwest::Client> {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    if let Some(c) = CLIENT.get() {
+        return Some(c);
+    }
+    match reqwest::Client::builder().build() {
+        Ok(c) => Some(CLIENT.get_or_init(|| c)),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build shared reqwest client");
+            None
+        }
+    }
+}
+
 /// Returns the base URL (e.g. `http://127.0.0.1:19789`) if the daemon is alive.
 pub async fn detect_running_daemon(config: &brain::BrainConfig) -> Option<String> {
     let host = &config.adapters.http.host;
@@ -694,12 +719,14 @@ pub async fn detect_running_daemon(config: &brain::BrainConfig) -> Option<String
     let base_url = format!("http://{host}:{port}");
     let health_url = format!("{base_url}/health");
 
-    let client = reqwest::Client::builder()
-        .timeout(brain::timeouts::HEALTH_CHECK)
-        .build()
-        .ok()?;
+    let client = shared_client()?;
 
-    match client.get(&health_url).send().await {
+    match client
+        .get(&health_url)
+        .timeout(brain::timeouts::HEALTH_CHECK)
+        .send()
+        .await
+    {
         Ok(resp) if resp.status().is_success() => {
             tracing::info!(url = %base_url, "Detected running Brain daemon");
             Some(base_url)
@@ -749,9 +776,13 @@ pub async fn require_daemon(config: &brain::BrainConfig) -> anyhow::Result<Strin
 pub async fn proxy_mcp_stdio(mcp_url: &str, config: &brain::BrainConfig) -> anyhow::Result<()> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let client = reqwest::Client::builder()
-        .timeout(brain::timeouts::DAEMON_SETUP)
-        .build()?;
+    let client = shared_client()
+        .ok_or_else(|| anyhow::anyhow!("failed to build shared HTTP client"))?
+        .clone();
+    // Per-request timeout applied at .send() time below — the shared
+    // client itself stays timeout-free so health-check (short) and
+    // MCP-proxy (long) sites can each set their own without
+    // conflicting at the client level.
 
     // Resolve API key for the x-api-key header.
     let api_key = std::env::var("BRAIN_API_KEY").unwrap_or_default();
@@ -788,6 +819,7 @@ pub async fn proxy_mcp_stdio(mcp_url: &str, config: &brain::BrainConfig) -> anyh
             .post(mcp_url)
             .header("Content-Type", "application/json")
             .header("x-api-key", &api_key)
+            .timeout(brain::timeouts::DAEMON_SETUP)
             .body(trimmed.to_string())
             .send()
             .await;
