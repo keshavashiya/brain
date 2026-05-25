@@ -3,20 +3,36 @@
 //! Exposes Brain's signal processing pipeline over HTTP using axum.
 //!
 //! ## Routes
-//! - `GET  /health`             — health check (no auth required)
-//! - `GET  /metrics`            — Prometheus-format counters (no auth required)
-//! - `GET  /ui`                 — embedded memory explorer web UI (no auth required)
-//! - `GET  /openapi.json`       — OpenAPI 3.0 specification (no auth required)
-//! - `GET  /api`                 — Swagger UI (no auth required)
-//! - `POST /v1/signals`         — submit a signal (requires write)
-//! - `GET  /v1/signals/:id`     — retrieve cached signal response (requires read)
-//! - `POST /v1/memory/search`   — semantic search over stored facts (requires read)
-//! - `GET  /v1/memory/facts`    — list all semantic facts (requires read)
-//! - `GET  /v1/events`          — SSE stream of signal events + proactive notifications (requires read)
+//!
+//! Unauthenticated:
+//! - `GET    /`                         — redirect to `/ui`
+//! - `GET    /health`                   — liveness probe
+//! - `GET    /metrics`                  — Prometheus-format counters
+//! - `GET    /ui`                       — embedded memory explorer web UI
+//! - `GET    /openapi.json`             — OpenAPI 3.0 specification
+//! - `GET    /api`                      — Swagger UI
+//!
+//! Authenticated (`Authorization: Bearer <api-key>`):
+//! - `POST   /v1/signals`               — submit a signal *(scope: write)*
+//! - `GET    /v1/signals/:id`           — retrieve cached signal response *(scope: read)*
+//! - `POST   /v1/memory/search`         — semantic search over stored facts *(scope: read)*
+//! - `GET    /v1/memory/facts`          — paginated fact list *(scope: read)*
+//! - `GET    /v1/memory/namespaces`     — list namespaces with counts *(scope: read)*
+//! - `GET    /v1/memory/export`         — full memory export *(scope: export)*
+//! - `POST   /v1/memory/import`         — import facts/episodes *(scope: write)*
+//! - `GET    /v1/schedules`             — list scheduled intents *(scope: read)*
+//! - `DELETE /v1/schedules/:id`         — cancel a scheduled intent *(scope: write)*
+//! - `GET    /v1/events`                — SSE stream of signal/notification/brain events *(scope: read)*
+//! - `POST   /v1/webhooks/:id`          — inbound webhook delivery *(scope: write — or a configured signature verifier in lieu of Bearer auth)*
 //!
 //! ## Authentication
-//! All `/v1/*` routes require `Authorization: Bearer <api-key>` header.
-//! A random key is generated on `brain init` and printed to stdout.
+//!
+//! A random API key is generated on `brain init` and printed to stdout.
+//! Configure additional keys (and their permission scopes) under
+//! `access.api_keys[]` in the config; `admin` is treated as an implicit
+//! superset of every other scope. Webhook endpoints accept a verifier
+//! (HMAC or Ed25519) as an alternative to Bearer auth — see
+//! `adapters.http.webhook_verifiers` in the config.
 
 pub mod auth;
 pub mod handlers;
