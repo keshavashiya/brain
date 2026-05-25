@@ -24,6 +24,13 @@ pub enum ExtractError {
 /// Read the file at `path` as UTF-8 text, dispatching by extension.
 /// Returns up to `cap` bytes of text after extraction (so a 200-page
 /// PDF doesn't blow the LLM context window).
+///
+/// **Blocking.** Uses synchronous `std::fs::read` and (for PDFs) the
+/// CPU-bound `pdf_extract` parser. Callers from async contexts must
+/// wrap this in `tokio::task::spawn_blocking` — all current call sites
+/// (`attachment::build_chat_attachments`, `pipeline::paths::*`,
+/// `pipeline::paths::collect_path_excerpts`) do so at the pipeline
+/// boundary in `pipeline/{conversation,lifecycle}.rs`.
 pub(crate) fn read_path_as_text(path: &Path, cap: usize) -> Result<String, ExtractError> {
     let extension = path
         .extension()

@@ -73,6 +73,10 @@ impl ChatAttachments {
 /// `allowed_paths`, and produce attachments (or skip records). Capped
 /// at [`MAX_CHAT_ATTACHMENTS`]. Order matches the order tokens appear
 /// in the message; dedup is left to `extract_path_tokens`.
+///
+/// **Blocking.** Uses `std::fs::canonicalize` / `metadata` and the
+/// downstream snapshot builders. Async callers wrap this in
+/// `tokio::task::spawn_blocking` (see `pipeline/conversation.rs`).
 pub(crate) fn build_chat_attachments(message: &str, allowed_paths: &[String]) -> ChatAttachments {
     let mut out = ChatAttachments::default();
     for token in extract_path_tokens(message)

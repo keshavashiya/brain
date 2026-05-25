@@ -170,6 +170,11 @@ const NARRATIVE_EXTS: &[&str] = &[
 /// No hunt for anchor filenames, no source-landmark walks, no editorial
 /// framing ("no anchor files found…"). The SOUL prompt decides what
 /// kind of directory this is from what the snapshot shows.
+///
+/// **Blocking.** Uses `std::fs::read_dir` / `metadata`. Async callers
+/// must wrap in `tokio::task::spawn_blocking` — current callers
+/// (`attachment::build_chat_attachments`, `collect_path_excerpts`) are
+/// themselves only invoked from `spawn_blocking` in `pipeline/`.
 pub(crate) fn build_directory_snapshot(root: &std::path::Path) -> String {
     let mut out = String::new();
 
