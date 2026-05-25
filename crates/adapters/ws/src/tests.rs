@@ -24,6 +24,25 @@ fn random_port() -> u16 {
         .port()
 }
 
+/// Poll a TCP port until something accepts a connection (or fail after
+/// `timeout`). Replaces fixed `sleep(100ms)`s that raced the spawned
+/// `serve()` task's `bind()` under loaded CI.
+async fn wait_port_ready(port: u16, timeout: std::time::Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("port {port} not ready within {timeout:?}");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
 #[test]
 fn test_parse_source_defaults_to_websocket() {
     assert_eq!(
@@ -177,7 +196,6 @@ async fn test_process_text_frame_store_fact() {
 }
 
 #[tokio::test]
-#[ignore = "Requires local TCP listener permissions in the runtime environment"]
 async fn test_ws_server_auth_success_and_failure() {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
@@ -190,7 +208,7 @@ async fn test_ws_server_auth_success_and_failure() {
     let port = random_port();
 
     let server_task = tokio::spawn(serve(processor.clone(), "127.0.0.1", port));
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    wait_port_ready(port, std::time::Duration::from_secs(5)).await;
 
     // Valid auth
     let (mut ws_ok, _) = connect_async(format!("ws://127.0.0.1:{port}"))
@@ -224,7 +242,6 @@ async fn test_ws_server_auth_success_and_failure() {
 }
 
 #[tokio::test]
-#[ignore = "Requires local TCP listener permissions in the runtime environment"]
 async fn test_ws_server_multi_client_writes() {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
@@ -237,7 +254,7 @@ async fn test_ws_server_multi_client_writes() {
     let port = random_port();
 
     let server_task = tokio::spawn(serve(processor.clone(), "127.0.0.1", port));
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    wait_port_ready(port, std::time::Duration::from_secs(5)).await;
 
     let mut handles = Vec::new();
     // Use semantically distinct content so embeddings don't trigger the
@@ -295,7 +312,6 @@ async fn test_ws_server_multi_client_writes() {
 /// returns `PipelineResult::Complete` — so it should return a single
 /// `complete` frame (no chunks) since it's not an LLM-driven intent.
 #[tokio::test]
-#[ignore = "Requires local TCP listener permissions in the runtime environment"]
 async fn test_streaming_store_fact_returns_complete_frame() {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
@@ -308,7 +324,7 @@ async fn test_streaming_store_fact_returns_complete_frame() {
     let port = random_port();
 
     let server_task = tokio::spawn(serve(processor.clone(), "127.0.0.1", port));
-    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    wait_port_ready(port, std::time::Duration::from_secs(5)).await;
 
     let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{port}"))
         .await
@@ -333,11 +349,27 @@ async fn test_streaming_store_fact_returns_complete_frame() {
     .await
     .unwrap();
 
-    // Should receive a single `complete` frame (StoreFact is non-LLM)
-    let resp = ws.next().await.unwrap().unwrap();
-    let resp_text = resp.into_text().unwrap().to_string();
-    assert!(resp_text.contains("\"type\":\"complete\""));
-    assert!(resp_text.contains("\"status\":\"Ok\""));
+    // The streaming protocol may emit `status` progress frames before
+    // the terminal frame. StoreFact is non-LLM, so we expect *no*
+    // `chunk` frames — drain until a `complete` arrives and assert it
+    // carries status=Ok.
+    let mut saw_chunk = false;
+    let complete = loop {
+        let resp = ws.next().await.unwrap().unwrap();
+        let resp_text = resp.into_text().unwrap().to_string();
+        if resp_text.contains("\"type\":\"complete\"") {
+            break resp_text;
+        }
+        if resp_text.contains("\"type\":\"chunk\"") {
+            saw_chunk = true;
+        }
+        // status frames are fine — keep draining
+    };
+    assert!(
+        !saw_chunk,
+        "StoreFact is non-LLM and must not produce chunk frames"
+    );
+    assert!(complete.contains("\"status\":\"Ok\""));
 
     server_task.abort();
 }
