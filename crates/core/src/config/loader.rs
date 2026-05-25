@@ -50,14 +50,17 @@ impl BrainConfig {
         // onto providers[0] so `BRAIN_LLM__BASE_URL=...` does what users
         // expect regardless of how the YAML is structured.
         if !cfg.llm.providers.is_empty() {
-            if std::env::var("BRAIN_LLM__BASE_URL").is_ok() {
-                cfg.llm.providers[0].base_url = cfg.llm.base_url.clone();
-            }
-            if std::env::var("BRAIN_LLM__MODEL").is_ok() {
-                cfg.llm.providers[0].model = cfg.llm.model.clone();
-            }
-            if std::env::var("BRAIN_LLM__API_KEY").is_ok() {
-                cfg.llm.providers[0].api_key = cfg.llm.api_key.clone();
+            #[allow(deprecated)]
+            {
+                if std::env::var("BRAIN_LLM__BASE_URL").is_ok() {
+                    cfg.llm.providers[0].base_url = cfg.llm.base_url.clone();
+                }
+                if std::env::var("BRAIN_LLM__MODEL").is_ok() {
+                    cfg.llm.providers[0].model = cfg.llm.model.clone();
+                }
+                if std::env::var("BRAIN_LLM__API_KEY").is_ok() {
+                    cfg.llm.providers[0].api_key = cfg.llm.api_key.clone();
+                }
             }
         }
 
@@ -182,6 +185,7 @@ impl BrainConfig {
             }
         }
 
+        #[allow(deprecated)]
         let url = &self.llm.base_url;
         if !url.starts_with("http://") && !url.starts_with("https://") {
             return Err(format!(

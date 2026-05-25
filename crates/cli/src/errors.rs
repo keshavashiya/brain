@@ -42,6 +42,7 @@ pub fn friendly_error(err: &anyhow::Error) -> String {
 
     if let Some(e) = err.downcast_ref::<SqliteError>() {
         return match e {
+            #[allow(deprecated)]
             SqliteError::LockPoisoned => {
                 "Memory database is locked. Another Brain process may be running — \
                  check `brain status`."

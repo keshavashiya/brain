@@ -35,18 +35,24 @@ pub(crate) async fn show_status(config: &brain::BrainConfig) -> anyhow::Result<(
     let llm_api_key = resolve_llm_api_key(config)?;
     let mut llm_cfg = config.llm.clone();
     if llm_cfg.providers.is_empty() {
-        llm_cfg.api_key = llm_api_key;
+        #[allow(deprecated)]
+        {
+            llm_cfg.api_key = llm_api_key;
+        }
     }
     let resolved_provider = cortex::llm::select_provider(&llm_cfg).await.ok();
-    // Fallback display when no live provider is reachable. `llm.provider`
-    // is #[deprecated] (Issue 40) but still the legitimate single-shape
-    // source when `providers[]` is empty.
+    // Fallback display when no live provider is reachable. The legacy
+    // single-shape `llm.{provider,model}` fields are #[deprecated]
+    // (Issue 40) but still the legitimate source when `providers[]`
+    // is empty.
     #[allow(deprecated)]
     let legacy_provider = config.llm.provider.clone();
+    #[allow(deprecated)]
+    let legacy_model = config.llm.model.clone();
     let (display_model, display_kind) = resolved_provider
         .as_ref()
         .map(|p| (p.model().to_string(), p.name().to_string()))
-        .unwrap_or_else(|| (config.llm.model.clone(), legacy_provider));
+        .unwrap_or((legacy_model, legacy_provider));
     println!("  Cortex LLM:   {} ({})", display_model, display_kind);
     println!(
         "  Sensory:      {} ({}d)",

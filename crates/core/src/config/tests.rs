@@ -146,7 +146,9 @@ fn test_data_dir_paths() {
 fn test_load_from_defaults() {
     let figment = Figment::new().merge(Serialized::defaults(BrainConfig::default()));
     let config: BrainConfig = figment.extract().unwrap();
-    assert_eq!(config.llm.model, "qwen2.5-coder:7b");
+    #[allow(deprecated)]
+    let llm_model = config.llm.model.clone();
+    assert_eq!(llm_model, "qwen2.5-coder:7b");
     assert_eq!(config.memory.search.rrf_k, 60);
     assert_eq!(config.memory.search.pre_fusion_limit, 50);
     assert!((config.memory.search.importance_weight - 0.3).abs() < f64::EPSILON);
@@ -215,7 +217,10 @@ fn test_validate_port_conflict_is_hard_error() {
 #[test]
 fn test_validate_bad_llm_url_is_hard_error() {
     let mut config = validated_config();
-    config.llm.base_url = "ftp://invalid.example.com".to_string();
+    #[allow(deprecated)]
+    {
+        config.llm.base_url = "ftp://invalid.example.com".to_string();
+    }
     let err = config.validate().expect_err("should fail with bad URL");
     assert!(
         err.contains("Invalid LLM base_url"),
@@ -308,10 +313,16 @@ fn test_validate_searxng_no_web_search_warning() {
 #[test]
 fn test_validate_http_and_https_urls_accepted() {
     let mut config = validated_config();
-    config.llm.base_url = "https://api.example.com/v1".to_string();
+    #[allow(deprecated)]
+    {
+        config.llm.base_url = "https://api.example.com/v1".to_string();
+    }
     assert!(config.validate().is_ok());
 
-    config.llm.base_url = "http://localhost:11434".to_string();
+    #[allow(deprecated)]
+    {
+        config.llm.base_url = "http://localhost:11434".to_string();
+    }
     assert!(config.validate().is_ok());
 }
 

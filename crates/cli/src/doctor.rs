@@ -116,6 +116,7 @@ fn ollama_base_for_embedding(config: &BrainConfig) -> Option<String> {
             return Some(base_url);
         }
     }
+    #[allow(deprecated)]
     let legacy = config.llm.base_url.trim();
     if !legacy.is_empty() {
         Some(legacy.to_string())
@@ -130,7 +131,9 @@ pub(crate) async fn check_ollama_models(config: &BrainConfig) {
     println!();
     if config.llm.providers.is_empty() {
         // Legacy single-shape config — same shortcut path as before.
+        #[allow(deprecated)]
         let base = config.llm.base_url.clone();
+        #[allow(deprecated)]
         let llm_model = config.llm.model.clone();
         match list_ollama_models(&base).await {
             Some(installed) => print_model_status("Cortex LLM", &llm_model, &installed),
@@ -231,7 +234,9 @@ pub(crate) async fn cmd_doctor(config: &BrainConfig) -> anyhow::Result<()> {
     // with their bearer token. If `providers[]` is empty, fall back to the
     // legacy single-shape `llm.{base_url,model}` fields against Ollama.
     if config.llm.providers.is_empty() {
+        #[allow(deprecated)]
         let base = config.llm.base_url.clone();
+        #[allow(deprecated)]
         let model = config.llm.model.clone();
         match list_ollama_models(&base).await {
             Some(installed) => {

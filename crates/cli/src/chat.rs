@@ -648,12 +648,17 @@ pub(crate) async fn chat_interactive(config: &brain::BrainConfig) -> anyhow::Res
         let llm_key = resolve_llm_api_key(config)?;
         let mut llm_cfg = config.llm.clone();
         if llm_cfg.providers.is_empty() {
-            llm_cfg.api_key = llm_key;
+            #[allow(deprecated)]
+            {
+                llm_cfg.api_key = llm_key;
+            }
         }
+        #[allow(deprecated)]
+        let fallback_model = config.llm.model.clone();
         cortex::llm::select_provider(&llm_cfg)
             .await
             .map(|p| format!("{} ({})", p.model(), p.name()))
-            .unwrap_or_else(|_| config.llm.model.clone())
+            .unwrap_or(fallback_model)
     };
     println!("  Cortex:  {}", cortex_model);
     println!("  Memory:  {}", config.data_dir().display());

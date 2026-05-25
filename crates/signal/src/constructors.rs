@@ -11,6 +11,7 @@ use crate::SignalProcessor;
 /// (e.g. unset-but-exported in a shell profile) and reported as a clear
 /// init-time failure rather than silently falling back to an empty key.
 fn resolve_llm_api_key(config: &brain::BrainConfig) -> Result<String, SignalError> {
+    #[allow(deprecated)]
     let from_config = config.llm.api_key.trim().to_string();
     if !from_config.is_empty() {
         return Ok(from_config);
@@ -77,7 +78,10 @@ impl SignalProcessor {
         let llm_api_key = resolve_llm_api_key(&config)?;
         let mut llm_cfg = config.llm.clone();
         if llm_cfg.providers.is_empty() {
-            llm_cfg.api_key = llm_api_key.clone();
+            #[allow(deprecated)]
+            {
+                llm_cfg.api_key = llm_api_key.clone();
+            }
         }
         let llm: Arc<dyn cortex::LlmProvider> = Arc::new(
             cortex::llm::build_failover_chain(&llm_cfg)
@@ -93,6 +97,8 @@ impl SignalProcessor {
         let embedding_dim = config.embedding.dimensions as usize;
         #[allow(deprecated)]
         let embed_provider = config.llm.provider.clone();
+        #[allow(deprecated)]
+        let embed_base = config.llm.base_url.clone();
         tracing::info!(
             provider = %embed_provider,
             model = config.embedding.model,
@@ -101,7 +107,7 @@ impl SignalProcessor {
         );
         let embedder = hippocampus::Embedder::from_config(
             &embed_provider,
-            &config.llm.base_url,
+            &embed_base,
             &config.embedding.model,
             &llm_api_key,
         )

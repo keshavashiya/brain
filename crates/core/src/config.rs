@@ -212,12 +212,30 @@ pub struct LlmConfig {
         note = "Set `llm.providers[]` instead. Single-provider mode is still functional but no longer the recommended shape."
     )]
     pub provider: String,
+    /// Legacy single-provider model name. Superseded by per-entry
+    /// `llm.providers[].model` + `preferred_models[]`. Still consulted
+    /// when `providers[]` is empty.
+    #[deprecated(
+        note = "Set `llm.providers[].model` (and optionally `preferred_models`) instead."
+    )]
     pub model: String,
+    /// Legacy single-provider endpoint. Superseded by per-entry
+    /// `llm.providers[].base_url`. Still consulted when `providers[]`
+    /// is empty and by `Embedder::from_config` to pick the embedding
+    /// transport.
+    #[deprecated(
+        note = "Set `llm.providers[].base_url` instead. Embedder transport selection still reads this field as a fallback."
+    )]
     pub base_url: String,
     pub temperature: f64,
     pub max_tokens: u32,
     /// API key for the LLM provider (required for OpenAI, OpenRouter, etc.).
     /// Can also be set via `BRAIN_LLM__API_KEY` environment variable.
+    /// Prefer `api_key_file` (chmod-0600) for secrets that shouldn't live
+    /// in YAML, or move credentials to `llm.providers[].api_key_file`.
+    #[deprecated(
+        note = "Move credentials to `llm.providers[].api_key_file` (or `api_key_file` here) — the YAML field gets backed up and replicated."
+    )]
     #[serde(default)]
     pub api_key: String,
     /// Issue 125: path to a chmod-0600 file holding the API key. Preferred

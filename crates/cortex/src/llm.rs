@@ -441,20 +441,21 @@ fn synthesise_entries(llm: &brain::LlmConfig) -> Vec<brain::ProviderEntry> {
         return llm.providers.clone();
     }
     // Single-provider fallback path — legitimate use of the deprecated
-    // `llm.provider` field (Issue 40). The startup warning fires when
-    // both shapes are set; here `providers[]` is empty so it's the only
-    // way to know which transport to talk to.
+    // legacy `llm.{provider,model,base_url,api_key}` fields (Issue 40).
+    // The startup warning fires when both shapes are set; here
+    // `providers[]` is empty so it's the only way to know which transport
+    // to talk to.
     #[allow(deprecated)]
-    let kind = llm.provider.clone();
-    vec![brain::ProviderEntry {
+    let entry = brain::ProviderEntry {
         name: "default".to_string(),
-        kind,
+        kind: llm.provider.clone(),
         base_url: llm.base_url.clone(),
         api_key: llm.api_key.clone(),
         api_key_file: llm.api_key_file.clone(),
         model: llm.model.clone(),
         preferred_models: Vec::new(),
-    }]
+    };
+    vec![entry]
 }
 
 fn pick_model(preferred: &[String], available: &[String], fallback: &str) -> String {

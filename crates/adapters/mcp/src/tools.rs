@@ -206,10 +206,12 @@ impl McpServer {
         // it here is the deliberate path.
         #[allow(deprecated)]
         let llm_provider = config.llm.provider.clone();
+        #[allow(deprecated)]
+        let llm_model = config.llm.model.clone();
         let profile = json!({
             "llm": {
                 "provider": llm_provider,
-                "model": config.llm.model
+                "model": llm_model
             },
             "embedding": {
                 "model": config.embedding.model,

@@ -526,17 +526,21 @@ fn build_action_dispatcher(
     // #[deprecated] (Issue 40) but load-bearing here until embedder
     // selection learns to read `providers[]`; the explicit read is
     // suppressed at the call site rather than forced through a wrapper.
-    #[allow(deprecated)]
-    let embed_provider = config.llm.provider.clone();
-    let embedder = Arc::new(tokio::sync::Mutex::new(
-        hippocampus::Embedder::from_config(
-            &embed_provider,
-            &config.llm.base_url,
-            &config.embedding.model,
-            &llm_api_key,
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to create embedding provider: {e}"))?,
-    ));
+    let embedder = {
+        #[allow(deprecated)]
+        let embed_provider = config.llm.provider.clone();
+        #[allow(deprecated)]
+        let embed_base = config.llm.base_url.clone();
+        Arc::new(tokio::sync::Mutex::new(
+            hippocampus::Embedder::from_config(
+                &embed_provider,
+                &embed_base,
+                &config.embedding.model,
+                &llm_api_key,
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create embedding provider: {e}"))?,
+        ))
+    };
 
     let action_backend = Arc::new(DefaultMemoryBackend {
         semantic: processor.semantic().cloned(),

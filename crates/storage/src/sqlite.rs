@@ -39,6 +39,9 @@ pub enum SqliteError {
     /// failures; with the r2d2 pool we no longer hold a `Mutex` that
     /// can poison. Treat any inbound `LockPoisoned` as equivalent to
     /// `Pool` for routing decisions.
+    #[deprecated(
+        note = "No longer emitted after the r2d2 pool migration. Match `SqliteError::Pool` instead. Kept so older downstream `match` arms still compile."
+    )]
     #[error("Lock poisoned")]
     LockPoisoned,
 

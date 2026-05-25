@@ -62,6 +62,7 @@ pub(crate) fn resolve_llm_api_key(config: &BrainConfig) -> anyhow::Result<String
         }
         return Ok(trimmed);
     }
+    #[allow(deprecated)]
     let from_config = config.llm.api_key.trim().to_string();
     if !from_config.is_empty() {
         return Ok(from_config);
