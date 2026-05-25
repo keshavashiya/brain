@@ -482,6 +482,199 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_import_export_is_path_scoped_but_store_is_not() {
+        let s = store_with(
+            r#"
+            user_id: k
+            principals:
+              - agent_id: a
+                scopes: [memory.import, memory.export, memory.store]
+                tier: write
+                path_allowlist: [/tmp]
+            "#,
+        );
+        let p = s
+            .principal_for(&AgentHint::AgentId("a".into()))
+            .await
+            .unwrap();
+
+        // memory.import without a path → Deny (path-scoped)
+        let import_no_path = AuthorizationRequest::new("memory", "import");
+        assert!(matches!(
+            s.check(&p, &import_no_path, Tier::Write).await,
+            CheckOutcome::Deny { .. }
+        ));
+
+        // memory.export inside allowlist → Allow
+        let export_ok = AuthorizationRequest::new("memory", "export")
+            .with_modifiers(json!({ "path": "/tmp/out.json" }));
+        assert_eq!(
+            s.check(&p, &export_ok, Tier::Write).await,
+            CheckOutcome::Allow
+        );
+
+        // memory.store is NOT path-scoped — no modifier required.
+        let store_call = AuthorizationRequest::new("memory", "store");
+        assert_eq!(
+            s.check(&p, &store_call, Tier::Write).await,
+            CheckOutcome::Allow
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_exec_without_cwd_is_not_path_scoped() {
+        // The sandbox executor handles the default-cwd case, so
+        // `shell.exec` only path-checks when `cwd` is explicit.
+        let s = store_with(
+            r#"
+            user_id: k
+            principals:
+              - agent_id: a
+                scopes: [shell.exec]
+                tier: execute
+                path_allowlist: [/tmp]
+            "#,
+        );
+        let p = s
+            .principal_for(&AgentHint::AgentId("a".into()))
+            .await
+            .unwrap();
+        let req = AuthorizationRequest::new("shell", "exec");
+        assert_eq!(s.check(&p, &req, Tier::Execute).await, CheckOutcome::Allow);
+    }
+
+    #[tokio::test]
+    async fn path_allowlist_entry_with_trailing_slash_matches() {
+        // `path_is_covered` strips trailing `/` on allowlist entries
+        // so `/tmp/` and `/tmp` behave identically.
+        let s = store_with(
+            r#"
+            user_id: k
+            principals:
+              - agent_id: a
+                scopes: [fs.read]
+                tier: read
+                path_allowlist: ["/tmp/"]
+            "#,
+        );
+        let p = s
+            .principal_for(&AgentHint::AgentId("a".into()))
+            .await
+            .unwrap();
+        let req =
+            AuthorizationRequest::new("fs", "read").with_modifiers(json!({ "path": "/tmp/x" }));
+        assert_eq!(s.check(&p, &req, Tier::Read).await, CheckOutcome::Allow);
+    }
+
+    #[tokio::test]
+    async fn path_exactly_equal_to_allowlist_entry_matches() {
+        // Asking for `/tmp` when `/tmp` is in the allowlist must Allow,
+        // not require a trailing component.
+        let s = store_with(
+            r#"
+            user_id: k
+            principals:
+              - agent_id: a
+                scopes: [fs.read]
+                tier: read
+                path_allowlist: ["/tmp"]
+            "#,
+        );
+        let p = s
+            .principal_for(&AgentHint::AgentId("a".into()))
+            .await
+            .unwrap();
+        let req = AuthorizationRequest::new("fs", "read").with_modifiers(json!({ "path": "/tmp" }));
+        assert_eq!(s.check(&p, &req, Tier::Read).await, CheckOutcome::Allow);
+    }
+
+    #[tokio::test]
+    async fn empty_path_allowlist_denies_all_path_scoped_access() {
+        let s = store_with(
+            r#"
+            user_id: k
+            principals:
+              - agent_id: a
+                scopes: [fs.read]
+                tier: read
+            "#, // no path_allowlist → default empty
+        );
+        let p = s
+            .principal_for(&AgentHint::AgentId("a".into()))
+            .await
+            .unwrap();
+        let req =
+            AuthorizationRequest::new("fs", "read").with_modifiers(json!({ "path": "/tmp/x" }));
+        match s.check(&p, &req, Tier::Read).await {
+            CheckOutcome::Deny { .. } => {}
+            other => panic!("expected Deny for empty allowlist, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn identity_config_default_is_empty() {
+        let cfg = IdentityConfig::default();
+        assert!(cfg.user_id.is_empty());
+        assert!(cfg.principals.is_empty());
+        let store = ConfigIdentityStore::from_config(cfg);
+        assert_eq!(store.user_id(), &UserId(String::new()));
+    }
+
+    #[tokio::test]
+    async fn from_yaml_path_round_trips_principals() {
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(
+            tmp,
+            r#"
+identity:
+  user_id: keshav
+  principals:
+    - agent_id: claude-code
+      scopes: [fs.read, shell.exec]
+      tier: execute
+      path_allowlist: [/tmp]
+"#
+        )
+        .unwrap();
+        let store = ConfigIdentityStore::from_yaml_path(tmp.path()).unwrap();
+        let p = store
+            .principal_for(&AgentHint::AgentId("claude-code".into()))
+            .await
+            .unwrap();
+        assert_eq!(p.user_id, UserId("keshav".into()));
+        assert_eq!(p.tier, Tier::Execute);
+        assert!(p.has_scope("shell", "exec"));
+    }
+
+    #[test]
+    fn from_yaml_path_missing_identity_section_errors() {
+        use std::io::Write;
+        let mut tmp = tempfile::NamedTempFile::new().unwrap();
+        write!(tmp, "brain:\n  data_dir: /tmp\n").unwrap();
+        let result = ConfigIdentityStore::from_yaml_path(tmp.path());
+        match result {
+            Err(IdentityError::Config(msg)) => assert!(msg.contains("identity")),
+            Err(other) => panic!("expected Config error, got {other:?}"),
+            Ok(_) => panic!("expected error, got Ok(store)"),
+        }
+    }
+
+    #[test]
+    fn from_yaml_path_io_error_propagates() {
+        let result = ConfigIdentityStore::from_yaml_path("/nonexistent/path/cfg.yaml");
+        assert!(matches!(result, Err(IdentityError::Io(_))));
+    }
+
+    #[test]
+    fn identity_error_display_strings() {
+        let unk = IdentityError::UnknownAgent("ghost".into());
+        assert!(unk.to_string().contains("ghost"));
+        let cfg = IdentityError::Config("missing".into());
+        assert!(cfg.to_string().contains("missing"));
+    }
+
+    #[tokio::test]
     async fn path_match_does_not_falsely_extend() {
         // "/Users/keshav" allowlist must NOT match "/Users/keshav-evil/foo".
         let s = store_with(
