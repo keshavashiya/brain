@@ -776,3 +776,101 @@ async fn in_memory_dlq_purge_empty_input_is_no_op() {
     assert_eq!(removed, 0);
     assert_eq!(q.len().await.unwrap(), 1);
 }
+
+#[tokio::test]
+async fn in_memory_dlq_is_empty_default_method() {
+    let q = InMemoryDlq::new();
+    assert!(q.is_empty().await.unwrap());
+    q.enqueue(dlq_entry("a", "alpha", 1)).await.unwrap();
+    assert!(!q.is_empty().await.unwrap());
+}
+
+#[test]
+fn dlq_error_display_format() {
+    let e = DlqError::Backend("write failed".into());
+    let s = e.to_string();
+    assert!(s.contains("dlq backend error"));
+    assert!(s.contains("write failed"));
+}
+
+#[test]
+fn loop_detector_error_display_format() {
+    let e = LoopDetectorError::LoopDetected {
+        tool_id: "echo".into(),
+        count: 7,
+        window: 16,
+    };
+    let s = e.to_string();
+    assert!(s.contains("echo"));
+    assert!(s.contains("7"));
+    assert!(s.contains("16"));
+}
+
+#[test]
+fn loop_detector_config_default_matches_documented_shape() {
+    let cfg = LoopDetectorConfig::default();
+    assert_eq!(cfg.window, 16);
+    assert_eq!(cfg.threshold, 4);
+}
+
+// ─── Breaker accessor + registry-surface gap-fill ──────────────────────────
+
+#[tokio::test]
+async fn breaker_exposes_tool_id_and_config() {
+    let cfg = fast_config();
+    let expected_threshold = cfg.failure_threshold;
+    let cb = CircuitBreaker::new("mcp:echo:echo", cfg);
+    assert_eq!(cb.tool_id(), "mcp:echo:echo");
+    assert_eq!(cb.config().failure_threshold, expected_threshold);
+}
+
+/// `record_success` while the breaker is `Open` is a defensive branch:
+/// the caller should have gated on `is_open()` first, but a stray
+/// success still flips the breaker through `HalfOpen` and (with
+/// `half_open_required_successes = 1`) all the way back to `Closed`
+/// rather than swallowing the signal.
+#[tokio::test]
+async fn record_success_while_open_promotes_through_half_open() {
+    let cb = CircuitBreaker::new("t", fast_config());
+    cb.record_failure().await;
+    cb.record_failure().await;
+    assert!(matches!(cb.state().await, BreakerState::Open { .. }));
+    cb.record_success().await;
+    // fast_config sets half_open_required_successes = 1, so a single
+    // probe success collapses Open → HalfOpen → Closed.
+    assert_eq!(cb.state().await, BreakerState::Closed);
+}
+
+#[tokio::test]
+async fn registry_len_and_is_empty_track_creation() {
+    let reg = BreakerRegistry::new(fast_config());
+    assert!(reg.is_empty().await);
+    assert_eq!(reg.len().await, 0);
+
+    reg.get_or_create("a").await;
+    reg.get_or_create("b").await;
+    reg.get_or_create("a").await; // duplicate must not double-count
+
+    assert!(!reg.is_empty().await);
+    assert_eq!(reg.len().await, 2);
+}
+
+#[tokio::test]
+async fn registry_get_returns_none_for_never_minted_tool() {
+    let reg = BreakerRegistry::new(fast_config());
+    assert!(reg.get("ghost").await.is_none());
+    reg.get_or_create("real").await;
+    assert!(reg.get("real").await.is_some());
+    assert!(reg.get("ghost").await.is_none());
+}
+
+/// `BreakerCheck::is_open` for a tool with no recorded outcomes must
+/// answer `false` (closed) without minting a breaker — the registry
+/// reserves minting for the success/failure-recording sites.
+#[tokio::test]
+async fn registry_is_open_for_unknown_tool_does_not_mint() {
+    use intent::BreakerCheck;
+    let reg = BreakerRegistry::new(fast_config());
+    assert!(!reg.is_open("never-seen").await);
+    assert!(reg.is_empty().await, "is_open(unknown) must not mint");
+}
