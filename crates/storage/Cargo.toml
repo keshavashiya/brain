@@ -19,6 +19,8 @@ encryption = ["dep:aes-gcm", "dep:argon2"]
 async-trait = { workspace = true }
 resilience = { workspace = true }
 rusqlite = { workspace = true }
+r2d2 = { workspace = true }
+r2d2_sqlite = { workspace = true }
 aes-gcm = { workspace = true, optional = true }
 argon2 = { workspace = true, optional = true }
 sha2 = { workspace = true }

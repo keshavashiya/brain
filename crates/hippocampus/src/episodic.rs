@@ -398,11 +398,9 @@ impl EpisodicStore {
                     |row| row.get(0),
                 )?
             } else {
-                conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM episodes LIMIT 1)",
-                    [],
-                    |row| row.get(0),
-                )?
+                conn.query_row("SELECT EXISTS(SELECT 1 FROM episodes LIMIT 1)", [], |row| {
+                    row.get(0)
+                })?
             };
             Ok(exists != 0)
         })?)

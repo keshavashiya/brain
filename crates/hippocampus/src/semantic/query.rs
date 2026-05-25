@@ -260,10 +260,7 @@ impl SemanticStore {
     /// Cheap existence probe used by `namespace_is_empty` callers (chat /
     /// recall onboarding hints). Avoids loading + decrypting every fact in
     /// the namespace just to check `.is_empty()`.
-    pub fn has_facts_in_namespace(
-        &self,
-        namespace: Option<&str>,
-    ) -> Result<bool, SemanticError> {
+    pub fn has_facts_in_namespace(&self, namespace: Option<&str>) -> Result<bool, SemanticError> {
         Ok(self.db.with_conn(|conn| {
             let exists: i64 = if let Some(ns) = namespace {
                 let prefix = format!("{ns}/%");
@@ -354,10 +351,7 @@ impl SemanticStore {
     /// fact was already gone). Per-id RuVector failures are logged but
     /// don't fail the call — the deferred re-sync on next startup
     /// reconciles divergence, same as `delete_fact` already does.
-    pub async fn delete_facts_batch(
-        &self,
-        ids: &[&str],
-    ) -> Result<usize, SemanticError> {
+    pub async fn delete_facts_batch(&self, ids: &[&str]) -> Result<usize, SemanticError> {
         if ids.is_empty() {
             return Ok(0);
         }

@@ -7,8 +7,11 @@
 //! - Sessions (conversation grouping)
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+#[cfg(feature = "encryption")]
+use std::sync::Arc;
 
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 use thiserror::Error;
 use tracing::info;
@@ -28,11 +31,25 @@ pub enum SqliteError {
     #[error("SQLite error: {0}")]
     Rusqlite(#[from] rusqlite::Error),
 
+    #[error("connection pool unavailable: {0}")]
+    Pool(String),
+
+    /// Retained for back-compat with downstream `match` arms. New code
+    /// should emit [`SqliteError::Pool`] for connection-acquisition
+    /// failures; with the r2d2 pool we no longer hold a `Mutex` that
+    /// can poison. Treat any inbound `LockPoisoned` as equivalent to
+    /// `Pool` for routing decisions.
     #[error("Lock poisoned")]
     LockPoisoned,
 
     #[error("Migration failed: {0}")]
     Migration(String),
+}
+
+impl From<r2d2::Error> for SqliteError {
+    fn from(e: r2d2::Error) -> Self {
+        SqliteError::Pool(e.to_string())
+    }
 }
 
 /// A semantic fact for export/import operations.
@@ -81,18 +98,43 @@ pub struct Notification {
 
 /// Thread-safe SQLite connection wrapper.
 ///
-/// Uses a `Mutex<Connection>` — sufficient for our single-process,
-/// moderate-write workload. If we ever need concurrent writers,
-/// switch to `r2d2` or WAL mode (already enabled).
+/// Backed by an `r2d2` pool of `rusqlite::Connection`s with WAL mode
+/// enabled, so concurrent reads can proceed in parallel (writes are
+/// still serialized at the SQLite level). Replaces the previous
+/// `Arc<Mutex<Connection>>` shape that funnelled every operation
+/// through a single mutex (Wave F, Issue 68).
 ///
 /// When an `Encryptor` is set, `content` columns are transparently
 /// encrypted on write and decrypted on read by the store layers.
 #[derive(Clone)]
 pub struct SqlitePool {
-    conn: Arc<Mutex<Connection>>,
+    pool: Pool<SqliteConnectionManager>,
     #[cfg(feature = "encryption")]
     encryptor: Option<Arc<Encryptor>>,
 }
+
+/// PRAGMAs applied to every connection the pool hands out for a
+/// file-backed database. `journal_mode = WAL` is the load-bearing one
+/// — that's what lets the pool actually give us concurrent reads.
+const FILE_PRAGMAS: &str = "
+    PRAGMA journal_mode = WAL;
+    PRAGMA synchronous = NORMAL;
+    PRAGMA foreign_keys = ON;
+    PRAGMA busy_timeout = 5000;
+    PRAGMA cache_size = -8000;
+";
+
+/// In-memory variant — no WAL filesystem to worry about, just FK +
+/// foreign-keys consistency.
+const MEMORY_PRAGMAS: &str = "
+    PRAGMA foreign_keys = ON;
+";
+
+/// Pool size for file-backed databases. Enough connections to absorb
+/// burst concurrent reads (WS streaming + reflex + HTTP at the same
+/// time) without bloating memory; SQLite writes still serialize so
+/// over-sizing buys nothing on the write side.
+const FILE_POOL_SIZE: u32 = 8;
 
 /// Persisted scheduling intent (persist-only mode, no internal runtime).
 #[derive(Debug, Clone)]
@@ -121,58 +163,59 @@ impl SqlitePool {
             })?;
         }
 
-        let conn = Connection::open(path)?;
+        let manager = SqliteConnectionManager::file(path)
+            .with_init(|c: &mut Connection| c.execute_batch(FILE_PRAGMAS));
+        let pool = Pool::builder().max_size(FILE_POOL_SIZE).build(manager)?;
 
-        // Performance and safety pragmas — foreign_keys enforced by SQLite.
-        conn.execute_batch(
-            "
-            PRAGMA journal_mode = WAL;
-            PRAGMA synchronous = NORMAL;
-            PRAGMA foreign_keys = ON;
-            PRAGMA busy_timeout = 5000;
-            PRAGMA cache_size = -8000;
-            ",
-        )?;
-
-        let pool = Self {
-            conn: Arc::new(Mutex::new(conn)),
+        let p = Self {
+            pool,
             #[cfg(feature = "encryption")]
             encryptor: None,
         };
 
-        // Run migrations
-        pool.migrate()?;
+        // Run migrations on one borrowed connection — DDL is persisted
+        // to the file so subsequent pool checkouts see the new schema.
+        p.migrate()?;
 
-        info!("SQLite database opened at {}", path.display());
-        Ok(pool)
+        info!(
+            "SQLite database opened at {} (pool size {FILE_POOL_SIZE})",
+            path.display()
+        );
+        Ok(p)
     }
 
     /// Open an in-memory database (for testing).
+    ///
+    /// Pool size is forced to 1 — multiple `Connection::open_in_memory`
+    /// handles each get a *fresh* DB, which would break any test that
+    /// writes from one checkout and reads from another. Single
+    /// connection preserves the legacy single-connection semantics.
     pub fn open_memory() -> Result<Self, SqliteError> {
-        let conn = Connection::open_in_memory()?;
-        conn.execute_batch(
-            "
-            PRAGMA journal_mode = WAL;
-            PRAGMA foreign_keys = ON;
-            ",
-        )?;
+        let manager = SqliteConnectionManager::memory()
+            .with_init(|c: &mut Connection| c.execute_batch(MEMORY_PRAGMAS));
+        let pool = Pool::builder().max_size(1).build(manager)?;
 
-        let pool = Self {
-            conn: Arc::new(Mutex::new(conn)),
+        let p = Self {
+            pool,
             #[cfg(feature = "encryption")]
             encryptor: None,
         };
 
-        pool.migrate()?;
-        Ok(pool)
+        p.migrate()?;
+        Ok(p)
     }
 
-    /// Execute a closure with an exclusive lock on the connection.
+    /// Execute a closure with a connection borrowed from the pool.
+    ///
+    /// The connection returns to the pool when the closure exits.
+    /// Multiple concurrent readers can hold distinct connections at
+    /// the same time; writes still serialize at the SQLite level
+    /// (single-writer is fundamental to SQLite, WAL or not).
     pub fn with_conn<F, T>(&self, f: F) -> Result<T, SqliteError>
     where
         F: FnOnce(&Connection) -> Result<T, SqliteError>,
     {
-        let conn = self.conn.lock().map_err(|_| SqliteError::LockPoisoned)?;
+        let conn = self.pool.get()?;
         f(&conn)
     }
 
