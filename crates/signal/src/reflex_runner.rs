@@ -52,13 +52,28 @@ where
     let handle = tokio::spawn(async move {
         while let Some(event) = stream.next().await {
             let trigger = event.trigger.clone();
+            // Capture the raw reflex payload before the builder consumes
+            // the event so we can publish a `ReflexFired` on the bus
+            // alongside the pipeline dispatch.
+            let payload = event.payload.clone();
+            let event_ts = event.ts;
             let signal = signal_builder(event);
+            let signal_id = signal.id;
             debug!(
                 reflex = %name,
                 trigger = %trigger,
-                signal_id = %signal.id,
+                signal_id = %signal_id,
                 "reflex firing -> pipeline"
             );
+            if let Some(observer) = &processor.observability.observer {
+                let ev = ::observe::BrainEvent::ReflexFired {
+                    id: signal_id,
+                    trigger_id: trigger.clone(),
+                    payload,
+                    ts: event_ts,
+                };
+                let _ = observer.publish(ev).await;
+            }
             if let Err(e) = processor.process(signal).await {
                 warn!(
                     reflex = %name,

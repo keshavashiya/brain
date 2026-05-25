@@ -33,7 +33,6 @@ pub(crate) fn brain_event_ts(ev: &observe::BrainEvent) -> chrono::DateTime<chron
     match ev {
         SignalReceived { ts, .. }
         | IntentClassified { ts, .. }
-        | ReasoningStep { ts, .. }
         | ToolRouteResolved { ts, .. }
         | ConfirmationRequested { ts, .. }
         | ConfirmationResolved { ts, .. }

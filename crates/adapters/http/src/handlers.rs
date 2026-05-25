@@ -490,7 +490,6 @@ fn brain_event_ts(ev: &observe::BrainEvent) -> chrono::DateTime<chrono::Utc> {
     match ev {
         SignalReceived { ts, .. }
         | IntentClassified { ts, .. }
-        | ReasoningStep { ts, .. }
         | ToolRouteResolved { ts, .. }
         | ConfirmationRequested { ts, .. }
         | ConfirmationResolved { ts, .. }

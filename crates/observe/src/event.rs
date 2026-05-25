@@ -22,12 +22,12 @@ pub enum BrainEvent {
         confidence: f32,
         ts: DateTime<Utc>,
     },
-    ReasoningStep {
-        id: Uuid,
-        parent_id: Uuid,
-        text: String,
-        ts: DateTime<Utc>,
-    },
+    /// Reserved for a future dispatch-time emission point. Currently
+    /// not produced by any emitter — kept in the enum so consumers can
+    /// already handle it and so the serde wire shape is fixed before
+    /// the first emitter lands. Wire it from the dispatch layer
+    /// (`pipeline/dispatch.rs`) once route selection is on the
+    /// observability pillar's roadmap.
     ToolRouteResolved {
         id: Uuid,
         route: ToolRouteSummary,
@@ -45,12 +45,17 @@ pub enum BrainEvent {
         decision: String,
         ts: DateTime<Utc>,
     },
+    /// Reserved for future emission from the MCP / capability backends.
+    /// Pairs with [`BrainEvent::ToolCallFinished`] to bracket a single
+    /// tool invocation. Not produced yet — keep matching for forward
+    /// compat.
     ToolCallStarted {
         id: Uuid,
         tool_id: String,
         args_redacted: serde_json::Value,
         ts: DateTime<Utc>,
     },
+    /// See [`BrainEvent::ToolCallStarted`] — reserved, not yet emitted.
     ToolCallFinished {
         id: Uuid,
         tool_id: String,
@@ -73,6 +78,9 @@ pub enum BrainEvent {
         principal: Option<PrincipalSummary>,
         ts: DateTime<Utc>,
     },
+    /// Reserved for emission from the budget enforcement layer when a
+    /// watermark (warn / hard) is crossed. Not yet wired — the budget
+    /// crate currently signals decisions via return values only.
     BudgetCrossed {
         id: Uuid,
         watermark: f32,
@@ -130,7 +138,6 @@ impl BrainEvent {
         match self {
             BrainEvent::SignalReceived { .. } => "signal_received",
             BrainEvent::IntentClassified { .. } => "intent_classified",
-            BrainEvent::ReasoningStep { .. } => "reasoning_step",
             BrainEvent::ToolRouteResolved { .. } => "tool_route_resolved",
             BrainEvent::ConfirmationRequested { .. } => "confirmation_requested",
             BrainEvent::ConfirmationResolved { .. } => "confirmation_resolved",
@@ -152,7 +159,6 @@ impl BrainEvent {
         match self {
             BrainEvent::SignalReceived { id, .. }
             | BrainEvent::IntentClassified { id, .. }
-            | BrainEvent::ReasoningStep { id, .. }
             | BrainEvent::ToolRouteResolved { id, .. }
             | BrainEvent::ConfirmationRequested { id, .. }
             | BrainEvent::ConfirmationResolved { id, .. }
