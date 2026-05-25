@@ -63,15 +63,19 @@ impl SignalProcessor {
             .collect();
 
         let embedding_futures: Vec<_> = texts.iter().map(|t| self.embed_text(t)).collect();
-        let embeddings: Vec<Vec<f32>> = join_all(embedding_futures).await;
+        let mut embeddings: Vec<Vec<f32>> = join_all(embedding_futures).await;
 
-        // Step 2: Insert vectors sequentially (SQLite is single-writer)
+        // Step 2: Insert vectors sequentially (SQLite is single-writer).
+        // Move each embedding out of the buffer via `mem::take` — each
+        // vector is 3-6 KB and we never re-read `embeddings` after the
+        // loop, so the per-iteration `.clone()` was pure waste.
         let mut embedded = 0usize;
         let mut failed = 0usize;
 
         for (i, f) in facts.iter().enumerate() {
+            let vector = std::mem::take(&mut embeddings[i]);
             match semantic
-                .add_vector(&f.id, &texts[i], embeddings[i].clone(), "semantic")
+                .add_vector(&f.id, &texts[i], vector, "semantic")
                 .await
             {
                 Ok(()) => embedded += 1,
@@ -159,14 +163,17 @@ impl SignalProcessor {
             .collect();
 
         let embedding_futures: Vec<_> = texts.iter().map(|t| self.embed_text(t)).collect();
-        let embeddings: Vec<Vec<f32>> = join_all(embedding_futures).await;
+        let mut embeddings: Vec<Vec<f32>> = join_all(embedding_futures).await;
 
-        // Step 2: Store sequentially (SQLite is single-writer)
+        // Step 2: Store sequentially (SQLite is single-writer). Move
+        // each embedding out via `mem::take` rather than cloning — see
+        // `reembed_facts` for the same shape.
         let mut stored = Vec::new();
         let mut errors = Vec::new();
 
         for (i, fact) in facts.iter().enumerate() {
             let importance = self.importance.score(&texts[i]);
+            let vector = std::mem::take(&mut embeddings[i]);
             match semantic
                 .store_fact(
                     namespace,
@@ -176,7 +183,7 @@ impl SignalProcessor {
                     &fact.object,
                     importance as f64,
                     None,
-                    embeddings[i].clone(),
+                    vector,
                     agent,
                 )
                 .await
