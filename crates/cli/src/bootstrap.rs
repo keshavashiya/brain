@@ -464,15 +464,6 @@ async fn build_agent_registry(
     }
 
     for entry in &config.agents.delegates {
-        let capabilities = delegate::AgentCapabilities {
-            tags: entry.tags.clone(),
-            languages: Vec::new(),
-            max_concurrency: 1,
-            needs_network: true,
-        };
-
-        let workdir = entry.workdir.as_ref().map(std::path::PathBuf::from);
-
         match entry.kind.as_str() {
             "subprocess" => {
                 if entry.binary.is_empty() {
@@ -481,17 +472,21 @@ async fn build_agent_registry(
                         entry.name
                     );
                 }
-                let mut sub_cfg = delegate::SubprocessAgentConfig::new(&entry.name, &entry.binary)
-                    .with_args(entry.args.clone())
-                    .with_capabilities(capabilities)
-                    .with_prompt_via_stdin(entry.prompt_via_stdin);
-                if let Some(dir) = workdir {
-                    sub_cfg = sub_cfg.with_workdir(dir);
-                }
-                let binary_path = std::path::PathBuf::from(&entry.binary);
-                let d: Arc<dyn delegate::AgentDelegate> =
-                    Arc::new(delegate::SubprocessAgentDelegate::new(sub_cfg));
-                registry.register_manual(d, binary_path, None);
+                let spec = delegate::CustomAgentSpec {
+                    id: entry.name.clone(),
+                    binary: std::path::PathBuf::from(&entry.binary),
+                    args: entry.args.clone(),
+                    prompt_via_stdin: entry.prompt_via_stdin,
+                    capabilities: delegate::AgentCapabilities {
+                        tags: entry.tags.clone(),
+                        languages: Vec::new(),
+                        max_concurrency: 1,
+                        needs_network: true,
+                    },
+                    workdir: entry.workdir.as_ref().map(std::path::PathBuf::from),
+                    alias: entry.alias.clone(),
+                };
+                registry.register_subprocess_spec(&spec, delegate::AgentSource::Manual);
             }
             other => {
                 tracing::warn!(
@@ -499,12 +494,7 @@ async fn build_agent_registry(
                     name = %entry.name,
                     "Unknown agent kind — skipping (use `subprocess` or rely on auto-discovery)"
                 );
-                continue;
             }
-        }
-
-        if let Some(alias) = &entry.alias {
-            registry.alias(alias.clone(), entry.name.clone());
         }
     }
 

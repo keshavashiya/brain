@@ -40,6 +40,15 @@ pub struct CustomAgentSpec {
     pub prompt_via_stdin: bool,
     #[serde(default)]
     pub capabilities: AgentCapabilities,
+    /// Working directory the delegate cd's into before spawning the child.
+    /// Task-level workdir (set by the orchestrator on the `AgentTask`) wins
+    /// when present; this is the static default for the binary.
+    #[serde(default)]
+    pub workdir: Option<PathBuf>,
+    /// Optional alias registered alongside `id`. Lets one canonical agent
+    /// receive routing under a shorthand name too.
+    #[serde(default)]
+    pub alias: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -136,6 +145,49 @@ impl AgentRegistry {
             },
         );
         self.delegates.insert(name, delegate);
+    }
+
+    /// Build a `SubprocessAgentDelegate` from a [`CustomAgentSpec`] and
+    /// register it under `spec.id` with the given source attribution.
+    /// Returns the binary path so callers can reuse it for status/log
+    /// messages.
+    ///
+    /// This is the canonical entry point for both the YAML
+    /// `agents.delegates[]` flow (source = [`AgentSource::Manual`]) and the
+    /// programmatic [`DelegateOverrides::custom`] flow
+    /// (source = [`AgentSource::Custom`]). Centralising the
+    /// `SubprocessAgentConfig` construction here keeps the two paths from
+    /// drifting — every new field on [`CustomAgentSpec`] is honoured by
+    /// both.
+    pub fn register_subprocess_spec(
+        &mut self,
+        spec: &CustomAgentSpec,
+        source: AgentSource,
+    ) -> PathBuf {
+        let cfg = SubprocessAgentConfig {
+            name: spec.id.clone(),
+            binary: spec.binary.to_string_lossy().into_owned(),
+            args: spec.args.clone(),
+            workdir: spec.workdir.clone(),
+            capabilities: spec.capabilities.clone(),
+            prompt_via_stdin: spec.prompt_via_stdin,
+            version_args: vec!["--version".to_string()],
+        };
+        let delegate: Arc<dyn AgentDelegate> = Arc::new(SubprocessAgentDelegate::new(cfg));
+        let binary = spec.binary.clone();
+        self.agent_status.insert(
+            spec.id.clone(),
+            RegistryAgentStatus::Registered {
+                binary: binary.clone(),
+                version: None,
+                source,
+            },
+        );
+        if let Some(alias) = &spec.alias {
+            self.aliases.insert(alias.clone(), spec.id.clone());
+        }
+        self.delegates.insert(spec.id.clone(), delegate);
+        binary
     }
 
     /// Add an alias: `alias -> canonical_name`. If `canonical_name` isn't
@@ -249,26 +301,7 @@ impl AgentRegistry {
         }
 
         for spec in &overrides.custom {
-            let caps = spec.capabilities.clone();
-            let cfg = SubprocessAgentConfig {
-                name: spec.id.clone(),
-                binary: spec.binary.to_string_lossy().into_owned(),
-                args: spec.args.clone(),
-                workdir: None,
-                capabilities: caps,
-                prompt_via_stdin: spec.prompt_via_stdin,
-                version_args: vec!["--version".to_string()],
-            };
-            let delegate: Arc<dyn AgentDelegate> = Arc::new(SubprocessAgentDelegate::new(cfg));
-            self.agent_status.insert(
-                spec.id.clone(),
-                RegistryAgentStatus::Registered {
-                    binary: spec.binary.clone(),
-                    version: None,
-                    source: AgentSource::Custom,
-                },
-            );
-            self.register(delegate);
+            self.register_subprocess_spec(spec, AgentSource::Custom);
         }
     }
 }
@@ -460,6 +493,8 @@ mod tests {
                 args: vec![],
                 prompt_via_stdin: true,
                 capabilities: AgentCapabilities::default(),
+                workdir: None,
+                alias: None,
             }],
         };
         reg.populate_from_discovery(
@@ -519,6 +554,61 @@ mod tests {
                 assert_eq!(*source, AgentSource::Manual);
                 assert_eq!(binary, &PathBuf::from("/opt/local/bin/hand-wired"));
                 assert_eq!(version.as_deref(), Some("1.2.3"));
+            }
+            other => panic!("expected Registered, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn register_subprocess_spec_honours_alias_and_workdir() {
+        let mut reg = AgentRegistry::new();
+        let spec = CustomAgentSpec {
+            id: "canon".to_string(),
+            binary: PathBuf::from("/usr/local/bin/canon"),
+            args: vec!["--task".to_string(), "{task_id}".to_string()],
+            prompt_via_stdin: false,
+            capabilities: AgentCapabilities {
+                tags: vec!["plan".to_string()],
+                languages: vec!["rust".to_string()],
+                max_concurrency: 3,
+                needs_network: false,
+            },
+            workdir: Some(PathBuf::from("/var/work")),
+            alias: Some("alt".to_string()),
+        };
+
+        let binary = reg.register_subprocess_spec(&spec, AgentSource::Manual);
+        assert_eq!(binary, PathBuf::from("/usr/local/bin/canon"));
+        assert!(reg.contains("canon"), "canonical id must resolve");
+        assert!(
+            reg.contains("alt"),
+            "alias registered inside spec must resolve to the same delegate"
+        );
+        match reg.agent_status("canon") {
+            Some(RegistryAgentStatus::Registered { source, binary, .. }) => {
+                assert_eq!(*source, AgentSource::Manual);
+                assert_eq!(binary, &PathBuf::from("/usr/local/bin/canon"));
+            }
+            other => panic!("expected Registered, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn register_subprocess_spec_can_record_custom_source() {
+        let mut reg = AgentRegistry::new();
+        let spec = CustomAgentSpec {
+            id: "via_overrides".to_string(),
+            binary: PathBuf::from("/opt/x"),
+            args: vec![],
+            prompt_via_stdin: true,
+            capabilities: AgentCapabilities::default(),
+            workdir: None,
+            alias: None,
+        };
+        reg.register_subprocess_spec(&spec, AgentSource::Custom);
+        match reg.agent_status("via_overrides") {
+            Some(RegistryAgentStatus::Registered { source, .. }) => {
+                assert_eq!(*source, AgentSource::Custom);
             }
             other => panic!("expected Registered, got {other:?}"),
         }
