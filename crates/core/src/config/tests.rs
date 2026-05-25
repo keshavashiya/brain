@@ -458,6 +458,56 @@ fn test_channel_config_mixed_format() {
 }
 
 #[test]
+fn agent_discovery_override_parses_capabilities() {
+    let yaml = r#"
+        binary: "/opt/homebrew/bin/claude"
+        args: ["--print", "--task", "{task_id}"]
+        capabilities:
+          tags: ["code-edit", "rust"]
+          languages: ["rust", "typescript"]
+          max_concurrency: 4
+          needs_network: true
+    "#;
+    let ov: AgentDiscoveryOverride =
+        serde_yaml::from_str(yaml).expect("override with capabilities should deserialize");
+    let caps = ov
+        .capabilities
+        .expect("capabilities block should round-trip");
+    assert_eq!(caps.tags, vec!["code-edit".to_string(), "rust".to_string()]);
+    assert_eq!(
+        caps.languages,
+        vec!["rust".to_string(), "typescript".to_string()]
+    );
+    assert_eq!(caps.max_concurrency, 4);
+    assert!(caps.needs_network);
+}
+
+#[test]
+fn agent_discovery_override_capabilities_default_concurrency() {
+    let yaml = r#"
+        capabilities:
+          tags: ["plan"]
+    "#;
+    let ov: AgentDiscoveryOverride = serde_yaml::from_str(yaml).unwrap();
+    let caps = ov.capabilities.unwrap();
+    assert_eq!(caps.max_concurrency, 1, "default concurrency must be 1");
+    assert!(!caps.needs_network);
+    assert!(caps.languages.is_empty());
+}
+
+#[test]
+fn agent_discovery_override_capabilities_omitted_stays_none() {
+    let yaml = r#"
+        binary: "/usr/local/bin/aider"
+    "#;
+    let ov: AgentDiscoveryOverride = serde_yaml::from_str(yaml).unwrap();
+    assert!(
+        ov.capabilities.is_none(),
+        "omitted capabilities must stay None so the fingerprint default wins"
+    );
+}
+
+#[test]
 fn test_validate_channel_empty_url_warning() {
     let mut config = validated_config();
     config.actions.messaging.enabled = true;

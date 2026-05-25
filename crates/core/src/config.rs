@@ -605,6 +605,38 @@ pub struct AgentDiscoveryOverride {
     /// Force stdin vs. argv prompt delivery.
     #[serde(default)]
     pub prompt_via_stdin: Option<bool>,
+    /// Replace the fingerprint's default capability declaration.
+    /// Mirrors the runtime `AgentCapabilities` shape in `brainos-delegate`;
+    /// when set, every listed field is forwarded onto the registry entry
+    /// in place of the discovery default.
+    #[serde(default)]
+    pub capabilities: Option<CapabilitiesOverride>,
+}
+
+/// YAML-side mirror of `brainos_delegate::AgentCapabilities`. Lives here
+/// to keep `brainos-core` free of a `brainos-delegate` dependency
+/// (delegate already depends on us, so the reverse would be a cycle).
+/// The CLI bootstrap layer converts this into the runtime type when
+/// building the registry.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CapabilitiesOverride {
+    /// Free-form capability tags (`"code-edit"`, `"plan"`, `"research"`).
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Preferred languages/frameworks (`"rust"`, `"typescript"`).
+    #[serde(default)]
+    pub languages: Vec<String>,
+    /// Maximum concurrent delegations the orchestrator will dispatch to
+    /// this agent at once. Defaults to 1 (conservative).
+    #[serde(default = "default_capability_concurrency")]
+    pub max_concurrency: u32,
+    /// Whether this delegate needs network — informs sandbox policy.
+    #[serde(default)]
+    pub needs_network: bool,
+}
+
+fn default_capability_concurrency() -> u32 {
+    1
 }
 
 /// One registered delegate. Currently only `kind = "subprocess"` is

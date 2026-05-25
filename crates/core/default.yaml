@@ -215,6 +215,21 @@ agents:
   #   args: ["--task", "{task_id}"]
   #   prompt_via_stdin: true
   #   tags: ["custom"]
+  #
+  # Per-agent overrides for the auto-discovered registry. Keyed by canonical
+  # agent id (`claude_code`, `aider`, `cursor`, …). Every field is optional —
+  # unset ones fall back to the fingerprint default.
+  # discovery_overrides:
+  #   claude_code:
+  #     binary: "/opt/homebrew/bin/claude"          # pin path
+  #     args: ["--print", "--task", "{task_id}"]    # override invocation
+  #     prompt_via_stdin: true
+  #     disabled: false
+  #     capabilities:
+  #       tags: ["code-edit", "plan", "rust"]
+  #       languages: ["rust", "typescript"]
+  #       max_concurrency: 2
+  #       needs_network: true
 
 # ── Access ─────────────────────────────────────────────────────────────────────
 # A random key is generated on `brain init` and printed once to stdout.

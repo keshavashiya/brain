@@ -428,7 +428,14 @@ async fn build_agent_registry(
                     delegate::AgentOverride {
                         binary: ov.binary.as_ref().map(std::path::PathBuf::from),
                         disabled: ov.disabled,
-                        capabilities: None,
+                        capabilities: ov.capabilities.as_ref().map(|c| {
+                            delegate::AgentCapabilities {
+                                tags: c.tags.clone(),
+                                languages: c.languages.clone(),
+                                max_concurrency: c.max_concurrency,
+                                needs_network: c.needs_network,
+                            }
+                        }),
                         args: ov.args.clone(),
                         prompt_via_stdin: ov.prompt_via_stdin,
                     },
