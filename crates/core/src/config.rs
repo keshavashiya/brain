@@ -209,6 +209,13 @@ pub struct LlmConfig {
     /// Can also be set via `BRAIN_LLM__API_KEY` environment variable.
     #[serde(default)]
     pub api_key: String,
+    /// Issue 125: path to a chmod-0600 file holding the API key. Preferred
+    /// over `api_key` because the YAML config typically gets backed up,
+    /// version-controlled, and replicated; a sibling file with restricted
+    /// perms keeps the secret out of those flows. When both are set,
+    /// `api_key_file` wins.
+    #[serde(default)]
+    pub api_key_file: Option<std::path::PathBuf>,
     /// Optional multi-provider entries. When non-empty, startup probes each
     /// entry's `/models` endpoint and selects the first reachable one whose
     /// `preferred_models` are live. When empty, the legacy single-provider
@@ -236,6 +243,10 @@ pub struct ProviderEntry {
     /// Bearer token for OpenAI-compatible providers.
     #[serde(default)]
     pub api_key: String,
+    /// Issue 125: file-backed alternative to `api_key`. When set, the
+    /// trimmed contents of the file are used as the bearer token.
+    #[serde(default)]
+    pub api_key_file: Option<std::path::PathBuf>,
     /// Fallback model used when no `preferred_models` entry is live.
     pub model: String,
     /// Priority-ordered models. The first one present in the live
@@ -684,7 +695,12 @@ pub struct ApiKeyConfig {
     pub key: String,
     /// Human-readable name for this key (for display/audit purposes).
     pub name: String,
-    /// Granted permissions: `"read"` and/or `"write"`.
+    /// Granted permissions. Recognised scopes:
+    /// - `"read"`   — read-only memory + signal/status endpoints
+    /// - `"write"`  — submit signals, store/forget facts (Issue 127: does
+    ///   NOT imply `read`; list both if needed)
+    /// - `"export"` — bulk memory export (Issue 123)
+    /// - `"admin"`  — implicit superset of every other scope (Issue 127)
     pub permissions: Vec<String>,
     /// Agent identity bound to this key. Used by adapters to resolve a
     /// `Principal` from the `identity:` config. Backwards-compatible
@@ -696,7 +712,16 @@ pub struct ApiKeyConfig {
 
 impl ApiKeyConfig {
     /// Returns true if this key grants the requested permission.
+    ///
+    /// Issue 127: the `admin` permission implicitly grants every other
+    /// scope (read, write, export). All other scopes are exact match —
+    /// `write` does **not** imply `read`, so historically a key with
+    /// `["write"]` could not call read endpoints, and that contract is
+    /// preserved.
     pub fn has_permission(&self, perm: &str) -> bool {
+        if self.permissions.iter().any(|p| p == "admin") {
+            return true;
+        }
         self.permissions.iter().any(|p| p == perm)
     }
 }
@@ -714,9 +739,10 @@ pub struct AccessConfig {
 }
 
 impl AccessConfig {
-    /// Find a key entry by its raw key string.
+    /// Find a key entry by its raw key string. Delegates to the constant-
+    /// time helper in `auth` (Issue 62).
     pub fn find_key(&self, key: &str) -> Option<&ApiKeyConfig> {
-        self.api_keys.iter().find(|k| k.key == key)
+        crate::auth::find_key_ct(&self.api_keys, key)
     }
 }
 

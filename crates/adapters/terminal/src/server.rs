@@ -173,10 +173,7 @@ impl TerminalSvc {
         };
         let key =
             api_key_from_metadata(req).ok_or_else(|| Status::unauthenticated("missing api-key"))?;
-        let agent_id = auth
-            .api_keys
-            .iter()
-            .find(|k| k.key == key)
+        let agent_id = brain::auth::find_key_ct(&auth.api_keys, &key)
             .and_then(|k| k.agent_id.clone())
             .ok_or_else(|| Status::unauthenticated("unknown api-key"))?;
         let principal = auth

@@ -28,11 +28,8 @@ pub async fn resolve_principal(
     headers: &HeaderMap,
 ) -> Option<identity::Principal> {
     let key = extract_bearer(headers)?;
-    let agent_id = state
-        .api_keys
-        .iter()
-        .find(|k| k.key == key)
-        .and_then(|k| k.agent_id.clone())?;
+    let agent_id =
+        brain::auth::find_key_ct(&state.api_keys, key).and_then(|k| k.agent_id.clone())?;
     let store = state.processor.identity_store()?;
     store
         .principal_for(&identity::AgentHint::AgentId(agent_id.into()))

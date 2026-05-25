@@ -9,7 +9,7 @@
 //! ```
 //!
 //! Encryption: AES-256-GCM with 96-bit random nonce per write. Key derived
-//! from passphrase via Argon2id (19 MiB, t=2, p=1) using a per-vault salt
+//! from passphrase via Argon2id (46 MiB, t=1, p=1) using a per-vault salt
 //! stored alongside the verifier.
 
 use std::path::{Path, PathBuf};
@@ -23,6 +23,7 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
+use zeroize::Zeroizing;
 
 use crate::inject::{CredentialMetadata, CredentialValue, InjectedCredential, InjectionShape};
 use crate::vault::VaultError;
@@ -32,10 +33,14 @@ const KEY_LEN: usize = 32;
 const VERIFIER_FILE: &str = ".verifier";
 const SALT_FILE: &str = ".salt";
 
-/// Argon2id parameters — conservative, single-user desktop.
-/// 19 MiB memory, t=2 iterations, parallelism=1.
+/// Argon2id parameters — OWASP 2024 minimum recommendation for password
+/// hashing on commodity hardware (Issue 60). 46 MiB memory, t=1
+/// iteration, parallelism=1. Bumped from the v0.4.0 value
+/// (19 MiB, t=2, p=1) which was still inside OWASP's older range but
+/// now sits below the 2024 floor. Higher memory raises GPU/ASIC cost
+/// disproportionately to CPU cost on the legitimate single-user path.
 fn argon2_params() -> Params {
-    Params::new(19 * 1024, 2, 1, Some(KEY_LEN)).expect("valid argon2 params")
+    Params::new(46 * 1024, 1, 1, Some(KEY_LEN)).expect("valid argon2 params")
 }
 
 /// Source of the fallback passphrase.
@@ -89,7 +94,8 @@ impl FileBackend {
         let verifier_path = self.dir.join(VERIFIER_FILE);
         let salt_path = self.dir.join(SALT_FILE);
 
-        let passphrase = self.passphrase.resolve()?;
+        // Issue 61: zeroize on drop.
+        let passphrase = Zeroizing::new(self.passphrase.resolve()?);
 
         if verifier_path.exists() {
             // Verify the supplied passphrase matches the stored verifier.
@@ -121,7 +127,9 @@ impl FileBackend {
     }
 
     /// Ensure verifier exists; returns `BadPassphrase` if it doesn't match.
-    async fn require_verified(&self) -> Result<String, VaultError> {
+    /// Issue 61: the resolved passphrase is wrapped in `Zeroizing` so it
+    /// is scrubbed from memory when the binding drops.
+    async fn require_verified(&self) -> Result<Zeroizing<String>, VaultError> {
         let verifier_path = self.dir.join(VERIFIER_FILE);
         if !verifier_path.exists() {
             return Err(VaultError::BackendUnavailable(format!(
@@ -129,7 +137,7 @@ impl FileBackend {
                 self.dir.display()
             )));
         }
-        let passphrase = self.passphrase.resolve()?;
+        let passphrase = Zeroizing::new(self.passphrase.resolve()?);
         let hash_str = fs::read_to_string(&verifier_path).await?;
         let parsed = PasswordHash::new(&hash_str)
             .map_err(|e| VaultError::InvalidData(format!("verifier parse: {e}")))?;
@@ -139,13 +147,16 @@ impl FileBackend {
         Ok(passphrase)
     }
 
-    async fn derive_key(&self, passphrase: &str) -> Result<[u8; KEY_LEN], VaultError> {
+    /// Issue 61: derived key is wrapped in `Zeroizing` so its bytes are
+    /// scrubbed from RAM when the value is dropped. Callers should keep
+    /// the returned binding scoped tightly around the AES-GCM call.
+    async fn derive_key(&self, passphrase: &str) -> Result<Zeroizing<[u8; KEY_LEN]>, VaultError> {
         let salt_path = self.dir.join(SALT_FILE);
         let salt = fs::read(&salt_path).await?;
-        let mut key = [0u8; KEY_LEN];
+        let mut key = Zeroizing::new([0u8; KEY_LEN]);
         let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, argon2_params());
         argon
-            .hash_password_into(passphrase.as_bytes(), &salt, &mut key)
+            .hash_password_into(passphrase.as_bytes(), &salt, key.as_mut())
             .map_err(|e| VaultError::Crypto(format!("derive: {e}")))?;
         Ok(key)
     }
@@ -168,7 +179,7 @@ impl FileBackend {
     ) -> Result<(), VaultError> {
         let passphrase = self.require_verified().await?;
         let derived = self.derive_key(&passphrase).await?;
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&derived));
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(derived.as_slice()));
 
         let mut nonce_bytes = [0u8; NONCE_LEN];
         OsRng.fill_bytes(&mut nonce_bytes);
@@ -201,7 +212,7 @@ impl FileBackend {
     pub async fn get(&self, tool: &str, key: &str) -> Result<InjectedCredential, VaultError> {
         let passphrase = self.require_verified().await?;
         let derived = self.derive_key(&passphrase).await?;
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&derived));
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(derived.as_slice()));
 
         let (enc_path, meta_path) = self.entry_paths(tool, key);
         if !enc_path.exists() {

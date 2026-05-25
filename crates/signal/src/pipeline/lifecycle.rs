@@ -21,9 +21,14 @@ use crate::SignalProcessor;
 impl LifecycleAuth for SignalProcessor {
     fn auth_lifecycle(intent: &thalamus::Intent) -> Option<(AuthorizationRequest, Tier)> {
         match intent {
-            thalamus::Intent::Schedule { .. } => {
-                Some((AuthorizationRequest::new("schedule", "create"), Tier::Write))
-            }
+            // Issue 126: creating a schedule kicks off recurring actions
+            // that the user may not be present for at fire time. Elevate to
+            // Destructive so approval is required up-front and the lifecycle
+            // engine treats it the same way it treats irreversible writes.
+            thalamus::Intent::Schedule { .. } => Some((
+                AuthorizationRequest::new("schedule", "create"),
+                Tier::Destructive,
+            )),
             thalamus::Intent::CancelSchedule { .. } => {
                 Some((AuthorizationRequest::new("schedule", "cancel"), Tier::Write))
             }
@@ -51,7 +56,12 @@ impl LifecycleAuth for SignalProcessor {
             )),
             // MCP host control: mounting any server is External (HTTP transports
             // egress, stdio transports load untrusted tool descriptions into the
-            // planning context). Unmount drops state and is a Write.
+            // planning context). Both Destructive and External tiers route
+            // through the confirmation engine, so this satisfies Issue 120's
+            // "MCP mount requires human approval" — External is the
+            // semantically tighter classification (machine-leaving capability
+            // grant) so we keep it rather than downgrading to Destructive.
+            // Unmount drops state and is a Write.
             thalamus::Intent::MountMcpServer {
                 name,
                 transport,

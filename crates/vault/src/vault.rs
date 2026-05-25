@@ -23,7 +23,7 @@ pub enum VaultError {
     #[error("bad passphrase — verifier check failed")]
     BadPassphrase,
 
-    #[error("passphrase required but no source available (env BRAIN_VAULT_PASSPHRASE, passphrase_file, or TTY)")]
+    #[error("passphrase required but no source available (passphrase_file or TTY)")]
     PassphraseMissing,
 
     #[error("encryption/decryption failed: {0}")]
@@ -51,9 +51,13 @@ pub struct VaultConfig {
     #[serde(default)]
     pub dir: Option<PathBuf>,
 
-    /// Path to a file containing the fallback passphrase. Ignored if the env
-    /// var `BRAIN_VAULT_PASSPHRASE` is set. If neither is provided and the
-    /// file backend is active, the caller prompts on the TTY.
+    /// Path to a file containing the fallback passphrase. When unset and
+    /// the file backend is active, the caller prompts on the TTY.
+    ///
+    /// Issue 132: the env-var path (`BRAIN_VAULT_PASSPHRASE`) was removed
+    /// as a source — env vars leak via `/proc/<pid>/environ`, shell
+    /// histories, and `ps -e` on some systems. If the env var is set,
+    /// vault startup logs a warning and ignores it.
     #[serde(default)]
     pub passphrase_file: Option<PathBuf>,
 }
@@ -243,8 +247,16 @@ fn resolve_vault_dir(config: &VaultConfig) -> Result<PathBuf, VaultError> {
 }
 
 fn resolve_passphrase(config: &VaultConfig) -> PassphraseSource {
-    if std::env::var("BRAIN_VAULT_PASSPHRASE").is_ok() {
-        return PassphraseSource::EnvVar("BRAIN_VAULT_PASSPHRASE".to_string());
+    // Issue 132: env var is no longer a recognised source. Warn loudly
+    // if it's set so the operator notices and moves the secret to a
+    // passphrase_file or the interactive TTY prompt.
+    if std::env::var_os("BRAIN_VAULT_PASSPHRASE").is_some() {
+        tracing::warn!(
+            "BRAIN_VAULT_PASSPHRASE is set but ignored — env vars leak via \
+             /proc/<pid>/environ, shell history, and `ps -e`. Move the \
+             passphrase to a file (config: vault.passphrase_file) or unset \
+             the variable to take the TTY prompt path."
+        );
     }
     if let Some(path) = &config.passphrase_file {
         return PassphraseSource::File(path.clone());

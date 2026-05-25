@@ -276,12 +276,16 @@ pub async fn get_namespaces_handler(
     Ok(Json(namespaces))
 }
 
-/// GET /v1/memory/export — requires read permission
+/// GET /v1/memory/export — requires `export` permission (Issue 123).
+///
+/// Bulk export is gated behind its own scope so a daily `read` key can't
+/// be used to exfil the entire memory store. Mint an API key with
+/// `permissions: ["export"]` (or `["admin"]`) to call this endpoint.
 pub async fn export_memory_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<ExportJson>, (StatusCode, String)> {
-    auth::check_auth(&state, &headers, "read")?;
+    auth::check_auth(&state, &headers, "export")?;
 
     let facts = state.processor.export_facts().map_err(|e| {
         (

@@ -80,10 +80,7 @@ pub(crate) async fn resolve_principal_from_metadata<T>(
                     .and_then(|s| brain::auth::extract_bearer_from_value(s).or(Some(s)))
             })
         })?;
-    let agent_id = api_keys
-        .iter()
-        .find(|k| k.key == key)
-        .and_then(|k| k.agent_id.clone())?;
+    let agent_id = brain::auth::find_key_ct(api_keys, key).and_then(|k| k.agent_id.clone())?;
     let store = processor.identity_store()?;
     store
         .principal_for(&identity::AgentHint::AgentId(agent_id.into()))

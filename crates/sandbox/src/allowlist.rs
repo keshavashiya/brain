@@ -163,7 +163,14 @@ pub trait SandboxExecutor: Send + Sync {
 }
 
 /// Stub sandbox executor. Runs commands directly with no isolation —
-/// same privileges as daemon. Clearly labeled as un-sandboxed.
+/// same privileges as daemon. Test-only.
+///
+/// Issue 124: production wiring already routes
+/// `Action::ExecuteCommand` through `IsolatedSandbox`; this stub exists
+/// solely for unit tests that need a `SandboxExecutor` without paying
+/// the cost of rlimits / namespace setup. Each construction emits a
+/// runtime warning so the surface stays visible — if you see this in
+/// non-test logs, that's a wiring bug, not the intended path.
 pub struct StubSandbox {
     allowed_paths: HashSet<PathBuf>,
     forbidden_commands: HashSet<String>,
@@ -183,7 +190,13 @@ impl Default for StubSandbox {
 }
 
 impl StubSandbox {
+    /// Construct a stub sandbox. Logs a warning so accidental production
+    /// use shows up immediately in tracing output (Issue 124).
     pub fn new() -> Self {
+        tracing::warn!(
+            "StubSandbox constructed — no isolation. This is intended for tests only; \
+             production wiring must use IsolatedSandbox."
+        );
         Self::default()
     }
 

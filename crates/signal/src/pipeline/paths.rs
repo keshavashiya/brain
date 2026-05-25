@@ -44,22 +44,71 @@ pub(crate) fn path_under_any_root(
         .any(|root| candidate == root.as_path() || candidate.starts_with(root))
 }
 
-/// Expand a leading `~` to the user's home directory. Anything else is
-/// returned as-is — the caller resolves relative paths against cwd.
+/// Expand a leading `~` to the user's home directory and lexically
+/// normalise the result so `..` and `.` segments cannot smuggle the path
+/// out of an `allowed_paths` root (Issue 129).
+///
+/// Lexical (not filesystem) normalisation is intentional: the caller's
+/// allow-list check runs on the textual prefix and is happy to accept a
+/// path that does not yet exist, so we cannot rely on `canonicalize`
+/// (which would also follow symlinks at probe time — a different
+/// hazard). Comparison-shape only:
+///   * `~/foo/../bar`     → `<HOME>/bar`
+///   * `~/./foo`          → `<HOME>/foo`
+///   * `/a//b/./c/../d`   → `/a/b/d`
+///
+/// Anything without a `~` prefix is normalised in place but otherwise
+/// returned as-is so the caller can still resolve relative segments
+/// against cwd.
 pub(crate) fn expand_user_path(p: &str) -> String {
-    if let Some(rest) = p.strip_prefix("~/") {
+    let raw = if let Some(rest) = p.strip_prefix("~/") {
         if let Some(home) = std::env::var_os("HOME") {
             let mut out = std::path::PathBuf::from(home);
             out.push(rest);
-            return out.to_string_lossy().into_owned();
+            out
+        } else {
+            std::path::PathBuf::from(p)
         }
-    }
-    if p == "~" {
+    } else if p == "~" {
         if let Some(home) = std::env::var_os("HOME") {
-            return home.to_string_lossy().into_owned();
+            std::path::PathBuf::from(home)
+        } else {
+            std::path::PathBuf::from(p)
+        }
+    } else {
+        std::path::PathBuf::from(p)
+    };
+    lexical_normalize(&raw).to_string_lossy().into_owned()
+}
+
+/// Lexically collapse `.` and `..` segments without touching the
+/// filesystem. Absolute paths can never escape the root via this rule
+/// (a `..` at the root pops to itself); relative paths whose `..`
+/// segments outnumber the prior components turn into a bare relative
+/// rump that the caller's cwd join will still detect.
+fn lexical_normalize(p: &std::path::Path) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
+    let mut out = PathBuf::new();
+    for component in p.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                let popped = out.pop();
+                if !popped {
+                    // Preserve relative-path-with-leading-`..` so the
+                    // caller can still notice and reject it; absolute
+                    // paths reach `Component::RootDir` first and never
+                    // hit this branch with an empty `out`.
+                    out.push(Component::ParentDir);
+                }
+            }
+            other => out.push(other.as_os_str()),
         }
     }
-    p.to_string()
+    if out.as_os_str().is_empty() {
+        out.push(".");
+    }
+    out
 }
 
 /// Map an io::Error to a one-liner the user can act on. Avoids exposing
@@ -348,11 +397,27 @@ fn is_pathlike(s: &str) -> bool {
     s.starts_with(".github/") || s.starts_with(".vscode/") || s.starts_with(".cargo/")
 }
 
-/// Read short excerpts for every path token mentioned in `request`.
-/// Each entry becomes one `relevant_facts` line on the decomposer's
-/// prompt. Failures (missing path, unreadable, binary) are silently
-/// dropped — we don't want a prompt full of "(read failed: ...)".
-pub(crate) fn collect_path_excerpts(request: &str) -> Vec<String> {
+/// Issue 130: decompose no longer extracts path tokens from free user
+/// text. The previous behavior scanned `request` for anything that looked
+/// like a path (`/etc/passwd`, `~/.ssh/id_rsa`, `crates/foo/Cargo.toml`,
+/// …), read the file, and inlined the contents into the decomposer's
+/// `relevant_facts`. That gave any caller (or any text the LLM later
+/// fed back) a primitive for arbitrary local-file exfiltration over the
+/// reply channel.
+///
+/// The function is kept (call sites in lifecycle.rs remain) but returns
+/// empty. Users who want file contents in their decompose context must
+/// use the explicit `attach <path>` flow, which goes through the
+/// `allowed_paths` gate.
+#[allow(dead_code, unused_imports)]
+pub(crate) fn collect_path_excerpts(_request: &str) -> Vec<String> {
+    Vec::new()
+}
+
+/// Old free-text scanner kept private for tests / `attach` callers. NOT
+/// called from decompose anymore (Issue 130).
+#[allow(dead_code)]
+fn collect_path_excerpts_legacy(request: &str) -> Vec<String> {
     let cwd = std::env::current_dir().ok();
     extract_path_tokens(request)
         .into_iter()
@@ -648,14 +713,20 @@ mod path_extraction_tests {
     }
 
     #[test]
-    fn collect_excerpts_returns_real_file_content() {
+    fn collect_excerpts_returns_empty_after_issue_130() {
+        // Issue 130: decompose no longer pulls file content from free-text
+        // path tokens, even when the file exists, to remove the prompt-
+        // injection / data-exfil primitive. Explicit attach is the
+        // sanctioned path.
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("snippet.txt");
         std::fs::write(&path, "hello world").expect("write");
         let request = format!("look at {} please", path.display());
         let excerpts = collect_path_excerpts(&request);
-        assert_eq!(excerpts.len(), 1);
-        assert!(excerpts[0].contains("hello world"));
+        assert!(
+            excerpts.is_empty(),
+            "decompose must not inline file content from free text — got {excerpts:?}"
+        );
     }
 
     #[test]

@@ -36,10 +36,32 @@ pub(crate) fn write_salt(config: &BrainConfig, salt: &[u8; 16]) -> anyhow::Resul
 
 /// Resolve the LLM API key from config, with env var fallback for backwards compatibility.
 ///
+/// Resolution order (Issue 125):
+/// 1. `llm.api_key_file` — read trimmed contents of a chmod-0600 file.
+///    Preferred over inline `api_key` so secrets stay out of the YAML.
+/// 2. `llm.api_key` — inline string in config.
+/// 3. `BRAIN_LLM__API_KEY` env var (back-compat).
+///
 /// An empty/whitespace-only `BRAIN_LLM__API_KEY` is treated as a user error
 /// (e.g. unset-but-exported in a shell profile) and reported up the stack
 /// rather than silently producing an empty key the LLM call will reject.
 pub(crate) fn resolve_llm_api_key(config: &BrainConfig) -> anyhow::Result<String> {
+    if let Some(path) = &config.llm.api_key_file {
+        let raw = std::fs::read_to_string(path).map_err(|e| {
+            anyhow::anyhow!(
+                "llm.api_key_file at {} could not be read: {e}",
+                path.display()
+            )
+        })?;
+        let trimmed = raw.trim().to_string();
+        if trimmed.is_empty() {
+            anyhow::bail!(
+                "llm.api_key_file at {} is empty — remove the field or write a real key",
+                path.display()
+            );
+        }
+        return Ok(trimmed);
+    }
     let from_config = config.llm.api_key.trim().to_string();
     if !from_config.is_empty() {
         return Ok(from_config);

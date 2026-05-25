@@ -39,7 +39,10 @@ pub async fn serve_stdio(processor: signal::SignalProcessor) -> anyhow::Result<(
 
     let session_authed = match std::env::var("BRAIN_API_KEY") {
         Ok(env_key) if !env_key.is_empty() => {
-            let valid = api_keys.is_empty() || api_keys.iter().any(|k| k.key == env_key);
+            // Issue 62: constant-time lookup; empty configured-list still
+            // accepts (back-compat with no-auth dev mode).
+            let valid =
+                api_keys.is_empty() || brain::auth::find_key_ct(&api_keys, &env_key).is_some();
             if !valid {
                 anyhow::bail!(
                     "BRAIN_API_KEY does not match any configured API key. \

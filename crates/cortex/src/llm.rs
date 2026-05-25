@@ -244,14 +244,45 @@ fn provider_config_from_entry(
     max_tokens: i32,
     model_override: Option<&str>,
 ) -> ProviderConfig {
-    let api_key = entry.api_key.trim();
+    // Issue 125: `api_key_file` wins over the inline `api_key`. A file
+    // read failure here downgrades to `None` rather than failing the
+    // whole select_provider — the provider call will surface the missing
+    // key with a clearer message, and we don't want a typo in one entry
+    // to disable an unrelated working entry below it.
+    let api_key = match entry.api_key_file.as_ref() {
+        Some(path) => match std::fs::read_to_string(path) {
+            Ok(raw) => {
+                let trimmed = raw.trim().to_string();
+                if trimmed.is_empty() {
+                    tracing::warn!(
+                        provider = %entry.name,
+                        path = %path.display(),
+                        "llm.providers[].api_key_file is empty; falling back to inline api_key"
+                    );
+                    entry.api_key.trim().to_string()
+                } else {
+                    trimmed
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    provider = %entry.name,
+                    path = %path.display(),
+                    error = %e,
+                    "llm.providers[].api_key_file unreadable; falling back to inline api_key"
+                );
+                entry.api_key.trim().to_string()
+            }
+        },
+        None => entry.api_key.trim().to_string(),
+    };
     ProviderConfig {
         provider: entry.kind.clone(),
         base_url: entry.base_url.clone(),
         api_key: if api_key.is_empty() {
             None
         } else {
-            Some(api_key.to_string())
+            Some(api_key)
         },
         model: model_override.unwrap_or(&entry.model).to_string(),
         temperature,
@@ -420,6 +451,7 @@ fn synthesise_entries(llm: &brain::LlmConfig) -> Vec<brain::ProviderEntry> {
         kind,
         base_url: llm.base_url.clone(),
         api_key: llm.api_key.clone(),
+        api_key_file: llm.api_key_file.clone(),
         model: llm.model.clone(),
         preferred_models: Vec::new(),
     }]

@@ -318,6 +318,7 @@ impl Default for BrainConfig {
                 temperature: 0.7,
                 max_tokens: 4096,
                 api_key: String::new(),
+                api_key_file: None,
                 providers: Vec::new(),
             },
             embedding: EmbeddingConfig {

@@ -716,13 +716,43 @@ The default namespace is `"personal"`. Namespaces are a first-class schema conce
 | Concern | Mechanism |
 |---------|-----------|
 | API authentication | Bearer token / `x-api-key` checked before processing on every request |
-| Per-key permissions | `ApiKeyConfig { permissions: [read, write] }` — read-only keys rejected on POST |
-| CORS | `localhost_cors()` — only `127.0.0.1` and `localhost` origins allowed |
+| Per-key permissions | `ApiKeyConfig { permissions: [read, write, export, admin] }` — `admin` is a superset; `export` gates bulk memory export; `write` does NOT imply `read` |
+| CORS | `localhost_cors()` — only `127.0.0.1` and `localhost` origins allowed (exact match, no prefix tricks) |
 | Error exposure | HTTP 500 returns opaque message; real error logged server-side only |
-| Shell execution | `security.exec_allowlist` in config; configurable `exec_timeout_seconds` |
-| Encryption at rest | AES-256-GCM via `brain init --encrypt` (opt-in); Argon2id key derivation. **Note:** FTS5 full-text search is disabled when encryption is active |
+| Shell execution | `security.exec_allowlist` in config; configurable `exec_timeout_seconds`; deny-list extends to `kill`, `python`, `node`, `nc` family by default |
+| Encryption at rest | AES-256-GCM via `brain init --encrypt` (opt-in); Argon2id key derivation (OWASP 2024: 46 MiB / t=1). **Note:** FTS5 full-text search is disabled when encryption is active |
+| Vault key material | Derived keys + passphrase strings wrapped in `Zeroizing` so they scrub on drop |
+| Vault passphrase | Stdin / `passphrase_file` only; env var ignored with a startup warning (env vars leak via `/proc/<pid>/environ` and `ps -e`) |
+| Outbound URL fetch | LLM-controlled URL fetcher rejects loopback / private / link-local / cloud-metadata IPs at both literal-host and DNS-resolved layers |
 | LLM client failures | `Result<>` throughout — TLS failures surface as errors, never panics |
 | Embedding fallback | Deterministic non-zero vectors when provider is down — writes never fail silently |
+
+### Docker socket containment
+
+Brain's `IsolatedSandbox` does not bind, expose, or read `/var/run/docker.sock`
+under any built-in configuration. The sandbox runs each `Action::ExecuteCommand`
+with `setrlimit`, the configured `exec_allowlist` (binary names), and the
+`forbidden_commands` deny-list — none of which add docker to the visible
+PATH or interact with the docker daemon.
+
+If you mount `docker.sock` into a container that hosts Brain, **you have
+granted that Brain process root-equivalent control of the host**: any
+command the sandbox approves (e.g. `cat`, `ls`) becomes a primitive for
+`docker run --privileged -v /:/host ...` once an attacker can shell out.
+This is a property of the docker socket itself, not of Brain.
+
+Recommended containment when Brain is running inside docker:
+
+- **Do not** mount `/var/run/docker.sock` into the Brain container.
+- If you must (e.g. for a separate orchestration agent), run Brain in a
+  sibling container and have it talk to the orchestrator over an
+  authenticated network socket instead — never share the docker socket.
+- Add `docker`, `docker-compose`, `nerdctl`, `podman` to
+  `security.exec_allowlist` only when you understand the full effect
+  and have a dedicated rootless container runtime configured.
+
+The Brain default `exec_allowlist` ships without docker/podman/nerdctl
+on purpose. Adding them is a deliberate opt-in.
 
 ---
 

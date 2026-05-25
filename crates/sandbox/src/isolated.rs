@@ -66,11 +66,34 @@ impl IsolatedSandbox {
         let mut sb = Self {
             command_allowlist: allowlist,
             allowed_paths: HashSet::new(),
+            // Issue 128: extend deny-list beyond the original
+            // disk/admin-destructive set with common process-control,
+            // interpreter, and networking binaries. Interpreters
+            // (`python`, `node`, `perl`, `ruby`, `php`) bypass the
+            // per-binary allowlist by hosting arbitrary code; netcat
+            // family (`nc`, `ncat`, `socat`) exfils data even when
+            // Seatbelt/namespaces fail to deny network; `kill` and
+            // friends terminate sibling processes (including Brain).
             forbidden_commands: HashSet::from([
                 "dd".to_string(),
                 "mkfs".to_string(),
                 "shutdown".to_string(),
                 "reboot".to_string(),
+                "halt".to_string(),
+                "poweroff".to_string(),
+                "kill".to_string(),
+                "killall".to_string(),
+                "pkill".to_string(),
+                "python".to_string(),
+                "python3".to_string(),
+                "node".to_string(),
+                "deno".to_string(),
+                "perl".to_string(),
+                "ruby".to_string(),
+                "php".to_string(),
+                "nc".to_string(),
+                "ncat".to_string(),
+                "socat".to_string(),
             ]),
             limits: SandboxLimits::default(),
             default_timeout,
@@ -85,6 +108,27 @@ impl IsolatedSandbox {
                 tracing::warn!(
                     "failed to write macOS sandbox-exec profile; running with rlimits only"
                 );
+            }
+        }
+
+        // Issue 59: the pre_exec `unshare(CLONE_NEWNET|IPC|UTS)` call is
+        // silently best-effort — without CAP_SYS_ADMIN or unprivileged
+        // user namespaces it returns EPERM and the child runs without
+        // namespace isolation. Probe the kernel state at construction
+        // time and emit a one-shot warning so operators are not surprised
+        // when network isolation isn't actually in effect.
+        #[cfg(target_os = "linux")]
+        {
+            let euid = unsafe { libc::geteuid() };
+            if euid != 0 && !linux_userns_likely_available() {
+                tracing::warn!(
+                    "linux sandbox isolation: namespace unshare requires CAP_SYS_ADMIN or \
+                     unprivileged user namespaces enabled — falling back to rlimits-only. \
+                     Set `kernel.unprivileged_userns_clone=1` (Debian/Ubuntu) or raise \
+                     `user.max_user_namespaces` (Fedora/RHEL) for full isolation."
+                );
+            } else {
+                tracing::info!("linux sandbox isolation: namespace unshare available");
             }
         }
 
@@ -438,9 +482,35 @@ fn apply_linux_namespaces() {
     // Best-effort: CLONE_NEWNET/IPC/UTS without CAP_SYS_ADMIN will fail with
     // EPERM. Callers without user-namespace setup will simply run with
     // rlimits only; we deliberately don't fail the exec here.
+    // `IsolatedSandbox::new` already warned at startup if this is likely
+    // to fail (Issue 59), so we don't repeat the warning per exec —
+    // which would also be unsafe from pre_exec context.
     unsafe {
         let _ = libc::unshare(libc::CLONE_NEWNET | libc::CLONE_NEWIPC | libc::CLONE_NEWUTS);
     }
+}
+
+/// Issue 59: cheap heuristic for whether unprivileged user namespaces
+/// will let our subsequent `unshare(CLONE_NEW*)` succeed. We can't probe
+/// without committing to a real namespace, so read the well-known
+/// kernel sysfs flags. False negatives are fine — the warning is just a
+/// hint, the actual exec still tries.
+#[cfg(target_os = "linux")]
+fn linux_userns_likely_available() -> bool {
+    // Debian/Ubuntu toggle. `1` = enabled.
+    if std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone")
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    // Fedora/RHEL surface — non-zero quota means user namespaces are
+    // allowed for unprivileged users.
+    std::fs::read_to_string("/proc/sys/user/max_user_namespaces")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(|n| n > 0)
+        .unwrap_or(false)
 }
 
 #[cfg(test)]

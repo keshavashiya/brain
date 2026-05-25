@@ -47,6 +47,34 @@ pub fn extract_bearer_from_value(value: &str) -> Option<&str> {
     value.strip_prefix("Bearer ")
 }
 
+/// Constant-time `find` over an api-key list (Issue 62).
+///
+/// Used by adapters that previously called `api_keys.iter().find(|k| k.key == key)`.
+/// Direct `==` on `String` early-returns on the first differing byte, giving
+/// a per-byte timing oracle once an attacker can issue requests against the
+/// daemon (binding non-localhost, reverse-proxy, MCP over a shared socket).
+/// Iterating *all* entries and using `ConstantTimeEq` for equal-length
+/// entries closes that side-channel — total time depends only on the number
+/// and lengths of configured keys, not on which one matched.
+///
+/// Length mismatch is still an early skip; padding to a uniform max key
+/// length would only obscure the size signal, not eliminate it, and the
+/// length of a self-minted operator key isn't a useful secret in practice.
+pub fn find_key_ct<'a>(api_keys: &'a [ApiKeyConfig], key: &str) -> Option<&'a ApiKeyConfig> {
+    let key_bytes = key.as_bytes();
+    let mut matched: Option<&'a ApiKeyConfig> = None;
+    for entry in api_keys {
+        let stored = entry.key.as_bytes();
+        if stored.len() != key_bytes.len() {
+            continue;
+        }
+        if stored.ct_eq(key_bytes).unwrap_u8() == 1 && matched.is_none() {
+            matched = Some(entry);
+        }
+    }
+    matched
+}
+
 /// Validate an API key against the configured keys with permission checking.
 ///
 /// - If `api_keys` is empty, returns `MissingKey` (fail-closed security).

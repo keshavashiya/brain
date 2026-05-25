@@ -162,8 +162,12 @@ pub(crate) async fn assert_url_safe(url: &str, allow_internal: bool) -> Result<(
         .ok_or_else(|| ActionError::InvalidArguments("url-fetch requires a host".into()))?;
 
     match host {
-        url::Host::Ipv4(v4) => reject_reserved_ip(IpAddr::V4(v4), &host.to_string(), allow_internal),
-        url::Host::Ipv6(v6) => reject_reserved_ip(IpAddr::V6(v6), &host.to_string(), allow_internal),
+        url::Host::Ipv4(v4) => {
+            reject_reserved_ip(IpAddr::V4(v4), &host.to_string(), allow_internal)
+        }
+        url::Host::Ipv6(v6) => {
+            reject_reserved_ip(IpAddr::V6(v6), &host.to_string(), allow_internal)
+        }
         url::Host::Domain(name) => {
             // Hostname — resolve and reject if any answer is reserved.
             // `lookup_host` needs a `host:port` string; synthesise a port

@@ -48,6 +48,7 @@ fn validate_warns_when_legacy_provider_overlaps_providers_array() {
         base_url: "http://localhost:11434".into(),
         api_key: String::new(),
         model: "qwen2.5-coder:7b".into(),
+        api_key_file: None,
         preferred_models: Vec::new(),
     });
 
@@ -78,6 +79,7 @@ fn validate_silent_when_legacy_provider_empty() {
         base_url: "http://localhost:11434".into(),
         api_key: String::new(),
         model: "qwen2.5-coder:7b".into(),
+        api_key_file: None,
         preferred_models: Vec::new(),
     });
 
