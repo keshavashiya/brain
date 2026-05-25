@@ -1029,3 +1029,100 @@ fn every_category_has_at_least_one_variant() {
         );
     }
 }
+
+/// Tripwire: `every_intent_variant()` must enumerate one example per
+/// `Intent` variant. If the enum grows without the helper being
+/// updated, the per-variant category coverage assertions silently
+/// stop checking the new variant. The exact count is intentional —
+/// bump it deliberately when adding a variant, and add a sample to
+/// `every_intent_variant()` in the same change.
+#[test]
+fn every_intent_variant_helper_is_exhaustive() {
+    assert_eq!(
+        every_intent_variant().len(),
+        38,
+        "every_intent_variant() must list one example per Intent variant; \
+         update it (and bump this count) when the enum changes"
+    );
+}
+
+/// Stronger than the spot-check above: assert *every* sample variant
+/// lands in the category the taxonomy comment promised. Catches the
+/// case where a future variant is added to the `category()` match
+/// arm under the wrong heading.
+#[test]
+fn every_intent_variant_has_the_expected_category() {
+    fn expected(intent: &Intent) -> IntentCategory {
+        match intent {
+            Intent::Recall { .. }
+            | Intent::MemorySummary
+            | Intent::SystemStatus
+            | Intent::ProactivityStatus
+            | Intent::BudgetStatus { .. }
+            | Intent::ListApprovals { .. }
+            | Intent::ListStandingApprovals
+            | Intent::ListSchedules
+            | Intent::ListTasks
+            | Intent::TaskStatus { .. }
+            | Intent::QueryAgents { .. }
+            | Intent::QueryAudit { .. }
+            | Intent::ListChannels
+            | Intent::ChannelPreferences { .. }
+            | Intent::ListTerminalSessions
+            | Intent::ListMcpServers => IntentCategory::Inspection,
+            Intent::StoreFact { .. } | Intent::Forget { .. } => IntentCategory::Memory,
+            Intent::ExecuteCommand { .. }
+            | Intent::WebSearch { .. }
+            | Intent::SendMessage { .. }
+            | Intent::DelegateTask { .. } => IntentCategory::Action,
+            Intent::Schedule { .. }
+            | Intent::CancelSchedule { .. }
+            | Intent::DecomposeTask { .. }
+            | Intent::CancelTask { .. }
+            | Intent::CancelSignal { .. }
+            | Intent::OpenTerminalSession { .. }
+            | Intent::CloseTerminalSession { .. }
+            | Intent::MountMcpServer { .. }
+            | Intent::UnmountMcpServer { .. } => IntentCategory::Lifecycle,
+            Intent::RespondToApproval { .. }
+            | Intent::RevokeStandingApproval { .. }
+            | Intent::PruneAudit { .. }
+            | Intent::SetChannelPreference { .. }
+            | Intent::SetProactivity { .. } => IntentCategory::Governance,
+            Intent::ToolCall(_) => IntentCategory::Capability,
+            Intent::Chat { .. } => IntentCategory::Conversation,
+        }
+    }
+
+    for intent in every_intent_variant() {
+        let want = expected(&intent);
+        let got = intent.category();
+        assert_eq!(
+            got, want,
+            "intent {intent:?} categorised as {got:?}, expected {want:?}"
+        );
+    }
+}
+
+/// `IntentCategory` is `Serialize` + `Deserialize` because it surfaces
+/// in observability payloads (`BrainEvent::IntentClassified`, audit
+/// metadata). Pin the wire form so downstream consumers don't break
+/// when the enum changes.
+#[test]
+fn intent_category_serde_wire_form_is_stable() {
+    let pairs = [
+        (IntentCategory::Inspection, "\"Inspection\""),
+        (IntentCategory::Memory, "\"Memory\""),
+        (IntentCategory::Action, "\"Action\""),
+        (IntentCategory::Lifecycle, "\"Lifecycle\""),
+        (IntentCategory::Governance, "\"Governance\""),
+        (IntentCategory::Capability, "\"Capability\""),
+        (IntentCategory::Conversation, "\"Conversation\""),
+    ];
+    for (cat, wire) in pairs {
+        let s = serde_json::to_string(&cat).unwrap();
+        assert_eq!(s, wire, "wire form for {cat:?}");
+        let back: IntentCategory = serde_json::from_str(&s).unwrap();
+        assert_eq!(back, cat);
+    }
+}
