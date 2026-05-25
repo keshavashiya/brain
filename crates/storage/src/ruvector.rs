@@ -83,7 +83,13 @@ impl Default for HnswConfig {
             m: 16,
             ef_construction: 200,
             ef_search: 50,
-            max_elements: 10_000_000,
+            // 100k vectors. HNSW pre-allocates the index graph for this
+            // many entries up-front so this is a real memory cost, not
+            // just a cap (Wave F, Issue 71). The canonical default lives
+            // in `core::config::HnswConfig::default_max_elements`; this
+            // mirror exists so storage-only callers (tests, isolated
+            // RuVector users) don't have to pull in the core crate.
+            max_elements: 100_000,
         }
     }
 }

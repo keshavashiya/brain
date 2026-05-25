@@ -178,13 +178,24 @@ pub struct HnswConfig {
     /// Maximum number of vectors a single HNSW table can hold. Threaded
     /// into the underlying ruvector database at `open` time (Issue 37);
     /// previously hardcoded at 10_000_000 inside the storage crate.
+    ///
+    /// HNSW pre-allocates the index graph for `max_elements` entries
+    /// up-front, so this knob is a real memory cost — not just an
+    /// upper bound. Personal-scale installs rarely need more than
+    /// 100k facts/episodes; production / shared installs that need
+    /// more should raise this explicitly in their config rather than
+    /// pay for the headroom in every dev install. (Wave F, Issue 71.)
     #[serde(default = "HnswConfig::default_max_elements")]
     pub max_elements: u32,
 }
 
 impl HnswConfig {
+    /// 100k vectors — covers the vast majority of personal-scale
+    /// deployments without pre-allocating headroom for a million users
+    /// of facts that nobody will ever store. Raise via
+    /// `storage.hnsw.max_elements` when you actually need it.
     pub fn default_max_elements() -> u32 {
-        10_000_000
+        100_000
     }
 }
 

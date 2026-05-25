@@ -240,4 +240,8 @@ storage:
     ef_construction: 200
     m: 16
     ef_search: 50
-    max_elements: 10000000
+    # HNSW pre-allocates the index graph for max_elements up-front, so
+    # this is a real memory cost. 100k covers personal-scale installs;
+    # raise to 1_000_000+ if you're storing facts for a team or large
+    # corpus. (Wave F, Issue 71.)
+    max_elements: 100000

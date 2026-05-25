@@ -306,7 +306,7 @@ impl Default for BrainConfig {
                 sqlite_path: "~/.brain/db/brain.db".to_string(),
                 hnsw: HnswConfig {
                     ef_construction: 200,
-                    max_elements: 10_000_000,
+                    max_elements: HnswConfig::default_max_elements(),
                     m: 16,
                     ef_search: 50,
                 },
