@@ -388,6 +388,42 @@ impl SqlitePool {
                     ON task_states(task_id, id);
             ",
             ),
+            (
+                23,
+                "create_nodes_fts",
+                "
+                -- Full-text index over graph node bodies so the episodic
+                -- graph contributes a BM25 candidate list to recall (it was
+                -- write-only w.r.t. retrieval before). Regular FTS5 index
+                -- (stores its own content so hits are retrievable) mirroring
+                -- `episodes_fts` (v3); the `text` column carries each node's
+                -- raw `body_json`, which the porter tokenizer indexes
+                -- term-wise (verbs, program names, args all searchable).
+                CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+                    text,
+                    tokenize='porter unicode61'
+                );
+
+                -- Keep the index in sync via triggers so every writer
+                -- (add_node, delete_node, the compactor) stays covered
+                -- without touching Rust write paths. `nodes` has an implicit
+                -- integer rowid we mirror as the FTS rowid.
+                CREATE TRIGGER IF NOT EXISTS nodes_ai AFTER INSERT ON nodes BEGIN
+                    INSERT INTO nodes_fts(rowid, text) VALUES (new.rowid, new.body_json);
+                END;
+                CREATE TRIGGER IF NOT EXISTS nodes_ad AFTER DELETE ON nodes BEGIN
+                    DELETE FROM nodes_fts WHERE rowid = old.rowid;
+                END;
+                CREATE TRIGGER IF NOT EXISTS nodes_au AFTER UPDATE OF body_json ON nodes BEGIN
+                    DELETE FROM nodes_fts WHERE rowid = old.rowid;
+                    INSERT INTO nodes_fts(rowid, text) VALUES (new.rowid, new.body_json);
+                END;
+
+                -- Backfill any nodes written before this migration.
+                INSERT INTO nodes_fts(rowid, text)
+                    SELECT rowid, body_json FROM nodes;
+            ",
+            ),
         ]
     }
 

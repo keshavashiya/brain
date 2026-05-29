@@ -5,7 +5,7 @@ use super::*;
 // new migration means appending the version here AND regenerating the
 // schema snapshot below.
 const EXPECTED_MIGRATION_VERSIONS: &[i64] = &[
-    1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
+    1, 2, 3, 4, 5, 6, 7, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
 ];
 
 /// Committed snapshot of the post-migration `sqlite_master` schema.
@@ -16,14 +16,14 @@ const SCHEMA_SNAPSHOT: &str = include_str!("schema.snapshot.txt");
 fn test_open_memory() {
     let pool = SqlitePool::open_memory().unwrap();
     let version = pool.schema_version().unwrap();
-    assert_eq!(version, 22);
+    assert_eq!(version, 23);
 }
 
 #[test]
 fn test_migrations_idempotent() {
     let pool = SqlitePool::open_memory().unwrap();
     pool.migrate().unwrap();
-    assert_eq!(pool.schema_version().unwrap(), 22);
+    assert_eq!(pool.schema_version().unwrap(), 23);
 }
 
 #[test]

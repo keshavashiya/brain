@@ -157,6 +157,12 @@ CREATE TABLE nodes (
                     created_at TEXT NOT NULL DEFAULT (datetime('now'))
                 )
 
+-- table: nodes_fts
+CREATE VIRTUAL TABLE nodes_fts USING fts5(
+                    text,
+                    tokenize='porter unicode61'
+                )
+
 -- table: notification_outbox
 CREATE TABLE notification_outbox (
                     id TEXT PRIMARY KEY,
@@ -238,4 +244,20 @@ CREATE TABLE user_profile (
                     source TEXT,
                     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
                 )
+
+-- trigger: nodes_ad
+CREATE TRIGGER nodes_ad AFTER DELETE ON nodes BEGIN
+                    DELETE FROM nodes_fts WHERE rowid = old.rowid;
+                END
+
+-- trigger: nodes_ai
+CREATE TRIGGER nodes_ai AFTER INSERT ON nodes BEGIN
+                    INSERT INTO nodes_fts(rowid, text) VALUES (new.rowid, new.body_json);
+                END
+
+-- trigger: nodes_au
+CREATE TRIGGER nodes_au AFTER UPDATE OF body_json ON nodes BEGIN
+                    DELETE FROM nodes_fts WHERE rowid = old.rowid;
+                    INSERT INTO nodes_fts(rowid, text) VALUES (new.rowid, new.body_json);
+                END
 

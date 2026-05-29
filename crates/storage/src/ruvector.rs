@@ -187,7 +187,7 @@ impl RuVectorStore {
         const MAX_RETRIES: u32 = 5;
         const BASE_DELAY_MS: u64 = 200;
 
-        for name in &["facts_vec", "episodes_vec"] {
+        for name in &["facts_vec", "episodes_vec", "graph_vec"] {
             let mut last_err = None;
             for attempt in 0..=MAX_RETRIES {
                 match self.get_or_create_db(name) {
