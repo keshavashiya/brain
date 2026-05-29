@@ -203,8 +203,8 @@ fn print_model_status(label: &str, model: &str, installed: &[String]) {
     }
 }
 
-/// `brain doctor` — full environment check.
-pub(crate) async fn cmd_doctor(config: &BrainConfig) -> anyhow::Result<()> {
+/// `brain doctor` — full environment check (plus store-level probes with `--deep`).
+pub(crate) async fn cmd_doctor(config: &BrainConfig, deep: bool) -> anyhow::Result<()> {
     let mut failures = 0u32;
     println!("Brain doctor — environment check");
 
@@ -354,6 +354,12 @@ pub(crate) async fn cmd_doctor(config: &BrainConfig) -> anyhow::Result<()> {
         );
     }
 
+    // ── deep store-level probes (--deep) ─────────────────────────────────
+    if deep {
+        let daemon_up = daemon_url.is_some();
+        run_deep_checks(config, daemon_up, &mut failures).await;
+    }
+
     println!();
     if failures == 0 {
         println!("All checks passed. Run `brain start` to wake Brain.");
@@ -364,6 +370,158 @@ pub(crate) async fn cmd_doctor(config: &BrainConfig) -> anyhow::Result<()> {
             failures
         )
     }
+}
+
+/// Deep probes that open the actual data stores. Each prints `[ok]`/`[fail]`
+/// and folds into the shared `failures` tally. The vector-store open is
+/// skipped when a daemon is running, since it holds the RuVector file lock.
+async fn run_deep_checks(config: &BrainConfig, daemon_up: bool, failures: &mut u32) {
+    println!();
+    println!("Deep checks (--deep)");
+
+    // ── SQLite: open runs migrations; success == schema current ──────────
+    // The opened pool is reused for the audit-chain + counts probes below.
+    let pool = match storage::SqlitePool::open(&config.sqlite_path()) {
+        Ok(pool) => match pool.schema_version() {
+            Ok(version) => {
+                println!("  [ok]   sqlite schema          v{version} (migrations applied)");
+                Some(pool)
+            }
+            Err(e) => {
+                *failures += 1;
+                println!("  [fail] sqlite schema version  {e}");
+                Some(pool)
+            }
+        },
+        Err(e) => {
+            *failures += 1;
+            println!(
+                "  [fail] sqlite open            {} ({e})",
+                config.sqlite_path().display()
+            );
+            None
+        }
+    };
+
+    // ── audit hash-chain linkage + row counts (reuse the pool) ───────────
+    if let Some(pool) = &pool {
+        match check_audit_chain(pool) {
+            Ok(rows) => println!("  [ok]   audit chain            {rows} row(s), linkage intact"),
+            Err(e) => {
+                *failures += 1;
+                println!("  [fail] audit chain            {e}");
+            }
+        }
+        match memory_counts(pool) {
+            Ok((episodes, facts, nodes)) => println!(
+                "  [ok]   memory counts          {episodes} episode(s), {facts} fact(s), {nodes} graph node(s)"
+            ),
+            Err(e) => {
+                *failures += 1;
+                println!("  [fail] memory counts          {e}");
+            }
+        }
+    }
+
+    // ── vector store (skipped while the daemon holds the lock) ───────────
+    let dim = config.embedding.dimensions as usize;
+    if daemon_up {
+        println!("  [--]   vector store           skipped (daemon running — holds the lock)");
+    } else {
+        match storage::RuVectorStore::open(&config.ruvector_path(), dim).await {
+            Ok(ruv) => {
+                if let Err(e) = ruv.ensure_tables().await {
+                    *failures += 1;
+                    println!("  [fail] vector store tables    {e}");
+                } else {
+                    let mut parts = Vec::new();
+                    for name in ["facts_vec", "episodes_vec", "graph_vec"] {
+                        let n = ruv.table_count(name).await.unwrap_or(0);
+                        parts.push(format!("{name}={n}"));
+                    }
+                    println!(
+                        "  [ok]   vector store           dim {dim}, {}",
+                        parts.join(" ")
+                    );
+                }
+            }
+            Err(e) => {
+                *failures += 1;
+                println!(
+                    "  [fail] vector store           {} ({e})",
+                    config.ruvector_path().display()
+                );
+            }
+        }
+    }
+
+    // ── embedder round-trip (dimension match) ────────────────────────────
+    #[allow(deprecated)]
+    let provider = config.llm.provider.clone();
+    #[allow(deprecated)]
+    let base = config.llm.base_url.clone();
+    match hippocampus::Embedder::from_config(&provider, &base, &config.embedding.model, "") {
+        Ok(Some(embedder)) => match embedder.embed("brain doctor probe").await {
+            Ok(vec) if vec.len() == dim => {
+                println!("  [ok]   embedder round-trip    {} dims", vec.len())
+            }
+            Ok(vec) => {
+                *failures += 1;
+                println!(
+                    "  [fail] embedder round-trip    got {} dims, config expects {dim}",
+                    vec.len()
+                );
+            }
+            Err(e) => {
+                *failures += 1;
+                println!("  [fail] embedder round-trip    {e}");
+            }
+        },
+        Ok(None) => println!("  [--]   embedder               not configured"),
+        Err(e) => {
+            *failures += 1;
+            println!("  [fail] embedder init          {e}");
+        }
+    }
+}
+
+/// Verify the audit log's `prev_hash` linkage is contiguous: each row's
+/// `prev_hash` must equal the previous row's `hash` (ordered by id). Detects
+/// deletions / reordering without recomputing hashes. Returns the row count.
+fn check_audit_chain(pool: &storage::SqlitePool) -> anyhow::Result<i64> {
+    pool.with_conn(|conn| {
+        let mut stmt = conn.prepare("SELECT prev_hash, hash FROM audit_log ORDER BY id ASC")?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let mut prev: Option<String> = None;
+        for (i, (prev_hash, hash)) in rows.iter().enumerate() {
+            if let Some(expected) = &prev {
+                if prev_hash.as_deref() != Some(expected.as_str()) {
+                    return Err(storage::sqlite::SqliteError::Migration(format!(
+                        "broken linkage at row {i}: prev_hash does not match prior row's hash"
+                    )));
+                }
+            }
+            prev = Some(hash.clone());
+        }
+        Ok(rows.len() as i64)
+    })
+    .map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// Episode / fact / graph-node counts straight from SQLite.
+fn memory_counts(pool: &storage::SqlitePool) -> anyhow::Result<(i64, i64, i64)> {
+    pool.with_conn(|conn| {
+        let episodes: i64 = conn.query_row("SELECT COUNT(*) FROM episodes", [], |r| r.get(0))?;
+        let facts: i64 = conn.query_row("SELECT COUNT(*) FROM semantic_facts", [], |r| r.get(0))?;
+        let nodes: i64 = conn.query_row("SELECT COUNT(*) FROM nodes", [], |r| r.get(0))?;
+        Ok((episodes, facts, nodes))
+    })
+    .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// Check one provider entry. Returns `true` when the entry is fully healthy
@@ -436,4 +594,52 @@ async fn check_provider(entry: &ProviderEntry) -> bool {
 
 async fn port_in_use(host: &str, port: u16) -> bool {
     tokio::net::TcpStream::connect((host, port)).await.is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pool() -> storage::SqlitePool {
+        storage::SqlitePool::open_memory().expect("memory pool")
+    }
+
+    fn insert_audit(pool: &storage::SqlitePool, prev: Option<&str>, hash: &str) {
+        pool.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO audit_log (action, prev_hash, hash) VALUES ('test', ?1, ?2)",
+                rusqlite::params![prev, hash],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn audit_chain_passes_on_contiguous_linkage() {
+        let p = pool();
+        insert_audit(&p, None, "h1");
+        insert_audit(&p, Some("h1"), "h2");
+        insert_audit(&p, Some("h2"), "h3");
+        assert_eq!(check_audit_chain(&p).unwrap(), 3);
+    }
+
+    #[test]
+    fn audit_chain_fails_on_broken_linkage() {
+        let p = pool();
+        insert_audit(&p, None, "h1");
+        // prev_hash should be "h1" but points at a wrong value.
+        insert_audit(&p, Some("WRONG"), "h2");
+        assert!(check_audit_chain(&p).is_err());
+    }
+
+    #[test]
+    fn audit_chain_ok_on_empty_log() {
+        assert_eq!(check_audit_chain(&pool()).unwrap(), 0);
+    }
+
+    #[test]
+    fn memory_counts_zero_on_fresh_db() {
+        assert_eq!(memory_counts(&pool()).unwrap(), (0, 0, 0));
+    }
 }

@@ -59,7 +59,13 @@ enum Commands {
     /// Run this when `brain start` or `brain chat` is misbehaving. Prints
     /// pass/fail per check and exits non-zero on failures so it's safe
     /// to use in scripts.
-    Doctor,
+    Doctor {
+        /// Also run store-level probes (SQLite schema, vector store, embedder
+        /// round-trip, audit chain, row counts) — opens the data stores, so
+        /// the vector-store probe is skipped when a daemon holds the lock.
+        #[arg(long)]
+        deep: bool,
+    },
 
     /// Wake the brain — start all services as a background daemon.
     ///
@@ -296,7 +302,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             None => chat::chat_interactive(&config).await?,
         },
         Commands::Status => status::show_status(&config).await?,
-        Commands::Doctor => doctor::cmd_doctor(&config).await?,
+        Commands::Doctor { deep } => doctor::cmd_doctor(&config, deep).await?,
         Commands::Start => daemon::cmd_start(&config).await?,
         Commands::Stop => daemon::cmd_stop(&config).await?,
         Commands::Serve {
