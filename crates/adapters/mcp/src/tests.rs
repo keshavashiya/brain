@@ -241,34 +241,6 @@ async fn test_initialized_without_prefix_returns_none() {
 }
 
 #[tokio::test]
-async fn test_resources_list_returns_empty() {
-    let (server, _tmp) = make_server().await;
-    let req = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        id: Some(json!(1)),
-        method: "resources/list".to_string(),
-        params: None,
-    };
-    let resp = server.handle(req).await.unwrap();
-    assert!(resp.error.is_none());
-    assert_eq!(resp.result.unwrap()["resources"], json!([]));
-}
-
-#[tokio::test]
-async fn test_prompts_list_returns_empty() {
-    let (server, _tmp) = make_server().await;
-    let req = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        id: Some(json!(1)),
-        method: "prompts/list".to_string(),
-        params: None,
-    };
-    let resp = server.handle(req).await.unwrap();
-    assert!(resp.error.is_none());
-    assert_eq!(resp.result.unwrap()["prompts"], json!([]));
-}
-
-#[tokio::test]
 async fn test_unknown_method_returns_error() {
     let (server, _tmp) = make_server().await;
     let req = JsonRpcRequest {
@@ -539,4 +511,122 @@ fn test_extract_meta_key_missing() {
         params: Some(json!({"other": "field"})),
     };
     assert_eq!(extract_meta_key(&req), None);
+}
+
+// ── resources + prompts (#35) ──────────────────────────────────────────────
+
+/// Send a method with optional params against a fresh no-auth server and
+/// return the unwrapped JSON-RPC result (asserting no error).
+async fn call_ok(method: &str, params: Option<Value>) -> Value {
+    let (server, _tmp) = make_server().await;
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(1)),
+        method: method.to_string(),
+        params,
+    };
+    let resp = server.handle(req).await.unwrap();
+    assert!(resp.error.is_none(), "{method} errored: {:?}", resp.error);
+    resp.result.unwrap()
+}
+
+#[tokio::test]
+async fn test_resources_list_advertises_views() {
+    let result = call_ok("resources/list", None).await;
+    let uris: Vec<&str> = result["resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["uri"].as_str().unwrap())
+        .collect();
+    assert!(uris.contains(&"brain://profile"));
+    assert!(uris.contains(&"brain://capabilities"));
+    assert!(uris.contains(&"brain://namespaces"));
+}
+
+#[tokio::test]
+async fn test_resources_read_each_uri() {
+    for uri in [
+        "brain://profile",
+        "brain://capabilities",
+        "brain://namespaces",
+    ] {
+        let result = call_ok("resources/read", Some(json!({ "uri": uri }))).await;
+        let contents = result["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 1, "{uri} should return one content block");
+        assert_eq!(contents[0]["uri"], uri);
+        assert!(contents[0]["text"].as_str().is_some());
+    }
+}
+
+#[tokio::test]
+async fn test_resources_read_unknown_uri_errors() {
+    let (server, _tmp) = make_server().await;
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(1)),
+        method: "resources/read".to_string(),
+        params: Some(json!({ "uri": "brain://nope" })),
+    };
+    let resp = server.handle(req).await.unwrap();
+    assert!(resp.error.is_some());
+    assert_eq!(resp.error.unwrap().code, -32602);
+}
+
+#[tokio::test]
+async fn test_prompts_list_advertises_templates() {
+    let result = call_ok("prompts/list", None).await;
+    let names: Vec<&str> = result["prompts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"recall-context"));
+    assert!(names.contains(&"daily-review"));
+}
+
+#[tokio::test]
+async fn test_prompts_get_recall_context_interpolates_query() {
+    let result = call_ok(
+        "prompts/get",
+        Some(json!({ "name": "recall-context", "arguments": { "query": "rust ownership" } })),
+    )
+    .await;
+    let text = result["messages"][0]["content"]["text"].as_str().unwrap();
+    assert!(text.contains("rust ownership"));
+}
+
+#[tokio::test]
+async fn test_prompts_get_recall_context_requires_query() {
+    let (server, _tmp) = make_server().await;
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(1)),
+        method: "prompts/get".to_string(),
+        params: Some(json!({ "name": "recall-context" })),
+    };
+    let resp = server.handle(req).await.unwrap();
+    assert!(resp.error.is_some());
+    assert_eq!(resp.error.unwrap().code, -32602);
+}
+
+#[tokio::test]
+async fn test_prompts_get_daily_review_no_args() {
+    let result = call_ok("prompts/get", Some(json!({ "name": "daily-review" }))).await;
+    assert!(result["messages"][0]["content"]["text"].as_str().is_some());
+}
+
+#[tokio::test]
+async fn test_prompts_get_unknown_errors() {
+    let (server, _tmp) = make_server().await;
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(1)),
+        method: "prompts/get".to_string(),
+        params: Some(json!({ "name": "nope" })),
+    };
+    let resp = server.handle(req).await.unwrap();
+    assert!(resp.error.is_some());
+    assert_eq!(resp.error.unwrap().code, -32602);
 }

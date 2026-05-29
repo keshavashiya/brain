@@ -46,8 +46,10 @@ impl McpServer {
             "initialize" => self.handle_initialize(&req),
             "tools/list" => self.handle_tools_list(),
             "tools/call" => self.handle_tools_call(&req).await,
-            "resources/list" => Ok(json!({ "resources": [] })),
-            "prompts/list" => Ok(json!({ "prompts": [] })),
+            "resources/list" => self.handle_resources_list(),
+            "resources/read" => self.handle_resources_read(&req).await,
+            "prompts/list" => self.handle_prompts_list(),
+            "prompts/get" => self.handle_prompts_get(&req),
             "ping" => Ok(json!({})),
             _ => Err((-32601, format!("Method not found: {}", req.method))),
         };

@@ -199,6 +199,12 @@ impl McpServer {
     }
 
     pub(crate) fn tool_user_profile(&self) -> Result<Value, (i32, String)> {
+        Ok(tool_result_text(self.profile_json()))
+    }
+
+    /// Pretty-printed profile JSON, shared by the `user_profile` tool and the
+    /// `brain://profile` resource so both render identically.
+    pub(crate) fn profile_json(&self) -> String {
         let config = self.processor.config();
         // Surface the active LLM transport in the profile JSON. The
         // legacy `llm.provider` field is #[deprecated] (Issue 40) but
@@ -220,9 +226,7 @@ impl McpServer {
             "data_dir": config.data_dir().to_string_lossy(),
             "encryption_enabled": config.encryption.enabled
         });
-        Ok(tool_result_text(
-            serde_json::to_string_pretty(&profile).unwrap_or_default(),
-        ))
+        serde_json::to_string_pretty(&profile).unwrap_or_default()
     }
 
     /// `brain_capabilities` — expose Brain's live capability manifest to
