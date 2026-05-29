@@ -27,19 +27,14 @@ impl TaskOrchestrator {
         };
 
         let messages = vec![
-            cortex::llm::Message {
-                role: cortex::llm::Role::System,
-                content: "You are a research assistant. Answer the user's research query \
-                          concisely with concrete facts and references where possible. \
-                          If the query asks about a specific codebase or filesystem path, \
-                          state plainly that you do not have direct access and ask the \
-                          orchestrator to delegate the work."
-                    .to_string(),
-            },
-            cortex::llm::Message {
-                role: cortex::llm::Role::User,
-                content: query.to_string(),
-            },
+            cortex::llm::Message::system(
+                "You are a research assistant. Answer the user's research query \
+                 concisely with concrete facts and references where possible. \
+                 If the query asks about a specific codebase or filesystem path, \
+                 state plainly that you do not have direct access and ask the \
+                 orchestrator to delegate the work.",
+            ),
+            cortex::llm::Message::user(query.to_string()),
         ];
 
         match llm.generate(&messages).await {
@@ -68,17 +63,12 @@ impl TaskOrchestrator {
         };
 
         let messages = vec![
-            cortex::llm::Message {
-                role: cortex::llm::Role::System,
-                content: "You are a code/report reviewer. Critique the artifact for \
-                          completeness, correctness, and obvious gaps. Surface concrete \
-                          issues, not platitudes. Keep the critique under 200 words."
-                    .to_string(),
-            },
-            cortex::llm::Message {
-                role: cortex::llm::Role::User,
-                content: format!("Review this artifact: {artifact}"),
-            },
+            cortex::llm::Message::system(
+                "You are a code/report reviewer. Critique the artifact for \
+                 completeness, correctness, and obvious gaps. Surface concrete \
+                 issues, not platitudes. Keep the critique under 200 words.",
+            ),
+            cortex::llm::Message::user(format!("Review this artifact: {artifact}")),
         ];
 
         match llm.generate(&messages).await {

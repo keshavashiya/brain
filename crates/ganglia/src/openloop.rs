@@ -288,10 +288,7 @@ impl OpenLoopDetector {
              Messages:\n{message_lines}"
         );
 
-        let messages = vec![cortex::Message {
-            role: cortex::Role::User,
-            content: prompt,
-        }];
+        let messages = vec![cortex::Message::user(prompt)];
 
         let response = llm.generate(&messages).await?;
         let parsed =

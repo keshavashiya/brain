@@ -35,6 +35,10 @@ struct OpenAiMessage {
     content: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<OpenAiToolCall>>,
+    /// Set only on a `role:"tool"` result turn — links the result to the
+    /// assistant `tool_calls` entry it answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
 }
 
 /// One advertised tool in the OpenAI request (`{"type":"function", ...}`).
@@ -53,12 +57,20 @@ struct OpenAiFunctionDef {
 }
 
 /// A tool call in the response. `function.arguments` is a JSON-encoded
-/// string per the OpenAI wire format.
+/// string per the OpenAI wire format. The same shape is replayed on the
+/// request side for an assistant tool-call turn, where `type` must be
+/// `"function"`.
 #[derive(Serialize, Deserialize)]
 struct OpenAiToolCall {
     #[serde(default)]
     id: Option<String>,
+    #[serde(rename = "type", default = "function_kind")]
+    kind: String,
     function: OpenAiFunctionCall,
+}
+
+fn function_kind() -> String {
+    "function".to_string()
 }
 
 #[derive(Serialize, Deserialize)]
@@ -155,14 +167,29 @@ impl OpenAiProvider {
     }
 
     fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
-        messages
-            .iter()
-            .map(|m| OpenAiMessage {
-                role: m.role.as_wire_str().to_string(),
-                content: Some(m.content.clone()),
-                tool_calls: None,
-            })
-            .collect()
+        messages.iter().map(Self::convert_message).collect()
+    }
+
+    /// Translate one kernel [`Message`] into the OpenAI wire shape. An
+    /// assistant turn that proposed tool calls replays them (with `null`
+    /// content when it carried no prose); a [`Role::Tool`] result turn
+    /// carries its `tool_call_id`; every other turn is plain content.
+    fn convert_message(m: &Message) -> OpenAiMessage {
+        let role = m.role.as_wire_str().to_string();
+        if !m.tool_calls.is_empty() {
+            return OpenAiMessage {
+                role,
+                content: (!m.content.is_empty()).then(|| m.content.clone()),
+                tool_calls: Some(m.tool_calls.iter().map(convert_proposed_call).collect()),
+                tool_call_id: None,
+            };
+        }
+        OpenAiMessage {
+            role,
+            content: Some(m.content.clone()),
+            tool_calls: None,
+            tool_call_id: m.tool_call_id.clone(),
+        }
     }
 
     /// Translate the kernel's provider-agnostic [`ToolDef`]s into the
@@ -405,6 +432,20 @@ fn convert_usage(usage: Option<OpenAiUsage>) -> Option<Usage> {
         completion_tokens: u.completion_tokens,
         total_tokens: u.total_tokens,
     })
+}
+
+/// Reverse of [`OpenAiProvider::extract_tool_calls`]: render a kernel
+/// [`ProposedToolCall`] back into the OpenAI wire shape for an assistant
+/// tool-call turn. `arguments` go back out as a JSON-encoded string.
+fn convert_proposed_call(call: &ProposedToolCall) -> OpenAiToolCall {
+    OpenAiToolCall {
+        id: call.id.clone(),
+        kind: function_kind(),
+        function: OpenAiFunctionCall {
+            name: call.name.clone(),
+            arguments: serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".to_string()),
+        },
+    }
 }
 
 /// Parse a tool call's JSON-string `arguments` into a [`serde_json::Value`].

@@ -7,7 +7,7 @@
 //! - Retrieved memories (remaining budget)
 //! - Response buffer (~400 tokens)
 
-use crate::llm::{Message, Role};
+use crate::llm::Message;
 use hippocampus::search::Memory;
 
 /// Default token budgets.
@@ -296,10 +296,7 @@ You are the user's partner in thought. Your goal is to make their digital life f
         } else {
             prompt_with_caps
         };
-        messages.push(Message {
-            role: Role::System,
-            content: system_content,
-        });
+        messages.push(Message::system(system_content));
 
         // 2. Add memories as system context (if within budget)
         let mut current_tokens = messages[0].content.chars().count() / 2;
@@ -325,10 +322,10 @@ You are the user's partner in thought. Your goal is to make their digital life f
         }
 
         if !memory_context.is_empty() {
-            messages.push(Message {
-                role: Role::System,
-                content: format!("Relevant memories:\n{}", memory_context),
-            });
+            messages.push(Message::system(format!(
+                "Relevant memories:\n{}",
+                memory_context
+            )));
         }
 
         // 3. Add conversation history (respecting budget)
@@ -353,17 +350,11 @@ You are the user's partner in thought. Your goal is to make their digital life f
         //    message so the LLM has it freshly in attention).
         if let Some(block) = render_attachments_block(attachments, skipped, self.budget.attachments)
         {
-            messages.push(Message {
-                role: Role::System,
-                content: block,
-            });
+            messages.push(Message::system(block));
         }
 
         // 5. Add current user message
-        messages.push(Message {
-            role: Role::User,
-            content: user_message.to_string(),
-        });
+        messages.push(Message::user(user_message.to_string()));
 
         messages
     }
@@ -433,6 +424,7 @@ fn truncate_snapshot(s: &str, cap_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::llm::Role;
 
     #[test]
     fn test_token_budget_memory_allocation() {
@@ -573,10 +565,12 @@ mod tests {
             Message {
                 role: Role::User,
                 content: "Hello".to_string(),
+                ..Default::default()
             },
             Message {
                 role: Role::Assistant,
                 content: "Hi there!".to_string(),
+                ..Default::default()
             },
         ];
 
@@ -747,10 +741,7 @@ mod tests {
 
     #[test]
     fn test_estimate_tokens() {
-        let messages = vec![Message {
-            role: Role::User,
-            content: "Hello world".to_string(),
-        }];
+        let messages = vec![Message::user("Hello world")];
 
         let tokens = ContextAssembler::estimate_tokens(&messages);
         assert!(tokens > 0);

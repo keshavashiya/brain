@@ -51,19 +51,88 @@ pub enum LlmError {
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 /// A message in the conversation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// Plain text turns set only `role` + `content`; the two extra fields carry
+/// tool-use protocol state and stay empty otherwise. Prefer the
+/// constructors ([`Message::user`], [`Message::tool_result`], …) over a
+/// struct literal so the tool-use fields default correctly.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Message {
     pub role: Role,
     pub content: String,
+    /// Tool calls an assistant turn proposed. Replayed verbatim to the
+    /// provider so the following [`Role::Tool`] result turns resolve
+    /// against them. Empty for every non-assistant or plain-text message.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ProposedToolCall>,
+    /// For a [`Role::Tool`] result turn: the id of the proposed call this
+    /// answers (links the result to the assistant's `tool_calls`). `None`
+    /// for every other role.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+}
+
+impl Message {
+    /// A system-prompt turn.
+    pub fn system(content: impl Into<String>) -> Self {
+        Self::plain(Role::System, content)
+    }
+
+    /// A user turn.
+    pub fn user(content: impl Into<String>) -> Self {
+        Self::plain(Role::User, content)
+    }
+
+    /// A plain-text assistant turn (no proposed tool calls).
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self::plain(Role::Assistant, content)
+    }
+
+    /// An assistant turn that proposed tool calls. `content` may be empty
+    /// (a pure tool-call turn carries no prose).
+    pub fn assistant_with_tool_calls(
+        content: impl Into<String>,
+        tool_calls: Vec<ProposedToolCall>,
+    ) -> Self {
+        Self {
+            role: Role::Assistant,
+            content: content.into(),
+            tool_calls,
+            tool_call_id: None,
+        }
+    }
+
+    /// A tool-result turn answering the proposed call `tool_call_id`.
+    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(tool_call_id.into()),
+        }
+    }
+
+    fn plain(role: Role, content: impl Into<String>) -> Self {
+        Self {
+            role,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
 }
 
 /// Message roles.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     System,
+    #[default]
     User,
     Assistant,
+    /// A tool-call result fed back to the model. Carries a `tool_call_id`
+    /// on its [`Message`].
+    Tool,
 }
 
 impl Role {
@@ -75,6 +144,7 @@ impl Role {
             Role::System => "system",
             Role::User => "user",
             Role::Assistant => "assistant",
+            Role::Tool => "tool",
         }
     }
 }

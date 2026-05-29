@@ -173,18 +173,13 @@ impl SignalProcessor {
                             signal.content, result.output
                         );
                         let messages = vec![
-                            cortex::llm::Message {
-                                role: cortex::llm::Role::System,
-                                content: "You are Brain OS. Answer the user's question \
-                                          using the supplied research material. Be concise, \
-                                          cite sources by URL, and never invent content not \
-                                          present in the material."
-                                    .to_string(),
-                            },
-                            cortex::llm::Message {
-                                role: cortex::llm::Role::User,
-                                content: search_context,
-                            },
+                            cortex::llm::Message::system(
+                                "You are Brain OS. Answer the user's question \
+                                 using the supplied research material. Be concise, \
+                                 cite sources by URL, and never invent content not \
+                                 present in the material.",
+                            ),
+                            cortex::llm::Message::user(search_context),
                         ];
                         match self.llm.generate(&messages).await {
                             Ok(llm_response) => SignalResponse::ok(signal_id, llm_response.content),

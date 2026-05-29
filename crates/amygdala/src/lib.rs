@@ -87,14 +87,8 @@ Return ONLY JSON: {"score":0.X,"reason":"brief"}"#;
         );
 
         let messages = vec![
-            cortex::Message {
-                role: cortex::Role::System,
-                content: Self::IMPORTANCE_SYSTEM_PROMPT.to_string(),
-            },
-            cortex::Message {
-                role: cortex::Role::User,
-                content: user_text,
-            },
+            cortex::Message::system(Self::IMPORTANCE_SYSTEM_PROMPT),
+            cortex::Message::user(user_text),
         ];
 
         let response = llm.generate(&messages).await?;

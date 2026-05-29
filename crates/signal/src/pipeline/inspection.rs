@@ -177,10 +177,7 @@ impl SignalProcessor {
 
         let proc_history: Vec<cortex::llm::Message> = procedure_context
             .iter()
-            .map(|step| cortex::llm::Message {
-                role: cortex::llm::Role::User,
-                content: format!("[procedure step] {step}"),
-            })
+            .map(|step| cortex::llm::Message::user(format!("[procedure step] {step}")))
             .collect();
         let history = conversation_history.unwrap_or(&proc_history);
         // Onboarding mode only when the namespace is truly empty — not just when

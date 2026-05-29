@@ -266,6 +266,7 @@ impl SignalProcessor {
                 Some(cortex::llm::Message {
                     role,
                     content: ep.content,
+                    ..Default::default()
                 })
             })
             .collect()

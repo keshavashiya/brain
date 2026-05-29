@@ -57,11 +57,7 @@ pub trait CapabilityIndex: Send + Sync {
 /// (asc) for a stable order; zero-score tools sort last and are included
 /// only to fill remaining slots up to `k`. An empty `query` or `k == 0`
 /// short-circuits to a name-sorted prefix / empty vec respectively.
-pub fn score_top_k(
-    mut tools: Vec<ToolDescriptor>,
-    query: &str,
-    k: usize,
-) -> Vec<ToolDescriptor> {
+pub fn score_top_k(mut tools: Vec<ToolDescriptor>, query: &str, k: usize) -> Vec<ToolDescriptor> {
     if k == 0 {
         return Vec::new();
     }
@@ -94,7 +90,10 @@ fn score_tool(tool: &ToolDescriptor, terms: &[String]) -> usize {
         haystack.push(' ');
         haystack.push_str(&desc.to_lowercase());
     }
-    terms.iter().filter(|t| haystack.contains(t.as_str())).count()
+    terms
+        .iter()
+        .filter(|t| haystack.contains(t.as_str()))
+        .count()
 }
 
 /// Default in-process [`CapabilityIndex`], backed by a `RwLock<HashMap>`

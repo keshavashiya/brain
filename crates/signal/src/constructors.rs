@@ -214,10 +214,7 @@ impl SignalProcessor {
         // anything other than a clean exit.
         let warmup_llm = processor.llm.clone();
         let warmup_handle = tokio::spawn(async move {
-            let warmup = vec![cortex::llm::Message {
-                role: cortex::llm::Role::User,
-                content: "hi".to_string(),
-            }];
+            let warmup = vec![cortex::llm::Message::user("hi")];
             match warmup_llm.generate(&warmup).await {
                 Ok(_) => tracing::info!("LLM warm-up complete"),
                 Err(e) => tracing::debug!("LLM warm-up skipped (provider unavailable): {e}"),

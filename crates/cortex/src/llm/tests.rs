@@ -49,10 +49,7 @@ fn test_extract_json_from_response() {
 }
 
 fn user_message(text: &str) -> Vec<Message> {
-    vec![Message {
-        role: Role::User,
-        content: text.to_string(),
-    }]
+    vec![Message::user(text)]
 }
 
 #[tokio::test]
@@ -314,6 +311,56 @@ async fn test_openai_generate_with_tools_parses_tool_calls() {
     assert_eq!(call.id.as_deref(), Some("call_abc"));
     assert_eq!(call.name, "web_search");
     assert_eq!(call.arguments, serde_json::json!({ "query": "rust async" }));
+    mock.assert_async().await;
+}
+
+#[tokio::test]
+async fn test_openai_replays_assistant_tool_calls_and_tool_results() {
+    // A multi-round conversation must serialize the assistant tool-call
+    // turn (content null, tool_calls with type=function and a string-encoded
+    // arguments blob) and the role:"tool" result turn carrying tool_call_id.
+    let mut server = mockito::Server::new_async().await;
+    let mock = server
+        .mock("POST", "/chat/completions")
+        .match_body(mockito::Matcher::AllOf(vec![
+            mockito::Matcher::Regex(r#""role":"assistant""#.to_string()),
+            mockito::Matcher::Regex(r#""type":"function""#.to_string()),
+            // arguments are re-encoded as a JSON string, not an object.
+            mockito::Matcher::Regex(r#""arguments":"\{\\"query\\":\\"rust\\"\}""#.to_string()),
+            mockito::Matcher::Regex(r#""role":"tool""#.to_string()),
+            mockito::Matcher::Regex(r#""tool_call_id":"call_1""#.to_string()),
+        ]))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{
+                    "choices": [{
+                        "message": {"role": "assistant", "content": "found 3 results"},
+                        "finish_reason": "stop"
+                    }],
+                    "usage": null
+                }"#,
+        )
+        .create_async()
+        .await;
+
+    let messages = vec![
+        Message::user("search rust"),
+        Message::assistant_with_tool_calls(
+            "",
+            vec![ProposedToolCall {
+                id: Some("call_1".to_string()),
+                name: "web_search".to_string(),
+                arguments: serde_json::json!({ "query": "rust" }),
+            }],
+        ),
+        Message::tool_result("call_1", r#"{"results": 3}"#),
+    ];
+
+    let provider = OpenAiProvider::new(&server.url(), Some("k"), "gpt-4", 0.7, Some(1024)).unwrap();
+    let resp = provider.generate(&messages).await.unwrap();
+
+    assert_eq!(resp.content, "found 3 results");
     mock.assert_async().await;
 }
 

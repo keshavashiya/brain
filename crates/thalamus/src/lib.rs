@@ -581,7 +581,7 @@ impl IntentFallback for LlmIntentFallback {
                 let label = match msg.role {
                     Role::User => "user",
                     Role::Assistant => "assistant",
-                    Role::System => continue,
+                    Role::System | Role::Tool => continue,
                 };
                 let trimmed: String = msg.content.chars().take(PER_TURN_CHARS).collect();
                 let suffix = if msg.content.chars().count() > PER_TURN_CHARS {
@@ -604,14 +604,8 @@ impl IntentFallback for LlmIntentFallback {
         };
 
         let messages = vec![
-            Message {
-                role: Role::System,
-                content: CLASSIFIER_SYSTEM_PROMPT.to_string(),
-            },
-            Message {
-                role: Role::User,
-                content: user_content,
-            },
+            Message::system(CLASSIFIER_SYSTEM_PROMPT),
+            Message::user(user_content),
         ];
 
         let response = match self.llm.generate(&messages).await {

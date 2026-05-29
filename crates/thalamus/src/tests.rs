@@ -120,7 +120,7 @@ async fn test_classify_execute_command_regex_fallback() {
 
 #[tokio::test]
 async fn classify_with_history_passes_recent_turns_to_fallback() {
-    use cortex::llm::{Message, Role};
+    use cortex::llm::Message;
 
     let recording = Arc::new(RecordingFallback {
         response: Classification {
@@ -135,14 +135,8 @@ async fn classify_with_history_passes_recent_turns_to_fallback() {
     });
     let classifier = IntentClassifier::new().with_llm_fallback(recording.clone());
     let history = vec![
-        Message {
-            role: Role::Assistant,
-            content: "What's your username?".to_string(),
-        },
-        Message {
-            role: Role::User,
-            content: "Hold on…".to_string(),
-        },
+        Message::assistant("What's your username?"),
+        Message::user("Hold on…"),
     ];
     let _ = classifier
         .classify_with_history("username : keshavashiya", &history)

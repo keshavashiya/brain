@@ -130,10 +130,7 @@ impl SignalProcessor {
 
         let proc_history: Vec<cortex::llm::Message> = procedure_context
             .iter()
-            .map(|step| cortex::llm::Message {
-                role: cortex::llm::Role::User,
-                content: format!("[procedure step] {step}"),
-            })
+            .map(|step| cortex::llm::Message::user(format!("[procedure step] {step}")))
             .collect();
         let history = conversation_history.unwrap_or(&proc_history);
         let addendum = if self.namespace_is_empty(&signal.namespace) {

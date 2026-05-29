@@ -111,7 +111,8 @@ impl OllamaProvider {
             .map(|m| OllamaMessage {
                 role: m.role.as_wire_str().to_string(),
                 content: m.content.clone(),
-                tool_calls: None,
+                tool_calls: (!m.tool_calls.is_empty())
+                    .then(|| m.tool_calls.iter().map(convert_proposed_call).collect()),
             })
             .collect()
     }
@@ -333,6 +334,18 @@ impl LlmProvider for OllamaProvider {
         let resp = ensure_ok(resp).await?;
         let data: Tags = resp.json().await?;
         Ok(data.models.into_iter().map(|m| m.name).collect())
+    }
+}
+
+/// Reverse of [`OllamaProvider::extract_tool_calls`]: render a kernel
+/// [`ProposedToolCall`] back into Ollama's request shape for an assistant
+/// tool-call turn. Arguments stay an object (Ollama's wire format).
+fn convert_proposed_call(call: &ProposedToolCall) -> OllamaToolCall {
+    OllamaToolCall {
+        function: OllamaFunctionCall {
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
+        },
     }
 }
 

@@ -409,14 +409,8 @@ impl LlmDecomposer {
         }
 
         let messages = vec![
-            cortex::llm::Message {
-                role: cortex::llm::Role::System,
-                content: DECOMPOSE_SYSTEM_PROMPT.to_string(),
-            },
-            cortex::llm::Message {
-                role: cortex::llm::Role::User,
-                content: user_prompt,
-            },
+            cortex::llm::Message::system(DECOMPOSE_SYSTEM_PROMPT),
+            cortex::llm::Message::user(user_prompt),
         ];
 
         let response = self.llm.generate(&messages).await?;
@@ -654,14 +648,8 @@ impl LlmDecomposer {
         }
 
         let messages = vec![
-            cortex::llm::Message {
-                role: cortex::llm::Role::System,
-                content: REPAIR_SYSTEM_PROMPT.to_string(),
-            },
-            cortex::llm::Message {
-                role: cortex::llm::Role::User,
-                content: user_prompt,
-            },
+            cortex::llm::Message::system(REPAIR_SYSTEM_PROMPT),
+            cortex::llm::Message::user(user_prompt),
         ];
 
         let response = self.llm.generate(&messages).await?;

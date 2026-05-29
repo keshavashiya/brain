@@ -127,6 +127,7 @@ mod tests {
         Message {
             role,
             content: content.to_string(),
+            ..Default::default()
         }
     }
 
