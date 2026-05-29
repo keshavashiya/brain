@@ -33,6 +33,68 @@ pub trait CapabilityIndex: Send + Sync {
 
     /// Snapshot of every indexed tool. Stable order is not guaranteed.
     fn snapshot(&self) -> Vec<ToolDescriptor>;
+
+    /// Return up to `k` tools most relevant to `query`, ranked by keyword
+    /// overlap over the tool name and description. This is the seam the
+    /// chat tools channel uses to keep the advertised set small: we never
+    /// hand the model the whole catalogue, only the best-matching slice.
+    ///
+    /// The default scores [`snapshot`](CapabilityIndex::snapshot) with
+    /// [`score_top_k`]; a distributed router can override with a
+    /// hybrid/embedding scorer. Lower-relevance tools still fill remaining
+    /// slots up to `k`, so a query that matches nothing degrades to "the
+    /// first `k` tools" rather than an empty set.
+    fn top_k(&self, query: &str, k: usize) -> Vec<ToolDescriptor> {
+        score_top_k(self.snapshot(), query, k)
+    }
+}
+
+/// Rank `tools` by keyword overlap with `query` and return the best `k`.
+///
+/// Scoring is deliberately simple — case-insensitive alphanumeric term
+/// overlap over each tool's name and description — so it carries no model
+/// or embedding dependency. Results are sorted by score (desc) then name
+/// (asc) for a stable order; zero-score tools sort last and are included
+/// only to fill remaining slots up to `k`. An empty `query` or `k == 0`
+/// short-circuits to a name-sorted prefix / empty vec respectively.
+pub fn score_top_k(
+    mut tools: Vec<ToolDescriptor>,
+    query: &str,
+    k: usize,
+) -> Vec<ToolDescriptor> {
+    if k == 0 {
+        return Vec::new();
+    }
+    let terms = tokenize(query);
+    tools.sort_by(|a, b| {
+        let sa = score_tool(a, &terms);
+        let sb = score_tool(b, &terms);
+        sb.cmp(&sa).then_with(|| a.name.cmp(&b.name))
+    });
+    tools.truncate(k);
+    tools
+}
+
+/// Split text into lowercase alphanumeric terms, dropping empties.
+fn tokenize(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.to_lowercase())
+        .collect()
+}
+
+/// Number of query `terms` that appear anywhere in the tool's name or
+/// description (each term counted once).
+fn score_tool(tool: &ToolDescriptor, terms: &[String]) -> usize {
+    if terms.is_empty() {
+        return 0;
+    }
+    let mut haystack = tool.name.to_lowercase();
+    if let Some(desc) = &tool.description {
+        haystack.push(' ');
+        haystack.push_str(&desc.to_lowercase());
+    }
+    terms.iter().filter(|t| haystack.contains(t.as_str())).count()
 }
 
 /// Default in-process [`CapabilityIndex`], backed by a `RwLock<HashMap>`
@@ -106,6 +168,15 @@ mod tests {
         }
     }
 
+    fn td_desc(server: &str, name: &str, description: &str) -> ToolDescriptor {
+        ToolDescriptor {
+            server: server.into(),
+            name: name.into(),
+            description: Some(description.into()),
+            input_schema: json!({"type": "object"}),
+        }
+    }
+
     #[test]
     fn upsert_then_find_by_namespace_and_action() {
         let idx = InMemoryCapabilityIndex::new();
@@ -174,5 +245,75 @@ mod tests {
         idx.upsert("fs", vec![td("fs", "fs.read_text_file")]);
         idx.upsert("git", vec![td("git", "git.commit")]);
         assert_eq!(idx.snapshot().len(), 2);
+    }
+
+    #[test]
+    fn top_k_ranks_keyword_matches_first() {
+        let idx = InMemoryCapabilityIndex::new();
+        idx.upsert(
+            "fs",
+            vec![
+                td_desc("fs", "fs.read_text_file", "Read the contents of a file"),
+                td_desc("fs", "fs.write_file", "Write data to a file"),
+            ],
+        );
+        idx.upsert(
+            "web",
+            vec![td_desc("web", "web.search", "Search the web for a query")],
+        );
+
+        let hits = idx.top_k("search the web", 2);
+        assert_eq!(hits.len(), 2);
+        // The web search tool matches the most query terms, so it ranks first.
+        assert_eq!(hits[0].name, "web.search");
+    }
+
+    #[test]
+    fn top_k_caps_result_count() {
+        let idx = InMemoryCapabilityIndex::new();
+        idx.upsert(
+            "fs",
+            vec![
+                td("fs", "fs.read_text_file"),
+                td("fs", "fs.write_file"),
+                td("fs", "fs.list_dir"),
+            ],
+        );
+        assert_eq!(idx.top_k("file", 2).len(), 2);
+    }
+
+    #[test]
+    fn top_k_zero_returns_empty() {
+        let idx = InMemoryCapabilityIndex::new();
+        idx.upsert("fs", vec![td("fs", "fs.read_text_file")]);
+        assert!(idx.top_k("anything", 0).is_empty());
+    }
+
+    #[test]
+    fn top_k_no_match_falls_back_to_filling_slots() {
+        // A query that matches nothing still yields tools (best-effort fill)
+        // up to k, name-sorted, rather than an empty advertised set.
+        let tools = vec![
+            td("git", "git.commit"),
+            td("fs", "fs.read_text_file"),
+            td("web", "web.search"),
+        ];
+        let hits = score_top_k(tools, "zzz_no_such_term", 2);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].name, "fs.read_text_file");
+        assert_eq!(hits[1].name, "git.commit");
+    }
+
+    #[test]
+    fn score_top_k_empty_query_returns_name_sorted_prefix() {
+        let tools = vec![
+            td("web", "web.search"),
+            td("fs", "fs.read_text_file"),
+            td("git", "git.commit"),
+        ];
+        let hits = score_top_k(tools, "", 2);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].name, "fs.read_text_file");
+        assert_eq!(hits[1].name, "git.commit");
     }
 }
