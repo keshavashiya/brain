@@ -679,10 +679,7 @@ mod tests {
             &self,
             _messages: &[cortex::Message],
         ) -> Result<cortex::Response, cortex::LlmError> {
-            Ok(cortex::Response {
-                content: self.response.clone(),
-                usage: None,
-            })
+            Ok(cortex::Response::text(self.response.clone(), None))
         }
 
         async fn generate_stream(
@@ -799,10 +796,7 @@ mod tests {
             _messages: &[cortex::Message],
         ) -> Result<cortex::Response, cortex::LlmError> {
             tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-            Ok(cortex::Response {
-                content: "[]".to_string(),
-                usage: None,
-            })
+            Ok(cortex::Response::text("[]", None))
         }
 
         async fn generate_stream(

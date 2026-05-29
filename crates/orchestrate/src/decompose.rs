@@ -1028,12 +1028,12 @@ mod tests {
         #[async_trait]
         impl LlmProvider for EmptyCmdLlm {
             async fn generate(&self, _messages: &[Message]) -> Result<Response, LlmError> {
-                Ok(Response {
-                    content: r#"[
+                Ok(Response::text(
+                    r#"[
                         {"description": "run the script", "action_type": "execute", "command": "", "depends_on": []}
-                    ]"#.to_string(),
-                    usage: None,
-                })
+                    ]"#,
+                    None,
+                ))
             }
             async fn generate_stream(
                 &self,
@@ -1082,12 +1082,12 @@ mod tests {
         #[async_trait]
         impl LlmProvider for ActLlm {
             async fn generate(&self, _messages: &[Message]) -> Result<Response, LlmError> {
-                Ok(Response {
-                    content: r#"[
+                Ok(Response::text(
+                    r#"[
                         {"description": "check act installed", "action_type": "execute", "command": "which act", "depends_on": []}
-                    ]"#.to_string(),
-                    usage: None,
-                })
+                    ]"#,
+                    None,
+                ))
             }
             async fn generate_stream(
                 &self,
@@ -1138,12 +1138,12 @@ mod tests {
         #[async_trait]
         impl LlmProvider for PipeLlm {
             async fn generate(&self, _messages: &[Message]) -> Result<Response, LlmError> {
-                Ok(Response {
-                    content: r#"[
+                Ok(Response::text(
+                    r#"[
                         {"description": "pipeline step", "action_type": "execute", "command": "ls | grep foo", "depends_on": []}
-                    ]"#.to_string(),
-                    usage: None,
-                })
+                    ]"#,
+                    None,
+                ))
             }
             async fn generate_stream(
                 &self,
@@ -1188,15 +1188,15 @@ mod tests {
         #[async_trait]
         impl LlmProvider for FlatPlanLlm {
             async fn generate(&self, _messages: &[Message]) -> Result<Response, LlmError> {
-                Ok(Response {
-                    content: r#"[
+                Ok(Response::text(
+                    r#"[
                         {"description": "scan dir", "action_type": "research", "depends_on": []},
                         {"description": "write script", "action_type": "implement", "depends_on": []},
                         {"description": "run script", "action_type": "execute", "command": "echo hi", "depends_on": []},
                         {"description": "notify user", "action_type": "notify", "depends_on": []}
-                    ]"#.to_string(),
-                    usage: None,
-                })
+                    ]"#,
+                    None,
+                ))
             }
             async fn generate_stream(
                 &self,
@@ -1243,10 +1243,7 @@ mod tests {
             &self,
             _messages: &[cortex::llm::Message],
         ) -> Result<cortex::llm::Response, cortex::llm::LlmError> {
-            Ok(cortex::llm::Response {
-                content: self.0.to_string(),
-                usage: None,
-            })
+            Ok(cortex::llm::Response::text(self.0, None))
         }
         async fn generate_stream(
             &self,

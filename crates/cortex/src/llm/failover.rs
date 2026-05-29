@@ -2,7 +2,7 @@ use std::pin::Pin;
 
 use futures::Stream;
 
-use super::{LlmError, LlmProvider, Message, Response, ResponseChunk};
+use super::{LlmError, LlmProvider, Message, Response, ResponseChunk, ToolDef};
 
 /// An error is retriable (try next provider) for any failure EXCEPT
 /// `InvalidFormat` — a parse error in our own SSE/JSON handling that would
@@ -33,6 +33,30 @@ impl LlmProvider for FalloverProvider {
         let mut last_err = LlmError::ProviderUnavailable("no providers configured".into());
         for provider in &self.providers {
             match provider.generate(messages).await {
+                Ok(resp) => return Ok(resp),
+                Err(e) if is_retriable(&e) => {
+                    tracing::warn!(
+                        provider = provider.name(),
+                        model = provider.model(),
+                        error = %e,
+                        "provider failed — falling over to next"
+                    );
+                    last_err = e;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_err)
+    }
+
+    async fn generate_with_tools(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+    ) -> Result<Response, LlmError> {
+        let mut last_err = LlmError::ProviderUnavailable("no providers configured".into());
+        for provider in &self.providers {
+            match provider.generate_with_tools(messages, tools).await {
                 Ok(resp) => return Ok(resp),
                 Err(e) if is_retriable(&e) => {
                     tracing::warn!(

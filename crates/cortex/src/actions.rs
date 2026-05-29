@@ -7,13 +7,10 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
-mod tooling;
 mod validation;
 
 #[cfg(test)]
 mod tests;
-
-pub use tooling::{get_available_tools, ToolDefinition};
 
 // ─── Errors ─────────────────────────────────────────────────────────────────
 

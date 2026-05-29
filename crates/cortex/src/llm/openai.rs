@@ -4,7 +4,8 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    build_http_client, ensure_ok, LlmError, LlmProvider, Message, Response, ResponseChunk, Usage,
+    build_http_client, ensure_ok, LlmError, LlmProvider, Message, ProposedToolCall, Response,
+    ResponseChunk, ToolDef, Usage,
 };
 
 #[derive(Serialize)]
@@ -14,12 +15,57 @@ struct OpenAiRequest {
     temperature: f64,
     max_tokens: Option<i32>,
     stream: bool,
+    /// Advertised tools (OpenAI function-calling shape). Omitted entirely
+    /// from a plain-text request so behaviour is unchanged when no tools
+    /// channel is in play.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<OpenAiTool>>,
+    /// `"auto"` lets the model answer in plain text or propose a call. We
+    /// never force tool use, so chat stays able to just talk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'static str>,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct OpenAiMessage {
+    role: String,
+    /// Optional on the response side: a tool-call turn carries `null`
+    /// content. Always `Some` on the request side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OpenAiToolCall>>,
+}
+
+/// One advertised tool in the OpenAI request (`{"type":"function", ...}`).
+#[derive(Serialize)]
+struct OpenAiTool {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: OpenAiFunctionDef,
+}
+
+#[derive(Serialize)]
+struct OpenAiFunctionDef {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+/// A tool call in the response. `function.arguments` is a JSON-encoded
+/// string per the OpenAI wire format.
+#[derive(Serialize, Deserialize)]
+struct OpenAiToolCall {
+    #[serde(default)]
+    id: Option<String>,
+    function: OpenAiFunctionCall,
 }
 
 #[derive(Serialize, Deserialize)]
-struct OpenAiMessage {
-    role: String,
-    content: String,
+struct OpenAiFunctionCall {
+    name: String,
+    #[serde(default)]
+    arguments: String,
 }
 
 #[derive(Deserialize)]
@@ -113,7 +159,41 @@ impl OpenAiProvider {
             .iter()
             .map(|m| OpenAiMessage {
                 role: m.role.as_wire_str().to_string(),
-                content: m.content.clone(),
+                content: Some(m.content.clone()),
+                tool_calls: None,
+            })
+            .collect()
+    }
+
+    /// Translate the kernel's provider-agnostic [`ToolDef`]s into the
+    /// OpenAI function-calling request shape.
+    fn convert_tools(tools: &[ToolDef]) -> Vec<OpenAiTool> {
+        tools
+            .iter()
+            .map(|t| OpenAiTool {
+                kind: "function",
+                function: OpenAiFunctionDef {
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    parameters: t.parameters.clone(),
+                },
+            })
+            .collect()
+    }
+
+    /// Map a response message's `tool_calls` into provider-agnostic
+    /// [`ProposedToolCall`]s, parsing each JSON-string argument blob into a
+    /// [`serde_json::Value`] (empty / unparseable args become an empty
+    /// object so the caller never has to re-parse or guard for null).
+    fn extract_tool_calls(message: &OpenAiMessage) -> Vec<ProposedToolCall> {
+        message
+            .tool_calls
+            .iter()
+            .flatten()
+            .map(|tc| ProposedToolCall {
+                id: tc.id.clone(),
+                name: tc.function.name.clone(),
+                arguments: parse_arguments(&tc.function.arguments),
             })
             .collect()
     }
@@ -137,6 +217,8 @@ impl LlmProvider for OpenAiProvider {
             temperature: self.temperature,
             max_tokens: self.max_tokens,
             stream: false,
+            tools: None,
+            tool_choice: None,
         };
 
         let resp = self
@@ -150,16 +232,54 @@ impl LlmProvider for OpenAiProvider {
         let content = data
             .choices
             .first()
-            .map(|c| c.message.content.clone())
+            .and_then(|c| c.message.content.clone())
             .unwrap_or_default();
+
+        Ok(Response::text(content, convert_usage(data.usage)))
+    }
+
+    async fn generate_with_tools(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+    ) -> Result<Response, LlmError> {
+        // No tools to advertise → identical to a plain generate.
+        if tools.is_empty() {
+            return self.generate(messages).await;
+        }
+
+        let url = format!("{}/chat/completions", self.base_url);
+        let request = OpenAiRequest {
+            model: self.model.clone(),
+            messages: Self::convert_messages(messages),
+            temperature: self.temperature,
+            max_tokens: self.max_tokens,
+            stream: false,
+            tools: Some(Self::convert_tools(tools)),
+            // Never force a call — the model may answer in plain text.
+            tool_choice: Some("auto"),
+        };
+
+        let resp = self
+            .build_request(self.client.post(&url))
+            .json(&request)
+            .send()
+            .await?;
+        let resp = ensure_ok(resp).await?;
+
+        let data: OpenAiResponse = resp.json().await?;
+        let (content, tool_calls) = match data.choices.first() {
+            Some(choice) => (
+                choice.message.content.clone().unwrap_or_default(),
+                Self::extract_tool_calls(&choice.message),
+            ),
+            None => (String::new(), Vec::new()),
+        };
 
         Ok(Response {
             content,
-            usage: data.usage.map(|u| Usage {
-                prompt_tokens: u.prompt_tokens,
-                completion_tokens: u.completion_tokens,
-                total_tokens: u.total_tokens,
-            }),
+            usage: convert_usage(data.usage),
+            tool_calls,
         })
     }
 
@@ -176,6 +296,8 @@ impl LlmProvider for OpenAiProvider {
             temperature: self.temperature,
             max_tokens: self.max_tokens,
             stream: true,
+            tools: None,
+            tool_choice: None,
         };
 
         let resp = self
@@ -274,4 +396,24 @@ impl LlmProvider for OpenAiProvider {
         let data: Models = resp.json().await?;
         Ok(data.data.into_iter().map(|m| m.id).collect())
     }
+}
+
+/// Map the wire usage block into the kernel's [`Usage`].
+fn convert_usage(usage: Option<OpenAiUsage>) -> Option<Usage> {
+    usage.map(|u| Usage {
+        prompt_tokens: u.prompt_tokens,
+        completion_tokens: u.completion_tokens,
+        total_tokens: u.total_tokens,
+    })
+}
+
+/// Parse a tool call's JSON-string `arguments` into a [`serde_json::Value`].
+/// An empty or unparseable blob becomes an empty object so callers always
+/// get a well-formed args object.
+fn parse_arguments(raw: &str) -> serde_json::Value {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return serde_json::json!({});
+    }
+    serde_json::from_str(trimmed).unwrap_or_else(|_| serde_json::json!({}))
 }

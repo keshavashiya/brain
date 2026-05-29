@@ -4,7 +4,8 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    build_http_client, ensure_ok, LlmError, LlmProvider, Message, Response, ResponseChunk, Usage,
+    build_http_client, ensure_ok, LlmError, LlmProvider, Message, ProposedToolCall, Response,
+    ResponseChunk, ToolDef, Usage,
 };
 
 #[derive(Serialize)]
@@ -13,12 +14,48 @@ struct OllamaRequest {
     messages: Vec<OllamaMessage>,
     stream: bool,
     options: Option<OllamaOptions>,
+    /// Advertised tools. Omitted from a plain-text request so behaviour is
+    /// unchanged when no tools channel is in play.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<OllamaTool>>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct OllamaMessage {
     role: String,
     content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<OllamaToolCall>>,
+}
+
+/// One advertised tool in the request (`{"type":"function", ...}` — Ollama
+/// mirrors the OpenAI function-calling shape).
+#[derive(Serialize)]
+struct OllamaTool {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: OllamaFunctionDef,
+}
+
+#[derive(Serialize)]
+struct OllamaFunctionDef {
+    name: String,
+    description: String,
+    parameters: serde_json::Value,
+}
+
+/// A tool call in the response. Unlike OpenAI, Ollama sends
+/// `function.arguments` as a JSON *object*, not a string.
+#[derive(Serialize, Deserialize)]
+struct OllamaToolCall {
+    function: OllamaFunctionCall,
+}
+
+#[derive(Serialize, Deserialize)]
+struct OllamaFunctionCall {
+    name: String,
+    #[serde(default)]
+    arguments: serde_json::Value,
 }
 
 #[derive(Serialize)]
@@ -74,6 +111,39 @@ impl OllamaProvider {
             .map(|m| OllamaMessage {
                 role: m.role.as_wire_str().to_string(),
                 content: m.content.clone(),
+                tool_calls: None,
+            })
+            .collect()
+    }
+
+    /// Translate the kernel's provider-agnostic [`ToolDef`]s into Ollama's
+    /// function-calling request shape.
+    fn convert_tools(tools: &[ToolDef]) -> Vec<OllamaTool> {
+        tools
+            .iter()
+            .map(|t| OllamaTool {
+                kind: "function",
+                function: OllamaFunctionDef {
+                    name: t.name.clone(),
+                    description: t.description.clone(),
+                    parameters: t.parameters.clone(),
+                },
+            })
+            .collect()
+    }
+
+    /// Map a response message's `tool_calls` into provider-agnostic
+    /// [`ProposedToolCall`]s. Ollama supplies no call id and sends
+    /// arguments as an object, which we pass through unchanged.
+    fn extract_tool_calls(message: &OllamaMessage) -> Vec<ProposedToolCall> {
+        message
+            .tool_calls
+            .iter()
+            .flatten()
+            .map(|tc| ProposedToolCall {
+                id: None,
+                name: tc.function.name.clone(),
+                arguments: tc.function.arguments.clone(),
             })
             .collect()
     }
@@ -91,20 +161,57 @@ impl LlmProvider for OllamaProvider {
                 temperature: self.temperature,
                 num_predict: self.max_tokens,
             }),
+            tools: None,
         };
 
         let resp = self.client.post(&url).json(&request).send().await?;
         let resp = ensure_ok(resp).await?;
 
         let data: OllamaResponse = resp.json().await?;
+        let usage = usage_from(&data);
+
+        Ok(Response::text(
+            data.message.map(|m| m.content).unwrap_or_default(),
+            usage,
+        ))
+    }
+
+    async fn generate_with_tools(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+    ) -> Result<Response, LlmError> {
+        // No tools to advertise → identical to a plain generate.
+        if tools.is_empty() {
+            return self.generate(messages).await;
+        }
+
+        let url = format!("{}/api/chat", self.base_url);
+        let request = OllamaRequest {
+            model: self.model.clone(),
+            messages: Self::convert_messages(messages),
+            stream: false,
+            options: Some(OllamaOptions {
+                temperature: self.temperature,
+                num_predict: self.max_tokens,
+            }),
+            tools: Some(Self::convert_tools(tools)),
+        };
+
+        let resp = self.client.post(&url).json(&request).send().await?;
+        let resp = ensure_ok(resp).await?;
+
+        let data: OllamaResponse = resp.json().await?;
+        let usage = usage_from(&data);
+        let (content, tool_calls) = match data.message {
+            Some(ref m) => (m.content.clone(), Self::extract_tool_calls(m)),
+            None => (String::new(), Vec::new()),
+        };
 
         Ok(Response {
-            content: data.message.map(|m| m.content).unwrap_or_default(),
-            usage: Some(Usage {
-                prompt_tokens: data.prompt_eval_count.unwrap_or(0),
-                completion_tokens: data.eval_count.unwrap_or(0),
-                total_tokens: data.prompt_eval_count.unwrap_or(0) + data.eval_count.unwrap_or(0),
-            }),
+            content,
+            usage,
+            tool_calls,
         })
     }
 
@@ -123,6 +230,7 @@ impl LlmProvider for OllamaProvider {
                 temperature: self.temperature,
                 num_predict: self.max_tokens,
             }),
+            tools: None,
         };
 
         let resp = self.client.post(&url).json(&request).send().await?;
@@ -226,4 +334,15 @@ impl LlmProvider for OllamaProvider {
         let data: Tags = resp.json().await?;
         Ok(data.models.into_iter().map(|m| m.name).collect())
     }
+}
+
+/// Build the kernel's [`Usage`] from an Ollama response's eval counts.
+fn usage_from(data: &OllamaResponse) -> Option<Usage> {
+    let prompt = data.prompt_eval_count.unwrap_or(0);
+    let completion = data.eval_count.unwrap_or(0);
+    Some(Usage {
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+        total_tokens: prompt + completion,
+    })
 }

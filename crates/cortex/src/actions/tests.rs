@@ -184,14 +184,6 @@ async fn test_execute_disallowed_command() {
         .contains("not in the allowlist"));
 }
 
-#[test]
-fn test_get_available_tools() {
-    let tools = get_available_tools();
-    assert!(!tools.is_empty());
-    assert!(tools.iter().any(|t| t.name == "execute_command"));
-    assert!(tools.iter().any(|t| t.name == "web_search"));
-}
-
 #[tokio::test]
 async fn test_store_fact_with_memory_backend() {
     let backend = Arc::new(MockMemoryBackend {

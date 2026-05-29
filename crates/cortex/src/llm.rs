@@ -112,11 +112,54 @@ pub struct ResponseChunk {
     pub is_done: bool,
 }
 
+/// A tool the model may call, in the provider-agnostic shape the kernel
+/// hands down the tools channel. `parameters` is a JSON Schema object
+/// describing the call arguments (the same `input_schema` a
+/// [`intent::ToolDescriptor`](intent) carries). Producers route any
+/// untrusted `description` through `intent::sanitization` before it
+/// reaches a provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolDef {
+    pub name: String,
+    pub description: String,
+    pub parameters: serde_json::Value,
+}
+
+/// A tool call the model proposed in its response. Awareness ≠ permission:
+/// a proposed call is *not* executed here — the caller resolves it to a
+/// route and runs it through the consent/audit path.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProposedToolCall {
+    /// Provider-assigned call id (OpenAI sets one; Ollama may not).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub name: String,
+    /// Parsed call arguments. Providers send these as a JSON string; we
+    /// parse to a [`serde_json::Value`] so the caller never re-parses.
+    pub arguments: serde_json::Value,
+}
+
 /// Complete LLM response.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Response {
     pub content: String,
     pub usage: Option<Usage>,
+    /// Tool calls the model proposed this turn. Empty for a plain text
+    /// answer or for any provider without a tools channel.
+    pub tool_calls: Vec<ProposedToolCall>,
+}
+
+impl Response {
+    /// Construct a plain text response with no proposed tool calls — the
+    /// common case for providers and mocks that don't use the tools
+    /// channel.
+    pub fn text(content: impl Into<String>, usage: Option<Usage>) -> Self {
+        Self {
+            content: content.into(),
+            usage,
+            tool_calls: Vec::new(),
+        }
+    }
 }
 
 /// Token usage statistics.
@@ -134,6 +177,21 @@ pub struct Usage {
 pub trait LlmProvider: Send + Sync {
     /// Generate a complete response (non-streaming).
     async fn generate(&self, messages: &[Message]) -> Result<Response, LlmError>;
+
+    /// Generate with an optional tools channel. Providers that support
+    /// function-calling override this to advertise `tools` and surface any
+    /// proposed calls in [`Response::tool_calls`]; the default ignores
+    /// `tools` and delegates to [`generate`](LlmProvider::generate), so a
+    /// chat turn degrades gracefully to a plain text answer on a provider
+    /// (or mock) without a tools channel.
+    async fn generate_with_tools(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDef],
+    ) -> Result<Response, LlmError> {
+        let _ = tools;
+        self.generate(messages).await
+    }
 
     /// Generate a streaming response.
     async fn generate_stream(
