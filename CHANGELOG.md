@@ -77,6 +77,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   tagged with tier; a new read-only `brain_capabilities` MCP tool exposes
   the same manifest to external clients. Awareness only — execution stays
   gated. Untrusted MCP descriptions are sanitized before display.
+- **Planner sees the live capability roster.** Task decomposition now
+  composes against what the kernel can actually do: `DecompositionContext`
+  gains `available_agents` (the real `delegate::AgentRegistry` roster) and
+  `available_capabilities` (live manifest summary lines — mounted MCP
+  servers with their verbs, native backends, the terminal), both surfaced
+  in the decompose and replan prompts. An `implement` step that names an
+  agent which isn't registered is now rejected at *plan* time with the
+  list of available agents, instead of failing once execution reaches the
+  step. The sandbox binary allowlist (`available_tools`) is unchanged and
+  still gates `execute`/`test` argv steps. New
+  `signal::pipeline::conversation::planner_capabilities`.
 
 ### Changed
 

@@ -728,6 +728,10 @@ impl TaskOrchestrator {
 
         let context = crate::decompose::DecompositionContext {
             available_tools: self.available_tools.clone(),
+            // Surface the real delegate roster so a repair plan picks an
+            // agent that exists, and an unknown one is rejected before the
+            // replanned step is spliced in. Empty when no registry is wired.
+            available_agents: self.agents.as_ref().map(|r| r.list()).unwrap_or_default(),
             ..Default::default()
         };
         let repair = crate::decompose::RepairContext {

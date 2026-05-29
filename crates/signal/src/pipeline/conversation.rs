@@ -216,6 +216,64 @@ impl SignalProcessor {
             .unwrap_or_default();
         render_capability_digest(&tools, &agents)
     }
+
+    /// Concise capability summary lines for the task planner — one line
+    /// per faculty (mounted MCP servers with their action verbs, native
+    /// backends, the terminal) drawn from the live tool registry. Distinct
+    /// from [`Self::capability_digest`]: that builds a SOUL-prompt section
+    /// prefixed with the always-on faculties; this returns bare lines the
+    /// decomposer folds into its own prompt. Empty when no registry is
+    /// wired, in which case the planner falls back to the sandbox allowlist
+    /// alone (its prior behavior).
+    pub(super) async fn planner_capabilities(&self) -> Vec<String> {
+        let tools = match &self.capability.tool_registry {
+            Some(registry) => registry.list().await,
+            None => Vec::new(),
+        };
+        capability_lines(&tools)
+    }
+}
+
+/// Group registered tools by source into one summary line per faculty.
+/// Trusted fields only (server names + verb actions, source kind) — the
+/// same restraint as [`render_capability_digest`]; untrusted MCP tool
+/// *descriptions* are not inlined.
+fn capability_lines(tools: &[intent::ToolDescriptor]) -> Vec<String> {
+    use intent::ToolSource;
+    use std::collections::BTreeMap;
+
+    let mut mcp: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut native: Vec<String> = Vec::new();
+    let mut terminal = false;
+    for t in tools {
+        match &t.source {
+            ToolSource::McpServer { server } => mcp
+                .entry(server.clone())
+                .or_default()
+                .push(t.verb.action.clone()),
+            ToolSource::NativeBackend { backend } => native.push(backend.as_str().to_string()),
+            ToolSource::Terminal => terminal = true,
+        }
+    }
+
+    let mut lines = Vec::new();
+    for (server, mut actions) in mcp {
+        actions.sort();
+        actions.dedup();
+        lines.push(format!(
+            "MCP server \"{server}\": {}",
+            render_capped_list(&actions, MAX_TOOLS_PER_SERVER)
+        ));
+    }
+    if !native.is_empty() {
+        native.sort();
+        native.dedup();
+        lines.push(format!("Native backends: {}", native.join(", ")));
+    }
+    if terminal {
+        lines.push("Terminal: run shell commands in sandboxed sessions".to_string());
+    }
+    lines
 }
 
 /// Cap on tools listed per MCP server in the digest, keeping it token-bounded.
@@ -301,7 +359,7 @@ fn render_capped_list(items: &[String], cap: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{render_capability_digest, render_capped_list};
+    use super::{capability_lines, render_capability_digest, render_capped_list};
     use intent::{BackendId, ToolAnnotations, ToolDescriptor, ToolSource, Verb};
 
     fn tool(tool_id: &str, source: ToolSource, action: &str) -> ToolDescriptor {
@@ -368,6 +426,49 @@ mod tests {
         assert!(digest.contains("aider, claude"));
         // Untrusted descriptions are never inlined.
         assert!(!digest.contains("untrusted"));
+    }
+
+    #[test]
+    fn capability_lines_summarize_faculties_for_planner() {
+        let tools = vec![
+            tool(
+                "github::create_issue",
+                ToolSource::McpServer {
+                    server: "github".to_string(),
+                },
+                "create_issue",
+            ),
+            tool(
+                "github::list_prs",
+                ToolSource::McpServer {
+                    server: "github".to_string(),
+                },
+                "list_prs",
+            ),
+            tool(
+                "fs::read",
+                ToolSource::NativeBackend {
+                    backend: BackendId::new("fs"),
+                },
+                "read",
+            ),
+            tool("sh", ToolSource::Terminal, "exec"),
+        ];
+        let lines = capability_lines(&tools);
+        assert!(lines
+            .iter()
+            .any(|l| l == "MCP server \"github\": create_issue, list_prs"));
+        assert!(lines.iter().any(|l| l == "Native backends: fs"));
+        assert!(lines
+            .iter()
+            .any(|l| l.starts_with("Terminal: run shell commands")));
+        // Untrusted descriptions never leak into the planner lines.
+        assert!(!lines.iter().any(|l| l.contains("untrusted")));
+    }
+
+    #[test]
+    fn capability_lines_empty_when_nothing_wired() {
+        assert!(capability_lines(&[]).is_empty());
     }
 
     #[test]

@@ -27,12 +27,26 @@ pub enum DecompositionError {
 pub struct DecompositionContext {
     /// Known procedures from cerebellum (matched by trigger).
     pub known_procedures: Vec<String>,
-    /// Available tools/commands.
+    /// Sandbox binary allowlist. `execute`/`test` steps must start with
+    /// one of these; the planner surfaces it and the validation pass
+    /// rejects argv steps that name anything else.
     pub available_tools: Vec<String>,
     /// Relevant facts from semantic memory.
     pub relevant_facts: Vec<String>,
     /// Credential scopes available in the vault (tool names, not values).
     pub available_credentials: Vec<String>,
+    /// Names of delegate agents the registry can actually dispatch to
+    /// (from [`delegate::AgentRegistry::list`]). When non-empty, an
+    /// `implement` step that names an agent outside this set is rejected
+    /// at plan time instead of failing once execution reaches it.
+    pub available_agents: Vec<String>,
+    /// Live capability manifest summary lines — native backends, mounted
+    /// MCP server actions, the terminal — so the planner composes against
+    /// faculties that actually exist instead of inventing them. Advisory:
+    /// surfaced in the prompt but not used as a hard reject gate (mapping a
+    /// free-text step to a manifest tool is fuzzy; a false reject is worse
+    /// than letting execution-time gating handle the edge).
+    pub available_capabilities: Vec<String>,
 }
 
 /// Context for a replan-on-failure call. Built by the orchestrator from
@@ -379,6 +393,20 @@ impl LlmDecomposer {
             );
             user_prompt.push_str(&context.available_tools.join(", "));
         }
+        if !context.available_capabilities.is_empty() {
+            user_prompt.push_str(
+                "\n\nLive kernel capabilities (faculties wired right now — compose against these, do not invent others):\n",
+            );
+            for cap in &context.available_capabilities {
+                user_prompt.push_str(&format!("- {cap}\n"));
+            }
+        }
+        if !context.available_agents.is_empty() {
+            user_prompt.push_str(
+                "\n\nDelegate agents available for `implement` steps (the `agent` field MUST be exactly one of these):\n  ",
+            );
+            user_prompt.push_str(&context.available_agents.join(", "));
+        }
 
         let messages = vec![
             cortex::llm::Message {
@@ -409,6 +437,21 @@ impl LlmDecomposer {
         } else {
             Some(context.available_tools.iter().map(String::as_str).collect())
         };
+        // Same idea for delegate agents: an empty list means "no registry
+        // wired, can't validate" (skip the check), a non-empty list gates
+        // `implement` steps to real agents.
+        let allowed_agents: Option<std::collections::HashSet<&str>> =
+            if context.available_agents.is_empty() {
+                None
+            } else {
+                Some(
+                    context
+                        .available_agents
+                        .iter()
+                        .map(String::as_str)
+                        .collect(),
+                )
+            };
 
         for (i, step) in raw_steps.iter().enumerate() {
             match step.action_type.as_str() {
@@ -467,6 +510,30 @@ impl LlmDecomposer {
                                     basename,
                                 )));
                             }
+                        }
+                    }
+                }
+                "implement" => {
+                    // Reject delegations to agents that aren't registered,
+                    // at plan time, so the user sees "no such agent" before
+                    // approving rather than five steps into execution. Only
+                    // an explicitly-named agent is checked — an omitted/
+                    // "default" agent is resolved later by the orchestrator.
+                    if let Some(allowed) = &allowed_agents {
+                        let named = step.agent.as_deref().map(str::trim).unwrap_or("");
+                        if !named.is_empty() && named != "default" && !allowed.contains(named) {
+                            let mut available: Vec<&str> = allowed.iter().copied().collect();
+                            available.sort_unstable();
+                            return Err(DecompositionError::Parse(format!(
+                                "step {} ({:?}) delegates to agent `{}` which is not registered. \
+                                 Available agents: {}. \
+                                 Re-plan using one of those, or install/configure `{}`.",
+                                i + 1,
+                                step.description,
+                                named,
+                                available.join(", "),
+                                named,
+                            )));
                         }
                     }
                 }
@@ -579,6 +646,12 @@ impl LlmDecomposer {
             );
             user_prompt.push_str(&context.available_tools.join(", "));
         }
+        if !context.available_agents.is_empty() {
+            user_prompt.push_str(
+                "\nDelegate agents available for `implement` steps (the `agent` field MUST be one of these):\n  ",
+            );
+            user_prompt.push_str(&context.available_agents.join(", "));
+        }
 
         let messages = vec![
             cortex::llm::Message {
@@ -638,6 +711,18 @@ impl TaskDecomposer for LlmDecomposer {
         } else {
             Some(context.available_tools.iter().map(String::as_str).collect())
         };
+        let allowed_agents: Option<std::collections::HashSet<&str>> =
+            if context.available_agents.is_empty() {
+                None
+            } else {
+                Some(
+                    context
+                        .available_agents
+                        .iter()
+                        .map(String::as_str)
+                        .collect(),
+                )
+            };
 
         for (i, step) in raw_steps.iter().enumerate() {
             match step.action_type.as_str() {
@@ -649,6 +734,17 @@ impl TaskDecomposer for LlmDecomposer {
                             i + 1,
                             step.description
                         )));
+                    }
+                }
+                "implement" => {
+                    if let Some(allowed) = &allowed_agents {
+                        let named = step.agent.as_deref().map(str::trim).unwrap_or("");
+                        if !named.is_empty() && named != "default" && !allowed.contains(named) {
+                            return Err(DecompositionError::Parse(format!(
+                                "replan step {} delegates to agent `{named}` which is not registered",
+                                i + 1
+                            )));
+                        }
                     }
                 }
                 "execute" | "test" => {
@@ -1136,5 +1232,114 @@ mod tests {
         assert_eq!(steps[1].depends_on, vec![steps[0].id.clone()]);
         assert_eq!(steps[2].depends_on, vec![steps[1].id.clone()]);
         assert_eq!(steps[3].depends_on, vec![steps[2].id.clone()]);
+    }
+
+    /// Minimal LLM stub that always returns one canned plan, for the
+    /// agent-validation tests below.
+    struct CannedLlm(&'static str);
+    #[async_trait]
+    impl cortex::llm::LlmProvider for CannedLlm {
+        async fn generate(
+            &self,
+            _messages: &[cortex::llm::Message],
+        ) -> Result<cortex::llm::Response, cortex::llm::LlmError> {
+            Ok(cortex::llm::Response {
+                content: self.0.to_string(),
+                usage: None,
+            })
+        }
+        async fn generate_stream(
+            &self,
+            _messages: &[cortex::llm::Message],
+        ) -> Result<
+            std::pin::Pin<
+                Box<
+                    dyn futures::Stream<
+                            Item = Result<cortex::llm::ResponseChunk, cortex::llm::LlmError>,
+                        > + Send,
+                >,
+            >,
+            cortex::llm::LlmError,
+        > {
+            unimplemented!()
+        }
+        async fn health_check(&self) -> bool {
+            true
+        }
+        fn name(&self) -> &str {
+            "test"
+        }
+        fn model(&self) -> &str {
+            "test-model"
+        }
+        async fn list_models(&self) -> Result<Vec<String>, cortex::llm::LlmError> {
+            Ok(vec!["test-model".into()])
+        }
+    }
+
+    const IMPLEMENT_WITH_GHOST_AGENT: &str = r#"[
+        {"description": "do the work", "action_type": "implement", "spec": "build it", "agent": "ghost-agent", "depends_on": []}
+    ]"#;
+
+    #[tokio::test]
+    async fn rejects_implement_step_with_unregistered_agent() {
+        // The caller supplies the live agent roster; an `implement` step
+        // naming an agent outside it must fail at plan time, not five
+        // steps into execution.
+        let llm = std::sync::Arc::new(CannedLlm(IMPLEMENT_WITH_GHOST_AGENT));
+        let decomposer = LlmDecomposer::new(llm);
+        let ctx = DecompositionContext {
+            available_agents: vec!["claude-code".into(), "qwen".into()],
+            ..Default::default()
+        };
+        let err = decomposer.decompose("anything", ctx).await.unwrap_err();
+        match err {
+            DecompositionError::Parse(msg) => {
+                assert!(
+                    msg.contains("ghost-agent") && msg.contains("not registered"),
+                    "expected agent-rejection message, got: {msg}"
+                );
+                assert!(
+                    msg.contains("claude-code") && msg.contains("qwen"),
+                    "rejection should list available agents, got: {msg}"
+                );
+            }
+            other => panic!("expected Parse error, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn accepts_implement_step_with_registered_agent() {
+        let llm = std::sync::Arc::new(CannedLlm(
+            r#"[{"description": "do the work", "action_type": "implement", "spec": "build it", "agent": "claude-code", "depends_on": []}]"#,
+        ));
+        let decomposer = LlmDecomposer::new(llm);
+        let ctx = DecompositionContext {
+            available_agents: vec!["claude-code".into(), "qwen".into()],
+            ..Default::default()
+        };
+        let steps = decomposer.decompose("anything", ctx).await.unwrap();
+        assert_eq!(steps.len(), 1);
+        assert!(matches!(
+            &steps[0].action,
+            StepAction::Implement { agent, .. } if agent == "claude-code"
+        ));
+    }
+
+    #[tokio::test]
+    async fn skips_agent_validation_when_roster_unknown() {
+        // No registry wired (empty roster) ⇒ no validation; the planner
+        // keeps its prior behavior and the step is built as-is.
+        let llm = std::sync::Arc::new(CannedLlm(IMPLEMENT_WITH_GHOST_AGENT));
+        let decomposer = LlmDecomposer::new(llm);
+        let steps = decomposer
+            .decompose("anything", DecompositionContext::default())
+            .await
+            .unwrap();
+        assert_eq!(steps.len(), 1);
+        assert!(matches!(
+            &steps[0].action,
+            StepAction::Implement { agent, .. } if agent == "ghost-agent"
+        ));
     }
 }

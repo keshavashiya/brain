@@ -217,12 +217,19 @@ impl SignalProcessor {
                 })?
         };
 
-        // Build decomposition context from config + memory so the
-        // decomposer LLM sees the actual sandbox allowlist and won't
-        // produce plans that try to call binaries the sandbox refuses.
+        // Build decomposition context from config + memory + the live
+        // capability registries so the decomposer LLM sees (a) the actual
+        // sandbox allowlist, (b) the delegate agents it can hand off to,
+        // and (c) the faculties wired right now. The planner then composes
+        // against real capabilities, and an `implement` step naming an
+        // agent that doesn't exist is rejected at plan time.
+        let available_agents = self.agent_registry().map(|r| r.list()).unwrap_or_default();
+        let available_capabilities = self.planner_capabilities().await;
         let context = orchestrate::DecompositionContext {
             available_tools: self.config.security.exec_allowlist.clone(),
             relevant_facts,
+            available_agents,
+            available_capabilities,
             ..Default::default()
         };
 
