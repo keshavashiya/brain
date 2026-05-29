@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Structured logging policy.** New `[logging]` config section: base
+  `level`, per-subsystem `targets` overrides, `format` (`pretty`|`json`),
+  and daemon log-file `rotation` (`daily`|`hourly`|`never`). Long-running
+  services (`serve`, `mcp`) now log through a rotating file appender at
+  `~/.brain/logs/brain.log` instead of an unbounded shell-redirected file;
+  one-shot commands keep stderr. `RUST_LOG` still overrides the computed
+  filter.
+- **`brain doctor --deep`.** Store-level health probes beyond the
+  environment check: SQLite open + schema version, audit-log `prev_hash`
+  linkage continuity, episode/fact/graph-node counts, RuVector store
+  (per-collection counts + dimension), and an embedder round-trip
+  asserting the output dimension matches config. The vector-store probe is
+  skipped when a daemon holds the lock.
+- **MCP resources & prompts.** The MCP server now implements
+  `resources/list` + `resources/read` (`brain://profile`,
+  `brain://capabilities`, `brain://namespaces`) and `prompts/list` +
+  `prompts/get` (`recall-context`, `daily-review`) instead of stubbing them
+  to empty arrays.
 - **Graph memory now influences recall.** The episodic graph was
   write-only with respect to retrieval; it now contributes two candidate
   lists to hybrid recall. A full-text index over node bodies (`nodes_fts`,
@@ -120,6 +138,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **`scripts/check-crate-names.sh`** — header comment and error footer
   no longer reference gitignored docs paths. Rule is inlined; rationale
   moved to `CONTRIBUTING.md`.
+- **Dockerfile** — `RUST_VERSION` now tracks the workspace MSRV (was pinned
+  at 1.85, below the declared 1.91, so the image no longer built). Corrected
+  the inaccurate "musl" header comment (the build is glibc/distroless). A
+  new `docker` CI job builds the linux/amd64 image on every PR so it can't
+  rot again (no registry push).
 
 ### Removed
 

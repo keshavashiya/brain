@@ -154,6 +154,23 @@ jobs:
           # Run all checks: advisories, bans, licenses, sources.
           command: check all
 
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: docker/setup-buildx-action@v3
+      # Build the linux/amd64 image so the Dockerfile can't rot (e.g. a
+      # RUST_VERSION that drifts below the workspace MSRV). No registry push —
+      # publishing multi-arch images is release-automation work (Issue 167).
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   coverage:
     name: Coverage
     runs-on: ubuntu-latest

@@ -1,8 +1,9 @@
 # Brain OS — multi-stage Dockerfile for the `brain` binary.
 #
-# Stage 1 builds a static-ish release binary against musl when targeting
-# linux/amd64 or linux/arm64. Stage 2 ships only the binary on a minimal
-# distroless base.
+# Stage 1 compiles a release binary against the Debian bookworm glibc
+# toolchain (rusqlite's bundled SQLite and the HNSW C extensions need a C
+# toolchain; a musl-static build isn't wired up). Stage 2 ships only the
+# stripped binary on a minimal glibc distroless base.
 #
 # Build for the host platform:
 #   docker build -t brainos:dev .
@@ -10,13 +11,14 @@
 # Build multi-arch (requires buildx):
 #   docker buildx build \
 #     --platform linux/amd64,linux/arm64 \
-#     --tag ghcr.io/keshavashiya/brain:0.4.0 \
+#     --tag ghcr.io/keshavashiya/brain:0.5.0 \
 #     --push .
 #
+# RUST_VERSION must satisfy the workspace MSRV (`rust-version` in Cargo.toml).
 # The default feature set (`grpc`, `encryption`, `ganglia`) is enabled.
 # Override with `--build-arg FEATURES='--no-default-features'` etc.
 
-ARG RUST_VERSION=1.85
+ARG RUST_VERSION=1.91
 ARG DEBIAN_FRONTEND=noninteractive
 
 # ---------- Stage 1: build ----------
