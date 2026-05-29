@@ -37,6 +37,17 @@ pub const ONBOARDING_ADDENDUM: &str = r#"
 - NEVER say "I don't have that in my memory yet" — instead, be proactive about learning.
 - Once you learn something, acknowledge it naturally and ask about the next thing."#;
 
+/// The always-on cognitive faculties, rendered as the fallback "Your
+/// Capabilities" section of the SOUL prompt. Used verbatim when no live
+/// capability digest is supplied (non-chat LLM paths, tests, custom
+/// prompts) and as the prefix of the live digest the chat path builds
+/// (Pillar 10 P0 — see `signal::pipeline::conversation`). Keeping the
+/// wording in one place stops the static and live views from drifting.
+pub const DEFAULT_CAPABILITIES: &str = r#"Your Capabilities:
+- Episodic Memory: You recall past experiences and conversations provided as context.
+- Semantic Memory: You maintain a web of facts about the user's world, projects, and habits.
+- Proactivity: You don't just react; you anticipate needs based on established patterns (provided in context)."#;
+
 /// Token budget allocation.
 #[derive(Debug, Clone, Copy)]
 pub struct TokenBudget {
@@ -184,11 +195,6 @@ Your Identity:
 - You are private, secure, and run entirely on the user's machine.
 - Your purpose is to eliminate "context amnesia" by bridging the gap between siloed tools and the user's life.
 
-Your Capabilities:
-- Episodic Memory: You recall past experiences and conversations provided as context.
-- Semantic Memory: You maintain a web of facts about the user's world, projects, and habits.
-- Proactivity: You don't just react; you anticipate needs based on established patterns (provided in context).
-
 Operating Principles:
 1. TRUTH OVER HALLUCINATION: Ground answers in (a) the provided memories, (b) the live conversation history above this message, and (c) general knowledge. If a *fact about the user* is genuinely absent from memory AND not present in the conversation, state: "I don't have that in my memory yet." Do NOT say this when the user is asking about things discussed earlier in the current conversation — answer from the message thread itself.
 2. SEAMLESS RECALL: Reference memories and prior turns naturally ("You mentioned earlier...", "Based on what we discussed...").
@@ -230,6 +236,7 @@ You are the user's partner in thought. Your goal is to make their digital life f
             memories,
             conversation_history,
             addendum,
+            None,
             &[],
             &[],
         )
@@ -246,12 +253,20 @@ You are the user's partner in thought. Your goal is to make their digital life f
     /// when total snapshot text exceeds the budget, later attachments
     /// shrink first so the first (and usually primary) reference stays
     /// intact.
+    ///
+    /// `capabilities` is the "Your Capabilities" section of the SOUL
+    /// prompt. The chat path passes a *live* digest rendered from the
+    /// currently-wired tools and agents (Pillar 10 P0); every other path
+    /// passes `None` and falls back to [`DEFAULT_CAPABILITIES`]. Either
+    /// way the section is appended after the base prompt so the reasoner
+    /// always sees an explicit capability manifest.
     pub fn assemble_full(
         &self,
         user_message: &str,
         memories: &[Memory],
         conversation_history: &[Message],
         addendum: Option<&str>,
+        capabilities: Option<&str>,
         attachments: &[Attachment],
         skipped: &[SkippedAttachment],
     ) -> Vec<Message> {
@@ -265,14 +280,21 @@ You are the user's partner in thought. Your goal is to make their digital life f
             }
             _ => self.system_prompt.clone(),
         };
+        // Capability manifest: live digest from the chat path, or the
+        // static always-on faculties everywhere else.
+        let prompt_with_caps = format!(
+            "{}\n\n{}",
+            base_prompt,
+            capabilities.unwrap_or(DEFAULT_CAPABILITIES)
+        );
         let system_content = if self.user_profile.estimate_tokens() > 0 {
             format!(
                 "{}\n\nUser Profile: {}",
-                base_prompt,
+                prompt_with_caps,
                 self.user_profile.to_context_string()
             )
         } else {
-            base_prompt
+            prompt_with_caps
         };
         messages.push(Message {
             role: Role::System,
@@ -593,13 +615,41 @@ mod tests {
     }
 
     #[test]
+    fn default_capabilities_used_when_no_digest_supplied() {
+        let assembler = ContextAssembler::with_defaults();
+        let messages = assembler.assemble("what can you do?", &[], &[]);
+        let system = &messages[0].content;
+        // Falls back to the static always-on faculties.
+        assert!(system.contains(DEFAULT_CAPABILITIES));
+        assert!(system.contains("Episodic Memory"));
+    }
+
+    #[test]
+    fn live_capability_digest_overrides_default() {
+        let assembler = ContextAssembler::with_defaults();
+        let digest = "Your Capabilities:\n- Episodic Memory: ...\n\nMounted tools:\n- MCP server \"github\": create_issue";
+        let messages =
+            assembler.assemble_full("what can you do?", &[], &[], None, Some(digest), &[], &[]);
+        let system = &messages[0].content;
+        assert!(
+            system.contains("MCP server \"github\": create_issue"),
+            "live digest must reach the system prompt"
+        );
+        // The supplied digest replaces the static block — the default's
+        // Semantic/Proactivity bullets are not present unless the caller
+        // included them.
+        assert!(!system.contains("a web of facts about the user's world"));
+    }
+
+    #[test]
     fn attachments_render_as_a_dedicated_system_message_before_user() {
         let assembler = ContextAssembler::with_defaults();
         let attachments = vec![Attachment {
             display_path: "/Users/me/notes.md".to_string(),
             snapshot: "# my notes\nbuy milk".to_string(),
         }];
-        let messages = assembler.assemble_full("read this", &[], &[], None, &attachments, &[]);
+        let messages =
+            assembler.assemble_full("read this", &[], &[], None, None, &attachments, &[]);
 
         // Penultimate message should be the attachments block; last is
         // the user message itself.
@@ -626,7 +676,7 @@ mod tests {
             display_path: "/Users/me/missing.txt".to_string(),
             reason: "path not found".to_string(),
         }];
-        let messages = assembler.assemble_full("summarise it", &[], &[], None, &[], &skipped);
+        let messages = assembler.assemble_full("summarise it", &[], &[], None, None, &[], &skipped);
         let prev = &messages[messages.len() - 2];
         assert!(prev.content.contains("<SKIPPED_PATH"));
         assert!(prev.content.contains("/Users/me/missing.txt"));
@@ -637,7 +687,7 @@ mod tests {
     fn no_attachments_means_no_extra_block() {
         let assembler = ContextAssembler::with_defaults();
         let before = assembler.assemble("hi", &[], &[]);
-        let after = assembler.assemble_full("hi", &[], &[], None, &[], &[]);
+        let after = assembler.assemble_full("hi", &[], &[], None, None, &[], &[]);
         assert_eq!(
             before.len(),
             after.len(),
@@ -656,7 +706,7 @@ mod tests {
             display_path: "/Users/me/huge.txt".to_string(),
             snapshot: huge,
         }];
-        let messages = assembler.assemble_full("read", &[], &[], None, &attachments, &[]);
+        let messages = assembler.assemble_full("read", &[], &[], None, None, &attachments, &[]);
         let prev = &messages[messages.len() - 2];
         assert!(
             prev.content.contains("[truncated]"),

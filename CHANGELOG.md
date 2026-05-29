@@ -52,6 +52,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **`scripts/install.sh`** — Linux/macOS one-line installer. Probes the
   GitHub Releases binary for the host triple; falls back to
   `cargo install brainos` or `cargo install --git` from source.
+- **Live capability digest in the SOUL prompt (Pillar 10 P0).** The chat
+  reasoner's "Your Capabilities" section is now rendered from the *live*
+  wired capability set — the tool registry (MCP servers, native backends,
+  terminal) and the delegate agent registry — instead of a hardcoded
+  three-line string. Mount a new MCP server and the next chat turn's
+  self-description reflects it. Read-only awareness only: execution stays
+  gated by the consent/audit/breaker path, and untrusted MCP tool
+  descriptions are not inlined (deferred to Pillar 10 P1). New
+  `cortex::context::DEFAULT_CAPABILITIES` constant + `capabilities`
+  parameter on `ContextAssembler::assemble_full`;
+  `signal::pipeline::conversation::capability_digest`.
 
 ### Changed
 
