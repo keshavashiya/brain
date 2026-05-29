@@ -102,6 +102,11 @@ impl Verb {
             action: action.into(),
         }
     }
+
+    /// Dotted-string rendering (`memory.store`) for manifests and logs.
+    pub fn dotted(&self) -> String {
+        format!("{}.{}", self.namespace, self.action)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -190,6 +195,56 @@ pub struct ToolAnnotations {
     pub idempotent_hint: bool,
 }
 
+/// Reasoner-facing usage guidance for a capability. This is
+/// what lets a *planner* or the chat reasoner choose the right tool instead
+/// of guessing from a one-line description: when it applies, when it does
+/// not, what must be true first, roughly what it costs, and the safety
+/// `tier` the action carries (awareness ≠ permission — execution is still
+/// gated by the consent/audit path; this string is purely descriptive).
+///
+/// Every field is optional so the struct is backward-compatible on the wire
+/// (`#[serde(default)]` on the `ToolDescriptor::usage` field) and cheap to
+/// fill incrementally — MCP-sourced tools may carry none of it, a
+/// hand-authored native backend descriptor may carry all of it.
+///
+/// Free-text fields sourced from an untrusted MCP server are subject to the
+/// same injection caveat as [`ToolDescriptor::description`]; render them
+/// through [`sanitization`] before they reach a system prompt.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when_to_use: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when_not_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub preconditions: Vec<String>,
+    /// Coarse cost hint — e.g. "free / local", "network call", "LLM tokens".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<String>,
+    /// A short example invocation or phrasing that triggers this capability.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub example: Option<String>,
+    /// Safety tier as a string (`"read"`, `"write"`, `"execute"`,
+    /// `"external"`, `"destructive"`). Kept as a plain string so the schema
+    /// crate stays free of an `identity` dependency; registration sites
+    /// stamp it from the known [`Tier`](identity) equivalent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+}
+
+impl ToolUsage {
+    /// True when no guidance has been supplied — lets producers skip the
+    /// field on the wire so MCP-sourced tools that carry none stay tidy.
+    pub fn is_empty(&self) -> bool {
+        self.when_to_use.is_none()
+            && self.when_not_to.is_none()
+            && self.preconditions.is_empty()
+            && self.cost.is_none()
+            && self.example.is_none()
+            && self.tier.is_none()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDescriptor {
     pub tool_id: String,
@@ -214,6 +269,10 @@ pub struct ToolDescriptor {
     pub capabilities: Vec<String>,
     #[serde(default)]
     pub annotations: ToolAnnotations,
+    /// Reasoner-facing usage guidance. Optional + defaulted
+    /// so existing producers/consumers stay wire-compatible.
+    #[serde(default, skip_serializing_if = "ToolUsage::is_empty")]
+    pub usage: ToolUsage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub embedding: Option<Vec<f32>>,
 }

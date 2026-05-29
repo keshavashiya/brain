@@ -679,6 +679,17 @@ impl IntentClassifier {
                 extracted_facts: Vec::new(),
             });
         }
+        // Capability manifest. Slash form drives the
+        // `brain capabilities` subcommand and lets a chat user ask "what
+        // can you actually do?" deterministically.
+        if trimmed == "/capabilities" || trimmed == "/caps" {
+            return Some(Classification {
+                intent: Intent::ListCapabilities,
+                confidence: 1.0,
+                method: ClassificationMethod::Regex,
+                extracted_facts: Vec::new(),
+            });
+        }
         if let Some(rest) = trimmed.strip_prefix("/mcp-mount") {
             let parts: Vec<&str> = rest.split_whitespace().collect();
             if parts.len() >= 3 {

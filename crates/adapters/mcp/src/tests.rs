@@ -68,7 +68,26 @@ async fn test_tools_list() {
     assert!(names.contains(&"memory_episodes"));
     assert!(names.contains(&"user_profile"));
     assert!(names.contains(&"memory_procedures"));
-    assert_eq!(tools.len(), 6);
+    assert!(names.contains(&"brain_capabilities"));
+    assert_eq!(tools.len(), 7);
+}
+
+#[tokio::test]
+async fn test_tool_brain_capabilities_returns_manifest() {
+    let (server, _tmp) = make_server().await;
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(42)),
+        method: "tools/call".to_string(),
+        params: Some(json!({ "name": "brain_capabilities", "arguments": {} })),
+    };
+    let resp = server.handle(req).await.unwrap();
+    assert!(resp.error.is_none(), "got error: {:?}", resp.error);
+    let text = resp.result.unwrap()["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(text.contains("Capability manifest"), "got: {text:?}");
 }
 
 #[tokio::test]

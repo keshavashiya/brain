@@ -61,6 +61,7 @@ impl MCPHost for FailingMcpHost {
                 output_schema: None,
                 capabilities: vec![],
                 annotations: intent::ToolAnnotations::default(),
+                usage: intent::ToolUsage::default(),
                 embedding: None,
             })
             .await

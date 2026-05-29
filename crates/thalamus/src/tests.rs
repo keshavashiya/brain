@@ -1069,7 +1069,8 @@ fn every_intent_variant_has_the_expected_category() {
             | Intent::ListChannels
             | Intent::ChannelPreferences { .. }
             | Intent::ListTerminalSessions
-            | Intent::ListMcpServers => IntentCategory::Inspection,
+            | Intent::ListMcpServers
+            | Intent::ListCapabilities => IntentCategory::Inspection,
             Intent::StoreFact { .. } | Intent::Forget { .. } => IntentCategory::Memory,
             Intent::ExecuteCommand { .. }
             | Intent::WebSearch { .. }

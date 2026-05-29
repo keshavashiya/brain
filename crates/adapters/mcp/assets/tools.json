@@ -122,6 +122,14 @@
         },
         "required": ["action"]
       }
+    },
+    {
+      "name": "brain_capabilities",
+      "description": "List Brain's live capability manifest: every tool the kernel can dispatch to (native backends, terminal, mounted MCP servers) grouped by source and tagged with its safety tier, plus registered delegate agents. Read-only.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      }
     }
   ]
 }

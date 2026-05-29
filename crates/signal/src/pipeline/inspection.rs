@@ -118,6 +118,10 @@ impl InspectionHandler for SignalProcessor {
                 self.handle_list_mcp_servers(ctx.signal_id, prepend_nudges)
                     .await
             }
+            thalamus::Intent::ListCapabilities => {
+                self.handle_list_capabilities(ctx.signal_id, prepend_nudges)
+                    .await
+            }
             other => unreachable!(
                 "non-inspection variant routed to dispatch_inspection: {other:?} \
                  (Intent::category() / dispatch table out of sync)"
@@ -804,6 +808,98 @@ impl SignalProcessor {
         let resp = prepend_nudges(SignalResponse::ok(signal_id, message.trim_end()));
         Ok(PipelineResult::Complete(resp))
     }
+
+    /// Handle `Intent::ListCapabilities`. Renders the live
+    /// capability manifest: every tool in the shared registry (native +
+    /// terminal + mounted MCP), grouped by source and annotated with its
+    /// tier, plus the registered delegate agents. This is the same
+    /// registry the SOUL capability digest reads — one manifest, two
+    /// consumers.
+    pub(super) async fn handle_list_capabilities(
+        &self,
+        signal_id: Uuid,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
+    ) -> Result<PipelineResult, SignalError> {
+        let manifest = self.capability_manifest().await;
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, manifest.trim_end()));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    /// Render the live capability manifest as human-readable text: every
+    /// tool in the shared registry (native + terminal + mounted MCP),
+    /// grouped by source and tagged with its tier, plus the registered
+    /// delegate agents. The same registry the SOUL capability digest reads
+    /// — one manifest, two consumers (the `ListCapabilities` intent and
+    /// the outward MCP `brain_capabilities` tool). Untrusted MCP-server
+    /// descriptions are sanitized before they reach the output.
+    pub async fn capability_manifest(&self) -> String {
+        use std::fmt::Write;
+
+        let tools = match self.tool_registry() {
+            Some(reg) => reg.list().await,
+            None => Vec::new(),
+        };
+        let agents = self.agent_registry().map(|r| r.list()).unwrap_or_default();
+
+        // Partition by source: native + terminal are first-party
+        // (trusted descriptions); MCP tools come from mounted servers
+        // (untrusted descriptions — sanitized before display).
+        let mut native: Vec<&intent::ToolDescriptor> = Vec::new();
+        let mut mcp: Vec<&intent::ToolDescriptor> = Vec::new();
+        for t in &tools {
+            match t.source {
+                intent::ToolSource::McpServer { .. } => mcp.push(t),
+                _ => native.push(t),
+            }
+        }
+        native.sort_by(|a, b| a.tool_id.cmp(&b.tool_id));
+        mcp.sort_by(|a, b| a.tool_id.cmp(&b.tool_id));
+
+        let tier_of =
+            |t: &intent::ToolDescriptor| t.usage.tier.clone().unwrap_or_else(|| "?".to_string());
+
+        let mut buf = format!(
+            "Capability manifest — {} tool(s), {} agent(s):\n",
+            tools.len(),
+            agents.len()
+        );
+
+        if !native.is_empty() {
+            buf.push_str("\nNative & terminal tools:\n");
+            for t in &native {
+                let _ = writeln!(
+                    buf,
+                    "  {} [{}] — {}",
+                    t.verb.dotted(),
+                    tier_of(t),
+                    t.description
+                );
+                if let Some(when) = &t.usage.when_to_use {
+                    let _ = writeln!(buf, "      when: {when}");
+                }
+            }
+        }
+
+        if !mcp.is_empty() {
+            buf.push_str("\nMCP tools (mounted servers):\n");
+            for t in &mcp {
+                // Untrusted server-supplied description — strip control
+                // bytes / ANSI before it touches the output.
+                let desc = intent::sanitization::sanitize_description_body(&t.description);
+                let _ = writeln!(buf, "  {} [{}] — {}", t.tool_id, tier_of(t), desc);
+            }
+        }
+
+        if !agents.is_empty() {
+            let _ = writeln!(
+                buf,
+                "\nDelegate agents (specialist tasks you can hand off): {}",
+                agents.join(", ")
+            );
+        }
+
+        buf.trim_end().to_string()
+    }
 }
 
 #[cfg(test)]
@@ -926,5 +1022,115 @@ mod list_schedules_tests {
             .unwrap();
         let body = body_of(result);
         assert!(body.contains("Missing schedule id"), "got: {body:?}");
+    }
+}
+
+#[cfg(test)]
+mod list_capabilities_tests {
+    use crate::types::{PipelineResult, ResponseContent, SignalResponse};
+    use crate::SignalProcessor;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    async fn make_processor() -> SignalProcessor {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = brain::BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let processor = SignalProcessor::new(config).await.unwrap();
+        std::mem::forget(temp);
+        processor
+    }
+
+    fn body_of(result: PipelineResult) -> String {
+        match result {
+            PipelineResult::Complete(resp) => match resp.response {
+                ResponseContent::Text(t) => t,
+                other => panic!("expected Text response, got {other:?}"),
+            },
+            _ => panic!("expected PipelineResult::Complete"),
+        }
+    }
+
+    fn descriptor(
+        tool_id: &str,
+        source: intent::ToolSource,
+        verb: intent::Verb,
+    ) -> intent::ToolDescriptor {
+        intent::ToolDescriptor {
+            tool_id: tool_id.to_string(),
+            source,
+            verb,
+            description: "desc".to_string(),
+            input_schema: serde_json::json!({}),
+            output_schema: None,
+            capabilities: vec![],
+            annotations: intent::ToolAnnotations::default(),
+            usage: intent::ToolUsage::default(),
+            embedding: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn renders_native_and_mcp_grouped_with_tier() {
+        let registry: Arc<dyn intent::ToolRegistry> = Arc::new(intent::InMemoryToolRegistry::new());
+
+        let mut native = descriptor(
+            "native:memory.store",
+            intent::ToolSource::NativeBackend {
+                backend: intent::BackendId::new("memory"),
+            },
+            intent::Verb::new("memory", "store"),
+        );
+        native.usage.tier = Some("write".to_string());
+        native.usage.when_to_use = Some("State a durable fact.".to_string());
+        registry.register(native).await.unwrap();
+
+        // MCP description carries an ANSI escape — must be stripped on display.
+        let mut mcp = descriptor(
+            "mcp:github:create_issue",
+            intent::ToolSource::McpServer {
+                server: "github".to_string(),
+            },
+            intent::Verb::new("mcp", "create_issue"),
+        );
+        mcp.description = "open an \x1b[31missue\x1b[0m".to_string();
+        mcp.usage.tier = Some("external".to_string());
+        registry.register(mcp).await.unwrap();
+
+        let processor = make_processor().await.with_tool_registry(registry);
+        let result = processor
+            .handle_list_capabilities(Uuid::new_v4(), &|r: SignalResponse| r)
+            .await
+            .unwrap();
+        let body = body_of(result);
+
+        assert!(body.contains("2 tool(s)"), "got: {body:?}");
+        assert!(body.contains("Native & terminal tools:"), "got: {body:?}");
+        assert!(body.contains("memory.store [write]"), "got: {body:?}");
+        assert!(
+            body.contains("when: State a durable fact."),
+            "got: {body:?}"
+        );
+        assert!(
+            body.contains("MCP tools (mounted servers):"),
+            "got: {body:?}"
+        );
+        assert!(
+            body.contains("mcp:github:create_issue [external]"),
+            "got: {body:?}"
+        );
+        // ANSI escape stripped from untrusted MCP description.
+        assert!(!body.contains('\x1b'), "ANSI not stripped: {body:?}");
+    }
+
+    #[tokio::test]
+    async fn handles_no_registry() {
+        let processor = make_processor().await;
+        let result = processor
+            .handle_list_capabilities(Uuid::new_v4(), &|r: SignalResponse| r)
+            .await
+            .unwrap();
+        let body = body_of(result);
+        assert!(body.contains("0 tool(s), 0 agent(s)"), "got: {body:?}");
     }
 }

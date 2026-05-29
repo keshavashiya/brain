@@ -101,6 +101,7 @@ impl McpServer {
             "memory_episodes" => self.tool_memory_episodes(&args),
             "user_profile" => self.tool_user_profile(),
             "memory_procedures" => self.tool_memory_procedures(&args),
+            "brain_capabilities" => self.tool_capabilities().await,
             other => Err((-32602, format!("Unknown tool: {other}"))),
         }
     }

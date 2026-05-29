@@ -125,6 +125,7 @@ fn intent_variant_name(intent: &thalamus::Intent) -> &'static str {
         MountMcpServer { .. } => "MountMcpServer",
         UnmountMcpServer { .. } => "UnmountMcpServer",
         ListMcpServers => "ListMcpServers",
+        ListCapabilities => "ListCapabilities",
         ListStandingApprovals => "ListStandingApprovals",
         RevokeStandingApproval { .. } => "RevokeStandingApproval",
     }

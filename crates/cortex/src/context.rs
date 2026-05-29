@@ -41,7 +41,7 @@ pub const ONBOARDING_ADDENDUM: &str = r#"
 /// Capabilities" section of the SOUL prompt. Used verbatim when no live
 /// capability digest is supplied (non-chat LLM paths, tests, custom
 /// prompts) and as the prefix of the live digest the chat path builds
-/// (Pillar 10 P0 — see `signal::pipeline::conversation`). Keeping the
+/// (see `signal::pipeline::conversation`). Keeping the
 /// wording in one place stops the static and live views from drifting.
 pub const DEFAULT_CAPABILITIES: &str = r#"Your Capabilities:
 - Episodic Memory: You recall past experiences and conversations provided as context.
@@ -256,7 +256,7 @@ You are the user's partner in thought. Your goal is to make their digital life f
     ///
     /// `capabilities` is the "Your Capabilities" section of the SOUL
     /// prompt. The chat path passes a *live* digest rendered from the
-    /// currently-wired tools and agents (Pillar 10 P0); every other path
+    /// currently-wired tools and agents; every other path
     /// passes `None` and falls back to [`DEFAULT_CAPABILITIES`]. Either
     /// way the section is appended after the base prompt so the reasoner
     /// always sees an explicit capability manifest.

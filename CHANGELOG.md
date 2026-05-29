@@ -52,17 +52,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - **`scripts/install.sh`** — Linux/macOS one-line installer. Probes the
   GitHub Releases binary for the host triple; falls back to
   `cargo install brainos` or `cargo install --git` from source.
-- **Live capability digest in the SOUL prompt (Pillar 10 P0).** The chat
-  reasoner's "Your Capabilities" section is now rendered from the *live*
-  wired capability set — the tool registry (MCP servers, native backends,
+- **Live capability digest in the SOUL prompt.** The chat reasoner's
+  "Your Capabilities" section is now rendered from the *live* wired
+  capability set — the tool registry (MCP servers, native backends,
   terminal) and the delegate agent registry — instead of a hardcoded
   three-line string. Mount a new MCP server and the next chat turn's
   self-description reflects it. Read-only awareness only: execution stays
   gated by the consent/audit/breaker path, and untrusted MCP tool
-  descriptions are not inlined (deferred to Pillar 10 P1). New
-  `cortex::context::DEFAULT_CAPABILITIES` constant + `capabilities`
-  parameter on `ContextAssembler::assemble_full`;
+  descriptions are not inlined. New `cortex::context::DEFAULT_CAPABILITIES`
+  constant + `capabilities` parameter on
+  `ContextAssembler::assemble_full`;
   `signal::pipeline::conversation::capability_digest`.
+- **Unified capability manifest.** The kernel's *native*
+  capabilities (action-dispatcher backends — memory, web, scheduling,
+  messaging — plus the terminal bridge) now register into the same
+  `intent::ToolRegistry` the MCP host populates, so one manifest describes
+  every tool the kernel can dispatch to — not just mounted MCP servers.
+  `intent::ToolDescriptor` gains a `usage: ToolUsage` field carrying
+  reasoner-facing guidance (`when_to_use` / `when_not_to` / `preconditions`
+  / `cost` / `example` / `tier`); native descriptors are stamped with the
+  canonical verb summary + tier from `intent::verbs`. New
+  `brain capabilities` subcommand and `Intent::ListCapabilities`
+  (`/capabilities` in chat) render the live manifest grouped by source and
+  tagged with tier; a new read-only `brain_capabilities` MCP tool exposes
+  the same manifest to external clients. Awareness only — execution stays
+  gated. Untrusted MCP descriptions are sanitized before display.
 
 ### Changed
 

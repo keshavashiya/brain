@@ -363,6 +363,13 @@ fn tool_to_intent_descriptor(server: &str, t: &ToolDescriptor) -> intent::ToolDe
         output_schema: None,
         capabilities: Vec::new(),
         annotations: intent::ToolAnnotations::default(),
+        // MCP tools are mounted external servers, so the manifest tier is
+        // `external`; per-tool `when_to_use`/etc. would have to come from
+        // the (untrusted) server and is left empty rather than inlined.
+        usage: intent::ToolUsage {
+            tier: Some("external".to_string()),
+            ..Default::default()
+        },
         embedding: None,
     }
 }

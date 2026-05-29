@@ -233,6 +233,7 @@ mod tool_call_dispatch_tests {
                 output_schema: None,
                 capabilities: vec![],
                 annotations: intent::ToolAnnotations::default(),
+                usage: intent::ToolUsage::default(),
                 embedding: None,
             })
             .await
@@ -269,6 +270,7 @@ mod tool_call_dispatch_tests {
                 output_schema: None,
                 capabilities: vec![],
                 annotations: intent::ToolAnnotations::default(),
+                usage: intent::ToolUsage::default(),
                 embedding: None,
             })
             .await

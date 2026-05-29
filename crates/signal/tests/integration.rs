@@ -648,6 +648,7 @@ async fn tool_registry_accessor_round_trips() {
             output_schema: None,
             capabilities: vec!["fs.read".into()],
             annotations: intent::ToolAnnotations::default(),
+            usage: intent::ToolUsage::default(),
             embedding: None,
         })
         .await

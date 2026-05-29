@@ -96,6 +96,10 @@ pub enum Intent {
     ListTerminalSessions,
     /// List currently-mounted MCP servers (read-only inspection).
     ListMcpServers,
+    /// List the live capability manifest — every native/terminal/MCP tool
+    /// the kernel can dispatch to, plus delegate agents, with their tier
+    /// (read-only inspection).
+    ListCapabilities,
 
     // ── Memory ─ episodic / semantic mutations ─────────────────────────────
     /// Store a fact explicitly.
@@ -249,7 +253,8 @@ impl Intent {
             | Intent::ListChannels
             | Intent::ChannelPreferences { .. }
             | Intent::ListTerminalSessions
-            | Intent::ListMcpServers => IntentCategory::Inspection,
+            | Intent::ListMcpServers
+            | Intent::ListCapabilities => IntentCategory::Inspection,
 
             // ── Memory ────────────────────────────────────────────────────
             Intent::StoreFact { .. } | Intent::Forget { .. } => IntentCategory::Memory,

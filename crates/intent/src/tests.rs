@@ -131,6 +131,7 @@ fn tool_descriptor_serde_roundtrip() {
             destructive_hint: false,
             idempotent_hint: true,
         },
+        usage: ToolUsage::default(),
         embedding: Some(vec![0.1, 0.2, 0.3]),
     };
     let s = serde_json::to_string(&td).unwrap();
@@ -184,6 +185,7 @@ fn sample_descriptor(tool_id: &str, verb_ns: &str, verb_action: &str) -> ToolDes
         output_schema: None,
         capabilities: vec![format!("{verb_ns}.{verb_action}")],
         annotations: ToolAnnotations::default(),
+        usage: ToolUsage::default(),
         embedding: None,
     }
 }
@@ -263,6 +265,7 @@ fn descriptor_with(
         output_schema: None,
         capabilities: caps.iter().map(|s| s.to_string()).collect(),
         annotations: ToolAnnotations::default(),
+        usage: ToolUsage::default(),
         embedding: None,
     }
 }

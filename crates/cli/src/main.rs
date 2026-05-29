@@ -1,5 +1,6 @@
 mod bootstrap;
 mod bridge;
+mod capabilities;
 mod chat;
 mod config;
 mod daemon;
@@ -236,6 +237,14 @@ enum Commands {
         #[command(subcommand)]
         action: config::ConfigAction,
     },
+
+    /// List the live capability manifest from the running daemon.
+    ///
+    /// Shows every tool the kernel can dispatch to — native backends,
+    /// terminal, and mounted MCP servers — grouped by source and tagged
+    /// with its safety tier, plus the registered delegate agents. This is
+    /// the same manifest the reasoner sees.
+    Capabilities,
 }
 
 #[tokio::main]
@@ -332,6 +341,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Commands::Vault { action } => vault::cmd_vault(&config, action).await?,
         Commands::Config { action } => config::cmd_config(&config, action)?,
+        Commands::Capabilities => capabilities::cmd_capabilities(&config).await?,
         Commands::Tail {
             kind,
             tool_id,

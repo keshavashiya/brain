@@ -168,6 +168,13 @@ pub async fn build_processor(
         .with_intent_router(intent_router);
     tracing::info!("Capability kernel wired (registry + DefaultIntentRouter + breakers)");
 
+    // Seed the registry with the kernel's *native* capabilities (action
+    // backends + terminal) so the one manifest the MCP host also
+    // populates describes the built-in tools, not just mounted servers.
+    // This is what the SOUL capability digest and external `tools/list`
+    // read. Awareness only — execution stays gated.
+    crate::capabilities::register_native_capabilities(&tool_registry, config).await;
+
     // MCP host — always wired so `Intent::MountMcpServer` /
     // `ListMcpServers` / `UnmountMcpServer` and the `mcp:{server}:{tool}`
     // route resolver have a real backend instead of the
@@ -1120,9 +1127,11 @@ mod tests {
     // `ToolRegistry` and a `DefaultIntentRouter` on top of it. Without
     // both wired, every `Intent::ToolCall` fell through to the
     // deterministic placeholder and no MCP mount could publish its
-    // catalog into a routable surface.
+    // catalog into a routable surface. The registry is also seeded with
+    // the kernel's native capabilities at boot, so it is non-empty even
+    // before any MCP server mounts.
     #[tokio::test]
-    async fn capability_kernel_wired_and_empty() {
+    async fn capability_kernel_wired_with_native_seed() {
         let tmp = tempfile::tempdir().unwrap();
         let mut cfg = brain::BrainConfig::default();
         cfg.brain.data_dir = tmp.path().to_str().unwrap().to_string();
@@ -1134,10 +1143,27 @@ mod tests {
             .expect("tool registry wired by build_processor")
             .clone();
         assert!(processor.intent_router().is_some(), "intent router wired");
+
+        let tools = registry.list().await;
+        // Native capabilities are seeded; no MCP-sourced tool exists yet.
         assert!(
-            registry.list().await.is_empty(),
-            "default install has no tools registered yet"
+            tools
+                .iter()
+                .any(|t| t.verb == intent::Verb::new("memory", "store")),
+            "memory.store native capability is seeded at boot"
         );
+        assert!(
+            !tools
+                .iter()
+                .any(|t| matches!(t.source, intent::ToolSource::McpServer { .. })),
+            "no MCP server is mounted on a default install"
+        );
+        // Seeded native descriptors carry the usage enrichment.
+        let store = tools
+            .iter()
+            .find(|t| t.verb == intent::Verb::new("memory", "store"))
+            .unwrap();
+        assert_eq!(store.usage.tier.as_deref(), Some("write"));
     }
 
     // Confirms `build_processor` wires a `BreakerRegistry` and that the

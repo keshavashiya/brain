@@ -168,7 +168,7 @@ impl SignalProcessor {
             );
         }
 
-        // Pillar 10 P0: hand the SOUL prompt a *live* capability digest
+        // Hand the SOUL prompt a *live* capability digest
         // rendered from the currently-wired tools and agents, so the
         // reasoner describes its real catalog instead of a hardcoded
         // string. Read-only awareness — execution stays gated downstream.
@@ -199,7 +199,7 @@ impl SignalProcessor {
     }
 
     /// Build the live "Your Capabilities" section for the SOUL prompt
-    /// (Pillar 10 P0). Reads the currently-wired tool registry and agent
+    /// Reads the currently-wired tool registry and agent
     /// registry so the reasoner's self-description tracks what is mounted
     /// *right now* — mount a new MCP server and the next turn's digest
     /// reflects it. Returns the always-on faculties even when nothing
@@ -224,7 +224,7 @@ const MAX_TOOLS_PER_SERVER: usize = 15;
 const MAX_AGENTS: usize = 20;
 
 /// Render the live capability section injected into the SOUL prompt
-/// (Pillar 10 P0). Starts from the always-on cognitive faculties
+/// Starts from the always-on cognitive faculties
 /// ([`cortex::context::DEFAULT_CAPABILITIES`]) and appends whatever tools
 /// and delegate agents are *currently* wired.
 ///
@@ -232,7 +232,7 @@ const MAX_AGENTS: usize = 20;
 /// by the capability/consent/audit path. Only trusted fields are inlined
 /// (verb vocabulary, source kind, agent names) — untrusted MCP tool
 /// *descriptions* are deliberately not rendered here (that enrichment is
-/// Pillar 10 P1 and would route through [`intent::sanitization`]).
+/// a later phase, and would route through [`intent::sanitization`]).
 /// Token-bounded: per-server tool lists and the agent list are capped.
 fn render_capability_digest(tools: &[intent::ToolDescriptor], agents: &[String]) -> String {
     use intent::ToolSource;
@@ -317,6 +317,7 @@ mod tests {
             output_schema: None,
             capabilities: vec![],
             annotations: ToolAnnotations::default(),
+            usage: intent::ToolUsage::default(),
             embedding: None,
         }
     }

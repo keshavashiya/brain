@@ -224,6 +224,14 @@ impl McpServer {
             serde_json::to_string_pretty(&profile).unwrap_or_default(),
         ))
     }
+
+    /// `brain_capabilities` — expose Brain's live capability manifest to
+    /// external MCP clients. Same text the internal
+    /// `ListCapabilities` intent renders, so internal reasoner and
+    /// external clients read one manifest.
+    pub(crate) async fn tool_capabilities(&self) -> Result<Value, (i32, String)> {
+        Ok(tool_result_text(self.processor.capability_manifest().await))
+    }
 }
 
 /// Build a standard MCP tool result with a single text content block.
