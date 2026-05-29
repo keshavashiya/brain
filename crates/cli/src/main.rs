@@ -10,6 +10,7 @@ mod encryption;
 mod errors;
 mod export;
 mod init;
+mod logging;
 mod serve;
 mod service;
 mod status;
@@ -259,44 +260,22 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> anyhow::Result<()> {
-    // Tracing routing:
-    //   - `brain mcp` stdout IS the JSON-RPC channel → tracing must go to
-    //     stderr with ANSI off so it never corrupts the stream.
-    //   - All other commands also route tracing to stderr so human-readable
-    //     stdout (`init`, `status`, `chat`, …) stays clean.
-    //
-    // Default filter:
-    //   - RUST_LOG wins if set
-    //   - --verbose / -v → brain=info
-    //   - `serve` / `mcp` (long-running services) → brain=info
-    //   - everything else → warn (no INFO leaking into stdout-adjacent UX)
-    let default_filter =
-        if cli.verbose || matches!(cli.command, Commands::Serve { .. } | Commands::Mcp) {
-            "brain=info"
-        } else {
-            "warn"
-        };
-    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| default_filter.into());
-
-    let builder = tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .with_writer(std::io::stderr);
-    if matches!(cli.command, Commands::Mcp) {
-        builder.with_ansi(false).init();
-    } else {
-        builder.init();
-    }
-
     // Config parse errors are fatal: silently falling back to defaults would
     // boot the daemon with no API keys, no principals, and no standing
     // approvals — i.e. "open mode" without the operator's knowledge.
     // A missing config file is NOT an error here (loader returns Ok with
     // embedded defaults); only malformed YAML / invalid enum values reach this.
+    //
+    // Loaded before tracing init so the logging policy (`[logging]`) can drive
+    // the subscriber. Config-load failures use `eprintln!` (no tracing yet).
     let config =
         brain::BrainConfig::load().map_err(|e| anyhow::anyhow!("failed to load config: {e}"))?;
 
     config.ensure_data_dirs()?;
+
+    // Install tracing per the logging policy. The returned guard flushes the
+    // non-blocking file appender on drop — hold it for the whole process.
+    let _log_guard = logging::init(&cli, &config);
 
     match cli.command {
         Commands::Init {

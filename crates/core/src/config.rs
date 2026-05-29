@@ -44,6 +44,66 @@ pub struct BrainConfig {
     /// streams into the pipeline via `signal::spawn_reflex`.
     #[serde(default)]
     pub reflex: ReflexConfig,
+    /// Logging policy — base level, per-subsystem overrides, output format,
+    /// and daemon log-file rotation. Default is empty/`info` pretty with daily
+    /// rotation; `RUST_LOG` still overrides the computed filter at runtime.
+    #[serde(default)]
+    pub logging: LoggingConfig,
+}
+
+/// Logging configuration. Drives the `tracing` subscriber the CLI installs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    /// Base level applied to the `brain` target when neither `RUST_LOG` nor a
+    /// per-command default is in force: `trace|debug|info|warn|error`.
+    #[serde(default = "LoggingConfig::default_level")]
+    pub level: String,
+    /// Per-subsystem level overrides, keyed by tracing target (crate name,
+    /// e.g. `hippocampus`, `signal`). Each becomes an `EnvFilter` directive.
+    #[serde(default)]
+    pub targets: HashMap<String, String>,
+    /// Output format: `pretty` (human) or `json` (structured/machine).
+    #[serde(default)]
+    pub format: LogFormat,
+    /// Daemon log-file rotation cadence for `logs/brain.log`.
+    #[serde(default)]
+    pub rotation: LogRotation,
+}
+
+impl LoggingConfig {
+    fn default_level() -> String {
+        "info".to_string()
+    }
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            level: Self::default_level(),
+            targets: HashMap::new(),
+            format: LogFormat::default(),
+            rotation: LogRotation::default(),
+        }
+    }
+}
+
+/// Log output format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogFormat {
+    #[default]
+    Pretty,
+    Json,
+}
+
+/// Daemon log-file rotation cadence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogRotation {
+    #[default]
+    Daily,
+    Hourly,
+    Never,
 }
 
 /// Top-level reactive-source configuration.

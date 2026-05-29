@@ -187,6 +187,19 @@ reflex:
     #     threshold: 20
     #   - kind: network_changed
 
+# ── Logging ────────────────────────────────────────────────────────────────────
+# Drives the tracing subscriber. `RUST_LOG` still overrides the computed filter
+# at runtime. Long-running services (`serve`, `mcp`) log to a rotating file at
+# ~/.brain/logs/brain.log; one-shot commands log to stderr.
+logging:
+  level: "info"                     # base level for the `brain` target
+  format: "pretty"                  # "pretty" (human) or "json" (structured)
+  rotation: "daily"                 # "daily" | "hourly" | "never" (file rotation)
+  targets: {}                       # per-subsystem overrides, e.g.:
+  # targets:
+  #   hippocampus: "debug"
+  #   signal: "info"
+
 # ── Channel Relays ─────────────────────────────────────────────────────────────
 # Bidirectional WebSocket gateways. Unlike webhooks these are long-lived
 # connections — approval responses from any relay are correlated automatically.

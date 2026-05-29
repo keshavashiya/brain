@@ -267,17 +267,26 @@ pub(crate) fn spawn_daemon(
         std::fs::create_dir_all(parent)?;
     }
 
-    let log_file = std::fs::OpenOptions::new()
+    // The `serve` process now writes its structured, rotating logs to
+    // `log_path` (brain.log) itself, via the tracing file appender (see
+    // `logging::init`). The child's raw stdout/stderr only carry panics and
+    // any stray prints, so capture those in a sibling `brain.stderr.log`
+    // rather than redirecting them onto the structured log file.
+    let raw_path = log_path
+        .parent()
+        .map(|p| p.join("brain.stderr.log"))
+        .unwrap_or_else(|| std::path::PathBuf::from("brain.stderr.log"));
+    let raw_file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(log_path)?;
+        .open(&raw_path)?;
 
     let exe = std::env::current_exe()?;
 
     let mut cmd = std::process::Command::new(&exe);
     cmd.arg("serve")
-        .stdout(log_file.try_clone()?)
-        .stderr(log_file)
+        .stdout(raw_file.try_clone()?)
+        .stderr(raw_file)
         .stdin(std::process::Stdio::null());
 
     if let Some(pp) = passphrase {
@@ -335,10 +344,7 @@ async fn try_start_via_launchd(config: &BrainConfig) -> bool {
         .unwrap_or(false);
     if service_loaded && bootstrap::detect_running_daemon(config).await.is_some() {
         println!("Brain is already awake (launchd service).");
-        println!(
-            "  Logs → {}",
-            config.data_dir().join("logs/brain.log").display()
-        );
+        println!("  Logs → {}", config.data_dir().join("logs").display());
         println!("Run `brain stop` to put it to sleep first.");
         return true;
     }
@@ -354,10 +360,7 @@ async fn try_start_via_launchd(config: &BrainConfig) -> bool {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         if bootstrap::detect_running_daemon(config).await.is_some() {
             println!("Brain started via launchd service.");
-            println!(
-                "  Logs → {}",
-                config.data_dir().join("logs/brain.log").display()
-            );
+            println!("  Logs → {}", config.data_dir().join("logs").display());
             return true;
         }
     }
@@ -386,10 +389,7 @@ pub(crate) async fn cmd_start(config: &BrainConfig) -> anyhow::Result<()> {
     // health probe is the only reliable "already running" signal.
     if let Some(url) = bootstrap::detect_running_daemon(config).await {
         println!("Brain is already awake ({url}).");
-        println!(
-            "  Logs → {}",
-            config.data_dir().join("logs/brain.log").display()
-        );
+        println!("  Logs → {}", config.data_dir().join("logs").display());
         println!("Run `brain stop` to put it to sleep first.");
         return Ok(());
     }

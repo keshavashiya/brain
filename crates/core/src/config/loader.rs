@@ -471,6 +471,7 @@ impl Default for BrainConfig {
             confirm: ConfirmConfig::default(),
             identity: identity::IdentityConfig::default(),
             reflex: ReflexConfig::default(),
+            logging: crate::config::LoggingConfig::default(),
         }
     }
 }
