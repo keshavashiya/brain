@@ -88,6 +88,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   step. The sandbox binary allowlist (`available_tools`) is unchanged and
   still gates `execute`/`test` argv steps. New
   `signal::pipeline::conversation::planner_capabilities`.
+- **Tool-use loop in chat.** A chat turn can now use the kernel's tools, not
+  just describe them. `cortex::LlmProvider` gains a tools channel
+  (`generate_with_tools` with `ToolDef` / `ProposedToolCall`; defaults to
+  plain text so providers without one degrade gracefully) implemented for
+  OpenAI and Ollama. The pipeline advertises a relevance-ranked slice of the
+  unified capability manifest to the model, and when the model proposes a
+  call it is mapped to an `intent::IntentToken`, passed through the **same**
+  tier-based confirmation gate every other capability invocation uses,
+  executed on approval, and its result fed back so the model can ground its
+  answer — looping over a bounded number of rounds within one turn.
+  `cortex::Message` gains `Role::Tool` and tool-call linkage; untrusted MCP
+  descriptions are sanitized before reaching a provider. Awareness stays
+  distinct from permission — advertising a tool only lets the model propose
+  it. New `signal::pipeline::toolloop`.
 
 ### Changed
 
