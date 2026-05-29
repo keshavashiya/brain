@@ -33,6 +33,7 @@ mod lifecycle;
 mod memory;
 mod observe;
 mod paths;
+mod toolloop;
 
 use dispatch::{
     ActionHandler, CapabilityHandler, ConversationHandler, GovernanceHandler, HandlerContext,
@@ -142,7 +143,7 @@ impl SignalProcessor {
                     _ = cancel.notified() => {
                         return Ok(self.cancelled_response(signal_id, &signal).await);
                     }
-                    r = self.llm.generate(&messages) => r?,
+                    r = self.run_chat_turn(&signal, signal_id, messages) => r?,
                 };
 
                 crate::budget_guard::record_llm_usage(

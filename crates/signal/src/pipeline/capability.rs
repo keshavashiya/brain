@@ -70,17 +70,28 @@ impl SignalProcessor {
             let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
             return Ok(PipelineResult::Complete(resp));
         };
-        let route = match router.resolve(&token).await {
+        let message = self.dispatch_tool_route(router.as_ref(), &token).await;
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    /// Resolve `token` to a [`intent::ToolRoute`] and execute it, returning a
+    /// readable outcome string. Shared by the `Intent::ToolCall` handler and
+    /// the chat tool-use loop. Records breaker outcomes for MCP calls.
+    ///
+    /// Consent is **not** gated here — callers run
+    /// [`confirmation_gate`](SignalProcessor::confirmation_gate) on the
+    /// wrapping intent first.
+    pub(super) async fn dispatch_tool_route(
+        &self,
+        router: &dyn intent::IntentRouter,
+        token: &intent::IntentToken,
+    ) -> String {
+        let route = match router.resolve(token).await {
             Ok(r) => r,
-            Err(e) => {
-                let resp = prepend_nudges(SignalResponse::ok(
-                    signal_id,
-                    format!("Tool resolution failed: {e}"),
-                ));
-                return Ok(PipelineResult::Complete(resp));
-            }
+            Err(e) => return format!("Tool resolution failed: {e}"),
         };
-        let message = match route {
+        match route {
             intent::ToolRoute::Mcp { server, tool } => match self.mcp_host() {
                 None => format!(
                     "Resolved '{}.{}' → mcp:{server}:{tool}, but MCP host not configured.",
@@ -130,9 +141,7 @@ impl SignalProcessor {
                 token.verb.action,
                 backend.as_str()
             ),
-        };
-        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
-        Ok(PipelineResult::Complete(resp))
+        }
     }
 }
 
