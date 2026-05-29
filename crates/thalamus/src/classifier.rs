@@ -784,11 +784,20 @@ impl IntentClassifier {
             }
         }
 
-        // /tool <verb_ns>.<verb_action> [json-args] — raw entrypoint for
-        // the capability router. The verb pair routes against the wired
-        // `intent::ToolRegistry`; optional JSON payload becomes the SIT's
-        // `object.value`. Useful as a tester / power-user path until the
-        // LLM classifier learns to emit `Intent::ToolCall` natively.
+        // /tool <verb_ns>.<verb_action> [json-args] — the deterministic
+        // power-user / tester entrypoint to the capability router. The verb
+        // pair routes against the wired `intent::ToolRegistry`; optional JSON
+        // payload becomes the SIT's `object.value`.
+        //
+        // This is one of two — and only two — `Intent::ToolCall` producers,
+        // by design: this explicit user path (`Provenance::User`), and the
+        // chat tool-loop where the reasoning LLM proposes calls in-band
+        // (`Provenance::Llm`, signal/pipeline/toolloop.rs). The classifier
+        // deliberately does NOT try to emit `Intent::ToolCall` from arbitrary
+        // free text — open-ended tool selection belongs to the tool-loop,
+        // which has the full tool manifest, argument schemas, and a
+        // multi-round protocol. A single-shot classifier guess would be a
+        // strictly weaker duplicate of that path.
         if let Some(rest) = trimmed.strip_prefix("/tool") {
             let rest = rest.trim();
             if !rest.is_empty() {
