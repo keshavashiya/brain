@@ -36,11 +36,20 @@
 //! 4. **Crate cleanup.** Remove `EpisodicStore` / [`crate::semantic::SemanticStore`]
 //!    surfaces or hide them behind a `legacy` feature for two more minor releases.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+
+use chrono::{DateTime, Utc};
+use storage::RuVectorStore;
 
 use crate::episodic::EpisodicStore;
 use crate::graph::{EpisodicGraph, Node};
 use crate::Episode;
+
+/// RuVector collection holding graph-node embeddings — written by the
+/// terminal graph sink, queried here for ANN recall. Must match the
+/// constant in `signal::terminal_graph_mirror`.
+const GRAPH_VEC: &str = "graph_vec";
 
 /// Errors from the dual-memory read path.
 #[derive(Debug, thiserror::Error)]
@@ -77,12 +86,36 @@ impl MemoryEntry {
     }
 }
 
+/// One hydrated graph candidate for recall fusion — enough to build a
+/// `Memory` without re-reading the node.
+#[derive(Debug, Clone)]
+pub struct GraphCandidate {
+    pub content: String,
+    pub weight: f32,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Graph candidate lists for one recall query, ready to fold into RRF.
+/// `fts` and `ann` are ordered best-first; `hydration` maps every id in
+/// either list to its `Memory`-building metadata.
+#[derive(Debug, Clone, Default)]
+pub struct GraphCandidates {
+    /// `(node_id, bm25_rank)` — lower rank is a better text match.
+    pub fts: Vec<(String, f64)>,
+    /// `(node_id, similarity)` — `1/(1+distance)`, higher is closer.
+    pub ann: Vec<(String, f64)>,
+    pub hydration: HashMap<String, GraphCandidate>,
+}
+
 /// Read facade unifying the graph and the legacy episodic store.
 /// Cheap to clone — both inner handles are `Arc`-shared.
 #[derive(Clone)]
 pub struct DualMemoryReader {
     graph: Option<Arc<dyn EpisodicGraph>>,
     legacy: Option<Arc<EpisodicStore>>,
+    /// Vector store backing graph-node ANN (`graph_vec`). When unset the
+    /// ANN half of [`Self::recall_candidates`] is skipped (FTS still runs).
+    vectors: Option<RuVectorStore>,
 }
 
 impl DualMemoryReader {
@@ -92,6 +125,7 @@ impl DualMemoryReader {
         Self {
             graph: Some(graph),
             legacy: None,
+            vectors: None,
         }
     }
 
@@ -102,6 +136,7 @@ impl DualMemoryReader {
         Self {
             graph: None,
             legacy: Some(legacy),
+            vectors: None,
         }
     }
 
@@ -110,7 +145,15 @@ impl DualMemoryReader {
         Self {
             graph: Some(graph),
             legacy: Some(legacy),
+            vectors: None,
         }
+    }
+
+    /// Attach the vector store so [`Self::recall_candidates`] can run the
+    /// ANN half over `graph_vec`. Without it, only graph FTS contributes.
+    pub fn with_vector_store(mut self, vectors: RuVectorStore) -> Self {
+        self.vectors = Some(vectors);
+        self
     }
 
     /// Look up one entry by id. Tries the graph first, then the
@@ -128,6 +171,81 @@ impl DualMemoryReader {
         }
         Ok(None)
     }
+
+    /// Gather graph candidates for a recall query: a BM25 list from the
+    /// `nodes_fts` index and an ANN list from the `graph_vec` collection.
+    /// Both are scoped to `namespace` (FTS at the SQL layer; ANN by
+    /// hydrating the node and checking its namespace). Returns ordered
+    /// id-lists plus a hydration map so the recall engine can fuse and
+    /// materialize hits without a second round-trip.
+    ///
+    /// Returns empty when no graph is wired. The ANN half is skipped when
+    /// no vector store is attached; FTS still runs.
+    pub async fn recall_candidates(
+        &self,
+        query: &str,
+        query_vector: Vec<f32>,
+        limit: usize,
+        namespace: Option<&str>,
+    ) -> Result<GraphCandidates, DualMemoryError> {
+        let Some(graph) = &self.graph else {
+            return Ok(GraphCandidates::default());
+        };
+        let mut out = GraphCandidates::default();
+
+        // FTS half — body-text BM25 over nodes_fts.
+        for hit in graph.search_text(query, limit, namespace)? {
+            out.fts.push((hit.id.clone(), hit.rank));
+            out.hydration.entry(hit.id).or_insert(GraphCandidate {
+                content: hit.text,
+                weight: hit.weight,
+                created_at: hit.created_at,
+            });
+        }
+
+        // ANN half — vector search over graph_vec, hydrated through the
+        // graph. Best-effort: a vector-store error degrades to FTS-only.
+        if let Some(vectors) = &self.vectors {
+            match vectors.search(GRAPH_VEC, query_vector, limit).await {
+                Ok(results) => {
+                    for vr in results {
+                        let Some(node) = graph.get_node(&vr.id)? else {
+                            continue; // vector outlived its node
+                        };
+                        if namespace.is_some_and(|ns| !namespace_matches(ns, &node.namespace)) {
+                            continue;
+                        }
+                        let similarity = 1.0 / (1.0 + vr.distance as f64);
+                        out.ann.push((node.id.clone(), similarity));
+                        out.hydration
+                            .entry(node.id.clone())
+                            .or_insert_with(|| GraphCandidate {
+                                content: node_content(&node),
+                                weight: node.weight,
+                                created_at: node.created_at,
+                            });
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("graph_vec ANN search failed, FTS-only graph recall: {e}");
+                }
+            }
+        }
+
+        Ok(out)
+    }
+}
+
+/// Namespace scope test mirroring the SQL filter: exact match or a
+/// `ns/…` sub-namespace.
+fn namespace_matches(scope: &str, ns: &str) -> bool {
+    ns == scope || ns.starts_with(&format!("{scope}/"))
+}
+
+/// Content projection for an ANN-hydrated node — the JSON body as text,
+/// matching what the FTS index stores so fused hits read consistently.
+fn node_content(node: &Node) -> String {
+    serde_json::to_string(&node.body).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -138,6 +256,118 @@ mod tests {
 
     fn pool() -> SqlitePool {
         SqlitePool::open_memory().expect("memory pool")
+    }
+
+    /// 384-dim one-hot vector so seeded + query vectors can be made
+    /// identical (distance ≈ 0 → similarity ≈ 1).
+    fn unit_vector(idx: usize) -> Vec<f32> {
+        let mut v = vec![0.0; 384];
+        v[idx % 384] = 1.0;
+        v
+    }
+
+    #[tokio::test]
+    async fn recall_candidates_returns_graph_fts_hit() {
+        let g: Arc<dyn EpisodicGraph> = Arc::new(SqliteGraph::new(pool()));
+        let mut n = Node::new(
+            NodeKind::new("tool_call"),
+            serde_json::json!({"program": "ripgrep"}),
+            "personal",
+            None,
+        );
+        n.weight = 0.7;
+        g.add_node(&n).unwrap();
+
+        let reader = DualMemoryReader::graph_only(g);
+        let cands = reader
+            .recall_candidates("ripgrep", vec![0.0; 384], 10, None)
+            .await
+            .unwrap();
+
+        assert_eq!(cands.fts.len(), 1, "FTS should surface the ripgrep node");
+        assert_eq!(cands.fts[0].0, n.id);
+        let hyd = cands.hydration.get(&n.id).expect("hydration entry");
+        assert!((hyd.weight - 0.7).abs() < 1e-6);
+        assert!(cands.ann.is_empty(), "no vector store wired → no ANN list");
+    }
+
+    #[tokio::test]
+    async fn recall_candidates_returns_graph_ann_hit() {
+        let g: Arc<dyn EpisodicGraph> = Arc::new(SqliteGraph::new(pool()));
+        let n = Node::new(
+            NodeKind::new("tool_call"),
+            serde_json::json!({"program": "opaque-binary"}),
+            "personal",
+            None,
+        );
+        g.add_node(&n).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let ruv = RuVectorStore::open(dir.path(), 384).await.unwrap();
+        ruv.ensure_tables().await.unwrap();
+        let seeded = unit_vector(42);
+        ruv.add_vectors(
+            GRAPH_VEC,
+            vec![n.id.clone()],
+            vec!["opaque-binary".into()],
+            vec![seeded.clone()],
+            vec![n.created_at.to_rfc3339()],
+            "graph",
+        )
+        .await
+        .unwrap();
+
+        let reader = DualMemoryReader::graph_only(g).with_vector_store(ruv);
+        // Query text that FTS would NOT match ("xyzzy") so the hit can
+        // only come from the ANN half.
+        let cands = reader
+            .recall_candidates("xyzzy", seeded, 10, None)
+            .await
+            .unwrap();
+
+        assert!(cands.fts.is_empty(), "text query must not match via FTS");
+        assert_eq!(cands.ann.len(), 1, "ANN should surface the seeded node");
+        assert_eq!(cands.ann[0].0, n.id);
+        assert!(cands.ann[0].1 > 0.9, "identical vector → high similarity");
+        assert!(cands.hydration.contains_key(&n.id));
+    }
+
+    #[tokio::test]
+    async fn recall_candidates_scopes_fts_to_namespace() {
+        let g: Arc<dyn EpisodicGraph> = Arc::new(SqliteGraph::new(pool()));
+        let work = Node::new(
+            NodeKind::new("tool_call"),
+            serde_json::json!({"program": "deploy"}),
+            "work",
+            None,
+        );
+        let personal = Node::new(
+            NodeKind::new("tool_call"),
+            serde_json::json!({"program": "deploy"}),
+            "personal",
+            None,
+        );
+        g.add_node(&work).unwrap();
+        g.add_node(&personal).unwrap();
+
+        let reader = DualMemoryReader::graph_only(g);
+        let cands = reader
+            .recall_candidates("deploy", vec![0.0; 384], 10, Some("work"))
+            .await
+            .unwrap();
+        assert_eq!(cands.fts.len(), 1);
+        assert_eq!(cands.fts[0].0, work.id);
+    }
+
+    #[tokio::test]
+    async fn recall_candidates_empty_without_graph() {
+        let store = EpisodicStore::new(pool());
+        let reader = DualMemoryReader::legacy_only(Arc::new(store));
+        let cands = reader
+            .recall_candidates("anything", vec![0.0; 384], 10, None)
+            .await
+            .unwrap();
+        assert!(cands.fts.is_empty() && cands.ann.is_empty());
     }
 
     #[test]

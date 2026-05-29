@@ -51,8 +51,10 @@ pub struct SignalProcessor {
     semantic: Option<hippocampus::SemanticStore>,
     /// Embedding provider. `Embedder::embed` takes `&self`, so no external
     /// lock is needed — concurrent embed calls are safe and the HTTP client
-    /// inside the provider already serializes appropriately.
-    embedder: Option<hippocampus::Embedder>,
+    /// inside the provider already serializes appropriately. `Arc`-shared so
+    /// the terminal graph sink can embed node bodies through the same
+    /// provider without minting a second one.
+    embedder: Option<std::sync::Arc<hippocampus::Embedder>>,
     /// Actual output dimension of the active embedding provider (probed at startup).
     embedding_dim: usize,
     /// LRU cache for embedded query/text vectors. Keyed by a fast hash of

@@ -101,6 +101,7 @@ impl SignalProcessor {
                     top_k,
                     namespace,
                     None,
+                    self.dual_memory_reader.as_ref(),
                 )
                 .await
             {

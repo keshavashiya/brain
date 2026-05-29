@@ -111,7 +111,8 @@ impl SignalProcessor {
             &config.embedding.model,
             &llm_api_key,
         )
-        .map_err(|e| SignalError::Init(format!("Failed to create embedding provider: {e}")))?;
+        .map_err(|e| SignalError::Init(format!("Failed to create embedding provider: {e}")))?
+        .map(std::sync::Arc::new);
 
         // Create semantic store (optional — fails gracefully if RuVector unavailable).
         // Pass the probed embedding_dim so VectorDB is sized to match the provider.

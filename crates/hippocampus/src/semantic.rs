@@ -74,6 +74,14 @@ impl SemanticStore {
         }
     }
 
+    /// Clone of the underlying vector store handle. `RuVectorStore` is
+    /// `Arc`-backed, so the clone shares the same tables — used to give
+    /// the graph write-path / recall a `graph_vec` collection on the
+    /// same store without re-opening it.
+    pub fn vector_store(&self) -> RuVectorStore {
+        self.ruv.clone()
+    }
+
     /// Store a new fact in both SQLite and RuVector.
     ///
     /// The `vector` should be the embedding of the fact's content

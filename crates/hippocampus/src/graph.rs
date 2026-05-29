@@ -131,12 +131,41 @@ impl Edge {
     }
 }
 
+/// One full-text hit from [`EpisodicGraph::search_text`]. Carries the
+/// BM25 `rank` (lower = better, FTS5 convention) plus enough node
+/// metadata for the recall engine to build a `Memory` and fold the hit
+/// into RRF fusion without a second lookup.
+#[derive(Debug, Clone)]
+pub struct GraphHit {
+    pub id: String,
+    /// The indexed text (the node's `body_json`).
+    pub text: String,
+    /// FTS5 BM25 rank — lower is a better match.
+    pub rank: f64,
+    pub namespace: String,
+    pub node_kind: NodeKind,
+    pub created_at: DateTime<Utc>,
+    pub weight: f32,
+    pub vector_id: Option<String>,
+}
+
 /// Repository surface for the graph store. Sync (matches
 /// [`crate::EpisodicStore`]) — `tokio` callers wrap in
 /// `spawn_blocking` if they need to avoid blocking the reactor.
 pub trait EpisodicGraph: Send + Sync {
     fn add_node(&self, node: &Node) -> Result<(), GraphError>;
     fn add_edge(&self, edge: &Edge) -> Result<(), GraphError>;
+    /// Full-text search over node bodies via the `nodes_fts` index
+    /// (BM25). Optionally scoped to a namespace (exact or `ns/%`
+    /// sub-namespace prefix, matching the episodic store). Returns up
+    /// to `limit` hits ordered by rank (best first). An empty or
+    /// punctuation-only query yields an empty result set.
+    fn search_text(
+        &self,
+        query: &str,
+        limit: usize,
+        namespace: Option<&str>,
+    ) -> Result<Vec<GraphHit>, GraphError>;
     fn get_node(&self, id: &str) -> Result<Option<Node>, GraphError>;
     /// Outgoing neighbors of `id`. Each row is `(edge, destination
     /// node)` so callers can render provenance without a second
@@ -213,6 +242,19 @@ struct NodeRow {
     created_at: String,
 }
 
+/// Raw `search_text` row — timestamp stays a string until `parse_ts`
+/// runs outside the conn closure (same pattern as `NodeRow`).
+struct HitRow {
+    id: String,
+    text: String,
+    rank: f64,
+    namespace: String,
+    node_kind: String,
+    created_at: String,
+    weight: f64,
+    vector_id: Option<String>,
+}
+
 impl NodeRow {
     fn into_node(self) -> Result<Node, GraphError> {
         Ok(Node {
@@ -286,6 +328,84 @@ impl EpisodicGraph for SqliteGraph {
             Ok(())
         })?;
         Ok(())
+    }
+
+    fn search_text(
+        &self,
+        query: &str,
+        limit: usize,
+        namespace: Option<&str>,
+    ) -> Result<Vec<GraphHit>, GraphError> {
+        let sanitized = crate::episodic::sanitize_fts5_query(query);
+        if sanitized.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Raw rows (timestamp still a string) come out of the conn
+        // closure; `parse_ts` runs outside since its `GraphError`
+        // doesn't fit the closure's `SqliteError` channel — same split
+        // `get_node` uses with `NodeRow::into_node`.
+        let raw: Vec<HitRow> = self.db.with_conn(|conn| {
+            // Mirrors EpisodicStore::search_bm25 — MATCH on the FTS
+            // index, join back to `nodes` via the shared rowid, optional
+            // namespace scope (exact or `ns/%` sub-namespace), order by
+            // BM25 rank (ascending = best).
+            let mut sql = String::from(
+                "SELECT n.id, f.text, f.rank, n.namespace, n.node_kind,
+                        n.created_at, n.weight, n.vector_id
+                 FROM nodes_fts f
+                 JOIN nodes n ON n.rowid = f.rowid
+                 WHERE nodes_fts MATCH ?1",
+            );
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(sanitized)];
+
+            if let Some(ns) = namespace {
+                sql.push_str(&format!(
+                    " AND (n.namespace = ?{} OR n.namespace LIKE ?{})",
+                    params.len() + 1,
+                    params.len() + 2
+                ));
+                params.push(Box::new(ns.to_string()));
+                params.push(Box::new(format!("{ns}/%")));
+            }
+
+            sql.push_str(&format!(" ORDER BY f.rank LIMIT ?{}", params.len() + 1));
+            params.push(Box::new(limit as i64));
+
+            let mut stmt = conn.prepare(&sql)?;
+            let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+                params.iter().map(|p| p.as_ref()).collect();
+            let rows = stmt
+                .query_map(param_refs.as_slice(), |row| {
+                    Ok(HitRow {
+                        id: row.get(0)?,
+                        text: row.get(1)?,
+                        rank: row.get(2)?,
+                        namespace: row.get(3)?,
+                        node_kind: row.get(4)?,
+                        created_at: row.get(5)?,
+                        weight: row.get(6)?,
+                        vector_id: row.get(7)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })?;
+
+        raw.into_iter()
+            .map(|r| {
+                Ok(GraphHit {
+                    id: r.id,
+                    text: r.text,
+                    rank: r.rank,
+                    namespace: r.namespace,
+                    node_kind: NodeKind(r.node_kind),
+                    created_at: parse_ts(&r.created_at)?,
+                    weight: r.weight as f32,
+                    vector_id: r.vector_id,
+                })
+            })
+            .collect()
     }
 
     fn get_node(&self, id: &str) -> Result<Option<Node>, GraphError> {
@@ -467,6 +587,78 @@ mod tests {
             "personal",
             None,
         )
+    }
+
+    #[test]
+    fn search_text_finds_node_by_body_term() {
+        let g = store();
+        let mut n = Node::new(
+            NodeKind::new("tool_call"),
+            serde_json::json!({"verb": "terminal.open", "program": "ripgrep"}),
+            "personal",
+            None,
+        );
+        n.weight = 0.5;
+        g.add_node(&n).unwrap();
+        // unrelated node that must not match.
+        g.add_node(&node("terminal_event", "cargo")).unwrap();
+
+        let hits = g.search_text("ripgrep", 10, None).unwrap();
+        assert_eq!(hits.len(), 1, "only the ripgrep node should match");
+        assert_eq!(hits[0].id, n.id);
+        assert_eq!(hits[0].node_kind.as_str(), "tool_call");
+        assert!((hits[0].weight - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn search_text_respects_namespace_scope() {
+        let g = store();
+        let work = Node::new(
+            NodeKind::new("tool_call"),
+            serde_json::json!({"program": "deploy"}),
+            "work",
+            None,
+        );
+        let personal = Node::new(
+            NodeKind::new("tool_call"),
+            serde_json::json!({"program": "deploy"}),
+            "personal",
+            None,
+        );
+        g.add_node(&work).unwrap();
+        g.add_node(&personal).unwrap();
+
+        let hits = g.search_text("deploy", 10, Some("work")).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, work.id);
+    }
+
+    #[test]
+    fn search_text_index_stays_in_sync_on_delete() {
+        let g = store();
+        let n = Node::new(
+            NodeKind::new("tool_call"),
+            serde_json::json!({"program": "ephemeral-tool"}),
+            "personal",
+            None,
+        );
+        g.add_node(&n).unwrap();
+        assert_eq!(g.search_text("ephemeral-tool", 10, None).unwrap().len(), 1);
+        assert!(g.delete_node(&n.id).unwrap());
+        assert!(
+            g.search_text("ephemeral-tool", 10, None)
+                .unwrap()
+                .is_empty(),
+            "delete trigger must drop the FTS row"
+        );
+    }
+
+    #[test]
+    fn search_text_empty_query_returns_empty() {
+        let g = store();
+        g.add_node(&node("tool_call", "x")).unwrap();
+        assert!(g.search_text("   ", 10, None).unwrap().is_empty());
+        assert!(g.search_text("!@#$", 10, None).unwrap().is_empty());
     }
 
     #[test]

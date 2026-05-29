@@ -83,9 +83,20 @@ pub async fn build_processor(
     let graph: Arc<dyn hippocampus::EpisodicGraph> = Arc::new(hippocampus::SqliteGraph::new(
         processor.episodic().pool().clone(),
     ));
-    let graph_sink: Arc<dyn terminal::TerminalGraphSink> = Arc::new(
-        signal::terminal_graph_mirror::HippocampusTerminalSink::new(graph.clone()),
-    );
+    // When a semantic store is present, share its vector store + the
+    // processor's embedder so mirrored nodes are embedded into `graph_vec`
+    // and gain a `vector_id` — this is what lets terminal activity surface
+    // through ANN recall, not just FTS. Degraded (no semantic store)
+    // installs still mirror nodes; they just skip the ANN link.
+    let mut sink = signal::terminal_graph_mirror::HippocampusTerminalSink::new(graph.clone());
+    if let Some(semantic) = processor.semantic() {
+        sink = sink.with_embedding(
+            processor.embedder(),
+            semantic.vector_store(),
+            processor.embedding_dim(),
+        );
+    }
+    let graph_sink: Arc<dyn terminal::TerminalGraphSink> = Arc::new(sink);
     let terminal_bridge = terminal::TerminalBridge::new()
         .with_observer(observer.clone())
         .with_graph_sink(graph_sink);
@@ -101,7 +112,13 @@ pub async fn build_processor(
     let legacy = Arc::new(hippocampus::EpisodicStore::new(
         processor.episodic().pool().clone(),
     ));
-    let dual_reader = hippocampus::DualMemoryReader::dual(legacy, graph);
+    let mut dual_reader = hippocampus::DualMemoryReader::dual(legacy, graph);
+    // Attach the shared vector store so recall's graph-ANN half can query
+    // `graph_vec` (the FTS half needs no extra handle). Skipped on degraded
+    // installs without a semantic store — graph recall then runs FTS-only.
+    if let Some(semantic) = processor.semantic() {
+        dual_reader = dual_reader.with_vector_store(semantic.vector_store());
+    }
     processor = processor.with_dual_memory_reader(dual_reader);
     tracing::info!("Dual-memory reader wired (graph first, legacy fallback)");
 

@@ -66,7 +66,10 @@ pub struct FtsResult {
 /// user input (for example apostrophes in words like "I've").
 ///
 /// Returns an empty string if no searchable tokens remain.
-fn sanitize_fts5_query(query: &str) -> String {
+///
+/// Shared with the graph-side FTS path ([`crate::graph::SqliteGraph::search_text`])
+/// so both stores sanitize identically — do not duplicate.
+pub(crate) fn sanitize_fts5_query(query: &str) -> String {
     query
         .chars()
         .map(|c| {

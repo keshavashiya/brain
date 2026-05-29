@@ -27,6 +27,9 @@ pub struct Memory {
 pub enum MemorySource {
     Episodic,
     Semantic,
+    /// The episodic graph (`nodes`) — terminal/tool events surfaced via
+    /// graph FTS or ANN over `graph_vec`.
+    Graph,
 }
 
 /// Configuration for the recall engine.
@@ -129,9 +132,10 @@ impl RecallEngine {
     /// Pipeline:
     /// 1. Query episodic store (BM25 full-text search)
     /// 2. Query semantic store (ANN vector search, optionally scoped to namespace)
-    /// 3. Fuse with Reciprocal Rank Fusion (k=60)
-    /// 4. Rerank by importance × recency (forgetting curve)
-    /// 5. Return top_k results
+    /// 3. Query the episodic graph, if wired (FTS over node bodies + ANN over `graph_vec`)
+    /// 4. Fuse all lists with Reciprocal Rank Fusion (k=60)
+    /// 5. Rerank by importance × recency (forgetting curve)
+    /// 6. Return top_k results
     #[allow(clippy::too_many_arguments)]
     pub async fn recall(
         &self,
@@ -142,8 +146,10 @@ impl RecallEngine {
         top_k: usize,
         namespace: Option<&str>,
         agent: Option<&str>,
+        graph: Option<&crate::DualMemoryReader>,
     ) -> Result<Vec<Memory>, RecallError> {
         let limit = self.config.pre_fusion_limit;
+        let threshold = self.config.similarity_threshold;
 
         // 1. BM25 search on episodic store
         let bm25_results = episodic
@@ -157,23 +163,45 @@ impl RecallEngine {
 
         // 2. ANN search on semantic store (filtered by namespace and/or agent if provided)
         let ann_results = semantic
-            .search_similar(query_vector, limit, namespace, agent)
+            .search_similar(query_vector.clone(), limit, namespace, agent)
             .await
             .map_err(RecallError::Semantic)?;
 
         // Convert distance to similarity and filter by threshold.
         // distance is L2; similarity = 1/(1+d). Higher = more similar.
-        let threshold = self.config.similarity_threshold;
         let ann_ranked: Vec<(String, f64)> = ann_results
             .iter()
             .map(|r| (r.fact.id.clone(), 1.0 / (1.0 + r.distance as f64)))
             .filter(|(_, sim)| *sim >= threshold)
             .collect();
 
-        // 3. RRF fusion
-        let fused = rrf_fuse(&[bm25_ranked, ann_ranked], self.config.rrf_k);
+        // 3. Graph candidates (FTS + ANN over the episodic graph), if a
+        //    reader is wired. The agent filter doesn't apply — graph nodes
+        //    carry no per-agent column today. A hard store error surfaces as
+        //    RecallError::Graph; the ANN half degrades to FTS-only internally
+        //    (see DualMemoryReader::recall_candidates).
+        let graph_candidates = match graph {
+            Some(reader) => reader
+                .recall_candidates(query, query_vector, limit, namespace)
+                .await
+                .map_err(RecallError::Graph)?,
+            None => crate::GraphCandidates::default(),
+        };
+        let graph_fts_ranked = graph_candidates.fts.clone();
+        let graph_ann_ranked: Vec<(String, f64)> = graph_candidates
+            .ann
+            .iter()
+            .filter(|(_, sim)| *sim >= threshold)
+            .cloned()
+            .collect();
 
-        // 4. Build lookup maps to avoid O(n*m) linear scans during reranking
+        // 4. RRF fusion across every candidate list
+        let fused = rrf_fuse(
+            &[bm25_ranked, ann_ranked, graph_fts_ranked, graph_ann_ranked],
+            self.config.rrf_k,
+        );
+
+        // 5. Build lookup maps to avoid O(n*m) linear scans during reranking
         let bm25_map: HashMap<&str, &FtsResult> = bm25_results
             .iter()
             .map(|r| (r.episode_id.as_str(), r))
@@ -183,7 +211,7 @@ impl RecallEngine {
             .map(|r| (r.fact.id.as_str(), r))
             .collect();
 
-        // 5. Build Memory objects and rerank
+        // 6. Build Memory objects and rerank
         let now = chrono::Utc::now();
         let mut memories: Vec<Memory> = Vec::new();
 
@@ -231,6 +259,29 @@ impl RecallEngine {
                     importance,
                     timestamp: sr.created_at.clone(),
                     agent: sr.fact.agent.clone(),
+                });
+                continue;
+            }
+
+            // Try the episodic graph. `weight` stands in for importance
+            // (the compactor's half-life decay already lives there).
+            if let Some(gc) = graph_candidates.hydration.get(id.as_str()) {
+                let importance = gc.weight as f64;
+                let timestamp = gc.created_at.to_rfc3339();
+                let hours = parse_elapsed_hours(&timestamp, &now);
+                let retention = forgetting_curve(importance, hours, self.config.decay_rate);
+                let final_score = rrf_score
+                    + self.config.importance_weight * importance
+                    + self.config.recency_weight * retention;
+
+                memories.push(Memory {
+                    id: id.clone(),
+                    content: gc.content.clone(),
+                    source: MemorySource::Graph,
+                    score: final_score,
+                    importance,
+                    timestamp,
+                    agent: None,
                 });
             }
         }
@@ -283,11 +334,84 @@ pub enum RecallError {
 
     #[error("Semantic search failed: {0}")]
     Semantic(crate::semantic::SemanticError),
+
+    #[error("Graph recall failed: {0}")]
+    Graph(crate::dual_memory::DualMemoryError),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::episodic::EpisodicStore;
+    use crate::graph::{EpisodicGraph, Node, NodeKind, SqliteGraph};
+    use crate::semantic::SemanticStore;
+    use crate::DualMemoryReader;
+    use std::sync::Arc;
+    use storage::{RuVectorStore, SqlitePool};
+
+    /// End-to-end: a graph-only event (no episodic/semantic row) must
+    /// surface in `recall` results via the graph FTS path. This is the
+    /// acceptance criterion for the graph→recall composition.
+    #[tokio::test]
+    async fn recall_fuses_graph_only_fts_hit() {
+        let episodic = EpisodicStore::new(SqlitePool::open_memory().unwrap());
+        let ruv_dir = tempfile::tempdir().unwrap();
+        let ruv = RuVectorStore::open(ruv_dir.path(), 384).await.unwrap();
+        ruv.ensure_tables().await.unwrap();
+        let semantic = SemanticStore::new(SqlitePool::open_memory().unwrap(), ruv);
+
+        let g: Arc<dyn EpisodicGraph> =
+            Arc::new(SqliteGraph::new(SqlitePool::open_memory().unwrap()));
+        let node = Node::new(
+            NodeKind::new("tool_call"),
+            serde_json::json!({"verb": "terminal.open", "program": "htop"}),
+            "personal",
+            None,
+        );
+        g.add_node(&node).unwrap();
+        let reader = DualMemoryReader::graph_only(g);
+
+        let engine = RecallEngine::with_defaults();
+        let results = engine
+            .recall(
+                "htop",
+                vec![0.0; 384],
+                &episodic,
+                &semantic,
+                10,
+                None,
+                None,
+                Some(&reader),
+            )
+            .await
+            .unwrap();
+
+        let graph_hit = results
+            .iter()
+            .find(|m| m.source == MemorySource::Graph)
+            .expect("the graph node must appear in recall results");
+        assert_eq!(graph_hit.id, node.id);
+        assert!(graph_hit.content.contains("htop"));
+
+        // Control: without the graph reader, recall yields nothing.
+        let without = engine
+            .recall(
+                "htop",
+                vec![0.0; 384],
+                &episodic,
+                &semantic,
+                10,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            without.is_empty(),
+            "the hit must come from the graph path, not episodic/semantic"
+        );
+    }
 
     #[test]
     fn test_rrf_single_list() {

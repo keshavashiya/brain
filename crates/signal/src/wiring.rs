@@ -21,6 +21,12 @@ impl SignalProcessor {
         self.semantic.as_ref()
     }
 
+    /// Expose the embedding provider (for the terminal graph sink, which
+    /// embeds node bodies through the same provider). `Arc`-shared clone.
+    pub fn embedder(&self) -> Option<Arc<hippocampus::Embedder>> {
+        self.embedder.clone()
+    }
+
     /// Expose the LLM provider (for adapter use).
     pub fn llm(&self) -> &Arc<dyn cortex::LlmProvider> {
         &self.llm

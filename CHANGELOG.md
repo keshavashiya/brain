@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Graph memory now influences recall.** The episodic graph was
+  write-only with respect to retrieval; it now contributes two candidate
+  lists to hybrid recall. A full-text index over node bodies (`nodes_fts`,
+  migration v23 with sync triggers) backs `EpisodicGraph::search_text`
+  (BM25), and the terminal graph sink embeds node bodies at write time
+  into a new `graph_vec` vector collection, setting each node's
+  `vector_id` for ANN. `DualMemoryReader::recall_candidates` produces both
+  lists; `RecallEngine::recall` folds them into RRF fusion alongside
+  episodic + semantic results and emits a new `MemorySource::Graph`.
+  Terminal/tool activity is now recallable by text and by semantic
+  similarity. Embedding on the write path is best-effort — a failure
+  leaves the node un-vectored rather than dropping it.
 - **Pre-commit gate.** `scripts/install-hooks.sh` installs a repo-managed
   pre-commit hook that runs `cargo fmt --check`, `cargo clippy
   --all-targets -D warnings`, and the crate-naming check. Opt-in;

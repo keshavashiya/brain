@@ -107,6 +107,7 @@ fn bench_hybrid_recall(c: &mut Criterion) {
                     20,
                     None,
                     None,
+                    None,
                 ))
                 .unwrap();
             });

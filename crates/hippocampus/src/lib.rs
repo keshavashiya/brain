@@ -23,10 +23,12 @@ pub use compactor::{CompactConfig, CompactStats, Compactor, DefaultCompactor};
 pub use consolidation::{
     ConsolidationConfig, ConsolidationReport, Consolidator, PromotionCandidate,
 };
-pub use dual_memory::{DualMemoryError, DualMemoryReader, MemoryEntry};
+pub use dual_memory::{
+    DualMemoryError, DualMemoryReader, GraphCandidate, GraphCandidates, MemoryEntry,
+};
 pub use embedding::{Embedder, EmbeddingError, EmbeddingProvider};
 pub use episodic::{Episode, EpisodicStore, Session};
-pub use graph::{Edge, EdgeKind, EpisodicGraph, GraphError, Node, NodeKind, SqliteGraph};
+pub use graph::{Edge, EdgeKind, EpisodicGraph, GraphError, GraphHit, Node, NodeKind, SqliteGraph};
 pub use importance::{ImportanceScorer, ImportanceSignals};
 pub use search::{Memory, MemorySource, RecallConfig, RecallEngine};
 pub use semantic::{Fact, NamespaceStats, SemanticResult, SemanticStore};
