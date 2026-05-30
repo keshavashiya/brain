@@ -346,6 +346,9 @@ struct ResponseAccumulator {
     body: String,
     label: Option<ResponseLabel>,
     style: RenderStyle,
+    /// Latest pipeline stage message ("routing…", "thinking…") for the
+    /// one-shot elapsed spinner to display while frames are awaited.
+    status: Option<String>,
 }
 
 impl ResponseAccumulator {
@@ -358,6 +361,7 @@ impl ResponseAccumulator {
             body: String::new(),
             label: None,
             style,
+            status: None,
         }
     }
 
@@ -462,10 +466,12 @@ fn apply_frame(acc: &mut ResponseAccumulator, frame: &serde_json::Value) -> Fram
     match frame.get("type").and_then(|v| v.as_str()) {
         Some("status") => {
             // Plain (deterministic-subcommand) output suppresses the
-            // transient `routing…` line; it's chat-render chrome.
-            if acc.style != RenderStyle::Plain && acc.body.is_empty() {
+            // transient `routing…` line; it's chat-render chrome. Otherwise
+            // record the stage for the elapsed spinner (driven by the frame
+            // loop) rather than rendering here, so the line keeps ticking.
+            if acc.style != RenderStyle::Plain {
                 if let Some(msg) = frame.get("message").and_then(|m| m.as_str()) {
-                    let _ = render_status_line(msg);
+                    acc.status = Some(msg.to_string());
                 }
             }
             FrameOutcome::Continue
@@ -524,8 +530,28 @@ async fn drive_frames(
     style: RenderStyle,
 ) -> anyhow::Result<Option<String>> {
     let mut acc = ResponseAccumulator::with_style(style);
+    // Live elapsed spinner: long turns (a slow LLM, an 80s task decompose)
+    // otherwise show a single static `routing…` and feel hung. We tick a
+    // dim status line with the current stage + elapsed seconds while waiting
+    // on the next frame, so the session always looks alive. Suppressed for
+    // Plain (deterministic-subcommand) output.
+    let start = std::time::Instant::now();
+    let mut ticker = tokio::time::interval(std::time::Duration::from_millis(250));
+    ticker.tick().await; // discard the immediate first tick (no 0s flash)
     loop {
-        let frame = match stream.next().await {
+        let frame = tokio::select! {
+            biased;
+            frame = stream.next() => frame,
+            _ = ticker.tick() => {
+                if acc.style != RenderStyle::Plain {
+                    let elapsed = start.elapsed().as_secs();
+                    let stage = acc.status.as_deref().unwrap_or("working…");
+                    let _ = render_status_line(&format!("{stage} ({elapsed}s)"));
+                }
+                continue;
+            }
+        };
+        let frame = match frame {
             Some(Ok(frame)) => frame,
             Some(Err(e)) => return Err(anyhow::anyhow!("WebSocket error: {e}")),
             None => return Err(anyhow::anyhow!("Connection closed by server")),
@@ -1139,6 +1165,27 @@ mod tests {
     fn default_style_is_chat() {
         assert_eq!(RenderStyle::default(), RenderStyle::Chat);
         assert_eq!(ResponseAccumulator::new().style, RenderStyle::Chat);
+    }
+
+    #[test]
+    fn status_frame_is_recorded_for_spinner() {
+        // Chat mode records the stage so the elapsed spinner can display it.
+        let mut acc = ResponseAccumulator::new();
+        let status =
+            serde_json::json!({"type": "status", "stage": "thinking", "message": "thinking…"});
+        assert!(matches!(
+            apply_frame(&mut acc, &status),
+            FrameOutcome::Continue
+        ));
+        assert_eq!(acc.status.as_deref(), Some("thinking…"));
+    }
+
+    #[test]
+    fn plain_style_does_not_record_status() {
+        let mut acc = ResponseAccumulator::with_style(RenderStyle::Plain);
+        let status = serde_json::json!({"type": "status", "message": "routing…"});
+        apply_frame(&mut acc, &status);
+        assert!(acc.status.is_none());
     }
 
     #[test]
