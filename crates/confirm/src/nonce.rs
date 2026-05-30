@@ -134,6 +134,17 @@ pub trait ConfirmationEngine: Send + Sync {
     /// Register a user response to an approval request.
     async fn respond(&self, nonce: &str, decision: ApprovalDecision) -> Result<(), ConfirmError>;
 
+    /// Withdraw a still-pending request without a user decision — e.g. the
+    /// client that asked for the action disconnected, so blocking to the
+    /// timeout would just hold a ghost gate. Resolves the row as `Aborted`
+    /// so the parked `request()` returns promptly and the nonce leaves
+    /// `pending()`. Idempotent: a no-op on an already-resolved or unknown
+    /// nonce (no error). The default does nothing, for engines that don't
+    /// park pending rows.
+    async fn withdraw(&self, _nonce: &str, _reason: &str) -> Result<(), ConfirmError> {
+        Ok(())
+    }
+
     /// Check status of a pending approval.
     async fn status(&self, nonce: &str) -> Result<ApprovalStatus, ConfirmError>;
 
@@ -423,6 +434,30 @@ impl ConfirmationEngine for SqliteConfirmationEngine {
         Ok(())
     }
 
+    async fn withdraw(&self, nonce: &str, reason: &str) -> Result<(), ConfirmError> {
+        let outcome = ApprovalOutcome::Aborted {
+            reason: reason.to_string(),
+        };
+        let outcome_json = serde_json::to_string(&outcome).unwrap_or_default();
+        let now = Utc::now().to_rfc3339();
+
+        // Only touch a still-pending row; the `resolved = 0` guard makes this
+        // idempotent and safe against a race with a user `respond()`.
+        let affected = self.db.with_conn(|conn| {
+            let n = conn.execute(
+                "UPDATE approval_requests SET resolved = 1, outcome = ?, resolved_at = ? \
+                 WHERE nonce = ? AND resolved = 0",
+                params![outcome_json, now, nonce],
+            )?;
+            Ok(n)
+        })?;
+
+        if affected > 0 {
+            tracing::info!(nonce = %nonce, reason = %reason, "pending approval withdrawn");
+        }
+        Ok(())
+    }
+
     async fn status(&self, nonce: &str) -> Result<ApprovalStatus, ConfirmError> {
         self.db
             .with_conn(|conn| {
@@ -582,6 +617,55 @@ mod tests {
         let outcome = engine.request(spec).await.unwrap();
         responder.await.unwrap();
         assert!(matches!(outcome, ApprovalOutcome::Approved));
+    }
+
+    #[tokio::test]
+    async fn withdraw_unblocks_pending_request_as_aborted() {
+        use std::sync::Arc;
+
+        let engine = Arc::new(test_engine());
+        let spec = ApprovalSpec::new("delete something", ActionTier::Destructive)
+            .with_timeout(std::time::Duration::from_secs(30));
+        let nonce = spec.nonce.clone();
+
+        let engine_cloned = engine.clone();
+        let nonce_cloned = nonce.clone();
+        let withdrawer = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            engine_cloned
+                .withdraw(&nonce_cloned, "originating client disconnected")
+                .await
+                .unwrap();
+        });
+
+        // Returns well before the 30s timeout — the withdraw resolves it.
+        let outcome = engine.request(spec).await.unwrap();
+        withdrawer.await.unwrap();
+        assert!(
+            matches!(&outcome, ApprovalOutcome::Aborted { reason } if reason.contains("disconnected")),
+            "expected Aborted, got {outcome:?}"
+        );
+        // It must no longer linger as a pending gate.
+        assert!(engine.pending().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn withdraw_is_noop_on_already_resolved_nonce() {
+        let engine = test_engine();
+        let spec = ApprovalSpec::new("read something", ActionTier::Read);
+        let nonce = spec.nonce.clone();
+        // Read tier auto-approves, so the row is already resolved.
+        let outcome = engine.request(spec).await.unwrap();
+        assert!(matches!(outcome, ApprovalOutcome::Approved));
+
+        // Withdrawing now must not error and must not change the outcome.
+        engine.withdraw(&nonce, "client gone").await.unwrap();
+        match engine.status(&nonce).await.unwrap() {
+            ApprovalStatus::Resolved { outcome, .. } => {
+                assert!(matches!(outcome, ApprovalOutcome::Approved));
+            }
+            other => panic!("expected Resolved(Approved), got {other:?}"),
+        }
     }
 
     #[tokio::test]

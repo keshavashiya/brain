@@ -138,10 +138,21 @@ pub(crate) async fn handle_connection(
             tracing::debug!(conn_id = %conn_id, channel_id = %channel_id, "WS chat transport registered");
         }
     }
+    // Nonces of approval prompts relayed to this connection. On disconnect we
+    // withdraw any that are still pending so the parked pipeline returns at
+    // once instead of holding a ghost gate to the tier timeout (W1).
+    let pending_nonces: Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
+        Arc::new(std::sync::Mutex::new(std::collections::HashSet::new()));
     let relay_out = out_tx.clone();
     let relay_conn = conn_id;
+    let relay_nonces = pending_nonces.clone();
     let relay_handle = tokio::spawn(async move {
         while let Some(intent) = intent_rx.recv().await {
+            if let Some(nonce) = &intent.nonce {
+                if let Ok(mut set) = relay_nonces.lock() {
+                    set.insert(nonce.clone());
+                }
+            }
             let frame = serde_json::json!({
                 "type": "approval_request",
                 "intent_id": intent.id,
@@ -316,6 +327,27 @@ pub(crate) async fn handle_connection(
     }
 
     // ── Teardown ────────────────────────────────────────────────────────────
+    // Withdraw any approval gates this connection raised but never answered —
+    // the client is gone, so blocking the parked pipeline to the tier timeout
+    // would only hold a ghost gate (W1). `withdraw` is idempotent and a no-op
+    // on nonces the user already resolved.
+    let to_withdraw: Vec<String> = pending_nonces
+        .lock()
+        .map(|set| set.iter().cloned().collect())
+        .unwrap_or_default();
+    if !to_withdraw.is_empty() {
+        if let Some(engine) = processor.confirmation_engine() {
+            for nonce in to_withdraw {
+                if let Err(e) = engine
+                    .withdraw(&nonce, "originating client disconnected")
+                    .await
+                {
+                    tracing::debug!(conn_id = %conn_id, nonce = %nonce, error = %e, "approval withdraw failed");
+                }
+            }
+        }
+    }
+
     // Order matters: unregister first (so no new intents arrive), drop
     // `intent_tx` (so the relay task exits), then drop `out_tx` (so the
     // writer task exits). The join handles guarantee both background tasks
