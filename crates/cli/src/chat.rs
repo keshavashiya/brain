@@ -314,9 +314,11 @@ fn render_response_direct(label: ResponseLabel, body: &str) {
     let _ = stdout().flush();
 }
 
-/// Plain one-shot render: just the markdown body, no `Brain:` label. Used by
-/// deterministic subcommands (e.g. `brain capabilities`) that shouldn't look
-/// like a chat turn.
+/// Unlabeled one-shot render: the markdown body, no `Brain:`/`[proactive]`
+/// label. Used for the approval-gate prompt + guidance, which are direct
+/// responses to the user's own request and shouldn't carry a chat or nudge
+/// label. (Deterministic subcommands like `brain capabilities` print their
+/// pre-formatted body verbatim instead — see the `Plain` finalize branch.)
 fn render_plain_direct(body: &str) {
     let trimmed = body.trim_end();
     if trimmed.is_empty() {
@@ -387,7 +389,10 @@ impl ResponseAccumulator {
 
     fn render_approval_prompt(content: &str) {
         let _ = clear_status_line();
-        render_response_direct(ResponseLabel::Proactive, content);
+        // The gate body is self-describing ("Approval needed (external): …").
+        // A `[proactive]` label on top misframes a direct response to the
+        // user's own request as an unsolicited nudge — render it unlabeled.
+        render_plain_direct(content);
     }
 
     fn render_error(message: &str) {
@@ -398,9 +403,17 @@ impl ResponseAccumulator {
     fn finalize(self) -> Option<String> {
         match self.style {
             RenderStyle::Plain => {
-                if !self.body.trim_end().is_empty() {
-                    let _ = clear_status_line();
-                    render_plain_direct(&self.body);
+                let trimmed = self.body.trim_end();
+                if !trimmed.is_empty() {
+                    // Deterministic subcommands (`brain capabilities`) send
+                    // pre-formatted plain text. Print it verbatim rather than
+                    // through the markdown renderer, which de-indents the
+                    // manifest's `when:` lines and right-pads wrapped lines
+                    // with trailing spaces. Plain never draws a status line
+                    // (status frames + the spinner are suppressed upstream),
+                    // so there's nothing to clear first.
+                    print!("{trimmed}\n\n");
+                    let _ = stdout().flush();
                 }
             }
             RenderStyle::Chat => {
@@ -580,7 +593,7 @@ async fn drive_frames(
                 // socket) signals the daemon to withdraw the pending nonce
                 // instead of leaving a ghost gate until it times out.
                 ResponseAccumulator::render_approval_prompt(&body);
-                render_response_direct(ResponseLabel::Proactive, ONE_SHOT_APPROVAL_HINT);
+                render_plain_direct(ONE_SHOT_APPROVAL_HINT);
                 return Ok(None);
             }
             FrameOutcome::Error(msg) => {
