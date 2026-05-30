@@ -268,10 +268,42 @@ impl IsolatedSandbox {
     }
 }
 
+/// Expand a leading `~` or `~/` in an argv token to `home`. Used only on the
+/// direct (non-shell) exec path, where there is no shell to do it — argv
+/// tokens otherwise reach the binary verbatim and `ls ~/.brain` fails with
+/// "No such file or directory". `~user` forms are intentionally left literal:
+/// we only resolve the current user's home, never look up other users.
+fn expand_leading_tilde(arg: &str, home: &str) -> String {
+    if arg == "~" {
+        home.to_string()
+    } else if let Some(rest) = arg.strip_prefix("~/") {
+        format!("{}/{}", home.trim_end_matches('/'), rest)
+    } else {
+        arg.to_string()
+    }
+}
+
 #[async_trait]
 impl SandboxExecutor for IsolatedSandbox {
     async fn run(&self, command: SandboxCommand) -> Result<SandboxOutcome, SandboxError> {
         self.validate(&command)?;
+
+        // On the direct (non-shell) path no shell expands `~`, so resolve a
+        // leading tilde in each argv token to the user's home before spawn.
+        // The `sh -c` shell tier already expands it, so leave that untouched.
+        let mut command = command;
+        if !command.shell_mode {
+            let home = command
+                .env
+                .get("HOME")
+                .cloned()
+                .or_else(|| std::env::var("HOME").ok());
+            if let Some(home) = home {
+                for arg in &mut command.args {
+                    *arg = expand_leading_tilde(arg, &home);
+                }
+            }
+        }
 
         let timeout = if command.timeout.is_zero() {
             self.default_timeout
@@ -626,5 +658,62 @@ mod tests {
         assert_eq!(outcome.exit_code, 0);
         let reported: u64 = outcome.stdout.trim().parse().unwrap_or(0);
         assert_eq!(reported, 16, "stdout was: {:?}", outcome.stdout);
+    }
+
+    #[test]
+    fn expand_leading_tilde_resolves_home_forms() {
+        let home = "/home/alice";
+        assert_eq!(expand_leading_tilde("~", home), "/home/alice");
+        assert_eq!(expand_leading_tilde("~/.brain", home), "/home/alice/.brain");
+        assert_eq!(expand_leading_tilde("~/a/b", home), "/home/alice/a/b");
+        // Trailing slash on home doesn't double up.
+        assert_eq!(expand_leading_tilde("~/x", "/home/alice/"), "/home/alice/x");
+        // Non-leading tilde and `~user` forms stay literal.
+        assert_eq!(expand_leading_tilde("~root/x", home), "~root/x");
+        assert_eq!(expand_leading_tilde("/tmp/~/x", home), "/tmp/~/x");
+        assert_eq!(expand_leading_tilde("plain", home), "plain");
+    }
+
+    #[tokio::test]
+    async fn argv_mode_expands_leading_tilde() {
+        // `cat ~/<file>` against an overridden HOME should read the file —
+        // proving the leading `~` was expanded before exec (no shell here).
+        let dir = std::env::temp_dir().join(format!("brain-tilde-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("marker.txt"), "tilde-ok").unwrap();
+
+        let sandbox = IsolatedSandbox::new(vec!["cat".into()], Duration::from_secs(5));
+        let cmd = SandboxCommand::new("cat", vec!["~/marker.txt".into()])
+            .with_env("HOME", dir.to_string_lossy().into_owned());
+        let outcome = sandbox.run(cmd).await.unwrap();
+
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(outcome.exit_code, 0, "stderr: {:?}", outcome.stderr);
+        assert!(
+            outcome.stdout.contains("tilde-ok"),
+            "stdout was: {:?}",
+            outcome.stdout
+        );
+    }
+
+    #[tokio::test]
+    async fn shell_mode_leaves_tilde_for_the_shell() {
+        // In shell mode the `~` must reach `sh`, which expands it against the
+        // child's HOME — we must NOT pre-expand and double-resolve it.
+        let dir = std::env::temp_dir().join(format!("brain-tilde-sh-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("marker.txt"), "shell-tilde-ok").unwrap();
+
+        let sandbox = IsolatedSandbox::new(vec!["sh".into()], Duration::from_secs(5));
+        // Pin PATH so the shell-mode HOME-injection branch (which would
+        // otherwise force the daemon's HOME) is skipped and our HOME stands.
+        let cmd = SandboxCommand::shell("cat ~/marker.txt")
+            .with_env("HOME", dir.to_string_lossy().into_owned())
+            .with_env("PATH", "/bin:/usr/bin");
+        let outcome = sandbox.run(cmd).await.unwrap();
+
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(outcome.exit_code, 0, "stderr: {:?}", outcome.stderr);
+        assert!(outcome.stdout.contains("shell-tilde-ok"));
     }
 }
