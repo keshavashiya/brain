@@ -140,9 +140,12 @@ pub const VERBS: &[VerbSpec] = &[
     },
     // ── Scheduling / tasks ───────────────────────────────────────────
     VerbSpec {
+        // Gates up-front (fires later, possibly unattended) but reversible via
+        // schedule.cancel — External, not Destructive/Write. Must stay in sync
+        // with `signal::authz::tier_for_verb` and `pipeline/lifecycle.rs`.
         ns: "schedule",
         action: "create",
-        tier_hint: TierHint::Write,
+        tier_hint: TierHint::External,
         summary: "Persist a scheduled-intent row.",
     },
     VerbSpec {

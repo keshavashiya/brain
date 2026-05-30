@@ -21,13 +21,16 @@ use crate::SignalProcessor;
 impl LifecycleAuth for SignalProcessor {
     fn auth_lifecycle(intent: &thalamus::Intent) -> Option<(AuthorizationRequest, Tier)> {
         match intent {
-            // Issue 126: creating a schedule kicks off recurring actions
-            // that the user may not be present for at fire time. Elevate to
-            // Destructive so approval is required up-front and the lifecycle
-            // engine treats it the same way it treats irreversible writes.
+            // Issue 126 / W3: creating a schedule kicks off actions that fire
+            // later, possibly while the user is away, so it still requires
+            // up-front approval — but it is a *reversible* create (undo via
+            // CancelSchedule), not an irreversible write. External is the
+            // right tier: it gates (`requires_confirmation`) without the
+            // misleading "destructive" label or the 5-minute timeout. This
+            // must stay in sync with `authz::tier_for_verb("schedule", _)`.
             thalamus::Intent::Schedule { .. } => Some((
                 AuthorizationRequest::new("schedule", "create"),
-                Tier::Destructive,
+                Tier::External,
             )),
             thalamus::Intent::CancelSchedule { .. } => {
                 Some((AuthorizationRequest::new("schedule", "cancel"), Tier::Write))

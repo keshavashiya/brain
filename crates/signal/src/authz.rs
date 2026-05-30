@@ -53,11 +53,17 @@ pub(crate) fn tier_for_verb(verb_ns: &str, verb_action: &str) -> Tier {
         (_, "delete") | (_, "drop") | (_, "destroy") => Tier::Destructive,
         ("net", _) | ("notify", _) => Tier::External,
         ("mcp", "mount") => Tier::External,
+        // schedule.create gates up-front but is a reversible create — see the
+        // matching rationale in `pipeline/lifecycle.rs` (Issue 126 / W3). Kept
+        // here so the typed and abstract paths converge on the same tier.
+        // schedule.cancel stays a Write (undo of a create), matching
+        // `Intent::CancelSchedule` in lifecycle.rs.
+        ("schedule", "create") => Tier::External,
         ("memory", "store")
         | ("memory", "import")
         | ("memory", "export")
         | ("mcp", "unmount")
-        | ("schedule", _)
+        | ("schedule", "cancel")
         | ("task", "cancel")
         | ("signal", "cancel")
         | ("approval", _)
@@ -115,6 +121,37 @@ mod tests {
     fn recall_and_memory_summary_unguarded() {
         assert!(intent_to_auth(&Intent::Recall { query: "x".into() }).is_none());
         assert!(intent_to_auth(&Intent::MemorySummary).is_none());
+    }
+
+    #[test]
+    fn schedule_create_tier_agrees_across_typed_and_abstract_paths() {
+        // W3: the typed `Intent::Schedule` path (pipeline/lifecycle.rs) and
+        // the abstract verb path (`tier_for_verb`, used by the ToolCall
+        // envelope) must resolve schedule.create to the same tier, or a
+        // scheduled reminder gets two different approval experiences.
+        let (req, typed_tier) = intent_to_auth(&Intent::Schedule {
+            description: "review PRs at 9am".into(),
+            cron: None,
+        })
+        .unwrap();
+        assert_eq!(req.verb_ns, "schedule");
+        assert_eq!(req.verb_action, "create");
+        assert_eq!(typed_tier, Tier::External);
+        assert_eq!(tier_for_verb("schedule", "create"), typed_tier);
+    }
+
+    #[test]
+    fn cancel_schedule_tier_agrees_across_typed_and_abstract_paths() {
+        // schedule.cancel is the reversible undo of a create — a Write on
+        // both paths.
+        let (req, typed_tier) = intent_to_auth(&Intent::CancelSchedule {
+            id: "review-prs".into(),
+        })
+        .unwrap();
+        assert_eq!(req.verb_ns, "schedule");
+        assert_eq!(req.verb_action, "cancel");
+        assert_eq!(typed_tier, Tier::Write);
+        assert_eq!(tier_for_verb("schedule", "cancel"), typed_tier);
     }
 
     #[test]

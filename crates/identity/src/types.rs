@@ -84,17 +84,18 @@ impl Tier {
 
     /// Default approval timeout for this tier.
     ///
-    /// `External` is shorter than `Destructive` (60s vs 300s): a destructive
-    /// action may legitimately need a few minutes of consideration, but an
-    /// External call is almost always issued mid-chat where the user is
-    /// either watching or has already moved on. A 5-minute deadlock there
-    /// just makes the chat feel broken.
+    /// These are kept humane (tens of seconds, not minutes): an interactive
+    /// user answers in seconds, and the non-interactive CLI now fast-fails an
+    /// unanswerable gate (W1) instead of blocking to the deadline, so a long
+    /// server timeout only ever punished people. Destructive gets the most
+    /// breathing room because an irreversible action deserves a beat of
+    /// consideration; Read the least because it barely warrants a pause.
     pub fn default_timeout(self) -> std::time::Duration {
         match self {
             Tier::Read => std::time::Duration::from_secs(30),
-            Tier::Write => std::time::Duration::from_secs(60),
-            Tier::Execute => std::time::Duration::from_secs(120),
-            Tier::Destructive => std::time::Duration::from_secs(300),
+            Tier::Write => std::time::Duration::from_secs(45),
+            Tier::Execute => std::time::Duration::from_secs(60),
+            Tier::Destructive => std::time::Duration::from_secs(90),
             Tier::External => std::time::Duration::from_secs(60),
         }
     }
