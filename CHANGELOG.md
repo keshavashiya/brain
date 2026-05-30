@@ -135,6 +135,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Scheduled intents fire through the pipeline.** The direct-execution
+  scheduled-intent poller in `serve` (a fixed 60s ticker that delivered a
+  bare `[scheduled] …` notification and bypassed identity, confirmation,
+  and per-tool breakers) has been retired. Firing now flows exclusively
+  through `reflex::CronReflex`: each due intent becomes a
+  `Provenance::Reflex` signal and runs the full pipeline (classification,
+  confirmation gate, breakers, audit). `actions.scheduling` remains the
+  *write* axis (create/persist intents); `reflex.cron.enabled` is now the
+  sole *fire* axis. `brain doctor` and `serve` startup warn when
+  scheduling is enabled while the cron reflex is disabled, since intents
+  would then persist but never fire.
 - **`scripts/check-crate-names.sh`** — header comment and error footer
   no longer reference gitignored docs paths. Rule is inlined; rationale
   moved to `CONTRIBUTING.md`.

@@ -354,6 +354,19 @@ pub(crate) async fn cmd_doctor(config: &BrainConfig, deep: bool) -> anyhow::Resu
         );
     }
 
+    // ── scheduling ⇄ cron-reflex consistency ─────────────────────────────
+    // `actions.scheduling` is the *write* axis (create/persist intents);
+    // `reflex.cron` is the *fire* axis. Enabling the former without the
+    // latter persists intents that never fire — a silent black hole, so
+    // surface it. This is a warning, not a failure: a write-only setup is
+    // a legitimate (if unusual) choice.
+    if config.actions.scheduling.enabled && !config.reflex.cron.enabled {
+        println!(
+            "  [warn] actions.scheduling enabled but reflex.cron disabled — scheduled \
+             intents persist but never fire (set reflex.cron.enabled = true)"
+        );
+    }
+
     // ── deep store-level probes (--deep) ─────────────────────────────────
     if deep {
         let daemon_up = daemon_url.is_some();

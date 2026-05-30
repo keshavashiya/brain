@@ -3,8 +3,13 @@
 //! Each `spawn_*` helper attaches one long-running maintenance loop to
 //! the shared join set. Helpers are no-ops at the caller-site when the
 //! relevant config is disabled — `cmd_serve` decides whether to invoke
-//! them based on `config.proactivity` / `config.memory.consolidation`
-//! / `config.actions.scheduling`. The graph compactor always runs.
+//! them based on `config.proactivity` / `config.memory.consolidation`.
+//! The graph compactor always runs.
+//!
+//! Scheduled-intent *firing* no longer lives here: it was migrated off
+//! the direct-execution poller onto `reflex::CronReflex`, which routes
+//! every due intent through the full pipeline (identity, confirmation,
+//! breakers, audit) instead of delivering a bare notification.
 //!
 //! `promote_candidates` (consolidation companion) also lives here
 //! because the consolidation loop is its only caller.
@@ -112,52 +117,6 @@ pub(super) fn spawn_open_loop_detector(
         interval_minutes = ol_cfg.check_interval_minutes,
         "Open-loop detector scheduled"
     );
-}
-
-pub(super) fn spawn_scheduled_intent_poller(
-    processor: Arc<signal::SignalProcessor>,
-    set: &mut tokio::task::JoinSet<anyhow::Result<()>>,
-) {
-    let p = processor.clone();
-    set.spawn(async move {
-        let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        ticker.tick().await;
-        loop {
-            ticker.tick().await;
-            let db = p.episodic().pool();
-            let due = match db.due_scheduled_intents() {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!("Scheduled intent poll failed: {e}");
-                    continue;
-                }
-            };
-            for intent in due {
-                tracing::info!(
-                    id = %intent.id,
-                    description = %intent.description,
-                    "Firing scheduled intent"
-                );
-                if let Some(router) = p.notification_router() {
-                    let notif = signal::notification::ProactiveNotification {
-                        content: format!("[scheduled] {}", intent.description),
-                        triggered_by: "scheduler".to_string(),
-                        priority: 1,
-                        agent: None,
-                    };
-                    router.deliver(notif).await;
-                }
-                if let Err(e) = db.update_scheduled_intent_status(&intent.id, "fired") {
-                    tracing::warn!(
-                        intent_id = %intent.id,
-                        "Scheduled intent fired but status update to 'fired' failed: {e} — \
-                         the intent will re-fire on the next poll until status persists"
-                    );
-                }
-            }
-        }
-    });
-    tracing::info!("Scheduled intent poller started (every 60s)");
 }
 
 pub(super) fn spawn_consolidator(

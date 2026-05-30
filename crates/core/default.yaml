@@ -99,7 +99,9 @@ actions:
     timeout_ms: 3000
     default_top_k: 5
   scheduling:
-    enabled: false
+    enabled: false                      # WRITE axis: lets Brain create/persist
+                                        # scheduled intents. Firing them is the
+                                        # FIRE axis — see reflex.cron below.
     mode: "persist_only"
   messaging:
     enabled: false
@@ -175,7 +177,9 @@ reflex:
   #     recursive: true
   #     debounce_ms: 200
   cron:
-    enabled: false                    # bridge scheduled_intents → reflex stream
+    enabled: false                    # FIRE axis: fires due scheduled_intents
+                                      # through the pipeline. Required for
+                                      # actions.scheduling intents to ever run.
     poll_interval_seconds: 60
   sys:
     enabled: false                    # edge-triggered system state

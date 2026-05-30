@@ -291,8 +291,18 @@ pub(crate) async fn cmd_serve(
             &mut set,
         );
     }
-    if config.actions.scheduling.enabled {
-        background::spawn_scheduled_intent_poller(processor.clone(), &mut set);
+    // Scheduled intents *fire* exclusively through the cron reflex now
+    // (the historical direct-execution poller was retired in favour of
+    // the reflex pipeline — see `reflex::CronReflex`). `actions.scheduling`
+    // remains the *write* axis (create/persist intents); `reflex.cron`
+    // is the *fire* axis. With scheduling enabled but the cron reflex
+    // off, intents persist but never fire — warn so that's not silent.
+    if config.actions.scheduling.enabled && !config.reflex.cron.enabled {
+        tracing::warn!(
+            "actions.scheduling is enabled but reflex.cron is disabled — scheduled \
+             intents will persist but never fire. Set reflex.cron.enabled = true to \
+             fire them through the pipeline."
+        );
     }
     if config.memory.consolidation.enabled {
         background::spawn_consolidator(
