@@ -110,6 +110,122 @@ fn match_br_tag(s: &str) -> Option<usize> {
     None
 }
 
+/// Reflow GFM tables that are too wide for the terminal into definition-style
+/// bullet lists, one bullet per cell (`- **<header>:** <cell>`), with a blank
+/// line between rows. termimad otherwise char-wraps each cell into a vertical
+/// stack of single characters once the table's natural width exceeds the
+/// terminal, which is unreadable. Tables that fit within `width` are left
+/// untouched so termimad renders them as real tables.
+fn reflow_wide_tables(input: &str, width: usize) -> String {
+    let lines: Vec<&str> = input.split('\n').collect();
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut i = 0;
+    while i < lines.len() {
+        // A table block is a header row immediately followed by a delimiter row.
+        if i + 1 < lines.len() && is_table_row(lines[i]) && is_table_delimiter(lines[i + 1]) {
+            let header = split_table_row(lines[i]);
+            let mut rows: Vec<Vec<String>> = Vec::new();
+            let mut j = i + 2;
+            while j < lines.len() && is_table_row(lines[j]) {
+                rows.push(split_table_row(lines[j]));
+                j += 1;
+            }
+            if table_natural_width(&header, &rows) > width {
+                out.push(reflow_table(&header, &rows));
+            } else {
+                // Fits — keep the original lines verbatim for termimad.
+                out.extend(lines[i..j].iter().map(|s| s.to_string()));
+            }
+            i = j;
+        } else {
+            out.push(lines[i].to_string());
+            i += 1;
+        }
+    }
+    out.join("\n")
+}
+
+/// A line that could be a table row: contains a `|` and at least one
+/// non-pipe character.
+fn is_table_row(line: &str) -> bool {
+    let t = line.trim();
+    t.contains('|') && t.chars().any(|c| c != '|' && !c.is_whitespace())
+}
+
+/// The GFM delimiter row: every cell is dashes with optional leading/trailing
+/// colons (alignment markers), and there is at least one dash overall.
+fn is_table_delimiter(line: &str) -> bool {
+    let cells = split_table_row(line);
+    if cells.is_empty() {
+        return false;
+    }
+    let mut saw_dash = false;
+    for cell in &cells {
+        let bytes = cell.trim().trim_start_matches(':').trim_end_matches(':');
+        if bytes.is_empty() || !bytes.chars().all(|c| c == '-') {
+            return false;
+        }
+        saw_dash = true;
+    }
+    saw_dash
+}
+
+/// Split a table row into trimmed cells, dropping the empty cells produced by
+/// the conventional leading/trailing `|`.
+fn split_table_row(line: &str) -> Vec<String> {
+    let t = line.trim();
+    let t = t.strip_prefix('|').unwrap_or(t);
+    let t = t.strip_suffix('|').unwrap_or(t);
+    t.split('|').map(|c| c.trim().to_string()).collect()
+}
+
+/// Estimate the rendered width of a table: summed max column widths plus the
+/// `| ` / ` | ` / ` |` border padding termimad draws.
+fn table_natural_width(header: &[String], rows: &[Vec<String>]) -> usize {
+    let cols = header
+        .len()
+        .max(rows.iter().map(|r| r.len()).max().unwrap_or(0));
+    if cols == 0 {
+        return 0;
+    }
+    let mut widths = vec![0usize; cols];
+    for (idx, cell) in header.iter().enumerate() {
+        widths[idx] = widths[idx].max(cell.chars().count());
+    }
+    for row in rows {
+        for (idx, cell) in row.iter().enumerate() {
+            if idx < cols {
+                widths[idx] = widths[idx].max(cell.chars().count());
+            }
+        }
+    }
+    // Each column contributes its content plus `| ` + trailing space, and the
+    // table closes with a final `|`: 3 chars of border per column + 1.
+    widths.iter().sum::<usize>() + cols * 3 + 1
+}
+
+/// Render a table as a bullet list: each row becomes a group of
+/// `- **<header>:** <cell>` bullets, groups separated by a blank line.
+fn reflow_table(header: &[String], rows: &[Vec<String>]) -> String {
+    let mut blocks: Vec<String> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut lines: Vec<String> = Vec::with_capacity(row.len());
+        for (idx, cell) in row.iter().enumerate() {
+            if cell.is_empty() {
+                continue;
+            }
+            match header.get(idx).filter(|h| !h.is_empty()) {
+                Some(h) => lines.push(format!("- **{h}:** {cell}")),
+                None => lines.push(format!("- {cell}")),
+            }
+        }
+        if !lines.is_empty() {
+            blocks.push(lines.join("\n"));
+        }
+    }
+    blocks.join("\n\n")
+}
+
 /// Label printed before a rendered response body.
 #[derive(Clone, Copy)]
 enum ResponseLabel {
@@ -158,6 +274,17 @@ impl ResponseLabel {
     }
 }
 
+/// Run the markdown body through the preprocessing passes (HTML `<br>`
+/// normalization + wide-table reflow) and termimad, returning the rendered
+/// string with trailing newlines trimmed. Shared by both render paths.
+fn render_markdown_body(body: &str, width: usize) -> String {
+    let processed = preprocess_markdown(body);
+    let processed = reflow_wide_tables(&processed, width);
+    let skin = brain_skin();
+    let formatted = skin.text(&processed, Some(width));
+    formatted.to_string().trim_end_matches('\n').to_string()
+}
+
 /// Build the full rendered string (label + markdown body + trailing blank
 /// line) for a response. Empty bodies render as empty so the caller can
 /// skip them.
@@ -166,14 +293,10 @@ fn render_to_string(label: ResponseLabel, body: &str) -> String {
     if trimmed.is_empty() {
         return String::new();
     }
-    let processed = preprocess_markdown(trimmed);
-    let skin = brain_skin();
-    let formatted = skin.text(&processed, Some(terminal_width()));
-    let rendered = formatted.to_string();
-    let rendered = rendered.trim_end_matches('\n');
+    let rendered = render_markdown_body(trimmed, terminal_width());
     let mut out = String::with_capacity(rendered.len() + 32);
     out.push_str(label.ansi_prefix());
-    out.push_str(rendered);
+    out.push_str(&rendered);
     out.push('\n');
     out
 }
@@ -186,11 +309,7 @@ fn render_response_direct(label: ResponseLabel, body: &str) {
         return;
     }
     let _ = label.write_prefix_direct();
-    let processed = preprocess_markdown(trimmed);
-    let skin = brain_skin();
-    let formatted = skin.text(&processed, Some(terminal_width()));
-    let rendered = formatted.to_string();
-    let rendered = rendered.trim_end_matches('\n');
+    let rendered = render_markdown_body(trimmed, terminal_width());
     print!("{rendered}\n\n");
     let _ = stdout().flush();
 }
@@ -862,6 +981,49 @@ mod tests {
     fn preprocess_passes_plain_text_through() {
         let input = "Hello, world!\n\nNo HTML here.";
         assert_eq!(preprocess_markdown(input), input);
+    }
+
+    const FOUR_COL_TABLE: &str = "\
+| Tool | Tier | Network | Description |
+| --- | --- | --- | --- |
+| web_search | External | yes | Search the public web for fresh information |
+| shell_exec | Execute | no | Run an allowlisted command in the sandbox |";
+
+    #[test]
+    fn wide_table_reflows_to_bullets() {
+        // At 80 cols the 4-column table is far too wide and must reflow.
+        let out = reflow_wide_tables(FOUR_COL_TABLE, 80);
+        assert!(!out.contains("---"), "delimiter row should be gone: {out}");
+        assert!(out.contains("- **Tool:** web_search"));
+        assert!(out.contains("- **Network:** yes"));
+        assert!(out.contains("- **Tool:** shell_exec"));
+        // Rows are separated by a blank line.
+        assert!(out.contains("\n\n- **Tool:** shell_exec"));
+    }
+
+    #[test]
+    fn narrow_table_is_left_untouched() {
+        // A table that comfortably fits is handed to termimad verbatim.
+        let table = "\
+| A | B |
+| --- | --- |
+| 1 | 2 |";
+        assert_eq!(reflow_wide_tables(table, 100), table);
+    }
+
+    #[test]
+    fn reflow_preserves_surrounding_prose() {
+        let input = format!("Here are my tools:\n\n{FOUR_COL_TABLE}\n\nThat's all.");
+        let out = reflow_wide_tables(&input, 80);
+        assert!(out.starts_with("Here are my tools:"));
+        assert!(out.trim_end().ends_with("That's all."));
+        assert!(out.contains("- **Description:** Search the public web for fresh information"));
+    }
+
+    #[test]
+    fn text_without_tables_is_unchanged() {
+        let input = "Just a line with a | pipe but no table.\nAnd another.";
+        assert_eq!(reflow_wide_tables(input, 80), input);
     }
 
     #[test]
