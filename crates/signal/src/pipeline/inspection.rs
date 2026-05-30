@@ -21,6 +21,20 @@ use super::dispatch::{HandlerContext, InspectionAuth, InspectionHandler, NudgeFn
 use crate::types::*;
 use crate::SignalProcessor;
 
+/// How far back the memory-summary "recent activity" list reaches. Older
+/// episodes are still stored and searchable; they just don't crowd the
+/// at-a-glance recent view.
+const RECENT_ACTIVITY_WINDOW_DAYS: i64 = 30;
+
+/// True if an episode timestamp falls on/after `cutoff`. Fails open: an
+/// unparseable timestamp is treated as in-window rather than silently dropped.
+fn episode_within_window(timestamp: &str, cutoff: chrono::DateTime<chrono::Utc>) -> bool {
+    match chrono::DateTime::parse_from_rfc3339(timestamp) {
+        Ok(ts) => ts.with_timezone(&chrono::Utc) >= cutoff,
+        Err(_) => true,
+    }
+}
+
 /// Render one budget window (hourly or daily) as `provider:resource — used /
 /// limit` rows, merging recorded consumption with the configured ceilings so
 /// the user sees the envelope, not just usage. When the window has neither
@@ -316,9 +330,18 @@ impl SignalProcessor {
             }
         }
 
-        if !episodes.is_empty() {
+        // "Recent" should mean recent — bound the activity list to a window so
+        // a long-lived store doesn't surface months-old personal turns as if
+        // they just happened. Unparseable timestamps are kept (fail-open).
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(RECENT_ACTIVITY_WINDOW_DAYS);
+        let recent: Vec<&hippocampus::Episode> = episodes
+            .iter()
+            .filter(|ep| episode_within_window(&ep.timestamp, cutoff))
+            .take(8)
+            .collect();
+        if !recent.is_empty() {
             md.push_heading(3, "Recent activity");
-            for ep in episodes.iter().take(8) {
+            for ep in recent {
                 let one_line = ep.content.lines().next().unwrap_or("").trim();
                 let trimmed = if one_line.chars().count() > 140 {
                     let mut s: String = one_line.chars().take(137).collect();
@@ -1207,5 +1230,30 @@ mod budget_render_tests {
             !out.contains(" / "),
             "should have no limit divider: {out:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod recent_activity_window_tests {
+    use super::episode_within_window;
+
+    #[test]
+    fn fresh_episode_is_in_window() {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+        let now = chrono::Utc::now().to_rfc3339();
+        assert!(episode_within_window(&now, cutoff));
+    }
+
+    #[test]
+    fn stale_episode_is_excluded() {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+        let old = (chrono::Utc::now() - chrono::Duration::days(90)).to_rfc3339();
+        assert!(!episode_within_window(&old, cutoff));
+    }
+
+    #[test]
+    fn unparseable_timestamp_fails_open() {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+        assert!(episode_within_window("not-a-timestamp", cutoff));
     }
 }

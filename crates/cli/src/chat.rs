@@ -314,19 +314,50 @@ fn render_response_direct(label: ResponseLabel, body: &str) {
     let _ = stdout().flush();
 }
 
+/// Plain one-shot render: just the markdown body, no `Brain:` label. Used by
+/// deterministic subcommands (e.g. `brain capabilities`) that shouldn't look
+/// like a chat turn.
+fn render_plain_direct(body: &str) {
+    let trimmed = body.trim_end();
+    if trimmed.is_empty() {
+        return;
+    }
+    let rendered = render_markdown_body(trimmed, terminal_width());
+    print!("{rendered}\n\n");
+    let _ = stdout().flush();
+}
+
 /// Aggregates incoming WS frames into a single buffered response for the
 /// one-shot path. The interactive path uses [`InteractiveAccumulator`]
 /// which prints through an external printer instead.
+/// How a one-shot response is rendered. `Chat` is the conversational
+/// `brain chat "…"` look (transient `routing…` status line + `Brain:`
+/// label). `Plain` is for deterministic subcommands like `brain capabilities`
+/// that ride the same WS path but should print only their body — no status
+/// line, no chat label.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+enum RenderStyle {
+    #[default]
+    Chat,
+    Plain,
+}
+
 struct ResponseAccumulator {
     body: String,
     label: Option<ResponseLabel>,
+    style: RenderStyle,
 }
 
 impl ResponseAccumulator {
     fn new() -> Self {
+        Self::with_style(RenderStyle::Chat)
+    }
+
+    fn with_style(style: RenderStyle) -> Self {
         Self {
             body: String::new(),
             label: None,
+            style,
         }
     }
 
@@ -361,9 +392,19 @@ impl ResponseAccumulator {
     }
 
     fn finalize(self) -> Option<String> {
-        if let Some(label) = self.label {
-            let _ = clear_status_line();
-            render_response_direct(label, &self.body);
+        match self.style {
+            RenderStyle::Plain => {
+                if !self.body.trim_end().is_empty() {
+                    let _ = clear_status_line();
+                    render_plain_direct(&self.body);
+                }
+            }
+            RenderStyle::Chat => {
+                if let Some(label) = self.label {
+                    let _ = clear_status_line();
+                    render_response_direct(label, &self.body);
+                }
+            }
         }
         Some(self.body).filter(|t| !t.is_empty())
     }
@@ -420,7 +461,9 @@ config so future runs skip the gate.";
 fn apply_frame(acc: &mut ResponseAccumulator, frame: &serde_json::Value) -> FrameOutcome {
     match frame.get("type").and_then(|v| v.as_str()) {
         Some("status") => {
-            if acc.body.is_empty() {
+            // Plain (deterministic-subcommand) output suppresses the
+            // transient `routing…` line; it's chat-render chrome.
+            if acc.style != RenderStyle::Plain && acc.body.is_empty() {
                 if let Some(msg) = frame.get("message").and_then(|m| m.as_str()) {
                     let _ = render_status_line(msg);
                 }
@@ -475,8 +518,12 @@ type WsStream = futures_util::stream::SplitStream<
 /// One-shot path: drive frames until the response settles or the connection
 /// closes. Used by `chat_non_interactive` and during the brief auth+send
 /// for the legacy single-message flow.
-async fn drive_frames(sink: &mut WsSink, stream: &mut WsStream) -> anyhow::Result<Option<String>> {
-    let mut acc = ResponseAccumulator::new();
+async fn drive_frames(
+    sink: &mut WsSink,
+    stream: &mut WsStream,
+    style: RenderStyle,
+) -> anyhow::Result<Option<String>> {
+    let mut acc = ResponseAccumulator::with_style(style);
     loop {
         let frame = match stream.next().await {
             Some(Ok(frame)) => frame,
@@ -524,6 +571,7 @@ async fn send_ws_message(
     api_key: &str,
     message: &str,
     session_id: &str,
+    style: RenderStyle,
 ) -> anyhow::Result<Option<String>> {
     let (ws, _) = tokio_tungstenite::connect_async(ws_url).await?;
     let (mut sink, mut stream) = ws.split();
@@ -555,7 +603,7 @@ async fn send_ws_message(
     });
     sink.send(Message::Text(signal.to_string().into())).await?;
 
-    drive_frames(&mut sink, &mut stream).await
+    drive_frames(&mut sink, &mut stream, style).await
 }
 
 /// Connect + authenticate, returning the split sink/stream pair the
@@ -603,16 +651,35 @@ fn first_api_key(config: &brain::BrainConfig) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("No API key configured. Run `brain init`."))
 }
 
+/// One-shot conversational turn (`brain chat "…"`): chat-styled output.
 pub(crate) async fn chat_non_interactive(
     config: &brain::BrainConfig,
     message: &str,
+) -> anyhow::Result<()> {
+    chat_non_interactive_styled(config, message, RenderStyle::Chat).await
+}
+
+/// One-shot output of a deterministic subcommand that rides the chat WS path
+/// (e.g. `brain capabilities`): plain output, no `routing…` line or `Brain:`
+/// label.
+pub(crate) async fn command_over_chat(
+    config: &brain::BrainConfig,
+    message: &str,
+) -> anyhow::Result<()> {
+    chat_non_interactive_styled(config, message, RenderStyle::Plain).await
+}
+
+async fn chat_non_interactive_styled(
+    config: &brain::BrainConfig,
+    message: &str,
+    style: RenderStyle,
 ) -> anyhow::Result<()> {
     let _ = crate::bootstrap::require_daemon(config).await?;
     let ws_url = ws_url(config);
     let api_key = first_api_key(config)?;
     let session_id = uuid::Uuid::new_v4().to_string();
 
-    let response = send_ws_message(&ws_url, &api_key, message, &session_id).await?;
+    let response = send_ws_message(&ws_url, &api_key, message, &session_id, style).await?;
     drop(response);
     Ok(())
 }
@@ -1066,6 +1133,29 @@ mod tests {
         acc.push_chunk("streamed");
         acc.set_complete_body("ignored");
         assert_eq!(acc.body, "streamed");
+    }
+
+    #[test]
+    fn default_style_is_chat() {
+        assert_eq!(RenderStyle::default(), RenderStyle::Chat);
+        assert_eq!(ResponseAccumulator::new().style, RenderStyle::Chat);
+    }
+
+    #[test]
+    fn plain_style_suppresses_status_line() {
+        // In Plain mode a `status` frame must not render the `routing…` line.
+        // We can't capture stdout here, but the gating reads `acc.style`, so
+        // assert the style is carried and the frame is still consumed cleanly.
+        let mut acc = ResponseAccumulator::with_style(RenderStyle::Plain);
+        assert_eq!(acc.style, RenderStyle::Plain);
+        let status = serde_json::json!({"type": "status", "message": "routing…"});
+        assert!(matches!(
+            apply_frame(&mut acc, &status),
+            FrameOutcome::Continue
+        ));
+        // Status frames never contribute to the body or set a chat label.
+        assert!(acc.body.is_empty());
+        assert!(acc.label.is_none());
     }
 
     #[test]

@@ -118,6 +118,40 @@ async fn test_classify_execute_command_regex_fallback() {
     );
 }
 
+#[tokio::test]
+async fn explicit_store_strips_imperative_wrapper() {
+    let classifier = IntentClassifier::new();
+    for (input, want_object) in [
+        (
+            "store this fact: my deploy script is ops/deploy.sh",
+            "my deploy script is ops/deploy.sh",
+        ),
+        ("remember that I prefer dark mode", "I prefer dark mode"),
+        (
+            "note the staging DB is read-only",
+            "the staging DB is read-only",
+        ),
+        (
+            "store that the API key rotates monthly",
+            "the API key rotates monthly",
+        ),
+    ] {
+        let result = classifier.classify(input).await;
+        match result.intent {
+            Intent::StoreFact {
+                subject,
+                predicate,
+                object,
+            } => {
+                assert_eq!(subject, "user");
+                assert_eq!(predicate, "said");
+                assert_eq!(object, want_object, "input {input:?} kept the wrapper");
+            }
+            other => panic!("{input:?}: expected StoreFact, got {other:?}"),
+        }
+    }
+}
+
 #[test]
 fn normalize_command_strips_filler_and_wrappers() {
     use crate::classifier::normalize_command;

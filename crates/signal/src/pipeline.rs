@@ -236,8 +236,13 @@ impl SignalProcessor {
         // category dispatcher that may produce a `Complete` result.
         let prepend_nudges = move |mut resp: SignalResponse| -> SignalResponse {
             if !pending_notifications.is_empty() {
+                // Dedupe by content: the same nudge can land in the outbox
+                // more than once (e.g. re-enqueued by proactivity), and two
+                // identical `[nudge]` lines in one reply reads as a bug.
+                let mut seen = std::collections::HashSet::new();
                 let nudge_text: String = pending_notifications
                     .iter()
+                    .filter(|n| seen.insert(n.content.as_str()))
                     .map(|n| format!("[nudge] {}", n.content))
                     .collect::<Vec<_>>()
                     .join("\n");

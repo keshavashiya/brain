@@ -103,9 +103,9 @@ impl SignalProcessor {
         let resp = prepend_nudges(SignalResponse {
             signal_id,
             status: ResponseStatus::Ok,
-            response: ResponseContent::Text(format!(
-                "Stored: {subject} {predicate} {object} (importance: {importance:.2})"
-            )),
+            // User-facing confirmation stays clean — the importance score is
+            // internal ranking jargon, not something the user asked about.
+            response: ResponseContent::Text(format!("Stored: {subject} {predicate} {object}")),
             memory_context: MemoryContext {
                 facts_used: facts_stored,
                 episodes_used: 0,

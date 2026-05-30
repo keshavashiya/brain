@@ -979,27 +979,47 @@ impl IntentClassifier {
             }
         }
 
-        let store_prefixes = ["remember ", "note ", "keep in mind "];
-        for prefix in &store_prefixes {
-            if lower.starts_with(prefix) {
-                let rest = &trimmed[prefix.len()..];
-                let content = if rest.to_lowercase().starts_with("that ") {
-                    rest[5..].trim()
-                } else {
-                    rest.trim()
-                };
-                if !content.is_empty() {
-                    return Some(Classification {
-                        intent: Intent::StoreFact {
-                            subject: "user".to_string(),
-                            predicate: "said".to_string(),
-                            object: content.to_string(),
-                        },
-                        confidence: 1.0,
-                        method: ClassificationMethod::Regex,
-                        extracted_facts: Vec::new(),
-                    });
-                }
+        // Store directives. Longest first so "store this fact" wins over the
+        // bare "store". The captured object is stripped of the imperative
+        // wrapper (a trailing `:`, a leading `that`) so the stored fact reads
+        // as the user's claim, not "user said store this fact: …".
+        const STORE_PREFIXES: &[&str] = &[
+            "store this fact",
+            "store the fact",
+            "store that",
+            "store",
+            "remember",
+            "note",
+            "keep in mind",
+        ];
+        for prefix in STORE_PREFIXES {
+            let Some(after) = lower.strip_prefix(prefix) else {
+                continue;
+            };
+            // Require a word boundary so "stored"/"noted" don't match.
+            if !after.is_empty() && !after.starts_with([' ', ':']) {
+                continue;
+            }
+            // Peel a leading `:`, then a leading "that ", from the original-case
+            // remainder.
+            let rest = trimmed[prefix.len()..].trim_start();
+            let rest = rest.strip_prefix(':').unwrap_or(rest).trim_start();
+            let content = if rest.len() >= 5 && rest[..5].eq_ignore_ascii_case("that ") {
+                rest[5..].trim()
+            } else {
+                rest.trim()
+            };
+            if !content.is_empty() {
+                return Some(Classification {
+                    intent: Intent::StoreFact {
+                        subject: "user".to_string(),
+                        predicate: "said".to_string(),
+                        object: content.to_string(),
+                    },
+                    confidence: 1.0,
+                    method: ClassificationMethod::Regex,
+                    extracted_facts: Vec::new(),
+                });
             }
         }
 

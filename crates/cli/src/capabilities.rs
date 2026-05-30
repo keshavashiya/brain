@@ -327,7 +327,7 @@ pub async fn register_native_capabilities(
 /// the listing reflects runtime state (e.g. MCP servers mounted since
 /// boot), not just this process's static view.
 pub async fn cmd_capabilities(config: &brain::BrainConfig) -> anyhow::Result<()> {
-    crate::chat::chat_non_interactive(config, "/capabilities").await
+    crate::chat::command_over_chat(config, "/capabilities").await
 }
 
 #[cfg(test)]
