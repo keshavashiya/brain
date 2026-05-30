@@ -50,10 +50,17 @@ pub enum BudgetDecision {
 }
 
 /// Current consumption snapshot.
+///
+/// `*_limits` carry the configured token ceilings for each `provider:resource`
+/// so callers can render the budget *envelope* (used / limit), not just raw
+/// usage. Only bounded token resources are included — unset (0) and unbounded
+/// (`u64::MAX`) ceilings are omitted.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BudgetStatus {
     pub hourly_consumption: HashMap<String, u64>,
     pub daily_consumption: HashMap<String, u64>,
+    pub hourly_limits: HashMap<String, u64>,
+    pub daily_limits: HashMap<String, u64>,
     pub warnings: Vec<String>,
 }
 
@@ -371,6 +378,27 @@ impl CostBudget for SqliteBudget {
             Ok(())
         })?;
 
+        // Surface the configured token envelope so a zero-usage status still
+        // shows the limits the user is operating under. Only the bounded
+        // token resources map cleanly onto the `provider:resource` key space;
+        // cost- and delegation-based ceilings are left out to avoid the
+        // misleading cost→token heuristic.
+        for provider in self.policy.providers.keys() {
+            for resource in [ResourceKind::LlmInputTokens, ResourceKind::LlmOutputTokens] {
+                let key = format!("{provider}:{resource}");
+                if let Ok(h) = self.policy.get_ceiling(provider, &resource, "hourly") {
+                    if h != 0 && h != u64::MAX {
+                        status.hourly_limits.insert(key.clone(), h);
+                    }
+                }
+                if let Ok(d) = self.policy.get_ceiling(provider, &resource, "daily") {
+                    if d != 0 && d != u64::MAX {
+                        status.daily_limits.insert(key, d);
+                    }
+                }
+            }
+        }
+
         Ok(status)
     }
 }
@@ -399,6 +427,29 @@ mod tests {
 
         let status = budget.status().await.unwrap();
         assert!(!status.hourly_consumption.is_empty());
+    }
+
+    #[tokio::test]
+    async fn status_surfaces_configured_token_limits() {
+        // The default policy bounds openai input/output tokens, so a
+        // zero-usage status still reports the envelope; providers with no
+        // token ceiling (claude-code, sandbox) are omitted.
+        let budget = test_budget();
+        let status = budget.status().await.unwrap();
+
+        assert_eq!(
+            status.hourly_limits.get("openai:llm_input_tokens").copied(),
+            Some(500_000)
+        );
+        assert_eq!(
+            status.daily_limits.get("openai:llm_input_tokens").copied(),
+            Some(500_000 * 24)
+        );
+        assert!(!status
+            .hourly_limits
+            .contains_key("claude-code:llm_input_tokens"));
+        // No spend recorded yet.
+        assert!(status.hourly_consumption.is_empty());
     }
 
     #[tokio::test]

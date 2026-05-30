@@ -21,6 +21,33 @@ use super::dispatch::{HandlerContext, InspectionAuth, InspectionHandler, NudgeFn
 use crate::types::*;
 use crate::SignalProcessor;
 
+/// Render one budget window (hourly or daily) as `provider:resource — used /
+/// limit` rows, merging recorded consumption with the configured ceilings so
+/// the user sees the envelope, not just usage. When the window has neither
+/// usage nor a configured limit, emit a single zero-state line instead of a
+/// dangling header with no children (the W6 bug).
+fn render_budget_window(
+    md: &mut crate::render::Markdown,
+    consumption: &std::collections::HashMap<String, u64>,
+    limits: &std::collections::HashMap<String, u64>,
+) {
+    let mut keys: Vec<&String> = consumption.keys().chain(limits.keys()).collect();
+    keys.sort();
+    keys.dedup();
+    if keys.is_empty() {
+        md.push_bullet(1, "none this window");
+        return;
+    }
+    for key in keys {
+        let used = consumption.get(key).copied().unwrap_or(0);
+        let value = match limits.get(key) {
+            Some(limit) => format!("{used} / {limit}"),
+            None => used.to_string(),
+        };
+        md.push_kv(1, key, value);
+    }
+}
+
 impl InspectionAuth for SignalProcessor {
     fn auth_inspection(_intent: &thalamus::Intent) -> Option<(AuthorizationRequest, Tier)> {
         // Read-only state queries. Identity gate is skipped entirely.
@@ -447,14 +474,10 @@ impl SignalProcessor {
                     .map_err(|e| SignalError::Processing(format!("Budget status failed: {e}")))?;
                 let mut md = crate::render::Markdown::new();
                 md.push_heading(3, "Budget status");
-                md.push_bullet(0, "**Hourly consumption**");
-                for (k, v) in &status.hourly_consumption {
-                    md.push_kv(1, k, v.to_string());
-                }
-                md.push_bullet(0, "**Daily consumption**");
-                for (k, v) in &status.daily_consumption {
-                    md.push_kv(1, k, v.to_string());
-                }
+                md.push_bullet(0, "**Hourly**");
+                render_budget_window(&mut md, &status.hourly_consumption, &status.hourly_limits);
+                md.push_bullet(0, "**Daily**");
+                render_budget_window(&mut md, &status.daily_consumption, &status.daily_limits);
                 md.build()
             }
             None => "Cost budget is not wired.".to_string(),
@@ -1129,5 +1152,60 @@ mod list_capabilities_tests {
             .unwrap();
         let body = body_of(result);
         assert!(body.contains("0 tool(s), 0 agent(s)"), "got: {body:?}");
+    }
+}
+
+#[cfg(test)]
+mod budget_render_tests {
+    use super::render_budget_window;
+    use crate::render::Markdown;
+    use std::collections::HashMap;
+
+    fn render(consumption: &[(&str, u64)], limits: &[(&str, u64)]) -> String {
+        let c: HashMap<String, u64> = consumption
+            .iter()
+            .map(|(k, v)| (k.to_string(), *v))
+            .collect();
+        let l: HashMap<String, u64> = limits.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+        let mut md = Markdown::new();
+        render_budget_window(&mut md, &c, &l);
+        md.build()
+    }
+
+    #[test]
+    fn empty_window_renders_zero_state_not_dangling_header() {
+        let out = render(&[], &[]);
+        assert!(out.contains("none this window"), "got: {out:?}");
+    }
+
+    #[test]
+    fn configured_limit_with_no_usage_shows_zero_over_limit() {
+        let out = render(&[], &[("openai:llm_input_tokens", 500_000)]);
+        assert!(
+            out.contains("openai:llm_input_tokens") && out.contains("0 / 500000"),
+            "got: {out:?}"
+        );
+    }
+
+    #[test]
+    fn usage_against_limit_shows_used_over_limit() {
+        let out = render(
+            &[("openai:llm_input_tokens", 1200)],
+            &[("openai:llm_input_tokens", 500_000)],
+        );
+        assert!(out.contains("1200 / 500000"), "got: {out:?}");
+    }
+
+    #[test]
+    fn usage_without_a_limit_shows_bare_count() {
+        let out = render(&[("local:llm_input_tokens", 42)], &[]);
+        assert!(
+            out.contains("local:llm_input_tokens") && out.contains("42"),
+            "got: {out:?}"
+        );
+        assert!(
+            !out.contains(" / "),
+            "should have no limit divider: {out:?}"
+        );
     }
 }
