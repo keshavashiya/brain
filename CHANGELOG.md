@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Release automation.** Tagging a `vX.Y.Z` release now builds pre-built
+  binaries — `brain-<target>.tar.gz` for macOS (`aarch64`/`x86_64`) and
+  Linux (`aarch64`/`x86_64`), each with a `.sha256` — and publishes a
+  GitHub Release with an SPDX SBOM and the changelog section as notes
+  (`.github/workflows/release.yml`). This is what `scripts/install.sh`
+  downloads, so the one-line installer now resolves to a real binary on
+  every supported platform. Maintainers drive releases with
+  `scripts/release.sh X.Y.Z`, which validates the tree/version/changelog,
+  runs the full CI-parity gate, `cargo publish`es every crate in dependency
+  order, then tags and pushes; `scripts/changelog-extract.sh` prints a
+  single version's notes.
 - **Structured logging policy.** New `[logging]` config section: base
   `level`, per-subsystem `targets` overrides, `format` (`pretty`|`json`),
   and daemon log-file `rotation` (`daily`|`hourly`|`never`). Long-running

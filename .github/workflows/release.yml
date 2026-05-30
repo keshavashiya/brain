@@ -1,0 +1,143 @@
+name: Release
+
+# Fires when scripts/release.sh pushes a `vX.Y.Z` tag. The crates.io publish
+# happens locally in that script (publishing is irreversible — a human drives
+# it); this workflow owns the reproducible-on-CI half: platform binaries, an
+# SBOM, and the GitHub Release itself.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write  # create the GitHub Release and upload assets
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ---- Build one tarball per target -------------------------------------
+  # Asset names MUST stay `brain-<target>.tar.gz` — scripts/install.sh probes
+  # exactly that name to find a pre-built binary for the host triple.
+  #
+  # Windows is omitted for the same reason as ci.yml: the grpc/terminal
+  # adapters pull `protobuf-src`, whose C++ build doesn't link under MSVC.
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Cross C toolchain for the aarch64 Linux target. rusqlite's bundled
+      # SQLite and the HNSW C extensions need a cross gcc; this action wires
+      # up CC/CXX/AR/linker + the runner so `cargo build --target` just works.
+      # No-op for the native targets.
+      - name: Set up cross toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --bin brain --target ${{ matrix.target }}
+
+      - name: Package tarball
+        shell: bash
+        run: |
+          dist="brain-${{ matrix.target }}"
+          mkdir -p "$dist"
+          cp "target/${{ matrix.target }}/release/brain" "$dist/"
+          cp LICENSE README.md "$dist/"
+          tar -czf "$dist.tar.gz" -C "$dist" .
+          # Checksum alongside the tarball for `install.sh` / manual verify.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "$dist.tar.gz" > "$dist.tar.gz.sha256"
+          else
+            shasum -a 256 "$dist.tar.gz" > "$dist.tar.gz.sha256"
+          fi
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: brain-${{ matrix.target }}
+          path: |
+            brain-${{ matrix.target }}.tar.gz
+            brain-${{ matrix.target }}.tar.gz.sha256
+          retention-days: 7
+
+  # ---- Software Bill of Materials ---------------------------------------
+  sbom:
+    name: SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Generate SBOM (SPDX JSON)
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: brain-${{ github.ref_name }}.spdx.json
+          # We attach the SBOM ourselves below so the release job sees it as
+          # a plain artifact alongside the tarballs; skip the action's own
+          # auto-upload to avoid a duplicate.
+          upload-artifact: false
+      - name: Upload SBOM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: brain-${{ github.ref_name }}.spdx.json
+          retention-days: 7
+
+  # ---- Assemble the GitHub Release --------------------------------------
+  release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build, sbom]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect release assets
+        run: |
+          mkdir -p dist
+          find artifacts -type f \( -name '*.tar.gz' -o -name '*.sha256' -o -name '*.spdx.json' \) \
+            -exec cp {} dist/ \;
+          ls -la dist
+
+      - name: Extract changelog notes
+        id: notes
+        run: |
+          ./scripts/changelog-extract.sh "${{ github.ref_name }}" > RELEASE_NOTES.md
+          echo "--- release notes ---"
+          cat RELEASE_NOTES.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Brain OS ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
+          files: dist/*
+          fail_on_unmatched_files: true
