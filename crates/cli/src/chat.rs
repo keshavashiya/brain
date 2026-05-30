@@ -280,8 +280,23 @@ fn extract_complete_body(frame: &serde_json::Value) -> &str {
 enum FrameOutcome {
     Continue,
     Complete,
+    /// The daemon parked the signal on a confirmation gate. A one-shot
+    /// client has no stdin loop to answer it, so this is terminal here:
+    /// render the prompt + guidance and return rather than blocking to the
+    /// server-side nonce timeout. Carries the prompt body (which includes
+    /// the nonce the daemon minted).
+    Approval(String),
     Error(String),
 }
+
+/// Guidance appended after a one-shot approval prompt. Without this the CLI
+/// would block until the daemon timed the nonce out (60s External / 300s
+/// Destructive); instead we explain how to actually grant the action.
+const ONE_SHOT_APPROVAL_HINT: &str = "\
+This action needs your approval, which can't be answered in one-shot mode.
+- Interactive: run `brain chat`, then reply `approve <nonce>` (or `reject <nonce>`).
+- Standing grant: pre-authorize it once via the `[confirm] standing_approvals` \
+config so future runs skip the gate.";
 
 fn apply_frame(acc: &mut ResponseAccumulator, frame: &serde_json::Value) -> FrameOutcome {
     match frame.get("type").and_then(|v| v.as_str()) {
@@ -303,9 +318,9 @@ fn apply_frame(acc: &mut ResponseAccumulator, frame: &serde_json::Value) -> Fram
             let body = frame
                 .get("content")
                 .and_then(|c| c.as_str())
-                .unwrap_or("Approval required.");
-            ResponseAccumulator::render_approval_prompt(body);
-            FrameOutcome::Continue
+                .unwrap_or("Approval required.")
+                .to_string();
+            FrameOutcome::Approval(body)
         }
         Some("chunk") => {
             if let Some(content) = frame.get("content").and_then(|c| c.as_str()) {
@@ -367,6 +382,15 @@ async fn drive_frames(sink: &mut WsSink, stream: &mut WsStream) -> anyhow::Resul
         match apply_frame(&mut acc, &parsed) {
             FrameOutcome::Continue => continue,
             FrameOutcome::Complete => return Ok(acc.finalize()),
+            FrameOutcome::Approval(body) => {
+                // Render the gate prompt + actionable guidance and return
+                // immediately. Closing the stream here (the caller drops the
+                // socket) signals the daemon to withdraw the pending nonce
+                // instead of leaving a ghost gate until it times out.
+                ResponseAccumulator::render_approval_prompt(&body);
+                render_response_direct(ResponseLabel::Proactive, ONE_SHOT_APPROVAL_HINT);
+                return Ok(None);
+            }
             FrameOutcome::Error(msg) => {
                 ResponseAccumulator::render_error(&msg);
                 return Err(anyhow::anyhow!(msg));
@@ -918,6 +942,29 @@ mod tests {
         match apply_frame(&mut acc, &frame) {
             FrameOutcome::Error(msg) => assert_eq!(msg, "boom"),
             _ => panic!("expected Error"),
+        }
+    }
+
+    #[test]
+    fn apply_frame_returns_approval_with_prompt() {
+        // One-shot: an approval gate must be terminal (carry the prompt so the
+        // caller can render guidance and return) rather than Continue —
+        // otherwise the loop blocks to the server-side nonce timeout (W1).
+        let mut acc = ResponseAccumulator::new();
+        let frame = serde_json::json!({"type": "approval_request", "content": "approve abc123?"});
+        match apply_frame(&mut acc, &frame) {
+            FrameOutcome::Approval(body) => assert_eq!(body, "approve abc123?"),
+            _ => panic!("expected Approval"),
+        }
+    }
+
+    #[test]
+    fn apply_frame_approval_falls_back_when_content_missing() {
+        let mut acc = ResponseAccumulator::new();
+        let frame = serde_json::json!({"type": "approval_request"});
+        match apply_frame(&mut acc, &frame) {
+            FrameOutcome::Approval(body) => assert_eq!(body, "Approval required."),
+            _ => panic!("expected Approval"),
         }
     }
 
