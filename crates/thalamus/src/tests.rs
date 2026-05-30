@@ -118,6 +118,44 @@ async fn test_classify_execute_command_regex_fallback() {
     );
 }
 
+#[test]
+fn normalize_command_strips_filler_and_wrappers() {
+    use crate::classifier::normalize_command;
+
+    // Plain command is untouched.
+    assert_eq!(normalize_command("ls -la"), "ls -la");
+    // Conversational filler before the binary is dropped.
+    assert_eq!(normalize_command("the command: ls ~/.brain"), "ls ~/.brain");
+    assert_eq!(normalize_command("the following: cargo test"), "cargo test");
+    assert_eq!(normalize_command("command: git status"), "git status");
+    // Shell wrappers around the whole command are peeled.
+    assert_eq!(normalize_command("`git status`"), "git status");
+    assert_eq!(normalize_command("$(cargo build)"), "cargo build");
+    assert_eq!(normalize_command("\"echo hi\""), "echo hi");
+    // A bare `cmd` token is a real binary, not filler.
+    assert_eq!(normalize_command("cmd /c dir"), "cmd /c dir");
+    // …but the explicit `cmd:` preamble is filler.
+    assert_eq!(normalize_command("cmd: dir"), "dir");
+}
+
+#[tokio::test]
+async fn test_classify_execute_command_with_filler_phrasing() {
+    let classifier = IntentClassifier::new();
+    for (input, want) in [
+        ("run the command: ls -la", "ls"),
+        ("please run `git status`", "git"),
+        ("execute the following: cargo test", "cargo"),
+    ] {
+        let result = classifier.classify(input).await;
+        match result.intent {
+            Intent::ExecuteCommand { command, .. } => {
+                assert_eq!(command, want, "{input:?} parsed binary as {command:?}");
+            }
+            other => panic!("{input:?}: expected ExecuteCommand, got {other:?}"),
+        }
+    }
+}
+
 #[tokio::test]
 async fn classify_with_history_passes_recent_turns_to_fallback() {
     use cortex::llm::Message;

@@ -39,9 +39,66 @@ static MEMORY_SUMMARY_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static EXECUTE_COMMAND_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(?:run|exec|execute)\s+(?:command\s+)?(\S+)(?:\s+(.*))?$")
+    // Capture the whole tail after the verb (and an optional "please"); the
+    // binary/args split and filler stripping happen in `normalize_command`,
+    // because natural phrasing wraps the command in filler ("the command:",
+    // "the following:") and shells (backticks, quotes, `$(...)`) that a
+    // single regex can't cleanly peel off.
+    Regex::new(r"(?i)^(?:please\s+)?(?:run|exec|execute)\s+(.+)$")
         .expect("invariant: EXECUTE_COMMAND_RE must be valid")
 });
+
+/// Leading words that are conversational filler in "run the command: …"
+/// phrasing, not part of the command. Compared case-insensitively with any
+/// trailing colon stripped, so both `command` and `command:` match.
+const COMMAND_FILLER: &[&str] = &["the", "this", "following", "please", "command"];
+
+/// Peel the filler and shell wrappers off a captured command string so the
+/// first whitespace token is the real binary. Handles:
+///
+/// - a `$(...)`, backtick, or matching-quote wrapper around the whole command
+/// - leading filler tokens ("the", "the command:", "the following:", …)
+///
+/// Leaves a bare `cmd` token intact (it's a real Windows binary); only the
+/// explicit `cmd:` form is treated as filler.
+pub(crate) fn normalize_command(raw: &str) -> String {
+    let mut s = raw.trim();
+
+    // Peel matching outer wrappers, possibly nested ($(`...`) etc.).
+    loop {
+        let stripped = if let Some(inner) = s.strip_prefix("$(").and_then(|x| x.strip_suffix(')')) {
+            inner.trim()
+        } else if let Some(inner) = ['`', '"', '\'']
+            .iter()
+            .find_map(|&q| s.strip_prefix(q).and_then(|x| x.strip_suffix(q)))
+        {
+            inner.trim()
+        } else {
+            break;
+        };
+        s = stripped;
+    }
+
+    // Drop leading filler tokens.
+    let mut tokens = s.split_whitespace().peekable();
+    while let Some(&tok) = tokens.peek() {
+        if is_command_filler(tok) {
+            tokens.next();
+        } else {
+            break;
+        }
+    }
+    tokens.collect::<Vec<_>>().join(" ")
+}
+
+/// True if `tok` is a leading filler word. `cmd:` is filler; bare `cmd` is not.
+fn is_command_filler(tok: &str) -> bool {
+    let lc = tok.to_ascii_lowercase();
+    if lc == "cmd:" {
+        return true;
+    }
+    COMMAND_FILLER.contains(&lc.trim_end_matches(':'))
+}
 
 static WEB_SEARCH_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(?:(?:can you|could you|please|will you|would you)\s+)?(?:search|look up|google|web search|look for)\s+(?:for\s+|about\s+|up\s+)?(.+?)(?:\?)?$")
@@ -229,7 +286,7 @@ pub(crate) const PATTERNS: &[PatternDef] = &[
             command: String::new(),
             args: Vec::new(),
         },
-        extractors: &[("command", 1), ("args", 2)],
+        extractors: &[("command", 1)],
     },
     PatternDef {
         regex: &WEB_SEARCH_RE,
@@ -511,7 +568,7 @@ impl IntentClassifier {
                 query: get_group("query"),
             },
             Intent::ExecuteCommand { .. } => {
-                let cmd_str = get_group("command");
+                let cmd_str = normalize_command(&get_group("command"));
                 let parts: Vec<&str> = cmd_str.split_whitespace().collect();
                 if parts.is_empty() {
                     Intent::ExecuteCommand {
