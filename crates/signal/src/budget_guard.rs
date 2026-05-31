@@ -27,12 +27,13 @@ pub enum BudgetGate {
     Blocked { message: String },
 }
 
-/// Estimate input tokens for a message list using the same heuristic the
-/// context assembler uses (`chars/2`). Caller-side mirror so the budget
-/// crate stays independent of cortex.
+/// Estimate input tokens for a message list using the same `chars/3`
+/// heuristic the context assembler uses (`cortex::context::CHARS_PER_TOKEN`).
+/// Kept as a caller-side mirror so the budget crate stays independent of
+/// cortex; the ratio is duplicated deliberately, not imported.
 fn estimate_input_tokens(messages: &[Message]) -> u64 {
     let chars: usize = messages.iter().map(|m| m.content.chars().count()).sum();
-    (chars / 2) as u64
+    chars.div_ceil(3) as u64
 }
 
 fn is_provider_unconfigured(err: &BudgetError) -> bool {
@@ -141,11 +142,12 @@ mod tests {
     }
 
     #[test]
-    fn estimate_uses_chars_over_two() {
+    fn estimate_uses_chars_over_three() {
         let messages = vec![
             msg(cortex::llm::Role::User, "abcdef"),
             msg(cortex::llm::Role::Assistant, "ghij"),
         ];
-        assert_eq!(estimate_input_tokens(&messages), 5);
+        // 10 chars at 3 chars/token → ceil(10/3) = 4.
+        assert_eq!(estimate_input_tokens(&messages), 4);
     }
 }

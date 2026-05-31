@@ -10,6 +10,23 @@
 use crate::llm::Message;
 use hippocampus::search::Memory;
 
+/// Conservative chars-per-token ratio for the prompt estimator. English
+/// prose runs ~4 chars/token and code/JSON (common in attachments) ~3, so we
+/// use 3: packing never badly *under*-counts and overflows the model's true
+/// window, while being far less wasteful than the old 2-chars/token guess
+/// (which threw away ~half the usable window). Deliberately a portable
+/// heuristic, not a model-specific BPE tokenizer — Brain is multi-provider
+/// (Ollama/qwen, OpenAI, …) and no single vocabulary is correct for all of
+/// them. Swapping in a real tokenizer later only needs to touch this module.
+pub const CHARS_PER_TOKEN: usize = 3;
+
+/// Estimate the token count of `text` for budgeting and packing decisions.
+/// Single source of the heuristic — every budget check in this module routes
+/// through here so they can't drift.
+pub fn estimate_tokens(text: &str) -> usize {
+    text.chars().count().div_ceil(CHARS_PER_TOKEN)
+}
+
 /// Default token budgets.
 pub const TOKEN_BUDGETS: TokenBudget = TokenBudget {
     system_prompt: 500,
@@ -179,7 +196,7 @@ impl UserProfile {
 
     /// Estimate token count (conservative: ~2 chars per token to handle non-ASCII safely).
     pub fn estimate_tokens(&self) -> usize {
-        self.to_context_string().chars().count() / 2
+        estimate_tokens(&self.to_context_string())
     }
 }
 
@@ -332,7 +349,7 @@ You are the user's partner in thought. Your goal is to make their digital life f
         messages.push(Message::system(system_content));
 
         // 2. Add memories as system context (if within budget)
-        let mut current_tokens = messages[0].content.chars().count() / 2;
+        let mut current_tokens = estimate_tokens(&messages[0].content);
         let mut memory_context = String::new();
 
         for memory in memories {
@@ -344,7 +361,7 @@ You are the user's partner in thought. Your goal is to make their digital life f
             } else {
                 format!("- [{:?}] {}\n", memory.source, memory.content)
             };
-            let memory_tokens = memory_text.chars().count() / 2;
+            let memory_tokens = estimate_tokens(&memory_text);
 
             if current_tokens + memory_tokens > memory_budget {
                 break;
@@ -367,7 +384,7 @@ You are the user's partner in thought. Your goal is to make their digital life f
 
         // Start from most recent and work backwards
         for msg in conversation_history.iter().rev() {
-            let msg_tokens = msg.content.chars().count() / 2;
+            let msg_tokens = estimate_tokens(&msg.content);
             if history_tokens + msg_tokens > self.budget.conversation_history {
                 break;
             }
@@ -394,7 +411,7 @@ You are the user's partner in thought. Your goal is to make their digital life f
 
     /// Quick estimate of total tokens in messages.
     pub fn estimate_tokens(messages: &[Message]) -> usize {
-        messages.iter().map(|m| m.content.chars().count() / 2).sum()
+        messages.iter().map(|m| estimate_tokens(&m.content)).sum()
     }
 }
 
@@ -411,9 +428,9 @@ fn render_attachments_block(
     if attachments.is_empty() && skipped.is_empty() {
         return None;
     }
-    // 2 chars per token (matches the conservative estimator used
-    // elsewhere in this module).
-    let char_budget = budget_tokens.saturating_mul(2);
+    // Convert the token budget back to a char ceiling using the same ratio
+    // the estimator assumes, so truncation and packing stay consistent.
+    let char_budget = budget_tokens.saturating_mul(CHARS_PER_TOKEN);
     let mut out = String::new();
     let mut chars_used = 0usize;
 
@@ -832,6 +849,8 @@ mod tests {
 
         let tokens = ContextAssembler::estimate_tokens(&messages);
         assert!(tokens > 0);
-        assert_eq!(tokens, 11 / 2); // "Hello world" is 11 chars, ~2 chars/token
+        // "Hello world" is 11 chars; at 3 chars/token, ceil(11/3) = 4.
+        assert_eq!(tokens, 11usize.div_ceil(CHARS_PER_TOKEN));
+        assert_eq!(super::estimate_tokens("Hello world"), 4);
     }
 }
