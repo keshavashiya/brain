@@ -516,6 +516,76 @@ fn test_parse_json_payload_without_facts_field() {
 }
 
 #[test]
+fn store_fact_or_chat_stores_a_distilled_triple() {
+    let intent = store_fact_or_chat(
+        Some("user".into()),
+        Some("uses".into()),
+        Some("Postgres".into()),
+        "remember I use Postgres",
+    );
+    match intent {
+        Intent::StoreFact {
+            subject,
+            predicate,
+            object,
+        } => {
+            assert_eq!(subject, "user");
+            assert_eq!(predicate, "uses");
+            assert_eq!(object, "Postgres");
+        }
+        other => panic!("expected StoreFact, got {other:?}"),
+    }
+}
+
+#[test]
+fn store_fact_or_chat_rejects_raw_request_echo() {
+    // The WS4 failure: a compound imperative routed to store_fact with no
+    // distilled object. The old code filed the whole sentence as
+    // "user said <request>"; now it must fall back to chat.
+    let input = "Can you access this terminal and type a message and share it to our memory";
+    // (a) no object at all → chat
+    let no_object = store_fact_or_chat(Some("user".into()), Some("said".into()), None, input);
+    assert!(
+        matches!(no_object, Intent::Chat { .. }),
+        "missing object should be chat, got {no_object:?}"
+    );
+    // (b) object that just echoes the raw request → chat
+    let echo = store_fact_or_chat(
+        Some("user".into()),
+        Some("said".into()),
+        Some(input.to_string()),
+        input,
+    );
+    assert!(
+        matches!(echo, Intent::Chat { .. }),
+        "raw-echo object should be chat, got {echo:?}"
+    );
+}
+
+#[test]
+fn store_fact_or_chat_requires_predicate_and_object() {
+    let input = "do the thing";
+    assert!(matches!(
+        store_fact_or_chat(
+            Some("user".into()),
+            Some("".into()),
+            Some("x".into()),
+            input
+        ),
+        Intent::Chat { .. }
+    ));
+    assert!(matches!(
+        store_fact_or_chat(
+            Some("user".into()),
+            Some("likes".into()),
+            Some("  ".into()),
+            input
+        ),
+        Intent::Chat { .. }
+    ));
+}
+
+#[test]
 fn test_extracted_fact_filters_empty_fields() {
     let raw_facts = vec![
         LlmFactPayload {

@@ -511,6 +511,46 @@ impl LlmIntentFallback {
     }
 }
 
+/// Decide the intent for an LLM `store_fact` classification.
+///
+/// A store is emitted only when the classifier actually *distilled* a fact: a
+/// non-empty predicate and object, and an object that isn't just the raw
+/// request echoed back. Otherwise we route to chat — the SOUL handles the
+/// turn, and any genuine personal fact is still captured through the separate
+/// `extracted_facts` channel.
+///
+/// This closes the WS4 failure: a compound imperative ("access the terminal,
+/// type a message, and share it to our memory") was mis-routed to `store_fact`
+/// and, lacking a distilled object, the raw sentence was filed verbatim as
+/// "user said <whole request>" — a low-value, mis-categorised memory echo.
+/// Mirrors the `execute_command` / `send_message` / `delegate_task` arms,
+/// which already fall back to chat when their required fields are absent.
+fn store_fact_or_chat(
+    subject: Option<String>,
+    predicate: Option<String>,
+    object: Option<String>,
+    input: &str,
+) -> Intent {
+    let predicate = predicate.unwrap_or_default().trim().to_string();
+    let object = object.unwrap_or_default().trim().to_string();
+    let distilled =
+        !predicate.is_empty() && !object.is_empty() && !object.eq_ignore_ascii_case(input.trim());
+    if distilled {
+        Intent::StoreFact {
+            subject: subject
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "user".to_string()),
+            predicate,
+            object,
+        }
+    } else {
+        Intent::Chat {
+            content: input.to_string(),
+        }
+    }
+}
+
 const CLASSIFIER_SYSTEM_PROMPT: &str = r#"You classify user input into exactly one intent for Brain OS.
 Valid intents: store_fact, recall, forget, execute_command, web_search, query_audit, prune_audit, list_approvals, respond_to_approval, budget_status, schedule, list_schedules, cancel_schedule, send_message, system_status, decompose_task, list_tasks, task_status, cancel_task, cancel_signal, query_agents, delegate_task, set_proactivity, proactivity_status, memory_summary, chat.
 Rules:
@@ -529,7 +569,8 @@ Rules:
 - Conversational meta-questions about the current chat ("what did we discuss?", "what did I just say?", "summarize our conversation", "what did we talk about earlier today") are chat — the assistant answers from the live conversation history, not from memory lookup.
 - Questions that are NOT about stored memories (general knowledge, opinions, how-to questions) are chat.
 - Questions should NEVER be execute_command.
-- store_fact is ONLY for explicit memory requests: "remember that ...", "note that ...", "keep in mind ...".
+- store_fact is ONLY for explicit memory requests that state a distilled fact: "remember that I use Postgres", "note that the deploy script is in ops/". Set subject/predicate/object to the distilled triple — never copy the user's whole sentence into object.
+- A COMPOUND request that asks you to DO something and also remember/save it ("access the terminal and share the result to memory", "run the build and remember the output") is chat, NOT store_fact. The assistant performs the action and stores a distilled result itself — do not file the raw request as a fact. If you cannot extract a clean fact triple from a would-be store, classify as chat.
 - execute_command is ONLY for explicit requests like "run ls", "execute cargo build". The command field must be a real shell command (ls, git, cargo, etc.).
 - decompose_task is for multi-step requests that need planning and execution: "build a CSV export feature", "set up CI/CD pipeline", "refactor the auth module and add tests", "deploy to production". The request must involve multiple steps or coordination. Simple single-step requests are NOT decompose_task.
 - A user message that names a local path (e.g. "summarise /Users/me/notes", "what's in ~/downloads/x", "read this file: /tmp/foo.txt") is chat — Brain reads the path as attached context and responds conversationally. Do NOT route these to decompose_task or any inspect-style intent; they go through the normal chat flow.
@@ -654,11 +695,9 @@ impl IntentFallback for LlmIntentFallback {
             .collect();
 
         let intent = match key.as_str() {
-            "store_fact" => Intent::StoreFact {
-                subject: payload.subject.unwrap_or_else(|| "user".to_string()),
-                predicate: payload.predicate.unwrap_or_else(|| "said".to_string()),
-                object: payload.object.unwrap_or_else(|| input.to_string()),
-            },
+            "store_fact" => {
+                store_fact_or_chat(payload.subject, payload.predicate, payload.object, input)
+            }
             "recall" => Intent::Recall {
                 query: payload.query.unwrap_or_else(|| input.to_string()),
             },
