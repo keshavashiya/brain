@@ -623,6 +623,7 @@ fn build_action_dispatcher(
             brain::config::WebSearchProvider::DuckDuckGo => {
                 DuckDuckGoSearchBackend::new_with_metrics(timeout, res, metrics.clone())
                     .map(|b| Some(Arc::new(b) as _))
+                    .map_err(anyhow::Error::from)
             }
             brain::config::WebSearchProvider::Searxng => {
                 let ep = if endpoint.is_empty() {
@@ -632,6 +633,7 @@ fn build_action_dispatcher(
                 };
                 SearxngSearchBackend::new_with_metrics(ep, timeout, res, metrics.clone())
                     .map(|b| Some(Arc::new(b) as _))
+                    .map_err(anyhow::Error::from)
             }
             brain::config::WebSearchProvider::Tavily => {
                 let api_key = ws.api_key.trim();
@@ -654,6 +656,7 @@ fn build_action_dispatcher(
                         metrics.clone(),
                     )
                     .map(|b| Some(Arc::new(b) as _))
+                    .map_err(anyhow::Error::from)
                 }
             }
             brain::config::WebSearchProvider::Custom => {
@@ -665,6 +668,7 @@ fn build_action_dispatcher(
                 } else {
                     CustomSearchBackend::new_with_metrics(endpoint, timeout, res, metrics.clone())
                         .map(|b| Some(Arc::new(b) as _))
+                        .map_err(anyhow::Error::from)
                 }
             }
         };

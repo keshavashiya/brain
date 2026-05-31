@@ -45,7 +45,7 @@ impl WebhookMessageBackend {
         channels: &HashMap<String, brain::config::ChannelConfig>,
         timeout_ms: u64,
         resilience: &brain::config::ResilienceConfig,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, crate::error::BackendInitError> {
         Self::new_with_metrics(channels, timeout_ms, resilience, None)
     }
 
@@ -54,11 +54,11 @@ impl WebhookMessageBackend {
         timeout_ms: u64,
         resilience: &brain::config::ResilienceConfig,
         metrics: Option<Arc<SubsystemMetrics>>,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, crate::error::BackendInitError> {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(timeout_ms.max(1)))
             .build()
-            .map_err(|e| anyhow::anyhow!("message client init failed: {e}"))?;
+            .map_err(|e| crate::error::BackendInitError::HttpClient("message client", e))?;
         let cb = http_breaker(
             "webhook-message",
             resilience.circuit_breaker_threshold,

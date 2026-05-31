@@ -60,11 +60,13 @@ fn parse_search_results(
         .collect()
 }
 
-pub fn build_search_client(timeout_ms: u64) -> anyhow::Result<reqwest::Client> {
+pub fn build_search_client(
+    timeout_ms: u64,
+) -> Result<reqwest::Client, crate::error::BackendInitError> {
     reqwest::Client::builder()
         .timeout(std::time::Duration::from_millis(timeout_ms.max(1)))
         .build()
-        .map_err(|e| anyhow::anyhow!("search client init failed: {e}"))
+        .map_err(|e| crate::error::BackendInitError::HttpClient("search client", e))
 }
 
 /// DuckDuckGo HTML provider — zero-config, no API key, no Docker.
@@ -84,7 +86,7 @@ impl DuckDuckGoSearchBackend {
     pub fn new(
         timeout_ms: u64,
         resilience: &brain::config::ResilienceConfig,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, crate::error::BackendInitError> {
         Self::new_with_metrics(timeout_ms, resilience, None)
     }
 
@@ -92,7 +94,7 @@ impl DuckDuckGoSearchBackend {
         timeout_ms: u64,
         resilience: &brain::config::ResilienceConfig,
         metrics: Option<Arc<SubsystemMetrics>>,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, crate::error::BackendInitError> {
         // DDG's HTML endpoint inspects the User-Agent and serves the
         // post-only "we redirected you" stub if it looks too generic.
         // A normal-looking UA gets the real result list.
@@ -105,7 +107,7 @@ impl DuckDuckGoSearchBackend {
             )
             .redirect(reqwest::redirect::Policy::limited(3))
             .build()
-            .map_err(|e| anyhow::anyhow!("DuckDuckGo client init failed: {e}"))?;
+            .map_err(|e| crate::error::BackendInitError::HttpClient("DuckDuckGo client", e))?;
         Ok(Self {
             client,
             circuit_breaker: Arc::new(make_cb("duckduckgo", resilience, metrics)),
@@ -464,7 +466,7 @@ impl SearxngSearchBackend {
         endpoint: &str,
         timeout_ms: u64,
         resilience: &brain::config::ResilienceConfig,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, crate::error::BackendInitError> {
         Self::new_with_metrics(endpoint, timeout_ms, resilience, None)
     }
 
@@ -473,7 +475,7 @@ impl SearxngSearchBackend {
         timeout_ms: u64,
         resilience: &brain::config::ResilienceConfig,
         metrics: Option<Arc<SubsystemMetrics>>,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, crate::error::BackendInitError> {
         Ok(Self {
             endpoint: endpoint.trim_end_matches('/').to_string(),
             client: build_search_client(timeout_ms)?,
@@ -550,7 +552,7 @@ impl TavilySearchBackend {
         api_key: &str,
         timeout_ms: u64,
         resilience: &brain::config::ResilienceConfig,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, crate::error::BackendInitError> {
         Self::new_with_metrics(endpoint, api_key, timeout_ms, resilience, None)
     }
 
@@ -560,7 +562,7 @@ impl TavilySearchBackend {
         timeout_ms: u64,
         resilience: &brain::config::ResilienceConfig,
         metrics: Option<Arc<SubsystemMetrics>>,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, crate::error::BackendInitError> {
         Ok(Self {
             endpoint: endpoint.trim_end_matches('/').to_string(),
             api_key: api_key.to_string(),
@@ -650,7 +652,7 @@ impl CustomSearchBackend {
         endpoint: &str,
         timeout_ms: u64,
         resilience: &brain::config::ResilienceConfig,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, crate::error::BackendInitError> {
         Self::new_with_metrics(endpoint, timeout_ms, resilience, None)
     }
 
@@ -659,7 +661,7 @@ impl CustomSearchBackend {
         timeout_ms: u64,
         resilience: &brain::config::ResilienceConfig,
         metrics: Option<Arc<SubsystemMetrics>>,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, crate::error::BackendInitError> {
         Ok(Self {
             endpoint: endpoint.to_string(),
             client: build_search_client(timeout_ms)?,

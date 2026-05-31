@@ -40,20 +40,22 @@ pub struct BasicUrlFetcher {
 }
 
 impl BasicUrlFetcher {
-    pub fn new(resilience: &brain::config::ResilienceConfig) -> anyhow::Result<Self> {
+    pub fn new(
+        resilience: &brain::config::ResilienceConfig,
+    ) -> Result<Self, crate::error::BackendInitError> {
         Self::new_with_metrics(resilience, None)
     }
 
     pub fn new_with_metrics(
         resilience: &brain::config::ResilienceConfig,
         metrics: Option<Arc<SubsystemMetrics>>,
-    ) -> anyhow::Result<Self> {
+    ) -> Result<Self, crate::error::BackendInitError> {
         let client = reqwest::Client::builder()
             .timeout(DEFAULT_FETCH_TIMEOUT)
             .user_agent("brainos/url-fetch (+https://github.com/keshavashiya/brain)")
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()
-            .map_err(|e| anyhow::anyhow!("URL fetch client init failed: {e}"))?;
+            .map_err(|e| crate::error::BackendInitError::HttpClient("URL fetch client", e))?;
         let cb = http_breaker(
             "url-fetch",
             resilience.circuit_breaker_threshold,

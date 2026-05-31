@@ -2,6 +2,7 @@
 //!
 //! Extracted from the CLI crate so they can be reused by adapters and tests.
 
+pub mod error;
 pub mod fetch;
 pub mod memory;
 pub mod messaging;
@@ -9,6 +10,7 @@ pub mod resilience;
 pub mod scheduling;
 pub mod search;
 
+pub use error::BackendInitError;
 pub use fetch::BasicUrlFetcher;
 pub use memory::DefaultMemoryBackend;
 pub use messaging::{
