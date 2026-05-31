@@ -169,7 +169,7 @@ pub async fn build_processor(
     // can dispatch to, plus the intent router that resolves a classified
     // `IntentToken` to a concrete `ToolRoute`. The same `ToolRegistry`
     // is threaded into the MCP host below so every server mount
-    // auto-populates it; the mcphost-side `CapabilityIndex` keeps the
+    // auto-populates it; the mcphost-side `ToolCapabilityIndex` keeps the
     // host's own per-server lookup hot. The breaker registry is wired
     // into the router so `Open` tools are skipped during scoring.
     let tool_registry: Arc<dyn intent::ToolRegistry> =
@@ -178,8 +178,8 @@ pub async fn build_processor(
     let intent_router: Arc<dyn intent::IntentRouter> = Arc::new(
         intent::DefaultIntentRouter::new(tool_registry.clone()).with_breakers(breaker_check),
     );
-    let mcp_capability_index: Arc<dyn mcphost::CapabilityIndex> =
-        Arc::new(mcphost::InMemoryCapabilityIndex::new());
+    let mcp_capability_index: Arc<dyn mcphost::ToolCapabilityIndex> =
+        Arc::new(mcphost::InMemoryToolCapabilityIndex::new());
     processor = processor
         .with_tool_registry(tool_registry.clone())
         .with_intent_router(intent_router);

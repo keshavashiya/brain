@@ -35,7 +35,7 @@ pub mod rmcp_host;
 pub mod types;
 
 pub use aud_check::{validate_token_aud, AudCheckOutcome};
-pub use capability_index::{CapabilityIndex, InMemoryCapabilityIndex};
+pub use capability_index::{InMemoryToolCapabilityIndex, ToolCapabilityIndex};
 pub use error::McpHostError;
 pub use oauth::{manager_from_vault, VaultCredentialStore};
 pub use resilient::{ResilienceConfig, ResilientMcpHost};

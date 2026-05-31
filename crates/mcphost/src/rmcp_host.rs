@@ -36,7 +36,7 @@ use uuid::Uuid;
 use vault::CredentialVault;
 
 use crate::{
-    capability_index::CapabilityIndex,
+    capability_index::ToolCapabilityIndex,
     error::McpHostError,
     oauth,
     types::{CallOutcome, MountedServer, ServerConfig, ServerInfo, ServerStatus, ToolDescriptor},
@@ -50,7 +50,7 @@ pub struct RmcpHost {
     mounted: RwLock<HashMap<String, Mounted>>,
     observer: Option<Arc<dyn Observer>>,
     vault: Option<Arc<dyn CredentialVault>>,
-    capability_index: Option<Arc<dyn CapabilityIndex>>,
+    capability_index: Option<Arc<dyn ToolCapabilityIndex>>,
     tool_registry: Option<Arc<dyn intent::ToolRegistry>>,
 }
 
@@ -102,10 +102,10 @@ impl RmcpHost {
         self
     }
 
-    /// Wire a [`CapabilityIndex`] so every successful mount auto-registers
+    /// Wire a [`ToolCapabilityIndex`] so every successful mount auto-registers
     /// the server's tool catalog and every unmount drops it. The intent
     /// router queries the same index when resolving a tool route.
-    pub fn with_capability_index(mut self, index: Arc<dyn CapabilityIndex>) -> Self {
+    pub fn with_capability_index(mut self, index: Arc<dyn ToolCapabilityIndex>) -> Self {
         self.capability_index = Some(index);
         self
     }

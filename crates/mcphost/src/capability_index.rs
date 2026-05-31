@@ -18,7 +18,7 @@ use std::{
 use crate::types::ToolDescriptor;
 
 /// Index of tools published by mounted MCP servers.
-pub trait CapabilityIndex: Send + Sync {
+pub trait ToolCapabilityIndex: Send + Sync {
     /// Replace the tool set published by `server`. Idempotent — calling
     /// `upsert` for an already-known server overwrites the previous entry.
     fn upsert(&self, server: &str, tools: Vec<ToolDescriptor>);
@@ -39,7 +39,7 @@ pub trait CapabilityIndex: Send + Sync {
     /// chat tools channel uses to keep the advertised set small: we never
     /// hand the model the whole catalogue, only the best-matching slice.
     ///
-    /// The default scores [`snapshot`](CapabilityIndex::snapshot) with
+    /// The default scores [`snapshot`](ToolCapabilityIndex::snapshot) with
     /// [`score_top_k`]; a distributed router can override with a
     /// hybrid/embedding scorer. Lower-relevance tools still fill remaining
     /// slots up to `k`, so a query that matches nothing degrades to "the
@@ -96,25 +96,25 @@ fn score_tool(tool: &ToolDescriptor, terms: &[String]) -> usize {
         .count()
 }
 
-/// Default in-process [`CapabilityIndex`], backed by a `RwLock<HashMap>`
+/// Default in-process [`ToolCapabilityIndex`], backed by a `RwLock<HashMap>`
 /// keyed by server name. Suitable for single-process deployments — a
 /// distributed router will plug in its own implementation.
 #[derive(Default)]
-pub struct InMemoryCapabilityIndex {
+pub struct InMemoryToolCapabilityIndex {
     by_server: RwLock<HashMap<String, Vec<ToolDescriptor>>>,
 }
 
-impl InMemoryCapabilityIndex {
+impl InMemoryToolCapabilityIndex {
     pub fn new() -> Self {
         Self::default()
     }
 
-    pub fn shared() -> Arc<dyn CapabilityIndex> {
+    pub fn shared() -> Arc<dyn ToolCapabilityIndex> {
         Arc::new(Self::new())
     }
 }
 
-impl CapabilityIndex for InMemoryCapabilityIndex {
+impl ToolCapabilityIndex for InMemoryToolCapabilityIndex {
     fn upsert(&self, server: &str, tools: Vec<ToolDescriptor>) {
         let mut guard = self.by_server.write().expect("capability index poisoned");
         guard.insert(server.to_string(), tools);
@@ -178,7 +178,7 @@ mod tests {
 
     #[test]
     fn upsert_then_find_by_namespace_and_action() {
-        let idx = InMemoryCapabilityIndex::new();
+        let idx = InMemoryToolCapabilityIndex::new();
         idx.upsert(
             "fs",
             vec![td("fs", "fs.read_text_file"), td("fs", "fs.write_file")],
@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn wildcard_action_returns_whole_namespace() {
-        let idx = InMemoryCapabilityIndex::new();
+        let idx = InMemoryToolCapabilityIndex::new();
         idx.upsert(
             "fs",
             vec![td("fs", "fs.read_text_file"), td("fs", "fs.write_file")],
@@ -205,7 +205,7 @@ mod tests {
 
     #[test]
     fn upsert_overwrites_previous_tools_for_server() {
-        let idx = InMemoryCapabilityIndex::new();
+        let idx = InMemoryToolCapabilityIndex::new();
         idx.upsert("fs", vec![td("fs", "fs.read_text_file")]);
         idx.upsert("fs", vec![td("fs", "fs.write_file")]);
         assert!(idx.find("fs", "read_text_file").is_empty());
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn remove_drops_servers_tools() {
-        let idx = InMemoryCapabilityIndex::new();
+        let idx = InMemoryToolCapabilityIndex::new();
         idx.upsert(
             "fs",
             vec![td("fs", "fs.read_text_file"), td("fs", "fs.write_file")],
@@ -225,13 +225,13 @@ mod tests {
 
     #[test]
     fn remove_unknown_server_is_noop() {
-        let idx = InMemoryCapabilityIndex::new();
+        let idx = InMemoryToolCapabilityIndex::new();
         assert_eq!(idx.remove("ghost"), 0);
     }
 
     #[test]
     fn dotless_tool_names_match_empty_namespace() {
-        let idx = InMemoryCapabilityIndex::new();
+        let idx = InMemoryToolCapabilityIndex::new();
         idx.upsert("misc", vec![td("misc", "ping")]);
         let hits = idx.find("", "ping");
         assert_eq!(hits.len(), 1);
@@ -240,7 +240,7 @@ mod tests {
 
     #[test]
     fn snapshot_returns_all_tools() {
-        let idx = InMemoryCapabilityIndex::new();
+        let idx = InMemoryToolCapabilityIndex::new();
         idx.upsert("fs", vec![td("fs", "fs.read_text_file")]);
         idx.upsert("git", vec![td("git", "git.commit")]);
         assert_eq!(idx.snapshot().len(), 2);
@@ -248,7 +248,7 @@ mod tests {
 
     #[test]
     fn top_k_ranks_keyword_matches_first() {
-        let idx = InMemoryCapabilityIndex::new();
+        let idx = InMemoryToolCapabilityIndex::new();
         idx.upsert(
             "fs",
             vec![
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn top_k_caps_result_count() {
-        let idx = InMemoryCapabilityIndex::new();
+        let idx = InMemoryToolCapabilityIndex::new();
         idx.upsert(
             "fs",
             vec![
@@ -283,7 +283,7 @@ mod tests {
 
     #[test]
     fn top_k_zero_returns_empty() {
-        let idx = InMemoryCapabilityIndex::new();
+        let idx = InMemoryToolCapabilityIndex::new();
         idx.upsert("fs", vec![td("fs", "fs.read_text_file")]);
         assert!(idx.top_k("anything", 0).is_empty());
     }

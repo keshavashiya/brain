@@ -5,7 +5,9 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use brainos_mcphost::{CapabilityIndex, InMemoryCapabilityIndex, MCPHost, RmcpHost, ServerConfig};
+use brainos_mcphost::{
+    InMemoryToolCapabilityIndex, MCPHost, RmcpHost, ServerConfig, ToolCapabilityIndex,
+};
 use observe::{BrainEvent, BroadcastObserver, Observer};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -146,7 +148,7 @@ async fn refresh_with_no_mount_errors() {
 #[tokio::test]
 async fn capability_index_auto_registers_and_drops() {
     let server = spawn_server().await;
-    let index: Arc<dyn CapabilityIndex> = Arc::new(InMemoryCapabilityIndex::new());
+    let index: Arc<dyn ToolCapabilityIndex> = Arc::new(InMemoryToolCapabilityIndex::new());
     let host = RmcpHost::new().with_capability_index(index.clone());
 
     host.mount(
