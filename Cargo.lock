@@ -689,7 +689,6 @@ dependencies = [
 name = "brainos-backends"
 version = "0.4.0"
 dependencies = [
- "anyhow",
  "async-trait",
  "brainos-core",
  "brainos-cortex",
@@ -704,6 +703,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "url",
