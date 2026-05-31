@@ -23,6 +23,7 @@ mod bundles;
 mod constructors;
 mod exchange;
 mod extract;
+mod memory_subsystem;
 mod pipeline;
 mod recall;
 mod render;
@@ -48,22 +49,10 @@ pub struct SignalProcessor {
     config: brain::BrainConfig,
     classifier: thalamus::IntentClassifier,
     importance: amygdala::ImportanceScorer,
-    episodic: hippocampus::EpisodicStore,
-    semantic: Option<hippocampus::SemanticStore>,
-    /// Embedding provider. `Embedder::embed` takes `&self`, so no external
-    /// lock is needed — concurrent embed calls are safe and the HTTP client
-    /// inside the provider already serializes appropriately. `Arc`-shared so
-    /// the terminal graph sink can embed node bodies through the same
-    /// provider without minting a second one.
-    embedder: Option<std::sync::Arc<hippocampus::Embedder>>,
-    /// Actual output dimension of the active embedding provider (probed at startup).
-    embedding_dim: usize,
-    /// LRU cache for embedded query/text vectors. Keyed by a fast hash of
-    /// the input text; only successful embeddings are cached (fallback
-    /// vectors are deterministic and skipped to avoid polluting the cache
-    /// during transient provider outages).
-    embedding_cache: std::sync::Mutex<lru::LruCache<u64, std::sync::Arc<Vec<f32>>>>,
-    recall_engine: hippocampus::RecallEngine,
+    /// Memory subsystem: episodic + semantic stores, the embedding provider
+    /// and its query cache, the recall engine, and the dual-memory reader.
+    /// See [`memory_subsystem::MemorySubsystem`].
+    memory: memory_subsystem::MemorySubsystem,
     llm: std::sync::Arc<dyn cortex::LlmProvider>,
     context_assembler: cortex::context::ContextAssembler,
     /// LRU cache of compacted-history summaries. Keyed by a fast hash of the
@@ -101,11 +90,6 @@ pub struct SignalProcessor {
     pub(crate) observability: bundles::ObservabilityBundle,
 
     // ── Top-level optionals that didn't fit a bundle ─────────────────────
-    /// Dual-memory reader — graph-first, legacy-fallback point lookups.
-    /// Wired so future read paths can resolve an id against the
-    /// episodic graph without bypassing the legacy `episodes` table for
-    /// content written before the graph schema landed.
-    dual_memory_reader: Option<hippocampus::DualMemoryReader>,
     /// Task orchestrator — decomposes requests into executable plans.
     orchestrator: Option<std::sync::Arc<orchestrate::TaskOrchestrator>>,
     /// Registry of specialist agent delegates (Claude Code, custom subprocess, etc.).

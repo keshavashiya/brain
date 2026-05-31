@@ -16,7 +16,8 @@ pub struct FactToStore {
 impl SignalProcessor {
     /// Export all semantic facts.
     pub fn export_facts(&self) -> Result<Vec<ExportedFact>, SignalError> {
-        self.episodic
+        self.memory
+            .episodic
             .pool()
             .export_all_facts()
             .map_err(|e| SignalError::Storage(e.to_string()))
@@ -24,7 +25,8 @@ impl SignalProcessor {
 
     /// Export all episodes with their session info.
     pub fn export_episodes(&self) -> Result<Vec<ExportedEpisode>, SignalError> {
-        self.episodic
+        self.memory
+            .episodic
             .pool()
             .export_all_episodes()
             .map_err(|e| SignalError::Storage(e.to_string()))
@@ -32,7 +34,8 @@ impl SignalProcessor {
 
     /// Import facts into SQLite (ON CONFLICT DO NOTHING). Returns (imported_count, new_fact_indices).
     pub fn import_facts(&self, facts: &[ExportedFact]) -> Result<(usize, Vec<usize>), SignalError> {
-        self.episodic
+        self.memory
+            .episodic
             .pool()
             .import_facts(facts)
             .map_err(|e| SignalError::Storage(e.to_string()))
@@ -40,7 +43,8 @@ impl SignalProcessor {
 
     /// Import episodes into SQLite (ON CONFLICT DO NOTHING). Returns count of newly imported episodes.
     pub fn import_episodes(&self, episodes: &[ExportedEpisode]) -> Result<usize, SignalError> {
-        self.episodic
+        self.memory
+            .episodic
             .pool()
             .import_episodes(episodes)
             .map_err(|e| SignalError::Storage(e.to_string()))
@@ -51,7 +55,7 @@ impl SignalProcessor {
     /// Generates embeddings concurrently, then inserts vectors sequentially
     /// (SQLite is single-writer).
     pub async fn reembed_facts(&self, facts: &[ExportedFact]) -> (usize, usize) {
-        let semantic = match &self.semantic {
+        let semantic = match &self.memory.semantic {
             Some(s) => s,
             None => return (0, 0),
         };
@@ -103,7 +107,7 @@ impl SignalProcessor {
         object: &str,
         agent: Option<&str>,
     ) -> Result<String, SignalError> {
-        if let Some(semantic) = &self.semantic {
+        if let Some(semantic) = &self.memory.semantic {
             let fact_text = format!("{subject} {predicate} {object}");
             let importance = self.importance.score(&fact_text);
             let vector = self.embed_text(&fact_text).await;
@@ -140,7 +144,7 @@ impl SignalProcessor {
         facts: &[FactToStore],
         agent: Option<&str>,
     ) -> (Vec<String>, Vec<(String, SignalError)>) {
-        let semantic = match &self.semantic {
+        let semantic = match &self.memory.semantic {
             Some(s) => s,
             None => {
                 let errors: Vec<_> = facts

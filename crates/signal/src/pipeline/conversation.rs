@@ -85,17 +85,20 @@ impl SignalProcessor {
             // Ensure the session row exists so FK constraints on episodes never fail.
             // This handles the case where a client reuses a session_id from a
             // previous daemon run that was cleared.
-            self.episodic
+            self.memory
+                .episodic
                 .ensure_session(sid, &signal.channel)
                 .map_err(|e| SignalError::Storage(e.to_string()))?;
             sid.clone()
         } else {
-            self.episodic
+            self.memory
+                .episodic
                 .create_session(&signal.channel)
                 .map_err(|e| SignalError::Storage(e.to_string()))?
         };
 
-        self.episodic
+        self.memory
+            .episodic
             .store_episode(
                 &session_id,
                 "user",

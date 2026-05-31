@@ -13,18 +13,18 @@ impl SignalProcessor {
 
     /// Expose the episodic store (for adapter use).
     pub fn episodic(&self) -> &hippocampus::EpisodicStore {
-        &self.episodic
+        &self.memory.episodic
     }
 
     /// Expose the semantic store (for adapter use).
     pub fn semantic(&self) -> Option<&hippocampus::SemanticStore> {
-        self.semantic.as_ref()
+        self.memory.semantic.as_ref()
     }
 
     /// Expose the embedding provider (for the terminal graph sink, which
     /// embeds node bodies through the same provider). `Arc`-shared clone.
     pub fn embedder(&self) -> Option<Arc<hippocampus::Embedder>> {
-        self.embedder.clone()
+        self.memory.embedder.clone()
     }
 
     /// Expose the LLM provider (for adapter use).
@@ -39,7 +39,7 @@ impl SignalProcessor {
 
     /// Expose the embedding dimension (for adapter use).
     pub fn embedding_dim(&self) -> usize {
-        self.embedding_dim
+        self.memory.embedding_dim
     }
 
     /// Expose the subsystem metrics handle (for adapter use / instrumentation).
@@ -75,7 +75,7 @@ impl SignalProcessor {
     /// Safe to call from any async context; completes synchronously on the
     /// calling thread (WAL checkpoint is a fast O(WAL-size) operation).
     pub fn shutdown(&self) {
-        if let Err(e) = self.episodic.pool().wal_checkpoint() {
+        if let Err(e) = self.memory.episodic.pool().wal_checkpoint() {
             tracing::warn!("WAL checkpoint on shutdown failed: {e}");
         } else {
             tracing::info!("SQLite WAL checkpoint complete");
@@ -142,13 +142,13 @@ impl SignalProcessor {
     /// graph and fall back to the legacy `episodes` table so callers
     /// can resolve a memory id without caring which side it lives on.
     pub fn with_dual_memory_reader(mut self, reader: hippocampus::DualMemoryReader) -> Self {
-        self.dual_memory_reader = Some(reader);
+        self.memory.dual_memory_reader = Some(reader);
         self
     }
 
     /// Expose the dual-memory reader.
     pub fn dual_memory_reader(&self) -> Option<&hippocampus::DualMemoryReader> {
-        self.dual_memory_reader.as_ref()
+        self.memory.dual_memory_reader.as_ref()
     }
 
     /// Attach a dead-letter queue (builder pattern). The same `Arc` is
@@ -261,7 +261,8 @@ impl SignalProcessor {
         &self,
         namespace: Option<&str>,
     ) -> Result<Vec<storage::ScheduledIntent>, crate::types::SignalError> {
-        self.episodic
+        self.memory
+            .episodic
             .pool()
             .list_scheduled_intents(namespace)
             .map_err(|e| crate::types::SignalError::Storage(e.to_string()))
@@ -269,7 +270,8 @@ impl SignalProcessor {
 
     /// Cancel a scheduled intent by ID. Returns true if the intent was found and cancelled.
     pub fn cancel_scheduled_intent(&self, id: &str) -> Result<bool, crate::types::SignalError> {
-        self.episodic
+        self.memory
+            .episodic
             .pool()
             .cancel_scheduled_intent(id)
             .map_err(|e| crate::types::SignalError::Storage(e.to_string()))

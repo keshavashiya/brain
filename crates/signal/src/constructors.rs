@@ -216,14 +216,18 @@ impl SignalProcessor {
             config,
             classifier,
             importance: amygdala::ImportanceScorer::with_llm(llm.clone()),
-            episodic,
-            semantic,
-            embedder,
-            embedding_dim,
-            embedding_cache: std::sync::Mutex::new(lru::LruCache::new(
-                std::num::NonZeroUsize::new(256).expect("256 is non-zero"),
-            )),
-            recall_engine,
+            memory: crate::memory_subsystem::MemorySubsystem {
+                episodic,
+                semantic,
+                embedder,
+                embedding_dim,
+                embedding_cache: std::sync::Mutex::new(lru::LruCache::new(
+                    std::num::NonZeroUsize::new(256).expect("256 is non-zero"),
+                )),
+                recall_engine,
+                // Wired post-construction via `with_dual_memory_reader`.
+                dual_memory_reader: None,
+            },
             llm,
             context_assembler: cortex::context::ContextAssembler::new(
                 cortex::context::TokenBudget::for_context_size(context_window),
@@ -243,7 +247,6 @@ impl SignalProcessor {
             observability: crate::bundles::ObservabilityBundle::new(),
 
             // Top-level optionals
-            dual_memory_reader: None,
             orchestrator: None,
             agent_registry: None,
             identity_store: None,

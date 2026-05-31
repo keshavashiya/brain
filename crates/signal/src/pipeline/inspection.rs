@@ -252,11 +252,12 @@ impl SignalProcessor {
         prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
         let semantic_count = self
+            .memory
             .semantic
             .as_ref()
             .and_then(|s| s.count().ok())
             .unwrap_or(0);
-        let episode_count = self.episodic.count().unwrap_or(0);
+        let episode_count = self.memory.episodic.count().unwrap_or(0);
 
         let resp = prepend_nudges(SignalResponse::ok(
             signal_id,

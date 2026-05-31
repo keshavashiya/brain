@@ -17,11 +17,13 @@ impl SignalProcessor {
         namespace: &str,
         agent: Option<&str>,
     ) -> Result<(), SignalError> {
-        self.episodic
+        self.memory
+            .episodic
             .ensure_session(session_id, "streaming")
             .map_err(|e| SignalError::Storage(e.to_string()))?;
 
-        self.episodic
+        self.memory
+            .episodic
             .store_episode(
                 session_id,
                 "assistant",

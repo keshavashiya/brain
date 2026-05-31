@@ -156,7 +156,8 @@ impl SignalProcessor {
 
                 // Store assistant episode for Chat/Recall
                 if let Some(sid) = &session_id {
-                    self.episodic
+                    self.memory
+                        .episodic
                         .store_episode(
                             sid,
                             "assistant",

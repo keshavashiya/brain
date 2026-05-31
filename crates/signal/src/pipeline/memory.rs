@@ -80,7 +80,7 @@ impl SignalProcessor {
         let vector = self.embed_text(&fact_text).await;
 
         let mut facts_stored = 0;
-        if let Some(semantic) = &self.semantic {
+        if let Some(semantic) = &self.memory.semantic {
             match semantic
                 .store_fact(
                     namespace,
@@ -124,7 +124,7 @@ impl SignalProcessor {
     ) -> Result<PipelineResult, SignalError> {
         let mut deleted_count = 0usize;
 
-        if let Some(semantic) = &self.semantic {
+        if let Some(semantic) = &self.memory.semantic {
             match semantic.find_facts_matching(&target, Some(&signal.namespace)) {
                 Ok(facts) if !facts.is_empty() => {
                     let ids: Vec<&str> = facts.iter().map(|f| f.id.as_str()).collect();

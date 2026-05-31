@@ -20,13 +20,24 @@ impl SignalProcessor {
     pub(super) async fn embed_text(&self, text: &str) -> Vec<f32> {
         self.metrics.inc_embedding_request();
         let key = embedding_cache_key(text);
-        if let Some(cached) = self.embedding_cache.lock().unwrap().get(&key).cloned() {
+        if let Some(cached) = self
+            .memory
+            .embedding_cache
+            .lock()
+            .unwrap()
+            .get(&key)
+            .cloned()
+        {
             return (*cached).clone();
         }
-        let (vector, cacheable) = match &self.embedder {
+        let (vector, cacheable) = match &self.memory.embedder {
             Some(embedder) => match embedder.embed(text).await {
                 Ok(vec) => (
-                    hippocampus::embedding::sanitize_embedding(vec, self.embedding_dim, text),
+                    hippocampus::embedding::sanitize_embedding(
+                        vec,
+                        self.memory.embedding_dim,
+                        text,
+                    ),
                     true,
                 ),
                 Err(e) => {
@@ -35,7 +46,7 @@ impl SignalProcessor {
                     (
                         hippocampus::embedding::deterministic_fallback_embedding(
                             text,
-                            self.embedding_dim,
+                            self.memory.embedding_dim,
                         ),
                         false,
                     )
@@ -46,7 +57,7 @@ impl SignalProcessor {
                 (
                     hippocampus::embedding::deterministic_fallback_embedding(
                         text,
-                        self.embedding_dim,
+                        self.memory.embedding_dim,
                     ),
                     false,
                 )
@@ -54,7 +65,7 @@ impl SignalProcessor {
         };
         if cacheable {
             let shared = std::sync::Arc::new(vector.clone());
-            self.embedding_cache.lock().unwrap().put(key, shared);
+            self.memory.embedding_cache.lock().unwrap().put(key, shared);
         }
         vector
     }
@@ -90,18 +101,19 @@ impl SignalProcessor {
         top_k: usize,
         namespace: Option<&str>,
     ) -> Result<(Vec<hippocampus::Memory>, usize, usize), crate::SignalError> {
-        if let Some(semantic) = &self.semantic {
+        if let Some(semantic) = &self.memory.semantic {
             match self
+                .memory
                 .recall_engine
                 .recall(
                     query,
                     query_vector,
-                    &self.episodic,
+                    &self.memory.episodic,
                     semantic,
                     top_k,
                     namespace,
                     None,
-                    self.dual_memory_reader.as_ref(),
+                    self.memory.dual_memory_reader.as_ref(),
                 )
                 .await
             {
@@ -125,6 +137,7 @@ impl SignalProcessor {
         }
         // Either semantic store is unavailable or hybrid recall failed.
         let bm25 = self
+            .memory
             .episodic
             .search_bm25(query, top_k, namespace, None)
             .map_err(|e| crate::SignalError::Storage(e.to_string()))?;
@@ -144,7 +157,7 @@ impl SignalProcessor {
         top_k: usize,
         namespace: Option<&str>,
     ) -> Vec<hippocampus::SemanticResult> {
-        if let Some(semantic) = &self.semantic {
+        if let Some(semantic) = &self.memory.semantic {
             let qv = self.embed_text(query).await;
             match semantic.search_similar(qv, top_k, namespace, None).await {
                 Ok(results) => results,
@@ -164,7 +177,7 @@ impl SignalProcessor {
     /// for `namespace`; storage errors fail closed (treat as non-empty so
     /// we don't show a misleading onboarding hint on a transient DB blip).
     pub fn namespace_is_empty(&self, namespace: &str) -> bool {
-        let has_facts = match &self.semantic {
+        let has_facts = match &self.memory.semantic {
             Some(semantic) => semantic
                 .has_facts_in_namespace(Some(namespace))
                 .unwrap_or(true),
@@ -174,6 +187,7 @@ impl SignalProcessor {
             return false;
         }
         let has_episodes = self
+            .memory
             .episodic
             .has_episodes_in_namespace(Some(namespace))
             .unwrap_or(true);
@@ -187,7 +201,7 @@ impl SignalProcessor {
     /// [`list_facts_paginated`] so a multi-thousand-fact store doesn't
     /// emit a single mega-response.
     pub fn list_facts(&self, namespace: Option<&str>) -> Vec<hippocampus::Fact> {
-        if let Some(semantic) = &self.semantic {
+        if let Some(semantic) = &self.memory.semantic {
             semantic.list_by_namespace(namespace).unwrap_or_default()
         } else {
             Vec::new()
@@ -203,7 +217,7 @@ impl SignalProcessor {
         limit: Option<usize>,
         offset: usize,
     ) -> Vec<hippocampus::Fact> {
-        if let Some(semantic) = &self.semantic {
+        if let Some(semantic) = &self.memory.semantic {
             semantic
                 .list_by_namespace_paginated(namespace, limit, offset)
                 .unwrap_or_default()
@@ -214,7 +228,7 @@ impl SignalProcessor {
 
     /// Get all facts about a specific subject.
     pub fn facts_about(&self, subject: &str, namespace: Option<&str>) -> Vec<hippocampus::Fact> {
-        if let Some(semantic) = &self.semantic {
+        if let Some(semantic) = &self.memory.semantic {
             semantic
                 .get_facts_about_in_namespace(subject, namespace)
                 .unwrap_or_default()
@@ -225,7 +239,7 @@ impl SignalProcessor {
 
     /// List all namespaces with fact and episode counts.
     pub fn list_namespaces(&self) -> Vec<hippocampus::NamespaceStats> {
-        if let Some(semantic) = &self.semantic {
+        if let Some(semantic) = &self.memory.semantic {
             semantic.list_namespaces().unwrap_or_default()
         } else {
             Vec::new()
@@ -238,7 +252,10 @@ impl SignalProcessor {
         limit: usize,
         namespace: Option<&str>,
     ) -> Vec<hippocampus::Episode> {
-        self.episodic.recent(limit, namespace).unwrap_or_default()
+        self.memory
+            .episodic
+            .recent(limit, namespace)
+            .unwrap_or_default()
     }
 
     /// Load the last `limit` episodes for a session as LLM messages, in
@@ -248,7 +265,7 @@ impl SignalProcessor {
         session_id: &str,
         limit: usize,
     ) -> Vec<cortex::llm::Message> {
-        let episodes = match self.episodic.get_session_history(session_id, limit) {
+        let episodes = match self.memory.episodic.get_session_history(session_id, limit) {
             Ok(eps) => eps,
             Err(e) => {
                 tracing::debug!(session_id, "session history unavailable: {e}");
