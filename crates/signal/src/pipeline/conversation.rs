@@ -316,7 +316,17 @@ impl SignalProcessor {
             .as_ref()
             .map(|r| r.list())
             .unwrap_or_default();
-        render_capability_digest(&tools, &agents)
+        // Learned self-model: tools that have a proven track record here.
+        // Empty when learning is off / nothing proven yet.
+        let proven = self
+            .fitness()
+            .proven_tools(
+                cerebellum::MIN_USES_TO_SURFACE,
+                cerebellum::MIN_RATIO_TO_SURFACE,
+                MAX_PROVEN_TOOLS,
+            )
+            .unwrap_or_default();
+        render_capability_digest(&tools, &agents, &proven)
     }
 
     /// Concise capability summary lines for the task planner — one line
@@ -387,6 +397,8 @@ const SELF_MODEL_CONFIG_K: usize = 3;
 const MAX_TOOLS_PER_SERVER: usize = 15;
 /// Cap on delegate agents listed in the digest.
 const MAX_AGENTS: usize = 20;
+/// Cap on proven tools listed in the learned "Proven here" digest line.
+const MAX_PROVEN_TOOLS: usize = 8;
 
 /// Render the live capability section injected into the SOUL prompt
 /// Starts from the always-on cognitive faculties
@@ -399,7 +411,11 @@ const MAX_AGENTS: usize = 20;
 /// *descriptions* are deliberately not rendered here (that enrichment is
 /// a later phase, and would route through [`intent::sanitization`]).
 /// Token-bounded: per-server tool lists and the agent list are capped.
-fn render_capability_digest(tools: &[intent::ToolDescriptor], agents: &[String]) -> String {
+fn render_capability_digest(
+    tools: &[intent::ToolDescriptor],
+    agents: &[String],
+    proven: &[cerebellum::Fitness],
+) -> String {
     use intent::ToolSource;
     use std::collections::BTreeMap;
 
@@ -448,6 +464,17 @@ fn render_capability_digest(tools: &[intent::ToolDescriptor], agents: &[String])
         ));
     }
 
+    // Learned self-model: tools with a proven track record in this deployment.
+    // Trusted fields only (internal tool ids → bare verb labels); no untrusted
+    // MCP description text. Awareness/preference only — still consent-gated.
+    if !proven.is_empty() {
+        let labels: Vec<String> = proven.iter().map(|f| proven_label(&f.tool_id)).collect();
+        out.push_str(&format!(
+            "\nProven here (you've used these successfully before — prefer them when they fit): {}\n",
+            render_capped_list(&labels, MAX_PROVEN_TOOLS),
+        ));
+    }
+
     // Closed-world boundary: the always-on faculties plus whatever is listed
     // above are the *complete* set of things actually executable in this
     // deployment. Stops the reasoner over-claiming faculties (shell, web,
@@ -462,6 +489,16 @@ fn render_capability_digest(tools: &[intent::ToolDescriptor], agents: &[String])
     );
 
     out
+}
+
+/// Bare verb/tool label for a proven `tool_id` in the digest — drops the
+/// source prefix (`native:` / `mcp:`) so the reasoner sees `net.http` rather
+/// than `native:net.http`. The tool_id is an internal, trusted string.
+fn proven_label(tool_id: &str) -> String {
+    tool_id
+        .split_once(':')
+        .map(|(_, rest)| rest.to_string())
+        .unwrap_or_else(|| tool_id.to_string())
 }
 
 /// Join `items` with commas, capping at `cap` and summarizing the overflow.
@@ -526,12 +563,13 @@ mod tests {
 
     #[test]
     fn digest_always_includes_static_faculties() {
-        let digest = render_capability_digest(&[], &[]);
+        let digest = render_capability_digest(&[], &[], &[]);
         assert!(digest.starts_with(cortex::context::DEFAULT_CAPABILITIES));
         assert!(digest.contains("Episodic Memory"));
-        // Nothing wired → no "Mounted tools" / agents sections.
+        // Nothing wired → no "Mounted tools" / agents / proven sections.
         assert!(!digest.contains("Mounted tools"));
         assert!(!digest.contains("Delegated agents"));
+        assert!(!digest.contains("Proven here"));
         // The closed-world boundary is always present, especially when nothing
         // is wired — that's when over-claiming is worst.
         assert!(digest.contains("complete set of actions you can actually execute"));
@@ -565,7 +603,7 @@ mod tests {
             tool("sh", ToolSource::Terminal, "exec"),
         ];
         let agents = vec!["aider".to_string(), "claude".to_string()];
-        let digest = render_capability_digest(&tools, &agents);
+        let digest = render_capability_digest(&tools, &agents, &[]);
 
         assert!(digest.contains("MCP server \"github\": create_issue, list_prs"));
         assert!(digest.contains("Native backends: fs"));
@@ -574,6 +612,24 @@ mod tests {
         assert!(digest.contains("aider, claude"));
         // Untrusted descriptions are never inlined.
         assert!(!digest.contains("untrusted"));
+    }
+
+    #[test]
+    fn digest_surfaces_proven_tools_with_bare_labels() {
+        let fit = |tool_id: &str| cerebellum::Fitness {
+            tool_id: tool_id.to_string(),
+            success: 5.0,
+            failure: 0.0,
+            uses: 5,
+            ratio: 1.0,
+        };
+        let proven = vec![fit("native:net.http"), fit("mcp:github:create_issue")];
+        let digest = render_capability_digest(&[], &[], &proven);
+        assert!(digest.contains("Proven here"), "{digest}");
+        // Source prefixes are stripped to bare labels.
+        assert!(digest.contains("net.http"), "{digest}");
+        assert!(digest.contains("github:create_issue"), "{digest}");
+        assert!(!digest.contains("native:net.http"), "{digest}");
     }
 
     #[test]

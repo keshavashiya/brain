@@ -71,6 +71,17 @@ impl SignalProcessor {
             tracing::warn!("ProcedureStore table init failed (non-fatal): {e}");
         }
 
+        // Create the learned capability-fitness store (cerebellum) alongside it.
+        let fitness_cfg = &config.learning.capability_fitness;
+        let fitness = cerebellum::CapabilityFitnessStore::new(
+            db.clone(),
+            fitness_cfg.enabled,
+            fitness_cfg.half_life_hours(),
+        );
+        if let Err(e) = fitness.ensure_tables() {
+            tracing::warn!("CapabilityFitnessStore table init failed (non-fatal): {e}");
+        }
+
         // Probe configured providers (multi-entry if `llm.providers` is set;
         // otherwise synthesised from the legacy single-provider fields) and
         // select the first reachable one. Env-var API key stays backfilled
@@ -196,6 +207,7 @@ impl SignalProcessor {
                 std::num::NonZeroUsize::new(64).expect("64 is non-zero"),
             )),
             procedures,
+            fitness,
             metrics: Arc::new(brain::metrics::SubsystemMetrics::new()),
             proactivity_enabled,
 

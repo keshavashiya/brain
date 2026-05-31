@@ -111,7 +111,12 @@ impl SignalProcessor {
             return Vec::new();
         }
         let query = latest_user_text(messages);
-        let ranked = score_top_k(manifest, &query, TOOL_ADVERTISE_K);
+        // Learned tie-breaker: proven tools earn a small bounded bonus so they
+        // edge out unproven peers with equal keyword overlap (never overtaking
+        // a stronger keyword match). Empty when learning is off / nothing
+        // proven yet, in which case ranking is byte-identical to keyword-only.
+        let bonuses = self.fitness_bonuses(&manifest);
+        let ranked = score_top_k(manifest, &query, TOOL_ADVERTISE_K, &bonuses);
         ranked
             .into_iter()
             .map(|t| ToolDef {
@@ -123,6 +128,31 @@ impl SignalProcessor {
                 ),
                 parameters: t.input_schema,
             })
+            .collect()
+    }
+
+    /// Map each proven tool in `manifest` to its bounded ranking bonus
+    /// (`[0, 0.99]`) from the learned capability-fitness store. Tools below the
+    /// proven bar — or any tool when learning is disabled — are simply absent
+    /// (treated as bonus `0.0`), so this only ever nudges, never demotes.
+    fn fitness_bonuses(
+        &self,
+        manifest: &[intent::ToolDescriptor],
+    ) -> std::collections::HashMap<String, f32> {
+        let proven = match self.fitness().proven_tools(
+            cerebellum::MIN_USES_TO_SURFACE,
+            cerebellum::MIN_RATIO_TO_SURFACE,
+            manifest.len().max(1),
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::debug!(error = %e, "capability-fitness read failed; ranking unboosted");
+                return std::collections::HashMap::new();
+            }
+        };
+        proven
+            .into_iter()
+            .map(|f| (f.tool_id.clone(), cerebellum::fitness_bonus(&f)))
             .collect()
     }
 
@@ -220,25 +250,34 @@ fn accumulate_usage(total: &mut Option<Usage>, round: Option<&Usage>) {
     acc.total_tokens += round.total_tokens;
 }
 
-/// Rank `tools` by keyword overlap with `query` and keep the best `k`.
+/// Rank `tools` by keyword overlap with `query` (plus a bounded learned
+/// fitness bonus) and keep the best `k`.
 ///
-/// Case-insensitive alphanumeric term overlap over each tool's dotted verb
-/// and description — no model/embedding dependency. Sorted by score then verb
-/// for stability; zero-score tools fill remaining slots up to `k`, so a query
-/// that matches nothing still advertises *some* tools rather than none.
+/// Case-insensitive alphanumeric term overlap over each tool's dotted verb and
+/// description — no model/embedding dependency — gives an integer score; the
+/// per-tool `bonuses` value (`[0, 0.99]`) is added on top. Because the bonus is
+/// strictly below `1.0`, it can only reorder tools with **equal** keyword
+/// overlap (a true tie-break) and never lifts a tool past one that matched an
+/// extra query term. Sorted by composite score then verb for stability;
+/// zero-score tools fill remaining slots up to `k`, so a query that matches
+/// nothing still advertises *some* tools rather than none.
 fn score_top_k(
     mut tools: Vec<intent::ToolDescriptor>,
     query: &str,
     k: usize,
+    bonuses: &std::collections::HashMap<String, f32>,
 ) -> Vec<intent::ToolDescriptor> {
     if k == 0 {
         return Vec::new();
     }
     let terms = tokenize(query);
+    let composite = |t: &intent::ToolDescriptor| -> f32 {
+        score_tool(t, &terms) as f32 + bonuses.get(&t.tool_id).copied().unwrap_or(0.0)
+    };
     tools.sort_by(|a, b| {
-        let sa = score_tool(a, &terms);
-        let sb = score_tool(b, &terms);
-        sb.cmp(&sa)
+        composite(b)
+            .partial_cmp(&composite(a))
+            .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.verb.dotted().cmp(&b.verb.dotted()))
     });
     tools.truncate(k);
@@ -369,6 +408,11 @@ mod tests {
         }
     }
 
+    /// Empty fitness map: keyword-only ranking, the pre-L1 behaviour.
+    fn no_bonus() -> std::collections::HashMap<String, f32> {
+        std::collections::HashMap::new()
+    }
+
     #[test]
     fn score_top_k_ranks_keyword_matches_first() {
         let tools = vec![
@@ -376,7 +420,7 @@ mod tests {
             td("web", "search", "Search the web for a query"),
             td("git", "commit", "Record changes to the repository"),
         ];
-        let hits = score_top_k(tools, "search the web", 2);
+        let hits = score_top_k(tools, "search the web", 2, &no_bonus());
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].verb.dotted(), "web.search");
     }
@@ -388,8 +432,8 @@ mod tests {
             td("fs", "write", "write"),
             td("fs", "list", "list"),
         ];
-        assert_eq!(score_top_k(tools.clone(), "file", 2).len(), 2);
-        assert!(score_top_k(tools, "file", 0).is_empty());
+        assert_eq!(score_top_k(tools.clone(), "file", 2, &no_bonus()).len(), 2);
+        assert!(score_top_k(tools, "file", 0, &no_bonus()).is_empty());
     }
 
     #[test]
@@ -399,10 +443,49 @@ mod tests {
             td("fs", "read", "y"),
             td("web", "search", "z"),
         ];
-        let hits = score_top_k(tools, "zzz_no_match", 2);
+        let hits = score_top_k(tools, "zzz_no_match", 2, &no_bonus());
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].verb.dotted(), "fs.read");
         assert_eq!(hits[1].verb.dotted(), "git.commit");
+    }
+
+    #[test]
+    fn fitness_bonus_breaks_ties_among_equal_keyword_overlap() {
+        // Two tools tie on keyword overlap (both match "file"); the proven one
+        // sorts first thanks to its fitness bonus, overriding the verb-sort
+        // tie-break that would otherwise put "fs.read" ahead of "fs.write".
+        let tools = vec![
+            td("fs", "read", "read a file"),
+            td("fs", "write", "write a file"),
+        ];
+        let mut bonuses = std::collections::HashMap::new();
+        bonuses.insert("fs.write".to_string(), 0.5);
+        let hits = score_top_k(tools, "file", 2, &bonuses);
+        assert_eq!(
+            hits[0].verb.dotted(),
+            "fs.write",
+            "proven tool wins the tie"
+        );
+        assert_eq!(hits[1].verb.dotted(), "fs.read");
+    }
+
+    #[test]
+    fn fitness_bonus_never_overtakes_a_stronger_keyword_match() {
+        // "web.search" matches two query terms; "fs.read" matches one but is
+        // maximally proven. The bonus is < 1.0, so it cannot lift fs.read past
+        // the stronger keyword match.
+        let tools = vec![
+            td("fs", "read", "read a file"),
+            td("web", "search", "search the web"),
+        ];
+        let mut bonuses = std::collections::HashMap::new();
+        bonuses.insert("fs.read".to_string(), 0.99);
+        let hits = score_top_k(tools, "search the web", 2, &bonuses);
+        assert_eq!(
+            hits[0].verb.dotted(),
+            "web.search",
+            "keyword relevance stays primary"
+        );
     }
 
     #[test]

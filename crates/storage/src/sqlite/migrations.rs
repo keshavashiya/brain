@@ -424,6 +424,27 @@ impl SqlitePool {
                     SELECT rowid, body_json FROM nodes;
             ",
             ),
+            (
+                24,
+                "create_capability_fitness",
+                "
+                -- Learned capability self-model: per-tool success/failure
+                -- mass the kernel reinforces after each dispatch and decays
+                -- under the forgetting curve (lazy, computed on read/write).
+                -- One row per tool_id (`mcp:{server}:{tool}` or
+                -- `native:{ns}.{action}`, mirroring ToolDescriptor.tool_id),
+                -- so it joins directly against the live capability manifest.
+                -- `*_mass` are decayed reinforcement counts (not raw tallies);
+                -- `uses` is the undecayed lifetime invocation count.
+                CREATE TABLE IF NOT EXISTS capability_fitness (
+                    tool_id      TEXT PRIMARY KEY,
+                    success_mass REAL    NOT NULL DEFAULT 0,
+                    failure_mass REAL    NOT NULL DEFAULT 0,
+                    uses         INTEGER NOT NULL DEFAULT 0,
+                    last_used_at TEXT    NOT NULL DEFAULT (datetime('now'))
+                );
+            ",
+            ),
         ]
     }
 

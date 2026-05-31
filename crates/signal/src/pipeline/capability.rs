@@ -105,17 +105,19 @@ impl SignalProcessor {
                     };
                     let tool_id = format!("mcp:{server}:{tool}");
                     let outcome_result = host.call(&server, &tool, args).await;
-                    // Record into the per-tool breaker (if wired). A
-                    // transport error or an `is_error: true` outcome both
+                    // A transport error or an `is_error: true` outcome both
                     // count as failures; otherwise success.
+                    let healthy = matches!(&outcome_result, Ok(o) if !o.is_error);
+                    // Record into the per-tool breaker (resilience/failover)
+                    // and the learned capability-fitness store (self-model).
                     if let Some(breakers) = self.breaker_registry() {
-                        let healthy = matches!(&outcome_result, Ok(o) if !o.is_error);
                         if healthy {
                             breakers.record_success(&tool_id).await;
                         } else {
                             breakers.record_failure(&tool_id).await;
                         }
                     }
+                    self.record_fitness(&tool_id, healthy);
                     match outcome_result {
                         Ok(outcome) => {
                             let status = if outcome.is_error { "error" } else { "ok" };
@@ -136,8 +138,25 @@ impl SignalProcessor {
             // classic intent paths use — see `execute_native_token`. Consent
             // was already gated upstream (see this fn's doc comment).
             intent::ToolRoute::Terminal { .. } | intent::ToolRoute::NativeBackend { .. } => {
-                self.execute_native_token(token).await
+                let tool_id = format!("native:{}.{}", token.verb.namespace, token.verb.action);
+                let (outcome, text) = self.execute_native_token(token).await;
+                // Only genuine dispatch outcomes feed the learned self-model;
+                // structural gaps (no executor / backend not wired) are `None`
+                // so a config gap never looks like an unreliable tool.
+                if let Some(success) = outcome {
+                    self.record_fitness(&tool_id, success);
+                }
+                text
             }
+        }
+    }
+
+    /// Record a tool dispatch outcome into the learned capability-fitness
+    /// store. Best-effort: the store self-gates on the `learning` config, and
+    /// a storage hiccup is logged at debug, never surfaced to the caller.
+    fn record_fitness(&self, tool_id: &str, success: bool) {
+        if let Err(e) = self.fitness().record(tool_id, success) {
+            tracing::debug!(tool_id, error = %e, "capability-fitness record failed");
         }
     }
 
@@ -153,7 +172,13 @@ impl SignalProcessor {
     /// returns its real output, or returns an explicit, model-legible reason
     /// (no executor for this verb / backend not configured / backend error) —
     /// never a vague giveup.
-    async fn execute_native_token(&self, token: &intent::IntentToken) -> String {
+    ///
+    /// Returns `(outcome, text)`: `outcome` is `Some(true)`/`Some(false)` when
+    /// the dispatcher actually ran the verb (success/failure — the signal the
+    /// learned self-model records), or `None` for the structural cases (no
+    /// executor for this verb, no dispatcher wired) which are config gaps, not
+    /// tool unreliability.
+    async fn execute_native_token(&self, token: &intent::IntentToken) -> (Option<bool>, String) {
         let ns = token.verb.namespace.as_str();
         let action = token.verb.action.as_str();
 
@@ -161,31 +186,41 @@ impl SignalProcessor {
             // No ActionDispatcher executor for this verb. Be specific about
             // why and point at the real path so the model relays the truth
             // rather than inventing a failure.
-            return format!(
-                "'{ns}.{action}' can't be run from the chat tool-loop. {}",
-                native_unexecutable_hint(ns, action)
+            return (
+                None,
+                format!(
+                    "'{ns}.{action}' can't be run from the chat tool-loop. {}",
+                    native_unexecutable_hint(ns, action)
+                ),
             );
         };
         let Some(dispatcher) = self.capability.action_dispatcher.as_ref() else {
-            return format!(
-                "'{ns}.{action}' needs its backend enabled in config, but no \
-                 action dispatcher is wired in this deployment."
+            return (
+                None,
+                format!(
+                    "'{ns}.{action}' needs its backend enabled in config, but no \
+                     action dispatcher is wired in this deployment."
+                ),
             );
         };
 
         let result = dispatcher.dispatch(&act).await;
         if result.success {
-            if result.output.trim().is_empty() {
+            let text = if result.output.trim().is_empty() {
                 format!("'{ns}.{action}' completed with no output.")
             } else {
                 result.output
-            }
+            };
+            (Some(true), text)
         } else {
-            format!(
-                "'{ns}.{action}' ran but failed: {}",
-                result
-                    .error
-                    .unwrap_or_else(|| "the backend reported no reason".to_string())
+            (
+                Some(false),
+                format!(
+                    "'{ns}.{action}' ran but failed: {}",
+                    result
+                        .error
+                        .unwrap_or_else(|| "the backend reported no reason".to_string())
+                ),
             )
         }
     }
@@ -550,13 +585,14 @@ mod tool_call_dispatch_tests {
         let processor = make_processor()
             .await
             .with_action_dispatcher(web_search_dispatcher());
-        let out = processor
+        let (outcome, out) = processor
             .execute_native_token(&token_with_args(
                 "net",
                 "http",
                 serde_json::json!({ "query": "ripgrep latest" }),
             ))
             .await;
+        assert_eq!(outcome, Some(true), "genuine success is recordable");
         assert!(out.contains("Result for ripgrep latest"), "{out}");
         assert!(out.contains("example.com"), "{out}");
         assert!(!out.contains("not yet wired"), "{out}");
@@ -569,9 +605,13 @@ mod tool_call_dispatch_tests {
         let processor = make_processor()
             .await
             .with_action_dispatcher(web_search_dispatcher());
-        let out = processor
+        let (outcome, out) = processor
             .execute_native_token(&token_with_args("fs", "read", serde_json::json!({})))
             .await;
+        assert_eq!(
+            outcome, None,
+            "a structural gap is not recorded as a failure"
+        );
         assert!(out.contains("fs.read"), "{out}");
         assert!(out.contains("reads it automatically"), "{out}");
         assert!(!out.contains("not yet wired"), "{out}");
@@ -586,16 +626,60 @@ mod tool_call_dispatch_tests {
             ..Default::default()
         });
         let processor = make_processor().await.with_action_dispatcher(dispatcher);
-        let out = processor
+        let (outcome, out) = processor
             .execute_native_token(&token_with_args(
                 "net",
                 "http",
                 serde_json::json!({ "query": "x" }),
             ))
             .await;
+        assert_eq!(
+            outcome,
+            Some(false),
+            "a genuine backend failure is recordable"
+        );
         assert!(out.contains("net.http"), "{out}");
         assert!(out.contains("ran but failed"), "{out}");
         assert!(out.to_lowercase().contains("disabled"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_records_native_success_into_fitness() {
+        // A genuine native dispatch reinforces the learned self-model: the
+        // tool's fitness row gains a success and a use.
+        let registry: Arc<dyn intent::ToolRegistry> = Arc::new(intent::InMemoryToolRegistry::new());
+        registry
+            .register(intent::ToolDescriptor {
+                tool_id: "native:net.http".into(),
+                source: intent::ToolSource::NativeBackend {
+                    backend: intent::BackendId::new("net"),
+                },
+                verb: intent::Verb::new("net", "http"),
+                description: "web".into(),
+                input_schema: serde_json::json!({ "type": "object" }),
+                output_schema: None,
+                capabilities: vec![],
+                annotations: intent::ToolAnnotations::default(),
+                usage: intent::ToolUsage::default(),
+                embedding: None,
+            })
+            .await
+            .unwrap();
+        let router: Arc<dyn intent::IntentRouter> =
+            Arc::new(intent::DefaultIntentRouter::new(registry));
+        let processor = make_processor()
+            .await
+            .with_action_dispatcher(web_search_dispatcher());
+        let token = token_with_args("net", "http", serde_json::json!({ "query": "ripgrep" }));
+        let _ = processor.dispatch_tool_route(router.as_ref(), &token).await;
+
+        let fit = processor
+            .fitness()
+            .fitness("native:net.http")
+            .unwrap()
+            .expect("a fitness row was recorded");
+        assert_eq!(fit.uses, 1);
+        assert!(fit.success > 0.0 && fit.failure == 0.0, "{fit:?}");
     }
 
     #[tokio::test]

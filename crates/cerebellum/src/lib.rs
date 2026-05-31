@@ -1,10 +1,19 @@
 //! # Brain Cerebellum
 //!
-//! Procedure store — learned workflows and automation.
+//! Procedural memory — learned workflows and learned capability fitness.
 //!
-//! Stores `(trigger_pattern, steps)` tuples in SQLite.  Incoming signals are
-//! matched against known triggers; matching procedures contribute additional
-//! context steps to the LLM prompt so Brain can auto-execute stored workflows.
+//! Two stores share this crate's SQLite-backed procedural-memory home:
+//! - [`ProcedureStore`] keeps `(trigger_pattern, steps)` tuples; incoming
+//!   signals are matched against known triggers and matching procedures
+//!   contribute context steps to the LLM prompt.
+//! - [`CapabilityFitnessStore`] (module [`fitness`]) keeps the *learned* half
+//!   of the capability self-model: per-tool success/failure mass the kernel
+//!   reinforces after each dispatch and decays under the forgetting curve.
+
+mod fitness;
+pub use fitness::{
+    fitness_bonus, CapabilityFitnessStore, Fitness, MIN_RATIO_TO_SURFACE, MIN_USES_TO_SURFACE,
+};
 
 use chrono::Utc;
 use rusqlite::OptionalExtension;

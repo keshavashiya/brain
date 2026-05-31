@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Learned capability fitness.** Brain now learns which tools actually work,
+  not just which exist. After every tool dispatch it records a per-tool
+  success/failure outcome (`learning.capability_fitness`, on by default), and
+  those observations decay under the forgetting curve (`half_life_days`,
+  default 30). The learned record nudges tool selection — a proven tool wins
+  a tie among equally-relevant candidates when the chat model is offered
+  tools, but never overtakes a stronger keyword match — and the reasoner's
+  capability digest gains a "Proven here" line listing tools with a track
+  record. Awareness/preference only: execution stays consent-gated. Backed by
+  a new `capability_fitness` table (procedural memory). Set
+  `learning.capability_fitness.enabled: false` to opt out (ranking and digest
+  then behave exactly as before).
 - **Release automation.** Tagging a `vX.Y.Z` release now builds pre-built
   binaries — `brain-<target>.tar.gz` for macOS (`aarch64`/`x86_64`) and
   Linux (`aarch64`/`x86_64`), each with a `.sha256` — and publishes a

@@ -71,6 +71,12 @@ pub struct SignalProcessor {
     /// the same prefix every turn. Only the summary text is stored.
     history_summary_cache: std::sync::Mutex<lru::LruCache<u64, std::sync::Arc<str>>>,
     procedures: cerebellum::ProcedureStore,
+    /// Learned capability self-model: per-tool success/failure mass recorded
+    /// after each dispatch (see [`SignalProcessor::dispatch_tool_route`]),
+    /// fed back as a bounded ranking nudge in the chat tool-loop and a
+    /// "proven tools" line in the capability digest. Inert when
+    /// `learning.capability_fitness.enabled = false`.
+    fitness: cerebellum::CapabilityFitnessStore,
     /// Cross-subsystem metrics (embedding, consolidation, circuit breaker, intent).
     metrics: std::sync::Arc<brain::metrics::SubsystemMetrics>,
     /// Runtime proactivity toggle. Initialised from

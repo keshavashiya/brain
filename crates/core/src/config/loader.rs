@@ -473,6 +473,7 @@ impl Default for BrainConfig {
             identity: identity::IdentityConfig::default(),
             reflex: ReflexConfig::default(),
             logging: crate::config::LoggingConfig::default(),
+            learning: crate::config::LearningConfig::default(),
         }
     }
 }

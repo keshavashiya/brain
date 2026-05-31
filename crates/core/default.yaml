@@ -209,6 +209,16 @@ logging:
   #   hippocampus: "debug"
   #   signal: "info"
 
+# ── Learned self-model ─────────────────────────────────────────────────────────
+# Capability fitness: Brain records whether each tool succeeds or fails, decays
+# those observations under the forgetting curve, and uses them as a tie-breaker
+# when ranking the tools it offers the chat model (plus a "proven tools" line in
+# its capability digest). Awareness only — execution stays consent-gated.
+learning:
+  capability_fitness:
+    enabled: true                   # record outcomes + boost ranking + surface
+    half_life_days: 30              # how long an observation keeps half its weight
+
 # ── Channel Relays ─────────────────────────────────────────────────────────────
 # Bidirectional WebSocket gateways. Unlike webhooks these are long-lived
 # connections — approval responses from any relay are correlated automatically.

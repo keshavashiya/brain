@@ -87,6 +87,13 @@ impl SignalProcessor {
         &self.procedures
     }
 
+    /// Expose the learned capability-fitness store. Used by the tool-loop
+    /// advertiser (ranking nudge) and the capability digest (proven-tools
+    /// line), and written to by `dispatch_tool_route` after each dispatch.
+    pub(crate) fn fitness(&self) -> &cerebellum::CapabilityFitnessStore {
+        &self.fitness
+    }
+
     // ── Safety infrastructure builder methods ───────────────────────────
 
     /// Attach an audit trail (builder pattern).

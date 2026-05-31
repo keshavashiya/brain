@@ -51,6 +51,55 @@ pub struct BrainConfig {
     /// rotation; `RUST_LOG` still overrides the computed filter at runtime.
     #[serde(default)]
     pub logging: LoggingConfig,
+    /// Learned self-model knobs — currently the capability-fitness loop that
+    /// records per-tool success/failure and feeds it back into tool ranking
+    /// and the SOUL capability digest. Default is on with a 30-day half-life.
+    #[serde(default)]
+    pub learning: LearningConfig,
+}
+
+/// Learned self-model configuration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LearningConfig {
+    #[serde(default)]
+    pub capability_fitness: CapabilityFitnessConfig,
+}
+
+/// Capability-fitness learning: per-tool success/failure mass that decays
+/// under the forgetting curve and nudges the chat tool-loop's advertised
+/// ranking. See `cerebellum::CapabilityFitnessStore`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityFitnessConfig {
+    /// Record outcomes, boost ranking, and surface "proven tools" in the
+    /// digest. When false the store is inert (nothing recorded or surfaced).
+    #[serde(default = "CapabilityFitnessConfig::default_enabled")]
+    pub enabled: bool,
+    /// Decay half-life in days: how long a success/failure observation keeps
+    /// half its weight. Longer = slower forgetting.
+    #[serde(default = "CapabilityFitnessConfig::default_half_life_days")]
+    pub half_life_days: f64,
+}
+
+impl CapabilityFitnessConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_half_life_days() -> f64 {
+        30.0
+    }
+    /// Half-life expressed in hours, as the fitness store consumes it.
+    pub fn half_life_hours(&self) -> f64 {
+        self.half_life_days * 24.0
+    }
+}
+
+impl Default for CapabilityFitnessConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            half_life_days: Self::default_half_life_days(),
+        }
+    }
 }
 
 /// Logging configuration. Drives the `tracing` subscriber the CLI installs.
