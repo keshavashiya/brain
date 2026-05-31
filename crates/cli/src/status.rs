@@ -7,7 +7,9 @@ use crate::encryption::resolve_llm_api_key;
 pub(crate) async fn show_status(config: &brain::BrainConfig) -> anyhow::Result<()> {
     println!("Brain Scan");
     println!("  DNA:          v{}", env!("CARGO_PKG_VERSION"));
-    println!("  Cortex:       {}", config.data_dir().display());
+    // "Memory" (not "Cortex") for the data dir — matches the chat banner and
+    // reserves "Cortex" for the reasoning/LLM layer (see "Cortex LLM" below).
+    println!("  Memory:       {}", config.data_dir().display());
 
     // Daemon state via HTTP health probe — the single source of truth.
     let daemon_running = bootstrap::detect_running_daemon(config).await;

@@ -26,6 +26,76 @@ use tokio_tungstenite::tungstenite::Message;
 use crate::encryption::resolve_llm_api_key;
 use crate::status::show_status;
 
+/// A REPL signal (slash-command) recognized inside the interactive chat.
+///
+/// This is the single source of truth: the banner, the `/help` listing, and
+/// the unknown-signal hint are all rendered from [`SIGNALS`], so adding a
+/// signal here surfaces it everywhere automatically.
+struct Signal {
+    /// Canonical name, e.g. `/status`.
+    name: &'static str,
+    /// Alternate spellings that invoke the same action.
+    aliases: &'static [&'static str],
+    /// One-line description shown by `/help`.
+    summary: &'static str,
+}
+
+const SIGNALS: &[Signal] = &[
+    Signal {
+        name: "/help",
+        aliases: &["/?"],
+        summary: "list available signals",
+    },
+    Signal {
+        name: "/status",
+        aliases: &[],
+        summary: "show cortex, memory, and synapse status",
+    },
+    Signal {
+        name: "/clear",
+        aliases: &[],
+        summary: "start a fresh conversation",
+    },
+    Signal {
+        name: "/quit",
+        aliases: &["/exit", "/q"],
+        summary: "go dormant and exit chat",
+    },
+];
+
+/// Space-separated list of canonical signal names, for the banner and the
+/// unknown-signal hint.
+fn signals_line() -> String {
+    SIGNALS
+        .iter()
+        .map(|s| s.name)
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
+/// Multi-line `/help` body: each signal with its aliases and summary.
+fn signals_help() -> String {
+    let width = SIGNALS.iter().map(|s| s.name.len()).max().unwrap_or(0);
+    SIGNALS
+        .iter()
+        .map(|s| {
+            let aliases = if s.aliases.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", s.aliases.join(", "))
+            };
+            format!(
+                "  {:<width$}  {}{}",
+                s.name,
+                s.summary,
+                aliases,
+                width = width
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Render a transient progress line ("routing…", "thinking…") that will be
 /// overwritten when the real response is rendered. Only used in the
 /// non-interactive (one-shot) path; the interactive loop drops status
@@ -95,6 +165,38 @@ fn preprocess_markdown(input: &str) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Strip the language info-string from opening code fences
+/// (```` ```bash ```` → ```` ``` ````). termimad renders the info-string as a
+/// literal first line *inside* the code block (so `bash` shows on its own line
+/// above the command), which reads as a rendering bug. Removing the info-string
+/// at the source leaves a clean fenced block.
+///
+/// Only the fence line itself is rewritten: a bare fence (```` ``` ````, used
+/// for both closing fences and language-less openings) and longer fences
+/// (```` ```` ````, which carry no info-string) are left untouched, as is all
+/// fenced content.
+fn strip_code_fence_langs(input: &str) -> String {
+    input
+        .split('\n')
+        .map(|line| {
+            let trimmed = line.trim_start();
+            let Some(info) = trimmed.strip_prefix("```") else {
+                return line.to_string();
+            };
+            // A bare fence has nothing after the backticks; a longer fence
+            // starts with another backtick. Neither carries a language token.
+            if info.trim().is_empty() || info.starts_with('`') {
+                return line.to_string();
+            }
+            // Opening fence with a language/info token → keep just the fence,
+            // preserving the (≤3 space) indentation CommonMark allows.
+            let indent = &line[..line.len() - trimmed.len()];
+            format!("{indent}```")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// If `s` starts with a `<br>`, `<br/>`, or `<br />` tag (case-insensitive),
@@ -279,6 +381,7 @@ impl ResponseLabel {
 /// string with trailing newlines trimmed. Shared by both render paths.
 fn render_markdown_body(body: &str, width: usize) -> String {
     let processed = preprocess_markdown(body);
+    let processed = strip_code_fence_langs(&processed);
     let processed = reflow_wide_tables(&processed, width);
     let skin = brain_skin();
     let formatted = skin.text(&processed, Some(width));
@@ -913,7 +1016,7 @@ pub(crate) async fn chat_interactive(config: &brain::BrainConfig) -> anyhow::Res
     println!("  Memory:  {}", config.data_dir().display());
     println!("  Synapse: connected to daemon (WebSocket)");
     println!();
-    println!("Signals: /status  /clear  /quit");
+    println!("Signals: {}", signals_line());
     println!();
 
     let (sink, stream) = connect_ws_session(&ws_url, &api_key).await?;
@@ -933,6 +1036,12 @@ pub(crate) async fn chat_interactive(config: &brain::BrainConfig) -> anyhow::Res
     // `line_tx` (by dropping the thread) tells the async loop to wind
     // down.
     let (line_tx, mut line_rx) = mpsc::channel::<LineEvent>(1);
+    // Back-channel that gates the next prompt redraw. After sending a line the
+    // input thread blocks here until the async loop has finished handling it
+    // (printed a command's output / dispatched a chat). Without this, the
+    // thread re-prints "You: " the instant it hands off the line, racing a
+    // synchronous `/status` block that's still printing — the two interleave.
+    let (ack_tx, mut ack_rx) = mpsc::channel::<()>(1);
     let history_path_for_thread = history_path.clone();
     let input_thread = std::thread::spawn(move || {
         let mut rl = rl;
@@ -945,6 +1054,12 @@ pub(crate) async fn chat_interactive(config: &brain::BrainConfig) -> anyhow::Res
                     }
                     let _ = rl.add_history_entry(&trimmed);
                     if line_tx.blocking_send(LineEvent::Line(trimmed)).is_err() {
+                        break;
+                    }
+                    // Wait for the async loop to finish handling this line
+                    // before redrawing the prompt. `None` means the loop has
+                    // exited (ack_tx dropped) — wind down.
+                    if ack_rx.blocking_recv().is_none() {
                         break;
                     }
                 }
@@ -968,40 +1083,56 @@ pub(crate) async fn chat_interactive(config: &brain::BrainConfig) -> anyhow::Res
             line = line_rx.recv() => {
                 match line {
                     Some(LineEvent::Line(line)) => {
-                        match line.as_str() {
+                        // Handle local commands (which print synchronously) and
+                        // chat dispatch, then release the input thread to redraw
+                        // its prompt. Quitting breaks *without* acking — the
+                        // thread unblocks when `ack_tx` drops on loop exit, so it
+                        // doesn't reprint "You: " after "Going dormant...".
+                        let handled_locally = match line.as_str() {
                             "/quit" | "/exit" | "/q" => {
                                 println!("Going dormant...");
                                 break Ok(());
+                            }
+                            "/help" | "/?" => {
+                                println!("Signals:\n{}", signals_help());
+                                true
                             }
                             "/status" => {
                                 if let Err(e) = show_status(config).await {
                                     eprintln!("status: {e}");
                                 }
-                                continue;
+                                true
                             }
                             "/clear" => {
                                 *session_id.lock().unwrap() = uuid::Uuid::new_v4().to_string();
                                 println!("Session cleared — starting fresh conversation.");
-                                continue;
+                                true
                             }
                             s if looks_like_slash_command(s) => {
                                 println!("Unknown signal: {s}");
-                                println!("Available: /status  /clear  /quit");
-                                continue;
+                                println!("Available: {}", signals_line());
+                                true
                             }
-                            _ => {}
+                            _ => false,
+                        };
+
+                        if !handled_locally {
+                            let sid = session_id.lock().unwrap().clone();
+                            let signal = serde_json::json!({
+                                "content": line,
+                                "session_id": sid,
+                                "stream": true,
+                            });
+                            if let Err(e) =
+                                sink.send(Message::Text(signal.to_string().into())).await
+                            {
+                                eprintln!("send failed: {e}");
+                                break Err(anyhow::anyhow!(e));
+                            }
                         }
 
-                        let sid = session_id.lock().unwrap().clone();
-                        let signal = serde_json::json!({
-                            "content": line,
-                            "session_id": sid,
-                            "stream": true,
-                        });
-                        if let Err(e) = sink.send(Message::Text(signal.to_string().into())).await {
-                            eprintln!("send failed: {e}");
-                            break Err(anyhow::anyhow!(e));
-                        }
+                        // Line fully handled — let the input thread reprompt.
+                        let _ = ack_tx.send(()).await;
                     }
                     Some(LineEvent::Quit) => {
                         println!("Going dormant...");
@@ -1038,10 +1169,13 @@ pub(crate) async fn chat_interactive(config: &brain::BrainConfig) -> anyhow::Res
     // join completes after the user hits Enter).
     let _ = sink.close().await;
     drop(line_rx);
+    // Release the input thread if it's parked waiting for an ack (e.g. after
+    // `/quit`): dropping the sender makes its `blocking_recv` return `None`.
+    drop(ack_tx);
     let _ = reader_handle.await;
-    // We deliberately do not join `input_thread`: rustyline is still
-    // blocked on a read, and there's no clean cross-platform way to
-    // wake it. Returning here lets the runtime tear down on its own.
+    // We deliberately do not join `input_thread`: rustyline may still be
+    // blocked on a read, and there's no clean cross-platform way to wake it.
+    // Returning here lets the runtime tear down on its own.
     drop(input_thread);
 
     result
@@ -1070,6 +1204,52 @@ enum LineEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signals_line_lists_every_canonical_name() {
+        let line = signals_line();
+        for sig in SIGNALS {
+            assert!(line.contains(sig.name), "banner missing {}", sig.name);
+        }
+    }
+
+    #[test]
+    fn strip_code_fence_langs_drops_info_string_only() {
+        let input = "before\n```bash\nls -la\n```\nafter";
+        let out = strip_code_fence_langs(input);
+        // The language token is gone from the opening fence…
+        assert!(!out.contains("```bash"), "info string survived: {out}");
+        // …but the fence, content, and closing fence remain intact.
+        assert_eq!(out, "before\n```\nls -la\n```\nafter");
+    }
+
+    #[test]
+    fn strip_code_fence_langs_preserves_indent_and_other_fences() {
+        // Indented opening fence keeps its indentation.
+        assert_eq!(strip_code_fence_langs("  ```rust"), "  ```");
+        // Bare fences (closing / language-less) are untouched.
+        assert_eq!(strip_code_fence_langs("```"), "```");
+        // A longer fence carries no info string and is left alone.
+        assert_eq!(strip_code_fence_langs("````"), "````");
+        // Non-fence lines pass through verbatim, even with inline backticks.
+        assert_eq!(strip_code_fence_langs("use `cargo` now"), "use `cargo` now");
+    }
+
+    #[test]
+    fn signals_help_covers_names_aliases_and_summaries() {
+        let help = signals_help();
+        for sig in SIGNALS {
+            assert!(help.contains(sig.name), "help missing {}", sig.name);
+            assert!(
+                help.contains(sig.summary),
+                "help missing summary for {}",
+                sig.name
+            );
+            for alias in sig.aliases {
+                assert!(help.contains(alias), "help missing alias {alias}");
+            }
+        }
+    }
 
     #[test]
     fn preprocess_replaces_br_variants() {
