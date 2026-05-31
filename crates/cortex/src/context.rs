@@ -222,6 +222,12 @@ impl ContextAssembler {
         Self::new(TOKEN_BUDGETS)
     }
 
+    /// The active token budget — lets the pipeline plan history compaction
+    /// against the same per-section allocation the assembler enforces.
+    pub fn budget(&self) -> TokenBudget {
+        self.budget
+    }
+
     /// Set custom system prompt.
     pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
         self.system_prompt = prompt.into();

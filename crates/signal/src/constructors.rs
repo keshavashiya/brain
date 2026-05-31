@@ -192,6 +192,9 @@ impl SignalProcessor {
             context_assembler: cortex::context::ContextAssembler::new(
                 cortex::context::TokenBudget::for_context_size(context_window),
             ),
+            history_summary_cache: std::sync::Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(64).expect("64 is non-zero"),
+            )),
             procedures,
             metrics: Arc::new(brain::metrics::SubsystemMetrics::new()),
             proactivity_enabled,

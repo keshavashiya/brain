@@ -132,7 +132,11 @@ impl SignalProcessor {
             .iter()
             .map(|step| cortex::llm::Message::user(format!("[procedure step] {step}")))
             .collect();
-        let history = conversation_history.unwrap_or(&proc_history);
+        let history_ref = conversation_history.unwrap_or(&proc_history);
+        // Compact overflow turns into a summary instead of dropping them when
+        // the thread exceeds its history budget (no-op + no LLM call when it
+        // fits, which is the norm on a generously-sized context window).
+        let history = self.compact_history(history_ref).await;
         let addendum = if self.namespace_is_empty(&signal.namespace) {
             Some(cortex::context::ONBOARDING_ADDENDUM)
         } else {
@@ -175,7 +179,7 @@ impl SignalProcessor {
         let messages = self.context_assembler.assemble_full(
             &content,
             &memories,
-            history,
+            &history,
             addendum,
             Some(&capability_digest),
             &attachments.attached,
@@ -210,6 +214,90 @@ impl SignalProcessor {
             section.push_str(&model.render_grounding(content, SELF_MODEL_CONFIG_K));
         }
         section
+    }
+
+    /// Compact conversation history that overflows its token budget: keep the
+    /// most recent turns verbatim and fold the oldest overflow into a single
+    /// cached summary note, so older context survives in compressed form
+    /// instead of being silently dropped.
+    ///
+    /// A no-op (returns the history unchanged, no LLM call) whenever the
+    /// thread already fits — which is the common case, and always true once
+    /// `llm.context_window` is set generously. Only long threads on small
+    /// windows pay the one extra summarization call, and repeated turns reuse
+    /// the cached summary.
+    pub(super) async fn compact_history(
+        &self,
+        history: &[cortex::llm::Message],
+    ) -> Vec<cortex::llm::Message> {
+        // Room held back for the summary note so summary + kept turns still fit.
+        const SUMMARY_RESERVE_TOKENS: usize = 256;
+        let budget = self.context_assembler.budget().conversation_history;
+        let plan =
+            cortex::compaction::plan_history_compaction(history, budget, SUMMARY_RESERVE_TOKENS);
+        if plan.is_noop() {
+            return history.to_vec();
+        }
+
+        let mut out = Vec::with_capacity(plan.keep_recent.len() + 1);
+        // On summarization failure we fall back to recent turns only — the
+        // overflow is dropped exactly as it was before compaction existed.
+        if let Some(summary) = self.summarize_overflow(plan.to_summarize).await {
+            out.push(cortex::llm::Message::system(format!(
+                "Summary of earlier conversation (older turns compacted to fit the context window):\n{summary}"
+            )));
+        }
+        out.extend_from_slice(plan.keep_recent);
+        out
+    }
+
+    /// Summarize the overflow turns into a short note, caching by content hash.
+    /// Returns `None` when there's nothing to summarize or the LLM call fails.
+    async fn summarize_overflow(
+        &self,
+        turns: &[cortex::llm::Message],
+    ) -> Option<std::sync::Arc<str>> {
+        if turns.is_empty() {
+            return None;
+        }
+        let key = history_summary_key(turns);
+        if let Some(hit) = self
+            .history_summary_cache
+            .lock()
+            .unwrap()
+            .get(&key)
+            .cloned()
+        {
+            return Some(hit);
+        }
+
+        let transcript = turns
+            .iter()
+            .map(|m| format!("{}: {}", role_label(&m.role), m.content))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let prompt = vec![
+            cortex::llm::Message::system(
+                "You compress conversation history. Summarize the turns below in 2-5 \
+                 sentences, preserving facts, decisions, names, numbers, and any \
+                 unresolved questions. Output only the summary.",
+            ),
+            cortex::llm::Message::user(transcript),
+        ];
+        match self.llm.generate(&prompt).await {
+            Ok(resp) => {
+                let summary: std::sync::Arc<str> = std::sync::Arc::from(resp.content.trim());
+                self.history_summary_cache
+                    .lock()
+                    .unwrap()
+                    .put(key, summary.clone());
+                Some(summary)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "history compaction summary failed; keeping recent turns only");
+                None
+            }
+        }
     }
 
     /// Build the live "Your Capabilities" section for the SOUL prompt
@@ -389,9 +477,33 @@ fn render_capped_list(items: &[String], cap: usize) -> String {
     }
 }
 
+/// Stable hash of the overflow turns being summarized — the
+/// history-summary cache key. Order-sensitive; role + content of each turn.
+fn history_summary_key(turns: &[cortex::llm::Message]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for m in turns {
+        role_label(&m.role).hash(&mut h);
+        m.content.hash(&mut h);
+    }
+    h.finish()
+}
+
+/// Lowercase wire label for a chat role, used in the compaction transcript.
+fn role_label(role: &cortex::llm::Role) -> &'static str {
+    match role {
+        cortex::llm::Role::User => "user",
+        cortex::llm::Role::Assistant => "assistant",
+        cortex::llm::Role::System => "system",
+        cortex::llm::Role::Tool => "tool",
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{capability_lines, render_capability_digest, render_capped_list};
+    use super::{
+        capability_lines, history_summary_key, render_capability_digest, render_capped_list,
+    };
     use intent::{BackendId, ToolAnnotations, ToolDescriptor, ToolSource, Verb};
 
     fn tool(tool_id: &str, source: ToolSource, action: &str) -> ToolDescriptor {
@@ -512,6 +624,35 @@ mod tests {
         let items: Vec<String> = (0..5).map(|i| format!("t{i}")).collect();
         assert_eq!(render_capped_list(&items, 10), "t0, t1, t2, t3, t4");
         assert_eq!(render_capped_list(&items, 2), "t0, t1, … (+3 more)");
+    }
+
+    #[test]
+    fn history_summary_key_is_order_sensitive_and_stable() {
+        use cortex::llm::Message;
+        let a = vec![Message::user("one"), Message::assistant("two")];
+        let b = vec![Message::assistant("two"), Message::user("one")];
+        assert_eq!(history_summary_key(&a), history_summary_key(&a));
+        assert_ne!(history_summary_key(&a), history_summary_key(&b));
+    }
+
+    #[tokio::test]
+    async fn compact_history_is_noop_when_within_budget() {
+        use cortex::llm::Message;
+        let processor = make_processor().await;
+        // A handful of short turns is far under the 8k-default history budget,
+        // so compaction must return them verbatim and make no LLM call.
+        let history = vec![
+            Message::user("hello"),
+            Message::assistant("hi there"),
+            Message::user("how are you?"),
+        ];
+        let out = processor.compact_history(&history).await;
+        assert_eq!(out.len(), history.len());
+        for (o, h) in out.iter().zip(&history) {
+            assert_eq!(o.content, h.content);
+        }
+        // No summary note was injected.
+        assert!(!out.iter().any(|m| m.content.contains("Summary of earlier")));
     }
 
     use crate::SignalProcessor;

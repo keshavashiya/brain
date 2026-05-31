@@ -66,6 +66,10 @@ pub struct SignalProcessor {
     recall_engine: hippocampus::RecallEngine,
     llm: std::sync::Arc<dyn cortex::LlmProvider>,
     context_assembler: cortex::context::ContextAssembler,
+    /// LRU cache of compacted-history summaries. Keyed by a fast hash of the
+    /// overflow turns being summarized, so a long chat doesn't re-summarize
+    /// the same prefix every turn. Only the summary text is stored.
+    history_summary_cache: std::sync::Mutex<lru::LruCache<u64, std::sync::Arc<str>>>,
     procedures: cerebellum::ProcedureStore,
     /// Cross-subsystem metrics (embedding, consolidation, circuit breaker, intent).
     metrics: std::sync::Arc<brain::metrics::SubsystemMetrics>,

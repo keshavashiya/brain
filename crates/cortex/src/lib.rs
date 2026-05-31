@@ -8,6 +8,7 @@
 //! - Structured output validation with retry logic
 
 pub mod actions;
+pub mod compaction;
 pub mod context;
 pub mod llm;
 pub mod presets;
