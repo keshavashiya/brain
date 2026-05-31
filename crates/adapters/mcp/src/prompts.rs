@@ -9,6 +9,21 @@ use crate::server::McpServer;
 const PROMPT_RECALL_CONTEXT: &str = "recall-context";
 const PROMPT_DAILY_REVIEW: &str = "daily-review";
 
+/// Rendered body for `recall-context`. `{query}` is interpolated with the
+/// caller's argument. Kept beside its sibling template so the prompt text is
+/// auditable in one place rather than buried in the `prompts/get` match.
+const RECALL_CONTEXT_TEMPLATE: &str =
+    "Before answering, use Brain's `memory_search` tool to recall context \
+     relevant to: \"{query}\". Summarize what you find, then answer the \
+     question grounded in that recalled context. If nothing relevant is \
+     stored, say so.";
+
+/// Rendered body for `daily-review` (no arguments).
+const DAILY_REVIEW_TEMPLATE: &str =
+    "Use Brain's `memory_episodes` tool to fetch recent activity, then \
+     produce a short daily review: what happened, any decisions made, and \
+     open loops or follow-ups worth surfacing. Keep it concise and actionable.";
+
 impl McpServer {
     /// `prompts/list` — advertise the available templates.
     pub(crate) fn handle_prompts_list(&self) -> Result<Value, (i32, String)> {
@@ -56,27 +71,16 @@ impl McpServer {
                         -32602,
                         "recall-context requires a 'query' argument".to_string(),
                     ))?;
-                let text = format!(
-                    "Before answering, use Brain's `memory_search` tool to recall context \
-                     relevant to: \"{query}\". Summarize what you find, then answer the \
-                     question grounded in that recalled context. If nothing relevant is \
-                     stored, say so."
-                );
+                let text = RECALL_CONTEXT_TEMPLATE.replace("{query}", query);
                 Ok(prompt_result(
                     "Recall relevant memory for a query, then answer grounded in it.",
                     &text,
                 ))
             }
-            PROMPT_DAILY_REVIEW => {
-                let text = "Use Brain's `memory_episodes` tool to fetch recent activity, then \
-                     produce a short daily review: what happened, any decisions made, and \
-                     open loops or follow-ups worth surfacing. Keep it concise and actionable."
-                    .to_string();
-                Ok(prompt_result(
-                    "Review recent activity and surface open loops.",
-                    &text,
-                ))
-            }
+            PROMPT_DAILY_REVIEW => Ok(prompt_result(
+                "Review recent activity and surface open loops.",
+                DAILY_REVIEW_TEMPLATE,
+            )),
             other => Err((-32602, format!("Unknown prompt: {other}"))),
         }
     }

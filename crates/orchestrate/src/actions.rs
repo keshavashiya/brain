@@ -27,13 +27,7 @@ impl TaskOrchestrator {
         };
 
         let messages = vec![
-            cortex::llm::Message::system(
-                "You are a research assistant. Answer the user's research query \
-                 concisely with concrete facts and references where possible. \
-                 If the query asks about a specific codebase or filesystem path, \
-                 state plainly that you do not have direct access and ask the \
-                 orchestrator to delegate the work.",
-            ),
+            cortex::llm::Message::system(crate::prompts::RESEARCH_SYSTEM),
             cortex::llm::Message::user(query.to_string()),
         ];
 
@@ -63,11 +57,7 @@ impl TaskOrchestrator {
         };
 
         let messages = vec![
-            cortex::llm::Message::system(
-                "You are a code/report reviewer. Critique the artifact for \
-                 completeness, correctness, and obvious gaps. Surface concrete \
-                 issues, not platitudes. Keep the critique under 200 words.",
-            ),
+            cortex::llm::Message::system(crate::prompts::REVIEW_SYSTEM),
             cortex::llm::Message::user(format!("Review this artifact: {artifact}")),
         ];
 

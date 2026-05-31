@@ -18,6 +18,28 @@ use super::dispatch::{ActionAuth, ActionHandler, HandlerContext, NudgeFn};
 use crate::types::*;
 use crate::SignalProcessor;
 
+/// System prompt for grounding a chat answer in web-search material. Kept as a
+/// named constant (not inline at the call site) so every LLM prompt in this
+/// crate is auditable in one read.
+const WEB_SYNTHESIS_SYSTEM: &str = "You are Brain OS. Answer the user's question \
+     using the supplied research material. Be concise, \
+     cite sources by URL, and never invent content not \
+     present in the material.";
+
+/// Render the user-turn that hands the model the question + research material
+/// for web-search synthesis.
+fn web_synthesis_user(question: &str, material: &str) -> String {
+    format!(
+        "The user asked: \"{question}\"\n\nResearch material:\n{material}\n\n\
+         Answer the user's question grounded in the material above. \
+         The `Linked sources` block (when present) is content fetched \
+         directly from URLs the user pasted — treat it as authoritative \
+         over the generic search hits. Quote page titles and URLs when \
+         you reference them. If the material is silent on the user's \
+         question, say so honestly instead of speculating."
+    )
+}
+
 impl ActionAuth for SignalProcessor {
     fn auth_action(intent: &thalamus::Intent) -> Option<(AuthorizationRequest, Tier)> {
         match intent {
@@ -162,23 +184,9 @@ impl SignalProcessor {
                     if matches!(&action, cortex::actions::Action::WebSearch { .. })
                         && !result.output.is_empty()
                     {
-                        let search_context = format!(
-                            "The user asked: \"{}\"\n\nResearch material:\n{}\n\n\
-                             Answer the user's question grounded in the material above. \
-                             The `Linked sources` block (when present) is content fetched \
-                             directly from URLs the user pasted — treat it as authoritative \
-                             over the generic search hits. Quote page titles and URLs when \
-                             you reference them. If the material is silent on the user's \
-                             question, say so honestly instead of speculating.",
-                            signal.content, result.output
-                        );
+                        let search_context = web_synthesis_user(&signal.content, &result.output);
                         let messages = vec![
-                            cortex::llm::Message::system(
-                                "You are Brain OS. Answer the user's question \
-                                 using the supplied research material. Be concise, \
-                                 cite sources by URL, and never invent content not \
-                                 present in the material.",
-                            ),
+                            cortex::llm::Message::system(WEB_SYNTHESIS_SYSTEM),
                             cortex::llm::Message::user(search_context),
                         ];
                         match self.llm.generate(&messages).await {

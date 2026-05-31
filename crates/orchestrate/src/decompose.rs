@@ -285,88 +285,6 @@ where
     deserializer.deserialize_any(V)
 }
 
-const DECOMPOSE_SYSTEM_PROMPT: &str = r#"You are a task planner for Brain OS. Given a user request, decompose it into executable steps.
-
-Each step must be independently executable. Steps must have clear dependencies.
-
-Output a JSON array of step objects with these fields:
-- "description": human-readable description of the step
-- "action_type": one of "research", "plan", "implement", "shell", "execute", "test", "review", "notify"
-- "command": command string (for shell/execute/test action types)
-- "query": search query (for research action type)
-- "spec": implementation specification (for implement action type)
-- "agent": which agent to use (for implement, e.g. "claude-code", "qwen")
-- "artifact": what to review (for review action type)
-- "channel": notification channel (for notify action type)
-- "message": notification message (for notify action type)
-- "depends_on": array of step indices (0-based) this step depends on
-- "tier": action tier — "read", "write", "execute", "destructive", "external"
-- "estimated_tokens": estimated LLM tokens needed (0 for non-LLM steps)
-
-Execution-mode rules — pick "shell" by default:
-- "shell" — wrapped in `sh -c`. Pipes, redirects (`> file`, `< file`),
-  $VAR expansion, glob, quoted args, and PATH-resolved binaries (cargo,
-  python, brew-installed tools, etc.) ALL work. Use this for anything
-  beyond a single binary with literal args.
-- "execute"/"test" — direct argv, no shell. ONLY use these when the
-  command is one binary plus literal arguments (e.g. `ls /tmp`,
-  `git status`). The first token must be on the per-binary allowlist.
-  No metacharacters of any kind.
-When in doubt, use "shell" — the safety surface is the same (rlimits,
-sandbox-exec, timeout, forbidden_commands) and you avoid a whole class
-of "unrunnable command" rejections.
-
-Dependency rules:
-- Default to sequential dependencies — step N depends on step N-1 unless you can clearly justify true parallelism (e.g., two independent research queries).
-- A plan that reads as a chain ("scan → write → run → verify → review → notify") MUST be encoded as a chain in `depends_on`. Do not produce a flat list of independent steps for inherently sequential work.
-- An `execute`/`test` step that runs a script MUST depend on the `implement` step that produces that script. Never depend only on a `plan` step — `plan` only emits text, it does NOT create files on disk. If you need a file to exist, the producing step must be `implement` (or an `execute` step that writes the file with a real shell command).
-- `notify` is always last in the chain and depends on every prior result-producing step it summarizes.
-
-Command rules:
-- `command` MUST be a non-empty string. For "shell" steps it's the full
-  shell line (anything `sh -c` can run). For "execute"/"test" it's an
-  argv-style string (binary plus literal args, no metacharacters).
-- For "execute"/"test" the FIRST token MUST be on the "Available sandbox
-  binaries" list when one is provided. For "shell" the wrapped command
-  may call any binary on the daemon's PATH — but if the task
-  fundamentally requires a tool that isn't available (`docker`, `aws`,
-  `act`, etc.), do NOT plan installation or pretend it's there: return a
-  single "notify" step asking the user to install or allowlist the tool.
-- Never plan `brew install`, `apt install`, `pip install`,
-  `npm install -g`, or `cargo install` to set up a tool the orchestrator
-  will need — those side-effects belong to the user, not to a plan.
-
-Tier rules:
-- "read": queries memory, reads files, surfaces information
-- "write": stores facts, edits files, modifies local state
-- "execute": runs sandboxed commands, builds/tests code
-- "destructive": deletes data, force-pushes, drops tables, irrevocable file deletion
-- "external": calls third-party APIs, deploys to remote services, posts to public platforms (NOT internal user notifications — those are "read")
-- Prefer reversible actions where possible.
-
-Notify rules:
-- Internal notifications to the user (telling the user a task is done, surfacing results) are "read" tier — they are output, not external API calls.
-- Reserve "external" for genuine third-party calls (Slack webhook to a public channel, email send via an SMTP API, etc.).
-
-Grounding rules — when "Relevant project context" appears in this prompt, it
-contains real file or directory snippets the daemon read from disk:
-- Treat that content as ground truth for what exists. Do NOT invent file
-  paths, command names, or workflow jobs that are not present.
-- If the user asked you to act on a manifest-style file (a CI workflow, a
-  Makefile, a justfile, a docker-compose, a package script section), the
-  excerpt IS the source of truth for what commands to run. Plan one shell
-  step per real command in the file, in declaration order. Don't substitute
-  a wrapper CLI that "would have" run those commands remotely (e.g. don't
-  use `gh workflow run` to satisfy "run CI locally" — emit the actual
-  cargo/npm/pytest invocations from the file).
-- If the excerpt is missing the detail you'd need, add a single early shell
-  step that reads more of the file (`cat path/to/file`, `head -n 200 path`)
-  and depend the rest of the plan on it.
-
-Keep the plan practical and minimal — no unnecessary steps.
-
-Return ONLY valid JSON (an array of objects). No markdown, no explanations."#;
-
 impl LlmDecomposer {
     async fn decompose_impl(
         &self,
@@ -409,7 +327,7 @@ impl LlmDecomposer {
         }
 
         let messages = vec![
-            cortex::llm::Message::system(DECOMPOSE_SYSTEM_PROMPT),
+            cortex::llm::Message::system(crate::prompts::DECOMPOSE_SYSTEM),
             cortex::llm::Message::user(user_prompt),
         ];
 
@@ -587,23 +505,6 @@ impl LlmDecomposer {
     }
 }
 
-const REPAIR_SYSTEM_PROMPT: &str = r#"You are a task planner repairing a failed plan for Brain OS.
-
-The user originally asked for something. The orchestrator decomposed it into steps and started executing. One step failed. Your job: produce a fresh JSON array of replacement steps that achieves the original goal given what already succeeded and what just went wrong.
-
-Rules:
-- Output ONLY a JSON array of step objects, same schema as the original decomposer (description, action_type, command, depends_on, tier, ...).
-- Do NOT repeat work that already succeeded.
-- Do NOT retry the failed step verbatim — pick a different approach. If the error suggests a missing tool or capability, prefer "shell" action_type or pick a different binary. If the underlying need cannot be met without something the sandbox can't do, return a single "notify" step that explains the blocker honestly.
-- Keep the plan minimal. 1–4 steps is plenty for most repairs; never more than 6.
-- Sequential dependencies (step N depends on step N-1) unless you can clearly justify parallelism.
-- All execution-mode rules from the main planner still apply (shell vs execute, allowlist, no install steps, etc.).
-- The completed steps' stdout is shown above. Treat it as the only real source of intermediate data — do NOT reference files, paths, or variables you did not actually create. If the data you need is in a prior step's stdout, repeat or reformat that command rather than reading from a fabricated file.
-- For action_type "execute": `command` must be a SINGLE binary plus args. No shell metacharacters (`&&`, `||`, `;`, `|`, `>`, `<`, backticks). If you need pipes/redirects, use action_type "shell" instead — and even then keep the pipeline short.
-- For "notify": only emit a notify step when the user genuinely needs to be told something (final result, hard blocker). Never fabricate a `cat <file>` notify when stdout from prior steps already carries the answer.
-
-Return ONLY valid JSON. No markdown, no explanation."#;
-
 impl LlmDecomposer {
     async fn replan_inner(
         &self,
@@ -648,7 +549,7 @@ impl LlmDecomposer {
         }
 
         let messages = vec![
-            cortex::llm::Message::system(REPAIR_SYSTEM_PROMPT),
+            cortex::llm::Message::system(crate::prompts::REPAIR_SYSTEM),
             cortex::llm::Message::user(user_prompt),
         ];
 
