@@ -407,3 +407,47 @@ async fn test_default_generate_with_tools_ignores_tools() {
     assert_eq!(resp.content, "plain answer");
     assert!(resp.tool_calls.is_empty());
 }
+
+#[test]
+fn known_context_window_recognises_commercial_models() {
+    // Claude family — 200K.
+    assert_eq!(known_context_window("claude-opus-4-8"), Some(200_000));
+    assert_eq!(known_context_window("claude-3-5-sonnet"), Some(200_000));
+    assert_eq!(
+        known_context_window("anthropic/claude-haiku-4-5"),
+        Some(200_000)
+    );
+
+    // Gemini — 1M.
+    assert_eq!(known_context_window("gemini-2.5-pro"), Some(1_000_000));
+
+    // GPT family — turbo and 4o are 128K, base gpt-4 is 32K, 3.5 is 16K.
+    assert_eq!(known_context_window("gpt-4o-mini"), Some(128_000));
+    assert_eq!(known_context_window("gpt-4-turbo"), Some(128_000));
+    assert_eq!(known_context_window("gpt-4"), Some(32_000));
+    assert_eq!(known_context_window("gpt-3.5-turbo"), Some(16_000));
+
+    // Reasoning models.
+    assert_eq!(known_context_window("o1-preview"), Some(200_000));
+    assert_eq!(known_context_window("o3-mini"), Some(200_000));
+}
+
+#[test]
+fn known_context_window_recognises_open_models() {
+    assert_eq!(known_context_window("deepseek-r1"), Some(128_000));
+    assert_eq!(known_context_window("qwen2.5-coder:7b"), Some(128_000));
+    assert_eq!(known_context_window("llama3.1:8b"), Some(128_000));
+    assert_eq!(known_context_window("llama2:7b"), Some(8_192));
+    assert_eq!(known_context_window("mistral-large"), Some(128_000));
+    assert_eq!(known_context_window("mistral:7b"), Some(32_000));
+    // Size-suffix heuristic for unfamiliar OpenRouter community models.
+    assert_eq!(
+        known_context_window("openai/gpt-oss-120b:free"),
+        Some(131_072)
+    );
+}
+
+#[test]
+fn known_context_window_returns_none_for_unknown() {
+    assert_eq!(known_context_window("some-bespoke-tiny-model"), None);
+}

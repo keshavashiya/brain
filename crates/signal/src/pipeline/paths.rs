@@ -175,7 +175,7 @@ const NARRATIVE_EXTS: &[&str] = &[
 /// must wrap in `tokio::task::spawn_blocking` — current callers
 /// (`attachment::build_chat_attachments`, `collect_path_excerpts`) are
 /// themselves only invoked from `spawn_blocking` in `pipeline/`.
-pub(crate) fn build_directory_snapshot(root: &std::path::Path) -> String {
+pub(crate) fn build_directory_snapshot(root: &std::path::Path, char_budget: usize) -> String {
     let mut out = String::new();
 
     let mut entries: Vec<(String, bool)> = match std::fs::read_dir(root) {
@@ -197,13 +197,16 @@ pub(crate) fn build_directory_snapshot(root: &std::path::Path) -> String {
     entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     // (1) Entry listing — dirs first, then files, alphabetical within each.
+    // Scale listing density with available char budget so large-window
+    // models see more entries. Default budget ~7500 chars → 1× scale.
     out.push_str("Top-level entries:\n");
-    const MAX_LISTED: usize = 40;
+    let listing_budget = char_budget.max(7500);
+    let max_listed = (listing_budget * 40 / 7500).clamp(8, 500);
     for (i, (name, is_dir)) in entries.iter().enumerate() {
-        if i == MAX_LISTED {
+        if i == max_listed {
             out.push_str(&format!(
                 "  … (+{} more entries omitted)\n",
-                entries.len() - MAX_LISTED
+                entries.len() - max_listed
             ));
             break;
         }
@@ -241,11 +244,14 @@ pub(crate) fn build_directory_snapshot(root: &std::path::Path) -> String {
         }
     }
 
-    // (3) Inline up to MAX_INLINED readable top-level files. Narrative
+    // (3) Inline readable top-level files, scaled with budget. Narrative
     // extensions go first so README / _chat.txt / notes.md surface
     // ahead of arbitrary configs; everything else gets a chance after.
-    const MAX_INLINED: usize = 3;
-    const PROBE_BYTES: usize = 4 * 1024;
+    // Default budget (~7500 chars) → scale=1x → 3 files at 4KB each.
+    // A 128k-window model (~138K chars) → scale≈18x → 50 files at 72KB each.
+    let inline_scale = (char_budget / 7500).clamp(1, 64);
+    let max_inlined = (3usize.saturating_mul(inline_scale)).min(50);
+    let probe_bytes = (4usize * 1024).saturating_mul(inline_scale).min(256 * 1024);
     let ext_of = |name: &str| {
         std::path::Path::new(name)
             .extension()
@@ -260,11 +266,11 @@ pub(crate) fn build_directory_snapshot(root: &std::path::Path) -> String {
     };
     let mut inlined = 0usize;
     for narrative_first in [true, false] {
-        if inlined == MAX_INLINED {
+        if inlined == max_inlined {
             break;
         }
         for (name, is_dir) in &entries {
-            if inlined == MAX_INLINED {
+            if inlined == max_inlined {
                 break;
             }
             if *is_dir {
@@ -279,10 +285,11 @@ pub(crate) fn build_directory_snapshot(root: &std::path::Path) -> String {
                 }
             }
             let p = root.join(name);
-            match crate::extract::read_path_as_text(&p, PROBE_BYTES) {
+            match crate::extract::read_path_as_text(&p, probe_bytes) {
                 Ok(body) => {
                     out.push_str(&format!(
-                        "\n--- {name} (first {PROBE_BYTES} bytes) ---\n{body}\n"
+                        "\n--- {name} (first {} bytes) ---\n{body}\n",
+                        probe_bytes
                     ));
                     inlined += 1;
                 }
@@ -294,11 +301,15 @@ pub(crate) fn build_directory_snapshot(root: &std::path::Path) -> String {
     out
 }
 
-/// Snapshot of a single file: path + first 12 KB of content. Binary
-/// files are reported as such instead of being fed through.
-pub(crate) fn build_file_snapshot(p: &std::path::Path) -> String {
+/// Snapshot of a single file: path + content, capped at `char_budget`
+/// characters (effectively the attachment's share of the LLM context
+/// window). Floor of 12 KB so small-window models still get usable
+/// grounding. Binary files are reported as such instead of being fed
+/// through.
+pub(crate) fn build_file_snapshot(p: &std::path::Path, char_budget: usize) -> String {
+    let cap = char_budget.max(12 * 1024);
     let mut out = format!("File: {}\n\n", p.display());
-    out.push_str(&read_truncated(p, 12 * 1024));
+    out.push_str(&read_truncated(p, cap));
     out
 }
 
@@ -493,10 +504,13 @@ mod directory_snapshot_tests {
     use super::build_directory_snapshot;
     use std::fs;
 
+    /// Default char budget (~7500 chars = 2500 tokens × 3).
+    const TEST_BUDGET: usize = 7500;
+
     #[test]
     fn empty_directory_lists_no_entries_and_no_histogram() {
         let dir = tempfile::tempdir().unwrap();
-        let snap = build_directory_snapshot(dir.path());
+        let snap = build_directory_snapshot(dir.path(), TEST_BUDGET);
         assert!(snap.contains("Top-level entries:"));
         assert!(!snap.contains("File types:"));
         // No leftover editorial framing from the old anchor-hunt code.
@@ -526,7 +540,7 @@ mod directory_snapshot_tests {
             )
             .unwrap();
         }
-        let snap = build_directory_snapshot(dir.path());
+        let snap = build_directory_snapshot(dir.path(), TEST_BUDGET);
 
         assert!(
             snap.contains("_chat.txt"),
@@ -547,7 +561,7 @@ mod directory_snapshot_tests {
         for i in 0..3 {
             fs::write(dir.path().join(format!("a{i}.jpg")), [0u8, 0xff]).unwrap();
         }
-        let snap = build_directory_snapshot(dir.path());
+        let snap = build_directory_snapshot(dir.path(), TEST_BUDGET);
         assert!(snap.contains("3 .jpg"));
         // Binary files must not be inlined (and the BINARY_PROBE_SKIP
         // list short-circuits the probe before extract.rs even reads).
@@ -562,7 +576,7 @@ mod directory_snapshot_tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("notes.md"), "# Personal notes\n\nimportant").unwrap();
         fs::write(dir.path().join("settings.toml"), "key = \"value\"").unwrap();
-        let snap = build_directory_snapshot(dir.path());
+        let snap = build_directory_snapshot(dir.path(), TEST_BUDGET);
 
         let md_pos = snap.find("--- notes.md").expect("notes.md not inlined");
         let toml_pos = snap
@@ -585,7 +599,7 @@ mod directory_snapshot_tests {
             )
             .unwrap();
         }
-        let snap = build_directory_snapshot(dir.path());
+        let snap = build_directory_snapshot(dir.path(), TEST_BUDGET);
         let inlined_count = snap.matches("--- note").count();
         assert_eq!(inlined_count, 3, "should inline exactly 3 files:\n{snap}");
     }
@@ -598,7 +612,7 @@ mod directory_snapshot_tests {
         for i in 0..45 {
             fs::write(dir.path().join(format!("f{i:02}.dat")), "x").unwrap();
         }
-        let snap = build_directory_snapshot(dir.path());
+        let snap = build_directory_snapshot(dir.path(), TEST_BUDGET);
         assert!(
             snap.contains("+5 more entries omitted"),
             "overflow line missing:\n{snap}"

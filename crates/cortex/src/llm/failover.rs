@@ -118,4 +118,8 @@ impl LlmProvider for FalloverProvider {
             .list_models()
             .await
     }
+
+    async fn fetch_context_window(&self) -> Option<usize> {
+        self.providers.first()?.fetch_context_window().await
+    }
 }

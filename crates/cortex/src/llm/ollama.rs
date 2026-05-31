@@ -335,6 +335,49 @@ impl LlmProvider for OllamaProvider {
         let data: Tags = resp.json().await?;
         Ok(data.models.into_iter().map(|m| m.name).collect())
     }
+
+    async fn fetch_context_window(&self) -> Option<usize> {
+        // 1. API-based detection via /api/show (works for most Ollama models).
+        #[derive(Deserialize)]
+        struct ModelInfo {
+            #[serde(default)]
+            model_info: std::collections::HashMap<String, serde_json::Value>,
+        }
+
+        let from_api = (async {
+            let url = format!("{}/api/show", self.base_url);
+            let body = serde_json::json!({ "model": self.model });
+            let resp = self.client.post(&url).json(&body).send().await.ok()?;
+            let resp = ensure_ok(resp).await.ok()?;
+            let data: ModelInfo = resp.json().await.ok()?;
+
+            // Ollama exposes context length under various keys depending
+            // on the backend. Try known patterns.
+            for key in &[
+                "llama.context_length",
+                "gptneox.context_length",
+                "llama2.context_length",
+            ] {
+                if let Some(val) = data.model_info.get(*key) {
+                    if let Some(n) = val.as_u64().or_else(|| val.as_f64().map(|f| f as u64)) {
+                        let n = n as usize;
+                        // Sanity: reject anything below 512 (parse artifact).
+                        if n >= 512 {
+                            return Some(n);
+                        }
+                    }
+                }
+            }
+            None
+        })
+        .await;
+        if from_api.is_some() {
+            return from_api;
+        }
+
+        // 2. Model-name heuristics.
+        super::known_context_window(self.model())
+    }
 }
 
 /// Reverse of [`OllamaProvider::extract_tool_calls`]: render a kernel

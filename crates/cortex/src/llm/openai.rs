@@ -423,6 +423,54 @@ impl LlmProvider for OpenAiProvider {
         let data: Models = resp.json().await?;
         Ok(data.data.into_iter().map(|m| m.id).collect())
     }
+
+    async fn fetch_context_window(&self) -> Option<usize> {
+        // 1. API-based detection: some providers (OpenRouter) advertise
+        //    `context_length` per model in their /models response.
+        #[derive(Deserialize)]
+        struct ModelDetail {
+            id: String,
+            #[serde(default)]
+            context_length: Option<usize>,
+        }
+        #[derive(Deserialize)]
+        struct ModelsResponse {
+            data: Vec<ModelDetail>,
+        }
+
+        let from_api = (async {
+            let url = format!("{}/models", self.base_url);
+            let resp = self
+                .build_request(self.client.get(&url))
+                .send()
+                .await
+                .ok()?;
+            let resp = ensure_ok(resp).await.ok()?;
+            let data: ModelsResponse = resp.json().await.ok()?;
+            let active = self.model();
+            // Exact match first.
+            for model in &data.data {
+                if model.id == active {
+                    return model.context_length;
+                }
+            }
+            // Prefix match for OpenRouter model IDs like "openai/gpt-4o"
+            // where the config stores just "gpt-4o".
+            for model in &data.data {
+                if model.id.ends_with(active) || model.id.contains(active) {
+                    return model.context_length;
+                }
+            }
+            None
+        })
+        .await;
+        if from_api.is_some() {
+            return from_api;
+        }
+
+        // 2. Model-name heuristics (covers OpenAI, Groq, DeepSeek, etc.).
+        super::known_context_window(self.model())
+    }
 }
 
 /// Map the wire usage block into the kernel's [`Usage`].

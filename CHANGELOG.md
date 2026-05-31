@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Model context-window auto-detection.** On startup Brain probes the active
+  LLM provider for its real context window and scales the prompt budgets to
+  match, instead of clipping everything to the conservative default. Detection
+  uses the provider API where available (OpenRouter advertises `context_length`
+  per model; Ollama exposes it via `/api/show`) and falls back to model-name
+  heuristics for providers that don't (OpenAI, Groq, DeepSeek, and others). A
+  detected window only widens the budget — a value you set in
+  `llm.context_window` is never lowered, and a configured value larger than the
+  detected capacity is kept with a warning. The extra room flows into richer
+  grounding: path-attachment snapshots, directory listings, and the number of
+  recalled memories all scale with the available budget, so a 128k- or
+  1M-window model reads far more file content and surfaces more relevant
+  context than the 8k default.
 - **Learned capability fitness.** Brain now learns which tools actually work,
   not just which exist. After every tool dispatch it records a per-tool
   success/failure outcome (`learning.capability_fitness`, on by default), and

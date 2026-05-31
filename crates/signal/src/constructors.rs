@@ -184,9 +184,34 @@ impl SignalProcessor {
         let proactivity_enabled = Arc::new(std::sync::atomic::AtomicBool::new(
             config.proactivity.enabled,
         ));
+        // Auto-detect the model's context window when the provider exposes it
+        // (e.g. OpenRouter advertises `context_length` per model via /models).
+        // Only overrides the configured value when detected and strictly larger,
+        // so user-set values always win.
+        let context_window = {
+            let configured = config.llm.context_window;
+            match llm.fetch_context_window().await {
+                Some(probed) if probed > configured => {
+                    tracing::info!(
+                        configured = configured,
+                        detected = probed,
+                        "LLM context window auto-detected — scaling prompt budgets"
+                    );
+                    probed
+                }
+                Some(probed) if probed < configured => {
+                    tracing::warn!(
+                        configured = configured,
+                        detected = probed,
+                        "Configured context window exceeds detected model capacity — using configured value (may cause truncation)"
+                    );
+                    configured
+                }
+                _ => configured,
+            }
+        };
         // Capture before `config` is moved into the struct below — the prompt
         // assembler's budget scales to the model's real context window.
-        let context_window = config.llm.context_window;
         let processor = Self {
             config,
             classifier,

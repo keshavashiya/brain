@@ -16,7 +16,7 @@
 //! turn proceeds through the normal SOUL pipeline and Brain can mention
 //! the skip to the user if it's relevant.
 
-use cortex::context::{Attachment, SkippedAttachment};
+use cortex::context::{Attachment, SkippedAttachment, CHARS_PER_TOKEN};
 
 use crate::pipeline::{
     build_directory_snapshot, build_file_snapshot, expand_user_path, extract_path_tokens,
@@ -77,13 +77,24 @@ impl ChatAttachments {
 /// **Blocking.** Uses `std::fs::canonicalize` / `metadata` and the
 /// downstream snapshot builders. Async callers wrap this in
 /// `tokio::task::spawn_blocking` (see `pipeline/conversation.rs`).
-pub(crate) fn build_chat_attachments(message: &str, allowed_paths: &[String]) -> ChatAttachments {
+/// Build path-attachments for one chat turn.
+///
+/// `budget_tokens` is the attachment slice of the LLM's context window
+/// (see [`cortex::context::TokenBudget`]). Each attachment's snapshot is
+/// sized to its fair share so large-window models read far more file
+/// content than the conservative 8k-window default.
+pub(crate) fn build_chat_attachments(
+    message: &str,
+    allowed_paths: &[String],
+    budget_tokens: usize,
+) -> ChatAttachments {
+    let per_attachment = (budget_tokens * CHARS_PER_TOKEN) / MAX_CHAT_ATTACHMENTS;
     let mut out = ChatAttachments::default();
     for token in extract_path_tokens(message)
         .into_iter()
         .take(MAX_CHAT_ATTACHMENTS)
     {
-        match validate_and_snapshot(&token, allowed_paths) {
+        match validate_and_snapshot(&token, allowed_paths, per_attachment) {
             Ok(att) => out.attached.push(att),
             Err(reason) => out.skipped.push(SkippedAttachment {
                 display_path: token,
@@ -95,9 +106,14 @@ pub(crate) fn build_chat_attachments(message: &str, allowed_paths: &[String]) ->
 }
 
 /// Resolve, sandbox-check, and snapshot a single path token.
+///
+/// `char_budget` limits how much file/directory content is read, scaling
+/// with the model's context window so large-window models get richer
+/// grounding.
 pub(crate) fn validate_and_snapshot(
     token: &str,
     allowed_paths: &[String],
+    char_budget: usize,
 ) -> Result<Attachment, AttachmentSkipReason> {
     let expanded = expand_user_path(token);
     let requested = std::path::PathBuf::from(&expanded);
@@ -114,9 +130,9 @@ pub(crate) fn validate_and_snapshot(
         .map_err(|e| AttachmentSkipReason::NotFound(friendly_io_error(&e)))?;
 
     let snapshot = if metadata.is_dir() {
-        build_directory_snapshot(&canonical)
+        build_directory_snapshot(&canonical, char_budget)
     } else if metadata.is_file() {
-        build_file_snapshot(&canonical)
+        build_file_snapshot(&canonical, char_budget)
     } else {
         return Err(AttachmentSkipReason::UnsupportedKind);
     };
@@ -131,6 +147,9 @@ pub(crate) fn validate_and_snapshot(
 mod tests {
     use super::*;
 
+    /// Default attachment budget used in tests (~2500 tokens).
+    const TEST_BUDGET: usize = 2500;
+
     /// `tempfile::tempdir` lives under `/var/folders/…` on macOS, which
     /// is a symlink to `/private/var/folders/…`. We canonicalize here
     /// so allowed-root checks (which also canonicalize) compare apples
@@ -141,7 +160,7 @@ mod tests {
 
     #[test]
     fn no_path_tokens_yields_empty() {
-        let out = build_chat_attachments("hey how are you doing today", &[]);
+        let out = build_chat_attachments("hey how are you doing today", &[], TEST_BUDGET);
         assert!(out.is_empty());
     }
 
@@ -152,7 +171,7 @@ mod tests {
         std::fs::write(&p, "hello").unwrap();
         let root = canon(dir.path()).display().to_string();
 
-        let out = build_chat_attachments(&format!("read {}", p.display()), &[root]);
+        let out = build_chat_attachments(&format!("read {}", p.display()), &[root], TEST_BUDGET);
         assert_eq!(out.attached.len(), 1);
         assert!(out.skipped.is_empty());
         let att = &out.attached[0];
@@ -173,7 +192,8 @@ mod tests {
         .unwrap();
         let root = canon(dir.path()).display().to_string();
 
-        let out = build_chat_attachments(&format!("summarise {}", p.display()), &[root]);
+        let out =
+            build_chat_attachments(&format!("summarise {}", p.display()), &[root], TEST_BUDGET);
         assert_eq!(out.attached.len(), 1);
         let snapshot = &out.attached[0].snapshot;
         assert!(
@@ -199,7 +219,11 @@ mod tests {
         .unwrap();
         let root = canon(dir.path()).display().to_string();
 
-        let out = build_chat_attachments(&format!("look at {}", dir.path().display()), &[root]);
+        let out = build_chat_attachments(
+            &format!("look at {}", dir.path().display()),
+            &[root],
+            TEST_BUDGET,
+        );
         assert_eq!(out.attached.len(), 1);
         let snapshot = &out.attached[0].snapshot;
         assert!(
@@ -216,7 +240,11 @@ mod tests {
         std::fs::write(dir.path().join("b.txt"), "b").unwrap();
         let root = canon(dir.path()).display().to_string();
 
-        let out = build_chat_attachments(&format!("look at {}", dir.path().display()), &[root]);
+        let out = build_chat_attachments(
+            &format!("look at {}", dir.path().display()),
+            &[root],
+            TEST_BUDGET,
+        );
         assert_eq!(out.attached.len(), 1);
         let att = &out.attached[0];
         assert!(att.snapshot.contains("a.txt"));
@@ -233,7 +261,7 @@ mod tests {
         std::fs::write(&p, "nope").unwrap();
         let root = canon(sandbox.path()).display().to_string();
 
-        let out = build_chat_attachments(&format!("read {}", p.display()), &[root]);
+        let out = build_chat_attachments(&format!("read {}", p.display()), &[root], TEST_BUDGET);
         assert!(out.attached.is_empty());
         assert_eq!(out.skipped.len(), 1);
         assert!(
@@ -249,7 +277,11 @@ mod tests {
         let root = canon(dir.path()).display().to_string();
         let missing = dir.path().join("does-not-exist.txt");
 
-        let out = build_chat_attachments(&format!("summarise {}", missing.display()), &[root]);
+        let out = build_chat_attachments(
+            &format!("summarise {}", missing.display()),
+            &[root],
+            TEST_BUDGET,
+        );
         assert!(out.attached.is_empty());
         assert_eq!(out.skipped.len(), 1);
         assert_eq!(out.skipped[0].display_path, missing.display().to_string());
@@ -268,7 +300,7 @@ mod tests {
         }
         let message = format!("read {}", tokens.join(" and "));
 
-        let out = build_chat_attachments(&message, &[root]);
+        let out = build_chat_attachments(&message, &[root], TEST_BUDGET);
         assert_eq!(out.attached.len(), MAX_CHAT_ATTACHMENTS);
     }
 
@@ -283,7 +315,10 @@ mod tests {
             "tell me about Rust",
             "look at this issue",
         ] {
-            assert!(build_chat_attachments(msg, &[]).is_empty(), "msg: {msg}");
+            assert!(
+                build_chat_attachments(msg, &[], TEST_BUDGET).is_empty(),
+                "msg: {msg}"
+            );
         }
     }
 }

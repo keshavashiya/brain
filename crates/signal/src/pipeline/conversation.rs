@@ -64,7 +64,14 @@ impl SignalProcessor {
         prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
         progress: Option<&tokio::sync::mpsc::Sender<&'static str>>,
     ) -> Result<PipelineResult, SignalError> {
-        let top_k = self.config.memory.semantic.max_results as usize;
+        // Scale the number of memory recall candidates with the available
+        // memory budget so large-window models surface more relevant context
+        // instead of being clipped to the conservative static default.
+        let top_k_base = self.config.memory.semantic.max_results as usize;
+        let memory_budget = self.context_assembler.budget().memory_budget();
+        let top_k = top_k_base
+            .max(memory_budget / 50) // ~50 tokens per memory entry
+            .min(200); // sanity cap
         if let Some(tx) = progress {
             let _ = tx.try_send("searching…");
         }
@@ -155,8 +162,9 @@ impl SignalProcessor {
         let attachments = {
             let content_owned = content.clone();
             let allowed = self.config.security.allowed_paths.clone();
+            let budget = self.context_assembler.budget().attachments;
             tokio::task::spawn_blocking(move || {
-                crate::attachment::build_chat_attachments(&content_owned, &allowed)
+                crate::attachment::build_chat_attachments(&content_owned, &allowed, budget)
             })
             .await
             .map_err(|e| SignalError::Processing(format!("attachment task panicked: {e}")))?
