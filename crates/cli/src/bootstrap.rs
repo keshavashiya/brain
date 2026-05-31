@@ -258,12 +258,16 @@ pub async fn build_processor(
     processor = wire_safety_infrastructure(processor, config, sandbox_executor).await?;
 
     // Product self-model — grounds the SOUL in Brain's own surface (real CLI
-    // commands walked from clap, config schema sliced from the embedded
-    // defaults, policy invariants) so it answers product questions from
-    // code-derived truth instead of fabricating commands/config keys.
-    let self_model = brain::ProductSelfModel::new(crate::selfmodel::command_catalog());
+    // commands walked from clap, in-chat signals walked from the SIGNALS table,
+    // config schema sliced from the embedded defaults, policy invariants) so it
+    // answers product questions from code-derived truth instead of fabricating
+    // commands/signals/config keys.
+    let self_model = brain::ProductSelfModel::new(
+        crate::selfmodel::command_catalog(),
+        crate::chat::signal_catalog(),
+    );
     processor = processor.with_product_self_model(Arc::new(self_model));
-    tracing::info!("Product self-model wired (commands + config schema + policy)");
+    tracing::info!("Product self-model wired (commands + signals + config schema + policy)");
 
     Ok(processor)
 }

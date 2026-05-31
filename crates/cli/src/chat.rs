@@ -63,6 +63,21 @@ const SIGNALS: &[Signal] = &[
     },
 ];
 
+/// The REPL signals rendered as product-self-model docs, so the SOUL's
+/// grounding lists the real in-chat commands (`/help`, `/status`, …) instead of
+/// inventing plausible ones like `/msg`. [`SIGNALS`] stays the single source of
+/// truth — the clap-walked [`crate::selfmodel::command_catalog`] is its CLI
+/// counterpart.
+pub(crate) fn signal_catalog() -> Vec<brain::SignalDoc> {
+    SIGNALS
+        .iter()
+        .map(|s| brain::SignalDoc {
+            name: s.name.to_string(),
+            summary: s.summary.to_string(),
+        })
+        .collect()
+}
+
 /// Space-separated list of canonical signal names, for the banner and the
 /// unknown-signal hint.
 fn signals_line() -> String {
@@ -1211,6 +1226,21 @@ mod tests {
         for sig in SIGNALS {
             assert!(line.contains(sig.name), "banner missing {}", sig.name);
         }
+    }
+
+    #[test]
+    fn signal_catalog_mirrors_the_signals_table() {
+        let catalog = signal_catalog();
+        assert_eq!(catalog.len(), SIGNALS.len());
+        for (doc, sig) in catalog.iter().zip(SIGNALS) {
+            assert_eq!(doc.name, sig.name);
+            assert_eq!(doc.summary, sig.summary);
+        }
+        // The real in-chat signals are present so the self-model can ground
+        // them; the phantom the SOUL once fabricated is not.
+        let names: Vec<&str> = catalog.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"/status"));
+        assert!(!names.contains(&"/msg"));
     }
 
     #[test]

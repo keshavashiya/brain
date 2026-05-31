@@ -515,7 +515,7 @@ mod tests {
     }
 
     use crate::SignalProcessor;
-    use brain::{BrainConfig, CommandDoc, ProductSelfModel};
+    use brain::{BrainConfig, CommandDoc, ProductSelfModel, SignalDoc};
     use std::sync::Arc;
 
     async fn make_processor() -> SignalProcessor {
@@ -528,11 +528,17 @@ mod tests {
     }
 
     fn self_model() -> Arc<ProductSelfModel> {
-        Arc::new(ProductSelfModel::new(vec![CommandDoc {
-            name: "chat".to_string(),
-            summary: "interactive chat session".to_string(),
-            args: vec![],
-        }]))
+        Arc::new(ProductSelfModel::new(
+            vec![CommandDoc {
+                name: "chat".to_string(),
+                summary: "interactive chat session".to_string(),
+                args: vec![],
+            }],
+            vec![SignalDoc {
+                name: "/status".to_string(),
+                summary: "show cortex, memory, and synapse status".to_string(),
+            }],
+        ))
     }
 
     #[tokio::test]

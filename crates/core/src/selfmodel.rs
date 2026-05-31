@@ -35,6 +35,19 @@ pub struct CommandDoc {
     pub args: Vec<String>,
 }
 
+/// One in-chat REPL signal (slash-command), derived from the binary crate's
+/// `SIGNALS` table. The CLI subcommands ([`CommandDoc`]) are the *outer*
+/// surface (`brain …`); these are the *inner* surface available while a chat
+/// session is open (`/status`, `/clear`, …). Modeling them stops the SOUL
+/// inventing plausible-but-nonexistent signals like `/msg`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SignalDoc {
+    /// Canonical signal name including the leading slash, e.g. `/status`.
+    pub name: String,
+    /// One-line description.
+    pub summary: String,
+}
+
 /// A top-level slice of the embedded default config, anchored on one of the
 /// `# ── … ──` banner comments. Body is the verbatim YAML + comments — the
 /// comments are the descriptions, so they ride along unmodified.
@@ -57,12 +70,20 @@ const POLICY_FACTS: &[&str] = &[
      entry is `{ url, body, headers }`) or a long-lived WebSocket gateway under \
      `channel.relays`. There is no `channels.telegram.token` / `chat_id` / `parse_mode` \
      schema — platform specifics live inside the `url`/`body` you provide.",
+    "Once a channel is configured, you CAN send: a natural request like \
+     \"send via <channel> to <recipient>: <message>\" routes as a gated messaging \
+     action (External tier — it asks for confirmation, then delivers over the \
+     configured webhook/relay). This is an action, not a CLI command or a `/`-signal; \
+     if no channel is configured, say so and point to `actions.messaging.channels`.",
     "Brain is local-first: it runs entirely on the user's machine; memories and \
      credentials never leave it.",
     "Config lives at `~/.brain/config.yaml`. Any key can be overridden by an \
      environment variable named `BRAIN_<SECTION>__<KEY>` (e.g. `BRAIN_LLM__API_KEY`).",
     "Brain is not a cloud service or a generic chatbot wrapper — it is a local \
      cognitive/memory engine driven by the fixed set of CLI commands listed above.",
+    "There is no `brain restart`, `brain reload`, or `brain send` command — restart \
+     by running `brain stop` then `brain start`. Compose any multi-step operation \
+     from the commands and in-chat signals listed above; never invent a new verb.",
 ];
 
 /// Per-section cap on rendered config body, so a comment-heavy section can't
@@ -74,16 +95,20 @@ const MAX_SECTION_CHARS: usize = 1600;
 #[derive(Debug, Clone)]
 pub struct ProductSelfModel {
     commands: Vec<CommandDoc>,
+    signals: Vec<SignalDoc>,
     config_sections: Vec<ConfigSection>,
     policy_facts: &'static [&'static str],
 }
 
 impl ProductSelfModel {
-    /// Build from the clap-derived command catalog. Config sections and policy
-    /// facts are sourced internally from this crate's embedded defaults.
-    pub fn new(commands: Vec<CommandDoc>) -> Self {
+    /// Build from the binary crate's code-derived catalogs: the clap-walked CLI
+    /// `commands` and the `SIGNALS`-table-walked in-chat `signals`. Config
+    /// sections and policy facts are sourced internally from this crate's
+    /// embedded defaults.
+    pub fn new(commands: Vec<CommandDoc>, signals: Vec<SignalDoc>) -> Self {
         Self {
             commands,
+            signals,
             config_sections: parse_config_sections(crate::config::DEFAULT_CONFIG),
             policy_facts: POLICY_FACTS,
         }
@@ -115,6 +140,21 @@ impl ProductSelfModel {
                     out.push_str(&format!("- brain {}{}\n", cmd.name, args));
                 } else {
                     out.push_str(&format!("- brain {}{} — {}\n", cmd.name, args, cmd.summary));
+                }
+            }
+        }
+
+        if !self.signals.is_empty() {
+            out.push_str(
+                "\nIn-chat signals, typed inside a `brain chat` session (the complete set — \
+                 there are no others; none of these send a message — messaging is a gated \
+                 channel action, see Policy below):\n",
+            );
+            for sig in &self.signals {
+                if sig.summary.is_empty() {
+                    out.push_str(&format!("- {}\n", sig.name));
+                } else {
+                    out.push_str(&format!("- {} — {}\n", sig.name, sig.summary));
                 }
             }
         }
@@ -274,18 +314,30 @@ mod tests {
     use super::*;
 
     fn model() -> ProductSelfModel {
-        ProductSelfModel::new(vec![
-            CommandDoc {
-                name: "chat".to_string(),
-                summary: "interactive chat session".to_string(),
-                args: vec!["message".to_string()],
-            },
-            CommandDoc {
-                name: "status".to_string(),
-                summary: "show system vitals".to_string(),
-                args: vec![],
-            },
-        ])
+        ProductSelfModel::new(
+            vec![
+                CommandDoc {
+                    name: "chat".to_string(),
+                    summary: "interactive chat session".to_string(),
+                    args: vec!["message".to_string()],
+                },
+                CommandDoc {
+                    name: "status".to_string(),
+                    summary: "show system vitals".to_string(),
+                    args: vec![],
+                },
+            ],
+            vec![
+                SignalDoc {
+                    name: "/status".to_string(),
+                    summary: "show cortex, memory, and synapse status".to_string(),
+                },
+                SignalDoc {
+                    name: "/quit".to_string(),
+                    summary: "go dormant and exit chat".to_string(),
+                },
+            ],
+        )
     }
 
     #[test]
@@ -317,10 +369,28 @@ mod tests {
     #[test]
     fn commands_are_listed_and_phantoms_absent() {
         let grounding = model().render_grounding("what commands can I run", 1);
-        assert!(grounding.contains("brain chat"));
-        assert!(grounding.contains("brain status"));
-        assert!(!grounding.contains("brain send"));
-        assert!(!grounding.contains("brain reload"));
+        assert!(grounding.contains("- brain chat"));
+        assert!(grounding.contains("- brain status"));
+        // Phantoms must not appear as *available* commands (rendered bullets).
+        // The lifecycle policy fact may name them in a negation, so we check the
+        // bullet form rather than a blanket substring.
+        assert!(!grounding.contains("- brain send"));
+        assert!(!grounding.contains("- brain reload"));
+        assert!(!grounding.contains("- brain restart"));
+        // …and that policy fact pins the no-restart invariant the SOUL
+        // fabricated in the end-user transcript.
+        assert!(grounding.contains("no `brain restart`"));
+    }
+
+    #[test]
+    fn in_chat_signals_are_listed_and_phantoms_absent() {
+        let grounding = model().render_grounding("how do I send a message in chat", 1);
+        // Real signals from the SIGNALS table are grounded…
+        assert!(grounding.contains("/status"));
+        assert!(grounding.contains("/quit"));
+        assert!(grounding.contains("In-chat signals"));
+        // …and the phantom signal from the transcript is not introduced.
+        assert!(!grounding.contains("/msg"));
     }
 
     #[test]
