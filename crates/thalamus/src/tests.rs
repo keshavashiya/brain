@@ -1263,3 +1263,247 @@ fn intent_category_serde_wire_form_is_stable() {
         assert_eq!(back, cat);
     }
 }
+
+// ── Taxonomy drift guards (F1/F2) ──────────────────────────────────────────
+//
+// `taxonomy::INTENT_SPECS` is the single source of truth for the control-plane
+// vocabulary. These four tests make any drift between the `Intent` enum, the
+// `PATTERNS` regex table, and the `CLASSIFIER_SYSTEM_PROMPT` a test failure
+// instead of a silent natural-language regression.
+
+mod taxonomy_drift_guards {
+    use super::*;
+    use crate::taxonomy::{spec_for_key, NlRouting, INTENT_SPECS};
+
+    /// One representative value of every `Intent` variant. Hand-maintained,
+    /// paired with the compiler-exhaustive [`Intent::key`]: adding a variant
+    /// forces a new `key()` arm (compile error), and the completeness test
+    /// below fails until this list and `INTENT_SPECS` gain the matching row.
+    fn sample_intents() -> Vec<Intent> {
+        use intent::{IntentToken, Object, Provenance, Verb};
+        let s = String::new;
+        vec![
+            // Inspection
+            Intent::Recall { query: s() },
+            Intent::MemorySummary,
+            Intent::SystemStatus,
+            Intent::ProactivityStatus,
+            Intent::BudgetStatus { window: None },
+            Intent::ListApprovals { status: None },
+            Intent::ListStandingApprovals,
+            Intent::ListSchedules,
+            Intent::ListTasks,
+            Intent::TaskStatus { task_id: s() },
+            Intent::QueryAgents { filter: s() },
+            Intent::QueryAudit {
+                filter: None,
+                since: None,
+                limit: None,
+            },
+            Intent::ListChannels,
+            Intent::ChannelPreferences {
+                namespace: None,
+                category: None,
+            },
+            Intent::ListTerminalSessions,
+            Intent::ListMcpServers,
+            Intent::ListCapabilities,
+            // Memory
+            Intent::StoreFact {
+                subject: s(),
+                predicate: s(),
+                object: s(),
+            },
+            Intent::Forget { target: s() },
+            // Action
+            Intent::ExecuteCommand {
+                command: s(),
+                args: Vec::new(),
+            },
+            Intent::WebSearch { query: s() },
+            Intent::SendMessage {
+                channel: s(),
+                recipient: s(),
+                content: s(),
+            },
+            Intent::DelegateTask {
+                agent: s(),
+                prompt: s(),
+            },
+            // Lifecycle
+            Intent::Schedule {
+                description: s(),
+                cron: None,
+            },
+            Intent::CancelSchedule { id: s() },
+            Intent::DecomposeTask { request: s() },
+            Intent::CancelTask { task_id: s() },
+            Intent::CancelSignal { signal_id: s() },
+            Intent::OpenTerminalSession {
+                program: s(),
+                args: Vec::new(),
+                cwd: None,
+            },
+            Intent::CloseTerminalSession { session_id: s() },
+            Intent::MountMcpServer {
+                name: s(),
+                transport: s(),
+                command_or_url: s(),
+            },
+            Intent::UnmountMcpServer { name: s() },
+            // Governance
+            Intent::RespondToApproval {
+                nonce: s(),
+                decision: s(),
+            },
+            Intent::RevokeStandingApproval { id: s() },
+            Intent::PruneAudit { older_than: s() },
+            Intent::SetChannelPreference {
+                channel: s(),
+                category: s(),
+                weight: 0.0,
+                pinned: false,
+            },
+            Intent::SetProactivity {
+                enabled: true,
+                until: None,
+            },
+            // Capability
+            Intent::ToolCall(Box::new(IntentToken::new(
+                Verb::new("ns", "action"),
+                Object {
+                    kind: "intent_args".into(),
+                    value: serde_json::Value::Null,
+                },
+                Provenance::User {
+                    raw_input: s(),
+                    ui_origin: None,
+                    ts: chrono::Utc::now(),
+                },
+                "personal".into(),
+            ))),
+            // Conversation
+            Intent::Chat { content: s() },
+        ]
+    }
+
+    /// Guard 1 — completeness: every `Intent` variant has exactly one
+    /// `IntentSpec`, and the table has no orphan rows. A new variant without a
+    /// spec (or a spec without a variant) trips this.
+    #[test]
+    fn every_variant_has_exactly_one_spec() {
+        let samples = sample_intents();
+
+        // No duplicate keys in the table, and the table is a bijection with
+        // the sample set (which covers every variant — see `sample_intents`).
+        let spec_keys: std::collections::BTreeSet<&str> =
+            INTENT_SPECS.iter().map(|s| s.key).collect();
+        assert_eq!(
+            spec_keys.len(),
+            INTENT_SPECS.len(),
+            "duplicate key in INTENT_SPECS"
+        );
+
+        let sample_keys: std::collections::BTreeSet<&str> =
+            samples.iter().map(|i| i.key()).collect();
+        assert_eq!(
+            sample_keys.len(),
+            samples.len(),
+            "two sample intents share a key() — sample list is malformed"
+        );
+
+        assert_eq!(
+            sample_keys, spec_keys,
+            "Intent variants and INTENT_SPECS disagree. Add the missing \
+             IntentSpec row (and a sample_intents() entry) for any new variant, \
+             or remove the orphan spec row."
+        );
+    }
+
+    /// Guard 2 — category agreement: `Intent::category()` must match the
+    /// category declared in the spec table for every variant.
+    #[test]
+    fn category_matches_spec_for_every_variant() {
+        for intent in sample_intents() {
+            let spec = spec_for_key(intent.key())
+                .unwrap_or_else(|| panic!("no spec for key {:?}", intent.key()));
+            assert_eq!(
+                intent.category(),
+                spec.category,
+                "category mismatch for {:?}: enum says {:?}, table says {:?}",
+                intent.key(),
+                intent.category(),
+                spec.category,
+            );
+        }
+    }
+
+    /// Guard 3 — regex coverage: every `PATTERNS` entry maps to a known,
+    /// non-slash-only spec, and every `RegexOnly` verb actually has at least
+    /// one regex (so it can't silently lose its only NL surface).
+    #[test]
+    fn regex_coverage_agrees_with_table() {
+        use std::collections::BTreeSet;
+
+        let regex_keys: BTreeSet<&str> = PATTERNS.iter().map(|p| p.base_intent.key()).collect();
+
+        for key in &regex_keys {
+            let spec = spec_for_key(key)
+                .unwrap_or_else(|| panic!("PATTERNS entry {key:?} has no IntentSpec row"));
+            assert_ne!(
+                spec.nl_routable,
+                NlRouting::SlashOnly,
+                "{key:?} is marked SlashOnly but has a regex in PATTERNS — \
+                 update its NlRouting to RegexOnly or LlmFallback",
+            );
+        }
+
+        for spec in INTENT_SPECS {
+            if spec.nl_routable == NlRouting::RegexOnly {
+                assert!(
+                    regex_keys.contains(spec.key),
+                    "{:?} is RegexOnly but has no PATTERNS entry — its only \
+                     natural-language surface is gone",
+                    spec.key,
+                );
+            }
+        }
+    }
+
+    /// Guard 4 — prompt coverage: the classifier prompt's "Valid intents:"
+    /// line lists exactly the `LlmFallback` keys, no more and no less. This
+    /// pins the documented "26 of 39 NL-routable" gap as a conscious per-verb
+    /// choice — adding an `LlmFallback` verb without listing it in the prompt
+    /// (or vice versa) fails here.
+    #[test]
+    fn prompt_lists_exactly_the_llm_fallback_keys() {
+        use std::collections::BTreeSet;
+
+        let prompt = super::CLASSIFIER_SYSTEM_PROMPT;
+        let line = prompt
+            .lines()
+            .find(|l| l.starts_with("Valid intents:"))
+            .expect("prompt must have a 'Valid intents:' line");
+        let listed: BTreeSet<&str> = line
+            .trim_start_matches("Valid intents:")
+            .trim()
+            .trim_end_matches('.')
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let expected: BTreeSet<&str> = INTENT_SPECS
+            .iter()
+            .filter(|s| s.nl_routable == NlRouting::LlmFallback)
+            .map(|s| s.key)
+            .collect();
+
+        assert_eq!(
+            listed, expected,
+            "classifier prompt's 'Valid intents:' line has drifted from the \
+             LlmFallback set in INTENT_SPECS. Update the prompt or the table's \
+             nl_routable so they agree.",
+        );
+    }
+}

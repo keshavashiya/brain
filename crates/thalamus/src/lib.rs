@@ -13,6 +13,7 @@ use thiserror::Error;
 
 mod classifier;
 mod router;
+pub mod taxonomy;
 
 #[cfg(test)]
 mod tests;
@@ -288,6 +289,64 @@ impl Intent {
 
             // ── Conversation ──────────────────────────────────────────────
             Intent::Chat { .. } => IntentCategory::Conversation,
+        }
+    }
+
+    /// Stable snake_case wire key for this intent — the identifier shared by
+    /// the LLM classifier prompt/parser, the `PATTERNS` regex table, and the
+    /// [`taxonomy::INTENT_SPECS`](crate::taxonomy::INTENT_SPECS) source of
+    /// truth. Exhaustive over all variants, so adding a new variant without
+    /// declaring its key is a compile error — the forcing function that keeps
+    /// the vocabulary from drifting. The drift-guard tests assert every key
+    /// here has exactly one `IntentSpec` row.
+    pub fn key(&self) -> &'static str {
+        match self {
+            // ── Inspection ────────────────────────────────────────────────
+            Intent::Recall { .. } => "recall",
+            Intent::MemorySummary => "memory_summary",
+            Intent::SystemStatus => "system_status",
+            Intent::ProactivityStatus => "proactivity_status",
+            Intent::BudgetStatus { .. } => "budget_status",
+            Intent::ListApprovals { .. } => "list_approvals",
+            Intent::ListStandingApprovals => "list_standing_approvals",
+            Intent::ListSchedules => "list_schedules",
+            Intent::ListTasks => "list_tasks",
+            Intent::TaskStatus { .. } => "task_status",
+            Intent::QueryAgents { .. } => "query_agents",
+            Intent::QueryAudit { .. } => "query_audit",
+            Intent::ListChannels => "list_channels",
+            Intent::ChannelPreferences { .. } => "channel_preferences",
+            Intent::ListTerminalSessions => "list_terminal_sessions",
+            Intent::ListMcpServers => "list_mcp_servers",
+            Intent::ListCapabilities => "list_capabilities",
+            // ── Memory ────────────────────────────────────────────────────
+            Intent::StoreFact { .. } => "store_fact",
+            Intent::Forget { .. } => "forget",
+            // ── Action ────────────────────────────────────────────────────
+            Intent::ExecuteCommand { .. } => "execute_command",
+            Intent::WebSearch { .. } => "web_search",
+            Intent::SendMessage { .. } => "send_message",
+            Intent::DelegateTask { .. } => "delegate_task",
+            // ── Lifecycle ─────────────────────────────────────────────────
+            Intent::Schedule { .. } => "schedule",
+            Intent::CancelSchedule { .. } => "cancel_schedule",
+            Intent::DecomposeTask { .. } => "decompose_task",
+            Intent::CancelTask { .. } => "cancel_task",
+            Intent::CancelSignal { .. } => "cancel_signal",
+            Intent::OpenTerminalSession { .. } => "open_terminal_session",
+            Intent::CloseTerminalSession { .. } => "close_terminal_session",
+            Intent::MountMcpServer { .. } => "mount_mcp_server",
+            Intent::UnmountMcpServer { .. } => "unmount_mcp_server",
+            // ── Governance ────────────────────────────────────────────────
+            Intent::RespondToApproval { .. } => "respond_to_approval",
+            Intent::RevokeStandingApproval { .. } => "revoke_standing_approval",
+            Intent::PruneAudit { .. } => "prune_audit",
+            Intent::SetChannelPreference { .. } => "set_channel_preference",
+            Intent::SetProactivity { .. } => "set_proactivity",
+            // ── Capability ────────────────────────────────────────────────
+            Intent::ToolCall(_) => "tool_call",
+            // ── Conversation ──────────────────────────────────────────────
+            Intent::Chat { .. } => "chat",
         }
     }
 
