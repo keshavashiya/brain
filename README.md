@@ -492,7 +492,7 @@ Action intents routed by Thalamus (`web_search`, `schedule_task`, `send_message`
 actions:
   scheduling:
     enabled: false
-    mode: "persist_only"    # SQLite persist + background poller fires due intents
+    mode: "persist_only"    # SQLite persist; due intents fired by CronReflex (reflex.cron.enabled)
 ```
 
 **Resilience** (shared by all HTTP backends):

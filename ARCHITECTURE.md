@@ -35,7 +35,9 @@ brain/
 │   ├── thalamus/       # Intent classification — the primary user-facing surface
 │   │                     Regex fast-path (compiled at startup) + async LLM fallback with timeout
 │   │                     Intent surface (grouped, ~39 variants — see `crates/thalamus/src/lib.rs`):
-│   │                       memory:    StoreFact, Recall, Forget, MemorySummary, ProjectInspect
+│   │                       memory:    StoreFact, Recall, Forget, MemorySummary
+│   │                                  (path references in chat are read as attachments, not a
+│   │                                   separate intent — the old ProjectInspect intent was removed)
 │   │                       chat:      Chat, SystemStatus, ProactivityStatus, SetProactivity
 │   │                       actions:   WebSearch, ExecuteCommand, SendMessage,
 │   │                                  Schedule, ListSchedules, CancelSchedule
@@ -47,7 +49,7 @@ brain/
 │   │                                  CancelTask, CancelSignal
 │   │                       agents:    QueryAgents, DelegateTask
 │   │                       mcp:       MountMcpServer, UnmountMcpServer, ListMcpServers,
-│   │                                  ToolCall(IntentToken)
+│   │                                  ListCapabilities, ToolCall(IntentToken)
 │   │                       terminal:  OpenTerminalSession, CloseTerminalSession,
 │   │                                  ListTerminalSessions
 │   │                       channels:  ChannelPreferences, SetChannelPreference, ListChannels
@@ -325,7 +327,7 @@ SignalProcessor::process(&signal)
      │                 → EpisodicStore::store_episode(assistant turn)
      │
      │     WebSearch   → ActionDispatcher::web_search (SearXNG / Tavily / custom HTTP)
-     │     Schedule    → ActionDispatcher::schedule_task (SQLite persist + background poller)
+     │     Schedule    → ActionDispatcher::schedule_task (SQLite persist; fired by CronReflex)
      │     SendMessage → ActionDispatcher::send_message (webhook POST with template)
      │     Command     → ActionDispatcher::execute_command (allowlist + timeout)
      │
@@ -336,6 +338,15 @@ SignalProcessor::process(&signal)
 ```
 
 The `SignalResponse` is returned directly to the calling adapter, which sends it back in the protocol-appropriate format.
+
+### Two routing planes
+
+Classification feeds **two distinct routing planes**, and they have opposite dynamism properties — keeping them separate is deliberate:
+
+- **Control plane** — Brain's own fixed verbs (memory ops, schedules, tasks, approvals, budget, channels, terminal/MCP lifecycle). These live in the closed `Intent` enum and are matched by the regex fast-path + the LLM fallback's static taxonomy. This is the kernel's *syscall table*: it is fixed by design, not discovered at runtime. (The LLM fallback covers the natural-language subset of these; the lifecycle/terminal/MCP/channel verbs are reached via deterministic `/slash` forms and narrow regexes.)
+- **Capability plane** — open-ended tool/agent invocation. Routed as `Intent::ToolCall(IntentToken)` → SIT → `CapabilityIndex` (semantic hybrid scoring) → `ToolRegistry`. This is fully **runtime-dynamic**: mounted MCP servers, native backends, and registered agents populate the index on mount and are retrieved top-k by relevance. There are exactly two `ToolCall` producers by design — the explicit `/tool <ns>.<action>` form and the chat **tool-loop** (the reasoner proposes calls in-band with full schemas). The classifier deliberately does **not** guess tools from free text; that belongs to the tool-loop.
+
+The resident reasoner (SOUL) is grounded against the **capability plane** every turn via a live capability digest + product self-model (`signal/pipeline/conversation.rs`). The classifier prompt is *not* yet fed that live manifest — it reasons about the fixed control-plane taxonomy only.
 
 ---
 
@@ -625,7 +636,7 @@ processor.shutdown();           // WAL checkpoint
 | Memory consolidation | Yes | 24 hours |
 | Proactivity / habit detection | Yes | `min_interval_minutes` (60) |
 | Open-loop detection | Yes | `check_interval_minutes` (120) |
-| Scheduled intent poller | No | 60 seconds |
+| Cron reflex (scheduled-intent firing) | `reflex.cron.enabled` | per-schedule cron tick |
 
 ---
 
