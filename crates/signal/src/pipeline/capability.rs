@@ -228,6 +228,35 @@ fn token_to_action(token: &intent::IntentToken) -> Option<cortex::actions::Actio
     }
 }
 
+/// Native / terminal SIT verbs the chat tool-loop can actually execute via the
+/// shared [`ActionDispatcher`](cortex::actions::ActionDispatcher) — exactly the
+/// set [`token_to_action`] maps. The single source of truth the tool-loop
+/// advertiser ([`SignalProcessor::advertised_tools`](crate::SignalProcessor))
+/// consults so it never surfaces a verb it can't dispatch.
+///
+/// This is the F6 fix: native backends register into the `ToolRegistry` so the
+/// reasoner is *aware* of them, but verbs like `fs.read`, `memory.delete`,
+/// `schedule.cancel`, and the `terminal.*` lifecycle verbs are reachable only
+/// through *other* paths (path-grounding, the `Forget`/`CancelSchedule`
+/// intents, the terminal bridge) — not this loop. Advertising them here would
+/// let the SOUL over-promise. A drift-guard test keeps this list in lockstep
+/// with `token_to_action`.
+pub(crate) const TOOL_LOOP_NATIVE_VERBS: &[(&str, &str)] = &[
+    ("net", "http"),
+    ("shell", "exec"),
+    ("memory", "store"),
+    ("schedule", "create"),
+    ("notify", "send"),
+];
+
+/// True when a native- or terminal-sourced verb has a chat-tool-loop executor
+/// (i.e. [`token_to_action`] maps it). MCP-sourced verbs are dispatched by the
+/// router/host on a separate path and are always loop-dispatchable, so this
+/// predicate is only consulted for native/terminal sources.
+pub(crate) fn native_verb_executable_in_tool_loop(ns: &str, action: &str) -> bool {
+    TOOL_LOOP_NATIVE_VERBS.contains(&(ns, action))
+}
+
 /// Per-verb hint for native verbs that have no chat-loop executor, so the
 /// model can tell the user the real path instead of a bare failure.
 fn native_unexecutable_hint(ns: &str, action: &str) -> &'static str {
@@ -465,6 +494,53 @@ mod tool_call_dispatch_tests {
         assert!(token_to_action(&token_with_args("fs", "read", serde_json::json!({}))).is_none());
         // Missing the required field also yields None (no half-built action).
         assert!(token_to_action(&token_with_args("net", "http", serde_json::json!({}))).is_none());
+    }
+
+    /// Drift guard for F6: the advertised-verb allowlist
+    /// (`TOOL_LOOP_NATIVE_VERBS`) and the actual executor (`token_to_action`)
+    /// must stay in lockstep. Every allowlisted verb maps to an Action when
+    /// given well-formed args; the known advertised-but-unexecutable verbs do
+    /// not. If someone adds a `token_to_action` arm without listing the verb
+    /// (or vice versa), this fails.
+    #[test]
+    fn tool_loop_native_verbs_agree_with_token_to_action() {
+        // Representative well-formed args per allowlisted verb.
+        let args_for = |ns: &str, action: &str| -> serde_json::Value {
+            match (ns, action) {
+                ("net", "http") => serde_json::json!({ "query": "x" }),
+                ("shell", "exec") => serde_json::json!({ "command": "ls" }),
+                ("memory", "store") => {
+                    serde_json::json!({ "subject": "s", "predicate": "p", "object": "o" })
+                }
+                ("schedule", "create") => serde_json::json!({ "description": "d" }),
+                ("notify", "send") => {
+                    serde_json::json!({ "channel": "c", "content": "m" })
+                }
+                _ => serde_json::json!({}),
+            }
+        };
+        for (ns, action) in super::TOOL_LOOP_NATIVE_VERBS {
+            let token = token_with_args(ns, action, args_for(ns, action));
+            assert!(
+                token_to_action(&token).is_some(),
+                "{ns}.{action} is allowlisted but token_to_action can't map it",
+            );
+            assert!(super::native_verb_executable_in_tool_loop(ns, action));
+        }
+        // Verbs advertised in the manifest but deliberately routed elsewhere
+        // must NOT be loop-executable.
+        for (ns, action) in [
+            ("fs", "read"),
+            ("memory", "delete"),
+            ("schedule", "cancel"),
+            ("terminal", "open"),
+            ("terminal", "close"),
+        ] {
+            assert!(
+                !super::native_verb_executable_in_tool_loop(ns, action),
+                "{ns}.{action} must not be advertised to the tool-loop",
+            );
+        }
     }
 
     #[tokio::test]

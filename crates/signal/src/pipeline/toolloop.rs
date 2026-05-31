@@ -97,6 +97,19 @@ impl SignalProcessor {
         if manifest.is_empty() {
             return Vec::new();
         }
+        // Only advertise verbs this loop can actually dispatch. Native backends
+        // register into the manifest so the SOUL is *aware* of them, but some
+        // (fs.read, memory.delete, schedule.cancel, terminal.*) are reachable
+        // only through other paths — surfacing them here would over-promise
+        // (F6: awareness must not exceed executability). MCP verbs always
+        // dispatch through the host, so they pass.
+        let manifest: Vec<intent::ToolDescriptor> = manifest
+            .into_iter()
+            .filter(|t| tool_loop_can_execute(&t.source, &t.verb))
+            .collect();
+        if manifest.is_empty() {
+            return Vec::new();
+        }
         let query = latest_user_text(messages);
         let ranked = score_top_k(manifest, &query, TOOL_ADVERTISE_K);
         ranked
@@ -135,6 +148,20 @@ impl SignalProcessor {
         }
 
         self.dispatch_tool_route(router.as_ref(), &token).await
+    }
+}
+
+/// Whether a tool can be executed through the chat tool-loop, so the
+/// advertiser never surfaces a verb it can't dispatch (F6). MCP verbs route
+/// through the host; native/terminal verbs are loop-executable only when
+/// [`token_to_action`](super::capability) maps them (see
+/// [`TOOL_LOOP_NATIVE_VERBS`](super::capability::TOOL_LOOP_NATIVE_VERBS)).
+fn tool_loop_can_execute(source: &intent::ToolSource, verb: &intent::Verb) -> bool {
+    match source {
+        intent::ToolSource::McpServer { .. } => true,
+        intent::ToolSource::NativeBackend { .. } | intent::ToolSource::Terminal => {
+            super::capability::native_verb_executable_in_tool_loop(&verb.namespace, &verb.action)
+        }
     }
 }
 
@@ -254,6 +281,91 @@ mod tests {
             annotations: Default::default(),
             usage: Default::default(),
             embedding: None,
+        }
+    }
+
+    #[test]
+    fn advertise_filter_only_keeps_dispatchable_verbs() {
+        use intent::{BackendId, ToolSource, Verb};
+        // (source, ns, action, should_be_advertised). Mirrors the live native
+        // manifest from `cli::capabilities::native_descriptors` plus an MCP
+        // tool. The `false` rows are the F6 awareness-but-unexecutable verbs.
+        let cases = [
+            (
+                ToolSource::NativeBackend {
+                    backend: BackendId::new("memory"),
+                },
+                "memory",
+                "store",
+                true,
+            ),
+            (
+                ToolSource::NativeBackend {
+                    backend: BackendId::new("memory"),
+                },
+                "memory",
+                "delete",
+                false,
+            ),
+            (
+                ToolSource::NativeBackend {
+                    backend: BackendId::new("net"),
+                },
+                "net",
+                "http",
+                true,
+            ),
+            (
+                ToolSource::NativeBackend {
+                    backend: BackendId::new("scheduling"),
+                },
+                "schedule",
+                "create",
+                true,
+            ),
+            (
+                ToolSource::NativeBackend {
+                    backend: BackendId::new("scheduling"),
+                },
+                "schedule",
+                "cancel",
+                false,
+            ),
+            (
+                ToolSource::NativeBackend {
+                    backend: BackendId::new("messaging"),
+                },
+                "notify",
+                "send",
+                true,
+            ),
+            (
+                ToolSource::NativeBackend {
+                    backend: BackendId::new("fs"),
+                },
+                "fs",
+                "read",
+                false,
+            ),
+            (ToolSource::Terminal, "shell", "exec", true),
+            (ToolSource::Terminal, "terminal", "open", false),
+            (ToolSource::Terminal, "terminal", "close", false),
+            (
+                ToolSource::McpServer {
+                    server: "github".to_string(),
+                },
+                "github",
+                "create_issue",
+                true,
+            ),
+        ];
+        for (source, ns, action, expect) in cases {
+            let verb = Verb::new(ns, action);
+            assert_eq!(
+                tool_loop_can_execute(&source, &verb),
+                expect,
+                "{ns}.{action} advertisement gate",
+            );
         }
     }
 
