@@ -360,6 +360,19 @@ fn render_capability_digest(tools: &[intent::ToolDescriptor], agents: &[String])
         ));
     }
 
+    // Closed-world boundary: the always-on faculties plus whatever is listed
+    // above are the *complete* set of things actually executable in this
+    // deployment. Stops the reasoner over-claiming faculties (shell, web,
+    // filesystem, a specific MCP tool) that aren't wired — the transcript's
+    // "I can run shell commands, query the filesystem" failure when neither
+    // was mounted.
+    out.push_str(
+        "\nThis is the complete set of actions you can actually execute right now. \
+         If a capability — shell/command execution, web search, file access, or a \
+         specific MCP tool — is not listed above, you do NOT have it in this \
+         deployment: say so plainly instead of claiming, promising, or simulating it.\n",
+    );
+
     out
 }
 
@@ -407,6 +420,10 @@ mod tests {
         // Nothing wired → no "Mounted tools" / agents sections.
         assert!(!digest.contains("Mounted tools"));
         assert!(!digest.contains("Delegated agents"));
+        // The closed-world boundary is always present, especially when nothing
+        // is wired — that's when over-claiming is worst.
+        assert!(digest.contains("complete set of actions you can actually execute"));
+        assert!(digest.contains("you do NOT have it in this deployment"));
     }
 
     #[test]

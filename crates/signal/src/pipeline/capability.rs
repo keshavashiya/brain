@@ -131,18 +131,148 @@ impl SignalProcessor {
                 }
             },
             intent::ToolRoute::HumanConfirm { ask } => ask,
-            intent::ToolRoute::Terminal { session_hint } => format!(
-                "Terminal routing for '{}.{}' is not yet wired (session_hint={:?}).",
-                token.verb.namespace, token.verb.action, session_hint
-            ),
-            intent::ToolRoute::NativeBackend { backend } => format!(
-                "Native-backend routing for '{}.{}' → {} is not yet wired.",
-                token.verb.namespace,
-                token.verb.action,
-                backend.as_str()
-            ),
+            // Both Terminal-sourced (`shell.exec`) and NativeBackend-sourced
+            // verbs execute through the same shared ActionDispatcher the
+            // classic intent paths use — see `execute_native_token`. Consent
+            // was already gated upstream (see this fn's doc comment).
+            intent::ToolRoute::Terminal { .. } | intent::ToolRoute::NativeBackend { .. } => {
+                self.execute_native_token(token).await
+            }
         }
     }
+
+    /// Execute a resolved native/terminal SIT token by mapping it to a
+    /// [`cortex::actions::Action`] and dispatching through the wired
+    /// [`ActionDispatcher`](cortex::actions::ActionDispatcher) — the same
+    /// executor the classic `Intent::{WebSearch,StoreFact,…}` paths use.
+    ///
+    /// This is the WS2 fix for the silent-failure trap: previously the chat
+    /// tool-loop advertised `net.http`/`shell.exec`/… and cleared the consent
+    /// gate, then returned a "not yet wired" placeholder the model paraphrased
+    /// into a bare "I couldn't do that." Now an approved call either runs and
+    /// returns its real output, or returns an explicit, model-legible reason
+    /// (no executor for this verb / backend not configured / backend error) —
+    /// never a vague giveup.
+    async fn execute_native_token(&self, token: &intent::IntentToken) -> String {
+        let ns = token.verb.namespace.as_str();
+        let action = token.verb.action.as_str();
+
+        let Some(act) = token_to_action(token) else {
+            // No ActionDispatcher executor for this verb. Be specific about
+            // why and point at the real path so the model relays the truth
+            // rather than inventing a failure.
+            return format!(
+                "'{ns}.{action}' can't be run from the chat tool-loop. {}",
+                native_unexecutable_hint(ns, action)
+            );
+        };
+        let Some(dispatcher) = self.capability.action_dispatcher.as_ref() else {
+            return format!(
+                "'{ns}.{action}' needs its backend enabled in config, but no \
+                 action dispatcher is wired in this deployment."
+            );
+        };
+
+        let result = dispatcher.dispatch(&act).await;
+        if result.success {
+            if result.output.trim().is_empty() {
+                format!("'{ns}.{action}' completed with no output.")
+            } else {
+                result.output
+            }
+        } else {
+            format!(
+                "'{ns}.{action}' ran but failed: {}",
+                result
+                    .error
+                    .unwrap_or_else(|| "the backend reported no reason".to_string())
+            )
+        }
+    }
+}
+
+/// Map a resolved native/terminal SIT token to an executable
+/// [`cortex::actions::Action`]. Only verbs with a real ActionDispatcher
+/// backend map; everything else returns `None` (handled with an honest
+/// reason by [`SignalProcessor::execute_native_token`]).
+///
+/// Argument extraction is tolerant of the key names the model picks, because
+/// the native descriptors advertise a bare `{"type":"object"}` schema (no
+/// declared properties) — so the model improvises (`query` vs `q` vs `url`).
+fn token_to_action(token: &intent::IntentToken) -> Option<cortex::actions::Action> {
+    use cortex::actions::Action;
+    let v = &token.object.value;
+    match (token.verb.namespace.as_str(), token.verb.action.as_str()) {
+        ("net", "http") => Some(Action::WebSearch {
+            query: first_str(v, &["query", "q", "url", "text", "input", "prompt"])?,
+        }),
+        ("shell", "exec") => Some(Action::ExecuteCommand {
+            command: first_str(v, &["command", "cmd", "program"])?,
+            args: str_array(v, &["args", "arguments"]),
+        }),
+        ("memory", "store") => Some(Action::StoreFact {
+            subject: first_str(v, &["subject"])?,
+            predicate: first_str(v, &["predicate", "relation"])?,
+            object: first_str(v, &["object", "value"])?,
+        }),
+        ("schedule", "create") => Some(Action::ScheduleTask {
+            description: first_str(v, &["description", "task", "text"])?,
+            cron: first_str(v, &["cron", "schedule"]),
+        }),
+        ("notify", "send") => Some(Action::SendMessage {
+            channel: first_str(v, &["channel"])?,
+            recipient: first_str(v, &["recipient", "to"]).unwrap_or_default(),
+            content: first_str(v, &["content", "message", "text", "body"])?,
+        }),
+        _ => None,
+    }
+}
+
+/// Per-verb hint for native verbs that have no chat-loop executor, so the
+/// model can tell the user the real path instead of a bare failure.
+fn native_unexecutable_hint(ns: &str, action: &str) -> &'static str {
+    match (ns, action) {
+        ("fs", "read") => {
+            "Just name the file path in your message — Brain reads it automatically \
+             as grounding; there's no separate fetch step."
+        }
+        ("memory", "delete") => {
+            "Forgetting a fact runs as its own confirmed step, not through this loop."
+        }
+        ("schedule", "cancel") => {
+            "Cancelling a schedule runs as its own step — list the schedules first, \
+             then cancel by id."
+        }
+        ("terminal", "open") | ("terminal", "close") => {
+            "Interactive PTY sessions are managed by the terminal bridge, not the \
+             chat tool-loop."
+        }
+        _ => "No native executor is wired for this verb in this deployment.",
+    }
+}
+
+/// First non-empty string value among `keys` in a JSON object, else `None`.
+fn first_str(v: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    let obj = v.as_object()?;
+    keys.iter().find_map(|k| {
+        obj.get(*k)
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    })
+}
+
+/// String array under the first present key among `keys`, or empty.
+fn str_array(v: &serde_json::Value, keys: &[&str]) -> Vec<String> {
+    keys.iter()
+        .find_map(|k| v.get(*k).and_then(|x| x.as_array()))
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -262,6 +392,134 @@ mod tool_call_dispatch_tests {
             }
             _ => panic!("expected PipelineResult::Complete"),
         }
+    }
+
+    fn token_with_args(
+        verb_ns: &str,
+        verb_action: &str,
+        args: serde_json::Value,
+    ) -> intent::IntentToken {
+        intent::IntentToken::new(
+            intent::Verb::new(verb_ns, verb_action),
+            intent::Object {
+                kind: "json".into(),
+                value: args,
+            },
+            intent::Provenance::User {
+                raw_input: format!("/{verb_ns} {verb_action}"),
+                ui_origin: None,
+                ts: chrono::Utc::now(),
+            },
+            "personal".into(),
+        )
+    }
+
+    struct FakeSearch;
+    #[async_trait::async_trait]
+    impl cortex::actions::WebSearchBackend for FakeSearch {
+        async fn search(
+            &self,
+            query: &str,
+            _top_k: usize,
+        ) -> Result<Vec<cortex::actions::SearchHit>, cortex::actions::ActionError> {
+            Ok(vec![cortex::actions::SearchHit {
+                title: format!("Result for {query}"),
+                url: "https://example.com".into(),
+                snippet: "a snippet".into(),
+            }])
+        }
+    }
+
+    fn web_search_dispatcher() -> cortex::actions::ActionDispatcher {
+        let config = cortex::actions::ActionConfig {
+            enable_web_search: true,
+            ..Default::default()
+        };
+        cortex::actions::ActionDispatcher::new(config).with_web_search_backend(Arc::new(FakeSearch))
+    }
+
+    #[test]
+    fn token_to_action_maps_native_verbs_and_is_arg_tolerant() {
+        // net.http accepts several arg key names for the query.
+        for key in ["query", "q", "url", "text", "input", "prompt"] {
+            let token = token_with_args("net", "http", serde_json::json!({ key: "ripgrep" }));
+            match token_to_action(&token) {
+                Some(cortex::actions::Action::WebSearch { query }) => assert_eq!(query, "ripgrep"),
+                other => panic!("net.http via `{key}` -> {other:?}"),
+            }
+        }
+        // shell.exec carries command + args.
+        let token = token_with_args(
+            "shell",
+            "exec",
+            serde_json::json!({ "command": "git", "args": ["status"] }),
+        );
+        match token_to_action(&token) {
+            Some(cortex::actions::Action::ExecuteCommand { command, args }) => {
+                assert_eq!(command, "git");
+                assert_eq!(args, vec!["status".to_string()]);
+            }
+            other => panic!("shell.exec -> {other:?}"),
+        }
+        // A verb with no ActionDispatcher executor maps to None.
+        assert!(token_to_action(&token_with_args("fs", "read", serde_json::json!({}))).is_none());
+        // Missing the required field also yields None (no half-built action).
+        assert!(token_to_action(&token_with_args("net", "http", serde_json::json!({}))).is_none());
+    }
+
+    #[tokio::test]
+    async fn native_token_executes_through_dispatcher() {
+        // The WS2 fix: an approved net.http now actually runs and returns the
+        // real search material, not a "not yet wired" placeholder.
+        let processor = make_processor()
+            .await
+            .with_action_dispatcher(web_search_dispatcher());
+        let out = processor
+            .execute_native_token(&token_with_args(
+                "net",
+                "http",
+                serde_json::json!({ "query": "ripgrep latest" }),
+            ))
+            .await;
+        assert!(out.contains("Result for ripgrep latest"), "{out}");
+        assert!(out.contains("example.com"), "{out}");
+        assert!(!out.contains("not yet wired"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn native_token_without_executor_gives_honest_reason() {
+        // fs.read has no dispatcher executor — the model must get a clear,
+        // truthful reason (and the real path) rather than a vague giveup.
+        let processor = make_processor()
+            .await
+            .with_action_dispatcher(web_search_dispatcher());
+        let out = processor
+            .execute_native_token(&token_with_args("fs", "read", serde_json::json!({})))
+            .await;
+        assert!(out.contains("fs.read"), "{out}");
+        assert!(out.contains("reads it automatically"), "{out}");
+        assert!(!out.contains("not yet wired"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn native_token_surfaces_backend_failure_reason() {
+        // A wired-but-failing backend (web search disabled) surfaces the
+        // backend's own reason, not a blank failure.
+        let dispatcher = cortex::actions::ActionDispatcher::new(cortex::actions::ActionConfig {
+            enable_web_search: false,
+            ..Default::default()
+        });
+        let processor = make_processor().await.with_action_dispatcher(dispatcher);
+        let out = processor
+            .execute_native_token(&token_with_args(
+                "net",
+                "http",
+                serde_json::json!({ "query": "x" }),
+            ))
+            .await;
+        assert!(out.contains("net.http"), "{out}");
+        assert!(out.contains("ran but failed"), "{out}");
+        assert!(out.to_lowercase().contains("disabled"), "{out}");
     }
 
     #[tokio::test]
