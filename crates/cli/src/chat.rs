@@ -429,6 +429,8 @@ fn render_response_direct(label: ResponseLabel, body: &str) {
     let _ = label.write_prefix_direct();
     let rendered = render_markdown_body(trimmed, terminal_width());
     print!("{rendered}\n\n");
+    // best-effort: a failed stdout flush means the pipe is closed and the
+    // process is exiting anyway — nothing actionable to recover.
     let _ = stdout().flush();
 }
 
@@ -444,6 +446,8 @@ fn render_plain_direct(body: &str) {
     }
     let rendered = render_markdown_body(trimmed, terminal_width());
     print!("{rendered}\n\n");
+    // best-effort: a failed stdout flush means the pipe is closed and the
+    // process is exiting anyway — nothing actionable to recover.
     let _ = stdout().flush();
 }
 
@@ -531,6 +535,8 @@ impl ResponseAccumulator {
                     // (status frames + the spinner are suppressed upstream),
                     // so there's nothing to clear first.
                     print!("{trimmed}\n\n");
+                    // best-effort: a closed stdout pipe means we're exiting
+                    // anyway — nothing actionable to recover.
                     let _ = stdout().flush();
                 }
             }

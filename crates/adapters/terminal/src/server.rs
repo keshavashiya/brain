@@ -271,6 +271,9 @@ impl TerminalSvc {
                     if writer.write_all(&chunk).is_err() {
                         break;
                     }
+                    // best-effort: write_all above already breaks the loop on a
+                    // hard error; a transient flush failure isn't separately
+                    // actionable and the next write_all will surface a real one.
                     let _ = writer.flush();
                 }
             });
