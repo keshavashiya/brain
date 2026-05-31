@@ -237,7 +237,7 @@ impl SignalProcessor {
             )),
             procedures,
             fitness,
-            metrics: Arc::new(brain::metrics::SubsystemMetrics::new()),
+            metrics: Arc::new(metrics::SubsystemMetrics::new()),
             proactivity_enabled,
 
             // Opt-in bundles — all builder-wired

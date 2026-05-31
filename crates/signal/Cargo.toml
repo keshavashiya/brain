@@ -17,6 +17,8 @@ encryption = ["storage/encryption"]
 
 [dependencies]
 brain         = { workspace = true }
+metrics       = { workspace = true }
+selfmodel     = { workspace = true }
 storage = { workspace = true }
 hippocampus = { workspace = true }
 cortex = { workspace = true }

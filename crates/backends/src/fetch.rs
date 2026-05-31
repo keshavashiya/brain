@@ -9,8 +9,8 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use brain::metrics::SubsystemMetrics;
 use cortex::actions::{ActionError, FetchedPage, UrlFetchBackend};
+use metrics::SubsystemMetrics;
 
 use crate::resilience::{http_breaker, resilient_send, CircuitBreaker};
 

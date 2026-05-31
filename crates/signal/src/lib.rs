@@ -67,7 +67,7 @@ pub struct SignalProcessor {
     /// `learning.capability_fitness.enabled = false`.
     fitness: cerebellum::CapabilityFitnessStore,
     /// Cross-subsystem metrics (embedding, consolidation, circuit breaker, intent).
-    metrics: std::sync::Arc<brain::metrics::SubsystemMetrics>,
+    metrics: std::sync::Arc<metrics::SubsystemMetrics>,
     /// Runtime proactivity toggle. Initialised from
     /// `config.proactivity.enabled` and flipped by
     /// `handle_set_proactivity`. The CLI bootstrap hands a clone of this
@@ -108,7 +108,7 @@ pub struct SignalProcessor {
     /// so the SOUL stops fabricating the product's own surface. Built from code
     /// at bootstrap; `None` leaves the prompt unchanged (back-compat for
     /// non-chat/test processors).
-    product_self_model: Option<std::sync::Arc<brain::ProductSelfModel>>,
+    product_self_model: Option<std::sync::Arc<selfmodel::ProductSelfModel>>,
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

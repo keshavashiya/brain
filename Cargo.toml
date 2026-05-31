@@ -32,6 +32,8 @@ members = [
     "crates/intent",
     "crates/reflex",
     "crates/resilience",
+    "crates/metrics",
+    "crates/selfmodel",
 ]
 
 [workspace.lints.rust]
@@ -177,6 +179,8 @@ mcphost = { package = "brainos-mcphost", path = "crates/mcphost", version = "0.4
 intent = { package = "brainos-intent", path = "crates/intent", version = "0.4.0" }
 reflex = { package = "brainos-reflex", path = "crates/reflex", version = "0.4.0" }
 resilience = { package = "brainos-resilience", path = "crates/resilience", version = "0.4.0" }
+metrics = { package = "brainos-metrics", path = "crates/metrics", version = "0.4.0" }
+selfmodel = { package = "brainos-selfmodel", path = "crates/selfmodel", version = "0.4.0" }
 
 # Benchmarks
 criterion = { version = "0.5", features = ["html_reports"] }

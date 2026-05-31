@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use brain::metrics::SubsystemMetrics;
+use metrics::SubsystemMetrics;
 
 use crate::resilience::{http_breaker, resilient_send, CircuitBreaker};
 

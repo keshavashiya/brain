@@ -619,6 +619,7 @@ dependencies = [
  "brainos-reflex",
  "brainos-resilience",
  "brainos-sandbox",
+ "brainos-selfmodel",
  "brainos-signal",
  "brainos-storage",
  "brainos-terminal",
@@ -693,6 +694,7 @@ dependencies = [
  "brainos-core",
  "brainos-cortex",
  "brainos-hippocampus",
+ "brainos-metrics",
  "brainos-observe",
  "brainos-resilience",
  "brainos-signal",
@@ -936,6 +938,7 @@ dependencies = [
  "brainos-core",
  "brainos-hippocampus",
  "brainos-identity",
+ "brainos-metrics",
  "brainos-observe",
  "brainos-resilience",
  "brainos-signal",
@@ -1028,6 +1031,10 @@ dependencies = [
  "uuid",
  "wiremock",
 ]
+
+[[package]]
+name = "brainos-metrics"
+version = "0.4.0"
 
 [[package]]
 name = "brainos-observe"
@@ -1127,6 +1134,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "brainos-selfmodel"
+version = "0.4.0"
+dependencies = [
+ "brainos-core",
+]
+
+[[package]]
 name = "brainos-signal"
 version = "0.4.0"
 dependencies = [
@@ -1146,11 +1160,13 @@ dependencies = [
  "brainos-identity",
  "brainos-intent",
  "brainos-mcphost",
+ "brainos-metrics",
  "brainos-observe",
  "brainos-orchestrate",
  "brainos-reflex",
  "brainos-resilience",
  "brainos-sandbox",
+ "brainos-selfmodel",
  "brainos-storage",
  "brainos-terminal",
  "brainos-thalamus",

@@ -1,6 +1,6 @@
 //! Command catalog — the CLI half of the product self-model.
 //!
-//! Walks the clap [`Cli`](crate::Cli) definition so the [`brain::ProductSelfModel`]
+//! Walks the clap [`Cli`](crate::Cli) definition so the [`selfmodel::ProductSelfModel`]
 //! the SOUL is grounded on lists the *real* subcommands. clap stays the single
 //! source of truth: add a subcommand to the `Commands` enum and it appears here
 //! automatically, with no separate catalog to maintain.
@@ -9,10 +9,10 @@ use clap::CommandFactory;
 
 /// Derive the command catalog from the clap definition.
 ///
-/// One [`brain::CommandDoc`] per top-level subcommand: its name, the first line
+/// One [`selfmodel::CommandDoc`] per top-level subcommand: its name, the first line
 /// of its `about`/doc-comment, and its argument identifiers. The `--verbose`
 /// global flag is intentionally omitted — it's not a command.
-pub fn command_catalog() -> Vec<brain::CommandDoc> {
+pub fn build() -> Vec<selfmodel::CommandDoc> {
     crate::Cli::command()
         .get_subcommands()
         .map(|sub| {
@@ -31,7 +31,7 @@ pub fn command_catalog() -> Vec<brain::CommandDoc> {
                 .filter(|a| !a.is_global_set())
                 .map(|a| a.get_id().to_string())
                 .collect();
-            brain::CommandDoc {
+            selfmodel::CommandDoc {
                 name: sub.get_name().to_string(),
                 summary,
                 args,
@@ -46,7 +46,7 @@ mod tests {
 
     #[test]
     fn catalog_lists_real_commands_only() {
-        let catalog = command_catalog();
+        let catalog = build();
         let names: Vec<&str> = catalog.iter().map(|c| c.name.as_str()).collect();
         // A representative sample of the real clap surface.
         for expected in ["init", "chat", "status", "doctor", "serve", "capabilities"] {
@@ -69,16 +69,16 @@ mod tests {
     /// leave a stale negation (the SOUL listing *and* denying the same verb).
     #[test]
     fn policy_command_claims_agree_with_clap_catalog() {
-        let names: Vec<String> = command_catalog().into_iter().map(|c| c.name).collect();
+        let names: Vec<String> = build().into_iter().map(|c| c.name).collect();
 
-        for denied in brain::DENIED_COMMANDS {
+        for denied in selfmodel::DENIED_COMMANDS {
             assert!(
                 !names.iter().any(|n| n == denied),
                 "POLICY_FACTS deny `brain {denied}`, but it now exists in the clap \
                  catalog — update the lifecycle policy fact and DENIED_COMMANDS",
             );
         }
-        for affirmed in brain::AFFIRMED_COMMANDS {
+        for affirmed in selfmodel::AFFIRMED_COMMANDS {
             assert!(
                 names.iter().any(|n| n == affirmed),
                 "POLICY_FACTS point users to `brain {affirmed}`, but it's missing from \

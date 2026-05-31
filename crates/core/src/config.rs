@@ -7,8 +7,9 @@
 
 /// Default configuration embedded at compile time.
 /// This means `brain` works anywhere without needing config files on disk.
-/// Also the single source of truth the product self-model
-/// ([`crate::selfmodel`]) slices into config-schema grounding for the SOUL.
+/// Also the single source of truth the product self-model (the `selfmodel`
+/// crate) slices into config-schema grounding for the SOUL, handed in via
+/// [`BrainConfig::default_config_content`].
 pub(crate) const DEFAULT_CONFIG: &str = include_str!("../default.yaml");
 
 use serde::{Deserialize, Serialize};

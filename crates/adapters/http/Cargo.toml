@@ -13,6 +13,7 @@ categories.workspace = true
 
 [dependencies]
 brain         = { workspace = true }
+metrics       = { workspace = true }
 signal = { workspace = true }
 resilience = { workspace = true }
 hippocampus = { workspace = true }

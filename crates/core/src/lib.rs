@@ -11,9 +11,7 @@
 pub mod auth;
 pub mod config;
 pub mod cors;
-pub mod metrics;
 pub mod security;
-pub mod selfmodel;
 
 pub use auth::{check_auth, AuthResult};
 pub use config::{
@@ -21,7 +19,6 @@ pub use config::{
     DeliveryConfig, LlmConfig, LogFormat, LogRotation, LoggingConfig, ProviderEntry,
 };
 pub use security::ActionTier;
-pub use selfmodel::{CommandDoc, ProductSelfModel, SignalDoc, AFFIRMED_COMMANDS, DENIED_COMMANDS};
 
 /// Standard timeout constants for HTTP clients across Brain OS.
 pub mod timeouts {

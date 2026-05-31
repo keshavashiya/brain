@@ -43,7 +43,7 @@ impl SignalProcessor {
     }
 
     /// Expose the subsystem metrics handle (for adapter use / instrumentation).
-    pub fn metrics(&self) -> &Arc<brain::metrics::SubsystemMetrics> {
+    pub fn metrics(&self) -> &Arc<metrics::SubsystemMetrics> {
         &self.metrics
     }
 
@@ -323,13 +323,13 @@ impl SignalProcessor {
     /// prompt carries an authoritative "About Brain" grounding section (real CLI
     /// commands, config schema, policy) so the SOUL stops fabricating the
     /// product's own surface. Built from code at bootstrap.
-    pub fn with_product_self_model(mut self, model: Arc<brain::ProductSelfModel>) -> Self {
+    pub fn with_product_self_model(mut self, model: Arc<selfmodel::ProductSelfModel>) -> Self {
         self.product_self_model = Some(model);
         self
     }
 
     /// Expose the configured product self-model, if any.
-    pub fn product_self_model(&self) -> Option<&Arc<brain::ProductSelfModel>> {
+    pub fn product_self_model(&self) -> Option<&Arc<selfmodel::ProductSelfModel>> {
         self.product_self_model.as_ref()
     }
 

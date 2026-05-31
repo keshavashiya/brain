@@ -1,0 +1,23 @@
+[package]
+name = "brainos-selfmodel"
+description = "Brain OS product self-model — grounded knowledge of Brain's own CLI, config, and policy surface"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+
+# Dev-only edge (allowed cycle: `core` depends on `selfmodel`, never the
+# reverse at build time): the config-schema grounding tests assert against the
+# real embedded `default.yaml`, which `core` owns.
+[dev-dependencies]
+brain = { workspace = true }
+
+[lints]
+workspace = true

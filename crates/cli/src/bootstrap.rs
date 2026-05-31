@@ -262,9 +262,10 @@ pub async fn build_processor(
     // config schema sliced from the embedded defaults, policy invariants) so it
     // answers product questions from code-derived truth instead of fabricating
     // commands/signals/config keys.
-    let self_model = brain::ProductSelfModel::new(
-        crate::selfmodel::command_catalog(),
+    let self_model = selfmodel::ProductSelfModel::new(
+        crate::command_catalog::build(),
         crate::chat::signal_catalog(),
+        brain::BrainConfig::default_config_content(),
     );
     processor = processor.with_product_self_model(Arc::new(self_model));
     tracing::info!("Product self-model wired (commands + signals + config schema + policy)");

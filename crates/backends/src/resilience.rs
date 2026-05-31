@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use brain::metrics::SubsystemMetrics;
+use metrics::SubsystemMetrics;
 use observe::{BrainEvent, ObserveError, Observer};
 use resilience::BreakerConfig;
 use tokio::sync::broadcast;

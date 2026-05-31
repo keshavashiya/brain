@@ -23,6 +23,7 @@ ganglia = ["dep:ganglia"]
 
 [dependencies]
 brain         = { workspace = true }
+selfmodel     = { workspace = true }
 storage = { workspace = true }
 rusqlite = { workspace = true }
 hippocampus = { workspace = true }

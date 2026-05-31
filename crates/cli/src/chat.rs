@@ -66,12 +66,12 @@ const SIGNALS: &[Signal] = &[
 /// The REPL signals rendered as product-self-model docs, so the SOUL's
 /// grounding lists the real in-chat commands (`/help`, `/status`, …) instead of
 /// inventing plausible ones like `/msg`. [`SIGNALS`] stays the single source of
-/// truth — the clap-walked [`crate::selfmodel::command_catalog`] is its CLI
+/// truth — the clap-walked [`crate::command_catalog::build`] is its CLI
 /// counterpart.
-pub(crate) fn signal_catalog() -> Vec<brain::SignalDoc> {
+pub(crate) fn signal_catalog() -> Vec<selfmodel::SignalDoc> {
     SIGNALS
         .iter()
-        .map(|s| brain::SignalDoc {
+        .map(|s| selfmodel::SignalDoc {
             name: s.name.to_string(),
             summary: s.summary.to_string(),
         })

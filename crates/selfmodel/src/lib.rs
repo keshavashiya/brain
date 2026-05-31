@@ -14,8 +14,9 @@
 //! - **Commands** — the real CLI surface, walked from the clap definition by the
 //!   binary crate and handed in as [`CommandDoc`]s (clap stays the single source
 //!   of truth, so a new subcommand self-registers).
-//! - **Config schema** — sliced from the embedded `default.yaml`
-//!   ([`crate::config::DEFAULT_CONFIG`]), the same file `brain init` writes. Its
+//! - **Config schema** — sliced from the embedded `default.yaml` (handed in by
+//!   the caller via `BrainConfig::default_config_content()`), the same file
+//!   `brain init` writes. Its
 //!   comments carry the human descriptions and the real
 //!   `actions.messaging.channels { url, body, headers }` webhook shape, so a new
 //!   config key self-registers there too.
@@ -113,14 +114,16 @@ pub struct ProductSelfModel {
 
 impl ProductSelfModel {
     /// Build from the binary crate's code-derived catalogs: the clap-walked CLI
-    /// `commands` and the `SIGNALS`-table-walked in-chat `signals`. Config
-    /// sections and policy facts are sourced internally from this crate's
-    /// embedded defaults.
-    pub fn new(commands: Vec<CommandDoc>, signals: Vec<SignalDoc>) -> Self {
+    /// `commands` and the `SIGNALS`-table-walked in-chat `signals`. The
+    /// `default_config` is the embedded `default.yaml` text (the same source
+    /// `brain init` writes, via `BrainConfig::default_config_content()`); its
+    /// commented sections become the config-schema grounding. Policy facts are
+    /// sourced internally from this crate's curated [`POLICY_FACTS`].
+    pub fn new(commands: Vec<CommandDoc>, signals: Vec<SignalDoc>, default_config: &str) -> Self {
         Self {
             commands,
             signals,
-            config_sections: parse_config_sections(crate::config::DEFAULT_CONFIG),
+            config_sections: parse_config_sections(default_config),
             policy_facts: POLICY_FACTS,
         }
     }
@@ -348,12 +351,15 @@ mod tests {
                     summary: "go dormant and exit chat".to_string(),
                 },
             ],
+            // Exercise against the real shipped defaults so the config-schema
+            // grounding tests guard the actual `default.yaml` surface.
+            brain::BrainConfig::default_config_content(),
         )
     }
 
     #[test]
     fn parses_real_sections_from_default_config() {
-        let sections = parse_config_sections(crate::config::DEFAULT_CONFIG);
+        let sections = parse_config_sections(brain::BrainConfig::default_config_content());
         let keys: Vec<&str> = sections.iter().map(|s| s.top_key.as_str()).collect();
         assert!(
             keys.contains(&"actions"),

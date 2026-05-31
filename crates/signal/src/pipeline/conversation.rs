@@ -723,7 +723,8 @@ mod tests {
     }
 
     use crate::SignalProcessor;
-    use brain::{BrainConfig, CommandDoc, ProductSelfModel, SignalDoc};
+    use brain::BrainConfig;
+    use selfmodel::{CommandDoc, ProductSelfModel, SignalDoc};
     use std::sync::Arc;
 
     async fn make_processor() -> SignalProcessor {
@@ -746,6 +747,7 @@ mod tests {
                 name: "/status".to_string(),
                 summary: "show cortex, memory, and synapse status".to_string(),
             }],
+            BrainConfig::default_config_content(),
         ))
     }
 
