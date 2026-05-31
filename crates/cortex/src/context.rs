@@ -72,11 +72,42 @@ impl TokenBudget {
             .saturating_sub(self.attachments)
     }
 
-    /// Create budget for a specific model context size.
+    /// Build a budget scaled to a model's real context window.
+    ///
+    /// Fixed overheads (system prompt, user-model snapshot, response buffer)
+    /// don't grow with the window, so they're reserved as constants. The
+    /// remaining *working pool* is split proportionally between conversation
+    /// history, path-attachments, and retrieved memories — so a 128k-window
+    /// model reads far more file content and recalls more memory than the
+    /// conservative 8k default, instead of clipping everything to a fixed cap.
+    ///
+    /// At `total_tokens == 8192` this stays close to the historical fixed
+    /// split (history ≈2k, attachments ≈2.5k, memory ≈2.5k). Memory is the
+    /// implicit remainder via [`Self::memory_budget`].
     pub fn for_context_size(total_tokens: usize) -> Self {
-        let mut budget = TOKEN_BUDGETS;
-        budget.total_context = total_tokens;
-        budget
+        let system_prompt = TOKEN_BUDGETS.system_prompt;
+        let user_model = TOKEN_BUDGETS.user_model;
+        let response_buffer = TOKEN_BUDGETS.response_buffer;
+        let reserved = system_prompt + user_model + response_buffer;
+
+        // Working pool after fixed overheads. Below the reserve we can't split
+        // anything — fall back to zero variable sections (the assembler still
+        // renders the system prompt).
+        let pool = total_tokens.saturating_sub(reserved);
+        // History stays modest (recent turns dominate relevance); attachments
+        // and memory get the lion's share and scale with the window.
+        let conversation_history = pool * 28 / 100;
+        let attachments = pool * 36 / 100;
+        // memory_budget() consumes the remainder (~36% of the pool).
+
+        Self {
+            system_prompt,
+            user_model,
+            conversation_history,
+            response_buffer,
+            attachments,
+            total_context: total_tokens,
+        }
     }
 }
 
@@ -438,13 +469,46 @@ mod tests {
     }
 
     #[test]
-    fn test_token_budget_for_context_size() {
-        let budget = TokenBudget::for_context_size(128000);
-        assert_eq!(budget.total_context, 128000);
-        assert_eq!(
-            budget.memory_budget(),
-            128000 - 500 - 300 - 2000 - 400 - 2500
+    fn for_context_size_scales_attachments_and_memory_with_window() {
+        let small = TokenBudget::for_context_size(8192);
+        let large = TokenBudget::for_context_size(128000);
+
+        // Fixed overheads don't move with the window.
+        assert_eq!(large.system_prompt, small.system_prompt);
+        assert_eq!(large.response_buffer, small.response_buffer);
+
+        // A 128k model reads far more file content and recalls far more memory.
+        assert!(
+            large.attachments > small.attachments * 10,
+            "attachments should scale with the window: {} vs {}",
+            large.attachments,
+            small.attachments,
         );
+        assert!(large.memory_budget() > small.memory_budget() * 10);
+
+        // The pieces still fit inside the declared window.
+        let used = large.system_prompt
+            + large.user_model
+            + large.conversation_history
+            + large.response_buffer
+            + large.attachments
+            + large.memory_budget();
+        assert!(used <= large.total_context);
+
+        // At the 8k default the split stays close to the historical fixed one.
+        assert!((1800..=2200).contains(&small.conversation_history));
+        assert!((2300..=2700).contains(&small.attachments));
+    }
+
+    #[test]
+    fn for_context_size_below_reserve_is_safe() {
+        // A tiny window can't fund variable sections, but must not panic or
+        // produce a budget that exceeds the window.
+        let budget = TokenBudget::for_context_size(500);
+        assert_eq!(budget.total_context, 500);
+        assert_eq!(budget.conversation_history, 0);
+        assert_eq!(budget.attachments, 0);
+        assert_eq!(budget.memory_budget(), 0);
     }
 
     #[test]

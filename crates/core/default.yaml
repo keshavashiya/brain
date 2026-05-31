@@ -10,6 +10,11 @@
 llm:
   temperature: 0.7
   max_tokens: 4096
+  # The active model's input context window, in tokens. Drives how much
+  # file/attachment + memory content the prompt assembler packs in. Raise this
+  # to your model's real size (e.g. 32768, 128000) so large-window models read
+  # in detail instead of clipping to the conservative 8k default.
+  context_window: 8192
   providers:
     - name: ollama
       kind: ollama

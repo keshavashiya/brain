@@ -291,6 +291,14 @@ pub struct LlmConfig {
     pub base_url: String,
     pub temperature: f64,
     pub max_tokens: u32,
+    /// The active model's input context window, in tokens. Drives the
+    /// prompt assembler's [`TokenBudget`](cortex) so a large-window model
+    /// (e.g. 128k) reads far more file/attachment + memory content instead
+    /// of being clipped to the conservative 8k default. Set this to your
+    /// model's real context size. Defaults to 8192 (safe for most models)
+    /// when omitted, preserving the historical budget.
+    #[serde(default = "default_context_window")]
+    pub context_window: usize,
     /// API key for the LLM provider (required for OpenAI, OpenRouter, etc.).
     /// Can also be set via `BRAIN_LLM__API_KEY` environment variable.
     /// Prefer `api_key_file` (chmod-0600) for secrets that shouldn't live
@@ -313,6 +321,13 @@ pub struct LlmConfig {
     /// fields above are used as-is.
     #[serde(default)]
     pub providers: Vec<ProviderEntry>,
+}
+
+/// Default context window when `llm.context_window` is omitted. 8192 is the
+/// historical assembler budget — safe for nearly every model, and large-window
+/// models opt into more by setting their real size.
+pub(crate) fn default_context_window() -> usize {
+    8192
 }
 
 /// One entry in `llm.providers` — a named destination that the cortex

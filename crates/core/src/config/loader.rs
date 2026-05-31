@@ -321,6 +321,7 @@ impl Default for BrainConfig {
                 base_url: "http://localhost:11434".to_string(),
                 temperature: 0.7,
                 max_tokens: 4096,
+                context_window: super::default_context_window(),
                 api_key: String::new(),
                 api_key_file: None,
                 providers: Vec::new(),

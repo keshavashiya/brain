@@ -173,6 +173,9 @@ impl SignalProcessor {
         let proactivity_enabled = Arc::new(std::sync::atomic::AtomicBool::new(
             config.proactivity.enabled,
         ));
+        // Capture before `config` is moved into the struct below — the prompt
+        // assembler's budget scales to the model's real context window.
+        let context_window = config.llm.context_window;
         let processor = Self {
             config,
             classifier,
@@ -186,7 +189,9 @@ impl SignalProcessor {
             )),
             recall_engine,
             llm,
-            context_assembler: cortex::context::ContextAssembler::with_defaults(),
+            context_assembler: cortex::context::ContextAssembler::new(
+                cortex::context::TokenBudget::for_context_size(context_window),
+            ),
             procedures,
             metrics: Arc::new(brain::metrics::SubsystemMetrics::new()),
             proactivity_enabled,
