@@ -310,6 +310,20 @@ impl SignalProcessor {
         self.identity_store.as_ref()
     }
 
+    /// Attach Brain's product self-model (builder pattern). When wired, the chat
+    /// prompt carries an authoritative "About Brain" grounding section (real CLI
+    /// commands, config schema, policy) so the SOUL stops fabricating the
+    /// product's own surface. Built from code at bootstrap.
+    pub fn with_product_self_model(mut self, model: Arc<brain::ProductSelfModel>) -> Self {
+        self.product_self_model = Some(model);
+        self
+    }
+
+    /// Expose the configured product self-model, if any.
+    pub fn product_self_model(&self) -> Option<&Arc<brain::ProductSelfModel>> {
+        self.product_self_model.as_ref()
+    }
+
     /// Attach a Terminal Bridge so `OpenTerminalSession` /
     /// `ListTerminalSessions` / `CloseTerminalSession` intents can drive
     /// real PTY sessions. Without this, the three intents return a

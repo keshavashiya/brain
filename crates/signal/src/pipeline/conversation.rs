@@ -165,11 +165,12 @@ impl SignalProcessor {
             );
         }
 
-        // Hand the SOUL prompt a *live* capability digest
-        // rendered from the currently-wired tools and agents, so the
-        // reasoner describes its real catalog instead of a hardcoded
-        // string. Read-only awareness — execution stays gated downstream.
-        let capability_digest = self.capability_digest().await;
+        // Hand the SOUL prompt a *live* capability digest rendered from the
+        // currently-wired tools and agents plus Brain's grounded self-model,
+        // so the reasoner describes its real catalog and product surface
+        // instead of a hardcoded or fabricated one. Read-only awareness —
+        // execution stays gated downstream.
+        let capability_digest = self.chat_capability_section(&content).await;
 
         let messages = self.context_assembler.assemble_full(
             &content,
@@ -193,6 +194,22 @@ impl SignalProcessor {
             namespace: signal.namespace.clone(),
             agent: signal.agent.clone(),
         })
+    }
+
+    /// The full "Your Capabilities" + "About Brain" prompt section for one
+    /// chat turn: the live capability digest (mounted tools/agents) followed,
+    /// when a product self-model is wired, by the code-derived self-knowledge
+    /// (real CLI commands, config schema, policy) scored against `content`.
+    /// The self-model section is what stops the SOUL fabricating Brain's own
+    /// commands and config keys; processors without one (tests, background
+    /// tasks) get the digest alone — back-compat.
+    pub(super) async fn chat_capability_section(&self, content: &str) -> String {
+        let mut section = self.capability_digest().await;
+        if let Some(model) = self.product_self_model() {
+            section.push_str("\n\n");
+            section.push_str(&model.render_grounding(content, SELF_MODEL_CONFIG_K));
+        }
+        section
     }
 
     /// Build the live "Your Capabilities" section for the SOUL prompt
@@ -272,6 +289,11 @@ fn capability_lines(tools: &[intent::ToolDescriptor]) -> Vec<String> {
     }
     lines
 }
+
+/// Top-k config sections injected into the per-turn product self-model
+/// grounding. Small so a relevant slice (e.g. the messaging webhook schema)
+/// reaches the SOUL without dumping the whole config.
+const SELF_MODEL_CONFIG_K: usize = 3;
 
 /// Cap on tools listed per MCP server in the digest, keeping it token-bounded.
 const MAX_TOOLS_PER_SERVER: usize = 15;
@@ -473,5 +495,50 @@ mod tests {
         let items: Vec<String> = (0..5).map(|i| format!("t{i}")).collect();
         assert_eq!(render_capped_list(&items, 10), "t0, t1, t2, t3, t4");
         assert_eq!(render_capped_list(&items, 2), "t0, t1, … (+3 more)");
+    }
+
+    use crate::SignalProcessor;
+    use brain::{BrainConfig, CommandDoc, ProductSelfModel};
+    use std::sync::Arc;
+
+    async fn make_processor() -> SignalProcessor {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = BrainConfig::default();
+        config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+        let processor = SignalProcessor::new(config).await.unwrap();
+        std::mem::forget(temp);
+        processor
+    }
+
+    fn self_model() -> Arc<ProductSelfModel> {
+        Arc::new(ProductSelfModel::new(vec![CommandDoc {
+            name: "chat".to_string(),
+            summary: "interactive chat session".to_string(),
+            args: vec![],
+        }]))
+    }
+
+    #[tokio::test]
+    async fn chat_section_includes_self_model_grounding_when_wired() {
+        let processor = make_processor().await.with_product_self_model(self_model());
+        let section = processor
+            .chat_capability_section("how do I configure telegram in config.yaml")
+            .await;
+        // Capability digest prefix is still there…
+        assert!(section.contains("Your Capabilities"));
+        // …and the authoritative self-model grounding is appended for this turn.
+        assert!(section.contains("About Brain"));
+        assert!(section.contains("brain chat"));
+        assert!(section.contains("NO native Telegram"));
+        // The telegram query pulled in the real messaging webhook schema.
+        assert!(section.contains("channels"));
+    }
+
+    #[tokio::test]
+    async fn chat_section_is_digest_only_without_self_model() {
+        let processor = make_processor().await;
+        let section = processor.chat_capability_section("hello").await;
+        assert!(section.contains("Your Capabilities"));
+        assert!(!section.contains("About Brain"));
     }
 }

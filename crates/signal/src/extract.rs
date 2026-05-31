@@ -45,12 +45,18 @@ pub(crate) fn read_path_as_text(path: &Path, cap: usize) -> Result<String, Extra
     if raw.is_empty() {
         return Err(ExtractError::NotText);
     }
-    if raw.len() > cap {
-        let mut s: String = raw.chars().take(cap).collect();
+    // This text becomes LLM grounding, so mask credential-shaped values before
+    // anything downstream sees them. Mask *before* truncation so a secret
+    // straddling the `cap` boundary can't survive as a partial token. This is
+    // the single chokepoint every file-content grounding path funnels through
+    // (chat attachments, directory inline, decompose excerpts).
+    let masked = crate::secrets::mask_secrets(&raw);
+    if masked.len() > cap {
+        let mut s: String = masked.chars().take(cap).collect();
         s.push_str("\n…[truncated]");
         Ok(s)
     } else {
-        Ok(raw)
+        Ok(masked)
     }
 }
 

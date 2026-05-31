@@ -161,6 +161,55 @@ mod tests {
     }
 
     #[test]
+    fn config_file_attachment_masks_secrets() {
+        // Reading `~/.brain/config.yaml` as an attachment must not leak the
+        // credential it holds into the snapshot the LLM sees (WS5).
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.yaml");
+        std::fs::write(
+            &p,
+            "llm:\n  provider: openrouter\n  api_key: sk-or-v1-deadbeefcafebabe0123456789\n",
+        )
+        .unwrap();
+        let root = canon(dir.path()).display().to_string();
+
+        let out = build_chat_attachments(&format!("summarise {}", p.display()), &[root]);
+        assert_eq!(out.attached.len(), 1);
+        let snapshot = &out.attached[0].snapshot;
+        assert!(
+            !snapshot.contains("sk-or-v1-deadbeef"),
+            "raw API key leaked into attachment snapshot: {snapshot}"
+        );
+        assert!(
+            snapshot.contains("[redacted]"),
+            "no redaction marker: {snapshot}"
+        );
+        // Non-secret structure is still present as grounding.
+        assert!(snapshot.contains("provider: openrouter"));
+    }
+
+    #[test]
+    fn directory_snapshot_masks_inlined_secrets() {
+        // The directory inline path reads file bodies too — same masking.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.yaml"),
+            "api_key: ghp_0123456789ABCDEFabcdef0123456789xyzw\n",
+        )
+        .unwrap();
+        let root = canon(dir.path()).display().to_string();
+
+        let out = build_chat_attachments(&format!("look at {}", dir.path().display()), &[root]);
+        assert_eq!(out.attached.len(), 1);
+        let snapshot = &out.attached[0].snapshot;
+        assert!(
+            !snapshot.contains("ghp_0123456789"),
+            "raw token leaked via directory inline: {snapshot}"
+        );
+        assert!(snapshot.contains("[redacted]"));
+    }
+
+    #[test]
     fn directory_inside_sandbox_attaches() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), "a").unwrap();

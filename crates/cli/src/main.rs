@@ -11,6 +11,7 @@ mod errors;
 mod export;
 mod init;
 mod logging;
+mod selfmodel;
 mod serve;
 mod service;
 mod status;
@@ -22,7 +23,7 @@ use clap::{Parser, Subcommand};
 /// Brain OS — your AI's long-term memory
 #[derive(Parser)]
 #[command(name = "brain", version, about, long_about = None)]
-struct Cli {
+pub(crate) struct Cli {
     /// Show full error details (technical error chain)
     #[arg(long, short, global = true)]
     verbose: bool,

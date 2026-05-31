@@ -26,6 +26,7 @@ mod extract;
 mod pipeline;
 mod recall;
 mod render;
+mod secrets;
 mod streaming;
 mod wiring;
 
@@ -108,6 +109,12 @@ pub struct SignalProcessor {
     /// (HTTP/WS/gRPC) to throttle abusive callers without changing
     /// identity resolution. Unwired processors disable rate limiting.
     client_rate_limits: Option<std::sync::Arc<resilience::RateLimitRegistry>>,
+    /// Brain's grounded self-knowledge (CLI commands, config schema, policy),
+    /// injected into the chat prompt as an authoritative "About Brain" section
+    /// so the SOUL stops fabricating the product's own surface. Built from code
+    /// at bootstrap; `None` leaves the prompt unchanged (back-compat for
+    /// non-chat/test processors).
+    product_self_model: Option<std::sync::Arc<brain::ProductSelfModel>>,
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
