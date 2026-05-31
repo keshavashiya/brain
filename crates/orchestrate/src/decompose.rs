@@ -929,7 +929,7 @@ mod tests {
                 _messages: &[Message],
             ) -> Result<Pin<Box<dyn Stream<Item = Result<ResponseChunk, LlmError>> + Send>>, LlmError>
             {
-                unimplemented!()
+                unreachable!("mock provider: the decomposer never streams")
             }
             async fn health_check(&self) -> bool {
                 true
@@ -983,7 +983,7 @@ mod tests {
                 _messages: &[Message],
             ) -> Result<Pin<Box<dyn Stream<Item = Result<ResponseChunk, LlmError>> + Send>>, LlmError>
             {
-                unimplemented!()
+                unreachable!("mock provider: the decomposer never streams")
             }
             async fn health_check(&self) -> bool {
                 true
@@ -1039,7 +1039,7 @@ mod tests {
                 _messages: &[Message],
             ) -> Result<Pin<Box<dyn Stream<Item = Result<ResponseChunk, LlmError>> + Send>>, LlmError>
             {
-                unimplemented!()
+                unreachable!("mock provider: the decomposer never streams")
             }
             async fn health_check(&self) -> bool {
                 true
@@ -1092,7 +1092,7 @@ mod tests {
                 _messages: &[Message],
             ) -> Result<Pin<Box<dyn Stream<Item = Result<ResponseChunk, LlmError>> + Send>>, LlmError>
             {
-                unimplemented!()
+                unreachable!("mock provider: the decomposer never streams")
             }
             async fn health_check(&self) -> bool {
                 true
@@ -1147,7 +1147,7 @@ mod tests {
             >,
             cortex::llm::LlmError,
         > {
-            unimplemented!()
+            unreachable!("mock provider: the decomposer never streams")
         }
         async fn health_check(&self) -> bool {
             true
