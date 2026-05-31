@@ -21,7 +21,7 @@ pub use config::{
     DeliveryConfig, LlmConfig, LogFormat, LogRotation, LoggingConfig, ProviderEntry,
 };
 pub use security::ActionTier;
-pub use selfmodel::{CommandDoc, ProductSelfModel, SignalDoc};
+pub use selfmodel::{CommandDoc, ProductSelfModel, SignalDoc, AFFIRMED_COMMANDS, DENIED_COMMANDS};
 
 /// Standard timeout constants for HTTP clients across Brain OS.
 pub mod timeouts {

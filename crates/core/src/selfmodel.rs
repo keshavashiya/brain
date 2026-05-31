@@ -86,6 +86,17 @@ const POLICY_FACTS: &[&str] = &[
      from the commands and in-chat signals listed above; never invent a new verb.",
 ];
 
+/// Commands the lifecycle [`POLICY_FACTS`] entry explicitly says do **not**
+/// exist. The binary crate cross-checks these against the live clap catalog
+/// (`cli::selfmodel`) so a future rename/addition can't leave a stale negation
+/// here — the self-model must never both deny and list the same command (F4).
+pub const DENIED_COMMANDS: &[&str] = &["restart", "reload", "send"];
+
+/// Commands the lifecycle [`POLICY_FACTS`] entry points users *to* as the real
+/// path (e.g. "restart = `brain stop` then `brain start`"). These MUST exist in
+/// the clap catalog, or the remediation advice is itself a fabrication.
+pub const AFFIRMED_COMMANDS: &[&str] = &["stop", "start"];
+
 /// Per-section cap on rendered config body, so a comment-heavy section can't
 /// dominate the prompt. Generous enough to keep small sections intact.
 const MAX_SECTION_CHARS: usize = 1600;
@@ -380,6 +391,36 @@ mod tests {
         // …and that policy fact pins the no-restart invariant the SOUL
         // fabricated in the end-user transcript.
         assert!(grounding.contains("no `brain restart`"));
+    }
+
+    #[test]
+    fn lifecycle_policy_prose_matches_structured_command_lists() {
+        // The structured DENIED/AFFIRMED command lists are the machine-checkable
+        // half of the hand-written lifecycle POLICY_FACT. Keep the two in sync:
+        // every command named in the constants must appear (as `brain <name>`)
+        // in some policy fact, so the binary crate's catalog cross-check (F4)
+        // is guarding the same names the prose actually claims.
+        let policy = POLICY_FACTS.join("\n");
+        for cmd in DENIED_COMMANDS {
+            assert!(
+                policy.contains(&format!("brain {cmd}")),
+                "DENIED_COMMANDS lists `{cmd}` but no POLICY_FACT mentions `brain {cmd}`",
+            );
+        }
+        for cmd in AFFIRMED_COMMANDS {
+            assert!(
+                policy.contains(&format!("brain {cmd}")),
+                "AFFIRMED_COMMANDS lists `{cmd}` but no POLICY_FACT mentions `brain {cmd}`",
+            );
+        }
+        // The two lists must be disjoint — a command can't be both denied and
+        // pointed-to as the real path.
+        for d in DENIED_COMMANDS {
+            assert!(
+                !AFFIRMED_COMMANDS.contains(d),
+                "`{d}` is in both DENIED_COMMANDS and AFFIRMED_COMMANDS",
+            );
+        }
     }
 
     #[test]

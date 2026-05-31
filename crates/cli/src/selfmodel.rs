@@ -62,4 +62,28 @@ mod tests {
         // Every command carries a one-line summary from its doc-comment.
         assert!(catalog.iter().all(|c| !c.summary.is_empty()));
     }
+
+    /// F4 — self-model fact integrity. The lifecycle POLICY_FACT hand-negates
+    /// some commands and points to others as the real path. Cross-check those
+    /// claims against the live clap catalog so a future rename/addition can't
+    /// leave a stale negation (the SOUL listing *and* denying the same verb).
+    #[test]
+    fn policy_command_claims_agree_with_clap_catalog() {
+        let names: Vec<String> = command_catalog().into_iter().map(|c| c.name).collect();
+
+        for denied in brain::DENIED_COMMANDS {
+            assert!(
+                !names.iter().any(|n| n == denied),
+                "POLICY_FACTS deny `brain {denied}`, but it now exists in the clap \
+                 catalog — update the lifecycle policy fact and DENIED_COMMANDS",
+            );
+        }
+        for affirmed in brain::AFFIRMED_COMMANDS {
+            assert!(
+                names.iter().any(|n| n == affirmed),
+                "POLICY_FACTS point users to `brain {affirmed}`, but it's missing from \
+                 the clap catalog — the remediation advice is now a fabrication",
+            );
+        }
+    }
 }
