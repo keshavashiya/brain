@@ -76,7 +76,7 @@ jobs:
           fi
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: brain-${{ matrix.target }}
           path: |
@@ -101,7 +101,7 @@ jobs:
           # auto-upload to avoid a duplicate.
           upload-artifact: false
       - name: Upload SBOM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom
           path: brain-${{ github.ref_name }}.spdx.json
