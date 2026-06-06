@@ -49,6 +49,7 @@ fn store_for(agent_id: &str, scopes: Vec<&str>, tier: Tier) -> Arc<ConfigIdentit
             scopes: scopes.into_iter().map(String::from).collect(),
             tier,
             path_allowlist: Vec::new(),
+            constraints: Vec::new(),
         }],
     };
     Arc::new(ConfigIdentityStore::from_config(cfg))

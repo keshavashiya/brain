@@ -1003,6 +1003,7 @@ mod tests {
                 scopes: vec!["shell.exec".into()],
                 tier: identity::Tier::Execute,
                 path_allowlist: vec![],
+                constraints: vec![],
             }],
         };
 
@@ -1285,6 +1286,7 @@ mod tests {
                 scopes: vec!["shell.exec".into()],
                 tier: identity::Tier::Execute,
                 path_allowlist: vec![],
+                constraints: vec![],
             }],
         };
 

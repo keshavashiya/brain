@@ -150,6 +150,93 @@ impl Principal {
     }
 }
 
+/// How a [`ModifierConstraint`] compares an allow-list entry against the
+/// actual modifier value pulled from an [`AuthorizationRequest`].
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MatchKind {
+    /// Value must equal an allow entry exactly. The default — the strictest
+    /// and the only safe choice for opaque identifiers (server names, ids).
+    #[default]
+    Exact,
+    /// Value must start with an allow entry. For path-like or prefix-shaped
+    /// modifiers. (The built-in `path_allowlist` uses a stricter
+    /// segment-boundary prefix; this is the plain `starts_with` form.)
+    Prefix,
+    /// Host-suffix match (case-insensitive): an entry `example.com` permits
+    /// `example.com` and any `*.example.com` subdomain. A leading `*.` on the
+    /// entry is accepted and ignored, so `*.example.com` behaves identically.
+    HostSuffix,
+}
+
+/// A per-principal constraint on one modifier of one verb (or verb namespace).
+///
+/// This is the general form of the older `path_allowlist`: that list is the
+/// built-in path constraint; `constraints` lets a principal scope *any*
+/// modifier — `net.http` `host`, `shell.exec` `command`, `mcp.mount` `name`,
+/// and so on. It is the enforcement substrate for capability-scoped Skill
+/// Packs: a pack granted `net.http` to `api.github.com` cannot reach
+/// `evil.com`, enforced at signal-entry rather than at execution.
+///
+/// Semantics (fail-closed): when a principal carries a constraint whose
+/// [`Self::applies_to`] matches the request's verb, the named `modifier` MUST
+/// be present in the request and its value MUST be [`Self::permits`]ted —
+/// otherwise the check denies. An empty `allow` list denies everything for
+/// that `(verb, modifier)` pair.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ModifierConstraint {
+    /// Verb this governs: an exact `"net.http"`, a namespace wildcard
+    /// `"net.*"`, or the global `"*"`.
+    pub verb: String,
+    /// Modifier key read from the request (e.g. `"host"`, `"command"`).
+    pub modifier: String,
+    #[serde(default)]
+    pub match_kind: MatchKind,
+    /// Permitted values. Empty = deny everything for this `(verb, modifier)`.
+    #[serde(default)]
+    pub allow: Vec<String>,
+}
+
+impl ModifierConstraint {
+    /// Does this constraint govern `verb_ns.verb_action`? Supports exact
+    /// match, a `"ns.*"` namespace wildcard, and the global `"*"`.
+    pub fn applies_to(&self, verb_ns: &str, verb_action: &str) -> bool {
+        if self.verb == "*" {
+            return true;
+        }
+        if let Some(prefix) = self.verb.strip_suffix(".*") {
+            return verb_ns == prefix;
+        }
+        let mut target = String::with_capacity(verb_ns.len() + 1 + verb_action.len());
+        target.push_str(verb_ns);
+        target.push('.');
+        target.push_str(verb_action);
+        self.verb == target
+    }
+
+    /// Is `value` permitted by this constraint's allow-list under its
+    /// [`MatchKind`]? An empty allow-list permits nothing.
+    pub fn permits(&self, value: &str) -> bool {
+        self.allow.iter().any(|entry| match self.match_kind {
+            MatchKind::Exact => entry == value,
+            MatchKind::Prefix => value.starts_with(entry.as_str()),
+            MatchKind::HostSuffix => host_suffix_match(entry, value),
+        })
+    }
+}
+
+/// `entry` permits `value` when `value` is the host itself or a subdomain of
+/// it. A leading `*.` on the entry is stripped first so `example.com` and
+/// `*.example.com` behave identically. Case-insensitive.
+fn host_suffix_match(entry: &str, value: &str) -> bool {
+    let base = entry.trim_start_matches("*.").to_ascii_lowercase();
+    if base.is_empty() {
+        return false;
+    }
+    let value = value.to_ascii_lowercase();
+    value == base || value.ends_with(&format!(".{base}"))
+}
+
 /// Identifier the adapter passes when resolving a principal from auth context.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentHint {
@@ -333,5 +420,84 @@ mod tests {
         assert_eq!(req.modifier_str("path"), Some("/tmp/x"));
         assert_eq!(req.modifier_str("limit"), None); // number, not string
         assert_eq!(req.modifier_str("missing"), None);
+    }
+
+    fn constraint(
+        verb: &str,
+        modifier: &str,
+        match_kind: MatchKind,
+        allow: &[&str],
+    ) -> ModifierConstraint {
+        ModifierConstraint {
+            verb: verb.into(),
+            modifier: modifier.into(),
+            match_kind,
+            allow: allow.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn constraint_applies_to_exact_namespace_and_global() {
+        let exact = constraint("net.http", "host", MatchKind::HostSuffix, &[]);
+        assert!(exact.applies_to("net", "http"));
+        assert!(!exact.applies_to("net", "connect"));
+        assert!(!exact.applies_to("fs", "read"));
+
+        let ns = constraint("net.*", "host", MatchKind::HostSuffix, &[]);
+        assert!(ns.applies_to("net", "http"));
+        assert!(ns.applies_to("net", "connect"));
+        assert!(!ns.applies_to("fs", "read"));
+
+        let global = constraint("*", "host", MatchKind::HostSuffix, &[]);
+        assert!(global.applies_to("anything", "at-all"));
+    }
+
+    #[test]
+    fn constraint_exact_match() {
+        let c = constraint(
+            "mcp.mount",
+            "name",
+            MatchKind::Exact,
+            &["github", "filesystem"],
+        );
+        assert!(c.permits("github"));
+        assert!(!c.permits("git")); // not a prefix match
+        assert!(!c.permits("evil"));
+    }
+
+    #[test]
+    fn constraint_prefix_match() {
+        let c = constraint(
+            "shell.exec",
+            "command",
+            MatchKind::Prefix,
+            &["git ", "cargo "],
+        );
+        assert!(c.permits("git status"));
+        assert!(c.permits("cargo build"));
+        assert!(!c.permits("rm -rf /"));
+    }
+
+    #[test]
+    fn constraint_host_suffix_match() {
+        let c = constraint(
+            "net.http",
+            "host",
+            MatchKind::HostSuffix,
+            &["github.com", "*.internal.example"],
+        );
+        assert!(c.permits("github.com")); // bare host
+        assert!(c.permits("api.github.com")); // subdomain
+        assert!(c.permits("svc.internal.example")); // leading *. on entry ignored
+        assert!(c.permits("API.GitHub.com")); // case-insensitive
+        assert!(!c.permits("github.com.evil.com")); // suffix-boundary respected
+        assert!(!c.permits("evil.com"));
+    }
+
+    #[test]
+    fn constraint_empty_allow_denies_everything() {
+        let c = constraint("net.http", "host", MatchKind::HostSuffix, &[]);
+        assert!(!c.permits("github.com"));
+        assert!(!c.permits(""));
     }
 }

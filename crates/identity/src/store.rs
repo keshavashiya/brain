@@ -24,7 +24,7 @@
 //! - `principal_for(Anonymous)` returns `Err(UnknownAgent("anonymous"))` —
 //!   adapters that receive unauthenticated traffic decide whether to refuse
 //!   or fall back to a configured anonymous principal.
-//! - `check` enforces three rules in order:
+//! - `check` enforces four rules in order:
 //!   1. `principal.tier >= required` — otherwise `EscalateToUser`.
 //!   2. `principal.has_scope(verb_ns, verb_action)` — otherwise `EscalateToUser`.
 //!   3. If the verb is path-scoped (`fs.*`, `memory.*`, or `shell.exec` with
@@ -32,6 +32,17 @@
 //!      principal's `path_allowlist` — otherwise `Deny` (paths are a
 //!      stricter boundary than verb scopes; an unauthorised path is not
 //!      "ask the user", it's "no").
+//!   4. For every per-principal [`ModifierConstraint`] whose verb matches the
+//!      request, the named modifier must be present and permitted — otherwise
+//!      `Deny`. This is the general form of rule 3: it scopes any modifier
+//!      (`net.http` `host`, `shell.exec` `command`, `mcp.mount` `name`), and
+//!      is the enforcement substrate for capability-scoped Skill Packs. Like
+//!      paths, an unauthorised modifier value is a hard `Deny`, not a prompt.
+//!      Constraints are opt-in: a principal with none behaves exactly as
+//!      before. Note a constrained verb that arrives without its modifier is
+//!      denied (fail-closed) — e.g. a `net.http` `host` constraint denies the
+//!      plain `WebSearch` path, which carries no host, so host constraints are
+//!      meant for principals on the capability/agent (`ToolCall`) surface.
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -41,7 +52,7 @@ use std::sync::Arc;
 
 use crate::types::{
     AgentHint, AgentId, AuthorizationRequest, CheckOutcome, IdentityError, IdentityStore,
-    Principal, Tier, UserId,
+    ModifierConstraint, Principal, Tier, UserId,
 };
 
 /// Top-level YAML structure under the `identity:` key.
@@ -69,6 +80,12 @@ pub struct PrincipalConfig {
     /// canonical (absolute) path in `req.modifiers["path"]` / `["cwd"]`.
     #[serde(default)]
     pub path_allowlist: Vec<String>,
+    /// General per-`(verb, modifier)` allowlists (the path-allowlist's
+    /// generalisation — see [`ModifierConstraint`]). Empty = unconstrained
+    /// beyond tier/scope/path. Opt-in: principals without constraints behave
+    /// exactly as before.
+    #[serde(default)]
+    pub constraints: Vec<ModifierConstraint>,
 }
 
 /// In-memory store materialised from an [`IdentityConfig`].
@@ -80,6 +97,7 @@ pub struct ConfigIdentityStore {
 struct StoredPrincipal {
     principal: Principal,
     path_allowlist: Vec<String>,
+    constraints: Vec<ModifierConstraint>,
 }
 
 impl ConfigIdentityStore {
@@ -100,6 +118,7 @@ impl ConfigIdentityStore {
                 StoredPrincipal {
                     principal,
                     path_allowlist: entry.path_allowlist,
+                    constraints: entry.constraints,
                 },
             );
         }
@@ -238,6 +257,34 @@ impl IdentityStore for ConfigIdentityStore {
                     reason: format!(
                         "agent_id={} cannot access {} (not in path_allowlist)",
                         p.agent_id, path
+                    ),
+                };
+            }
+        }
+
+        // 4. General modifier constraints (the path-allowlist's generalisation).
+        let constraints = self
+            .by_agent
+            .get(&p.agent_id)
+            .map(|sp| sp.constraints.as_slice())
+            .unwrap_or(&[]);
+        for c in constraints {
+            if !c.applies_to(&req.verb_ns, &req.verb_action) {
+                continue;
+            }
+            let Some(value) = req.modifier_str(&c.modifier) else {
+                return CheckOutcome::Deny {
+                    reason: format!(
+                        "agent_id={} {}.{} requires modifier `{}` (constrained)",
+                        p.agent_id, req.verb_ns, req.verb_action, c.modifier
+                    ),
+                };
+            };
+            if !c.permits(value) {
+                return CheckOutcome::Deny {
+                    reason: format!(
+                        "agent_id={} {}.{} modifier {}={} not permitted",
+                        p.agent_id, req.verb_ns, req.verb_action, c.modifier, value
                     ),
                 };
             }
@@ -695,6 +742,142 @@ identity:
             .with_modifiers(json!({ "path": "/Users/keshav-evil/foo" }));
         match s.check(&p, &req, Tier::Read).await {
             CheckOutcome::Deny { .. } => {} // expected
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    // --- Issue 159: general modifier constraints -------------------------
+
+    /// A principal with a `net.http` host allowlist. Used by the constraint
+    /// tests below; the `net.http` tier is External so checks pass `External`.
+    fn net_host_store() -> ConfigIdentityStore {
+        store_with(
+            r#"
+            user_id: k
+            principals:
+              - agent_id: agent
+                scopes: [net.http]
+                tier: external
+                constraints:
+                  - verb: net.http
+                    modifier: host
+                    match_kind: host_suffix
+                    allow: [github.com, api.openai.com]
+            "#,
+        )
+    }
+
+    async fn agent_of(s: &ConfigIdentityStore) -> Principal {
+        s.principal_for(&AgentHint::AgentId("agent".into()))
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn constraint_permits_allowed_host() {
+        let s = net_host_store();
+        let p = agent_of(&s).await;
+        let req = AuthorizationRequest::new("net", "http")
+            .with_modifiers(json!({ "host": "api.github.com" }));
+        assert_eq!(s.check(&p, &req, Tier::External).await, CheckOutcome::Allow);
+    }
+
+    #[tokio::test]
+    async fn constraint_denies_disallowed_host() {
+        let s = net_host_store();
+        let p = agent_of(&s).await;
+        let req =
+            AuthorizationRequest::new("net", "http").with_modifiers(json!({ "host": "evil.com" }));
+        match s.check(&p, &req, Tier::External).await {
+            CheckOutcome::Deny { reason } => assert!(reason.contains("host=evil.com")),
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn constrained_verb_without_modifier_is_denied() {
+        // A `net.http` host constraint denies a request that carries no host —
+        // e.g. the plain WebSearch path (fail-closed; documented in the module
+        // header). Constraints are intended for the capability/agent surface.
+        let s = net_host_store();
+        let p = agent_of(&s).await;
+        let req = AuthorizationRequest::new("net", "http"); // no modifiers
+        match s.check(&p, &req, Tier::External).await {
+            CheckOutcome::Deny { reason } => assert!(reason.contains("requires modifier `host`")),
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unconstrained_verb_passes_through() {
+        // The host constraint governs net.http only; an fs.read on this
+        // principal is unaffected by it (no constraint applies).
+        let s = store_with(
+            r#"
+            user_id: k
+            principals:
+              - agent_id: agent
+                scopes: [net.http, fs.read]
+                tier: external
+                path_allowlist: [/tmp]
+                constraints:
+                  - verb: net.http
+                    modifier: host
+                    match_kind: host_suffix
+                    allow: [github.com]
+            "#,
+        );
+        let p = agent_of(&s).await;
+        let req =
+            AuthorizationRequest::new("fs", "read").with_modifiers(json!({ "path": "/tmp/x" }));
+        assert_eq!(s.check(&p, &req, Tier::Read).await, CheckOutcome::Allow);
+    }
+
+    #[tokio::test]
+    async fn empty_allow_constraint_denies() {
+        let s = store_with(
+            r#"
+            user_id: k
+            principals:
+              - agent_id: agent
+                scopes: [mcp.mount]
+                tier: external
+                constraints:
+                  - verb: mcp.mount
+                    modifier: name
+                    allow: []
+            "#,
+        );
+        let p = agent_of(&s).await;
+        let req =
+            AuthorizationRequest::new("mcp", "mount").with_modifiers(json!({ "name": "anything" }));
+        match s.check(&p, &req, Tier::External).await {
+            CheckOutcome::Deny { .. } => {} // empty allow = deny everything
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn namespace_wildcard_constraint_applies_to_all_actions() {
+        let s = store_with(
+            r#"
+            user_id: k
+            principals:
+              - agent_id: agent
+                scopes: [net.http]
+                tier: external
+                constraints:
+                  - verb: net.*
+                    modifier: host
+                    match_kind: host_suffix
+                    allow: [github.com]
+            "#,
+        );
+        let p = agent_of(&s).await;
+        let req =
+            AuthorizationRequest::new("net", "http").with_modifiers(json!({ "host": "evil.com" }));
+        match s.check(&p, &req, Tier::External).await {
+            CheckOutcome::Deny { .. } => {} // net.* wildcard covers net.http
             other => panic!("expected Deny, got {other:?}"),
         }
     }

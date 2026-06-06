@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Per-principal capability scoping (modifier constraints).** An identity
+  principal can now constrain individual action *modifiers*, not just the
+  filesystem path. A new `constraints:` list under each principal scopes any
+  `(verb, modifier)` pair — e.g. allow `net.http` only to `*.github.com`,
+  `shell.exec` only to commands starting with `git `, or `mcp.mount` only to a
+  named server — with `exact`, `prefix`, or `host_suffix` matching. Checks are
+  fail-closed: a constrained verb that arrives without its modifier, or with a
+  value outside the allow-list, is denied at signal-entry (not at execution).
+  Constraints are opt-in; a principal without them behaves exactly as before.
+  This generalises the existing `path_allowlist` (kept as the built-in path
+  case) and is the enforcement substrate for future capability-scoped skill
+  packs.
 - **Model context-window auto-detection.** On startup Brain probes the active
   LLM provider for its real context window and scales the prompt budgets to
   match, instead of clipping everything to the conservative default. Detection
