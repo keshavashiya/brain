@@ -11,9 +11,12 @@
 mod actions;
 mod aggregation;
 pub mod decompose;
+mod execute;
 pub mod graph;
+mod lifecycle;
 pub mod orchestrator;
 mod prompts;
+mod replan;
 pub mod state;
 pub mod step;
 pub mod synthesize;
