@@ -610,9 +610,19 @@ fn store_fact_or_chat(
     }
 }
 
-const CLASSIFIER_SYSTEM_PROMPT: &str = r#"You classify user input into exactly one intent for Brain OS.
-Valid intents: store_fact, recall, forget, execute_command, web_search, query_audit, prune_audit, list_approvals, respond_to_approval, budget_status, schedule, list_schedules, cancel_schedule, send_message, system_status, decompose_task, list_tasks, task_status, cancel_task, cancel_signal, query_agents, delegate_task, set_proactivity, proactivity_status, memory_summary, chat.
-Rules:
+/// First line of the classifier prompt — fixed preamble that precedes the
+/// generated `Valid intents:` line.
+const CLASSIFIER_PROMPT_HEADER: &str =
+    "You classify user input into exactly one intent for Brain OS.";
+
+/// Everything from the `Rules:` line onward — hand-written disambiguation
+/// prose, the fact-extraction contract, and the JSON output shape. The list
+/// of valid intents that precedes this block is generated from
+/// [`taxonomy::INTENT_SPECS`] (its `LlmFallback` keys), so adding a
+/// natural-language-routable verb to the table surfaces it to the classifier
+/// automatically — no second edit here, and `prompt_lists_exactly_the_llm_fallback_keys`
+/// keeps the two in lockstep.
+const CLASSIFIER_PROMPT_RULES: &str = r#"Rules:
 - query_audit is for checking past actions: "what did I run today", "show my audit entries", "what did I approve yesterday".
 - prune_audit is for deleting old audit entries: "prune audit logs older than 30 days".
 - list_approvals is for showing pending confirmations: "what am I waiting to approve", "show pending approvals".
@@ -652,6 +662,29 @@ If no facts qualify, set facts to [].
 
 Return only JSON with keys: intent, subject, predicate, object, query, filter, since, limit, older_than, status, nonce, decision, window, id, task_id, enabled, until, target, command, args, description, cron, channel, recipient, content, facts.
 Missing keys must be null. facts must be [] if none."#;
+
+/// Assemble the classifier system prompt, generating the `Valid intents:` line
+/// from [`taxonomy::INTENT_SPECS`] so the natural-language vocabulary can never
+/// silently drift from the `Intent` enum. The keys are emitted in table order
+/// (grouped by category), which is the canonical SSOT ordering.
+fn build_classifier_system_prompt() -> String {
+    let valid_intents = taxonomy::INTENT_SPECS
+        .iter()
+        .filter(|s| s.nl_routable == taxonomy::NlRouting::LlmFallback)
+        .map(|s| s.key)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{CLASSIFIER_PROMPT_HEADER}\nValid intents: {valid_intents}.\n{CLASSIFIER_PROMPT_RULES}"
+    )
+}
+
+/// The full classifier system prompt, built once on first use. The
+/// `Valid intents:` line is generated from the taxonomy SSOT
+/// ([`build_classifier_system_prompt`]); everything else is the fixed
+/// header/rules prose.
+static CLASSIFIER_SYSTEM_PROMPT: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(build_classifier_system_prompt);
 
 #[async_trait::async_trait]
 impl IntentFallback for LlmIntentFallback {
@@ -704,7 +737,7 @@ impl IntentFallback for LlmIntentFallback {
         };
 
         let messages = vec![
-            Message::system(CLASSIFIER_SYSTEM_PROMPT),
+            Message::system(CLASSIFIER_SYSTEM_PROMPT.as_str()),
             Message::user(user_content),
         ];
 

@@ -1479,7 +1479,7 @@ mod taxonomy_drift_guards {
     fn prompt_lists_exactly_the_llm_fallback_keys() {
         use std::collections::BTreeSet;
 
-        let prompt = super::CLASSIFIER_SYSTEM_PROMPT;
+        let prompt: &str = &super::CLASSIFIER_SYSTEM_PROMPT;
         let line = prompt
             .lines()
             .find(|l| l.starts_with("Valid intents:"))
@@ -1504,6 +1504,32 @@ mod taxonomy_drift_guards {
             "classifier prompt's 'Valid intents:' line has drifted from the \
              LlmFallback set in INTENT_SPECS. Update the prompt or the table's \
              nl_routable so they agree.",
+        );
+    }
+
+    /// The generated prompt must stay well-formed: the fixed header and the
+    /// hand-written rules/JSON contract survive assembly, and there is exactly
+    /// one generated `Valid intents:` line between them. Guards against
+    /// `build_classifier_system_prompt` dropping or duplicating a section.
+    #[test]
+    fn generated_prompt_is_well_formed() {
+        let prompt: &str = &super::CLASSIFIER_SYSTEM_PROMPT;
+
+        assert!(
+            prompt.starts_with(super::CLASSIFIER_PROMPT_HEADER),
+            "prompt must begin with the fixed header",
+        );
+        assert!(
+            prompt.contains(super::CLASSIFIER_PROMPT_RULES),
+            "prompt must embed the hand-written rules/JSON-contract block",
+        );
+        assert_eq!(
+            prompt
+                .lines()
+                .filter(|l| l.starts_with("Valid intents:"))
+                .count(),
+            1,
+            "prompt must have exactly one generated 'Valid intents:' line",
         );
     }
 }
