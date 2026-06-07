@@ -500,4 +500,97 @@ mod tests {
         assert!(!c.permits("github.com"));
         assert!(!c.permits(""));
     }
+
+    // ── Property tests ────────────────────────────────────────────────
+    //
+    // Scope and host matching are access-control predicates: a prefix
+    // confusion (e.g. "fs.*" matching "fsx.read", or host entry
+    // "example.com" matching "evilexample.com") is a privilege escalation.
+    // These assert the boundary holds for arbitrary names.
+
+    use proptest::prelude::*;
+
+    fn principal_with(scopes: Vec<String>) -> Principal {
+        Principal {
+            user_id: "u".into(),
+            agent_id: "a".into(),
+            scopes,
+            tier: Tier::Execute,
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 512, .. ProptestConfig::default() })]
+
+        /// The global "*" scope covers every verb.
+        #[test]
+        fn global_scope_covers_everything(ns in "[a-z]{1,8}", action in "[a-z]{1,8}") {
+            prop_assert!(principal_with(vec!["*".into()]).has_scope(&ns, &action));
+        }
+
+        /// A namespace wildcard "X.*" covers a verb iff its namespace is
+        /// exactly X — never a namespace that merely shares a prefix
+        /// ("fs.*" must not cover "fsx.read").
+        #[test]
+        fn namespace_wildcard_matches_only_its_namespace(
+            scope_ns in "[a-z]{1,8}",
+            ns in "[a-z]{1,8}",
+            action in "[a-z]{1,8}",
+        ) {
+            let p = principal_with(vec![format!("{scope_ns}.*")]);
+            prop_assert_eq!(p.has_scope(&ns, &action), ns == scope_ns);
+        }
+
+        /// An exact scope "a.b" covers a verb iff both parts match exactly.
+        #[test]
+        fn exact_scope_matches_only_exact_verb(
+            sn in "[a-z]{1,8}", sa in "[a-z]{1,8}",
+            ns in "[a-z]{1,8}", action in "[a-z]{1,8}",
+        ) {
+            let p = principal_with(vec![format!("{sn}.{sa}")]);
+            prop_assert_eq!(p.has_scope(&ns, &action), ns == sn && action == sa);
+        }
+
+        /// `applies_to` shares the wildcard semantics: "X.*" governs a verb
+        /// iff its namespace is exactly X (same prefix-confusion guard).
+        #[test]
+        fn constraint_namespace_wildcard_is_exact(
+            verb_ns in "[a-z]{1,8}",
+            ns in "[a-z]{1,8}",
+            action in "[a-z]{1,8}",
+        ) {
+            let c = constraint(&format!("{verb_ns}.*"), "host", MatchKind::Exact, &[]);
+            prop_assert_eq!(c.applies_to(&ns, &action), ns == verb_ns);
+        }
+
+        /// Host-suffix matching: an entry permits the exact host and any
+        /// subdomain, but never a sibling that only shares a leading
+        /// substring without a label boundary ("example.com" must reject
+        /// "xexample.com"). Case-insensitive. The "*." prefix is a no-op.
+        #[test]
+        fn host_suffix_respects_label_boundary(
+            base in "[a-z]{1,6}\\.[a-z]{2,4}",
+            label in "[a-z]{1,5}",
+        ) {
+            let c = constraint("net.http", "host", MatchKind::HostSuffix, &[&base]);
+            let subdomain = format!("{label}.{base}");
+            let sibling = format!("{label}{base}"); // no label boundary
+            let upper = base.to_uppercase();
+
+            // Exact host and a real subdomain are permitted.
+            prop_assert!(c.permits(&base));
+            prop_assert!(c.permits(&subdomain));
+            // Case-insensitive on the value.
+            prop_assert!(c.permits(&upper));
+            // A sibling with no label boundary is rejected.
+            prop_assert!(!c.permits(&sibling));
+
+            // A "*.base" entry behaves identically to "base".
+            let starred_entry = format!("*.{base}");
+            let starred = constraint("net.http", "host", MatchKind::HostSuffix, &[&starred_entry]);
+            for v in [base.clone(), subdomain.clone(), sibling.clone()] {
+                prop_assert_eq!(c.permits(&v), starred.permits(&v));
+            }
+        }
+    }
 }

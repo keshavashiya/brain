@@ -881,4 +881,77 @@ identity:
             other => panic!("expected Deny, got {other:?}"),
         }
     }
+
+    // ── Property tests: path_is_covered ───────────────────────────────
+    //
+    // The path allowlist is the filesystem access boundary. The risk it
+    // must rule out is segment-boundary prefix confusion: an allowlist of
+    // "/home/u" must cover "/home/u/x" but never the sibling "/home/user".
+    // These assert that boundary, plus empty-list fail-closed, trailing-
+    // slash normalization, and monotonicity, for arbitrary paths.
+
+    use proptest::prelude::*;
+
+    fn covered(path: &str, allow: &[String]) -> bool {
+        ConfigIdentityStore::path_is_covered(path, allow)
+    }
+
+    /// Absolute paths of 1–4 lowercase segments, no trailing slash, no `..`.
+    fn abs_path() -> impl Strategy<Value = String> {
+        proptest::collection::vec("[a-z]{1,5}", 1..4)
+            .prop_map(|segs| format!("/{}", segs.join("/")))
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 512, .. ProptestConfig::default() })]
+
+        /// Fail closed: an empty allowlist never covers anything.
+        #[test]
+        fn empty_allowlist_denies_all(path in abs_path()) {
+            prop_assert!(!covered(&path, &[]));
+        }
+
+        /// An entry covers itself and any descendant beneath a `/` boundary.
+        #[test]
+        fn entry_covers_itself_and_descendants(entry in abs_path(), child in "[a-z]{1,5}") {
+            let allow = [entry.clone()];
+            let descendant = format!("{entry}/{child}");
+            prop_assert!(covered(&entry, &allow), "entry didn't cover itself: {}", entry);
+            prop_assert!(covered(&descendant, &allow), "didn't cover descendant: {}", descendant);
+        }
+
+        /// Segment-boundary safety: extending the final segment (no `/`)
+        /// yields a sibling that must NOT be covered ("/a/b" ⊉ "/a/bc").
+        #[test]
+        fn sibling_sharing_prefix_is_not_covered(entry in abs_path(), tail in "[a-z]{1,5}") {
+            let allow = [entry.clone()];
+            let sibling = format!("{entry}{tail}");
+            prop_assert!(!covered(&sibling, &allow), "covered a sibling: {}", sibling);
+        }
+
+        /// A trailing slash on an allowlist entry is normalized away — it
+        /// decides coverage identically to the same entry without one.
+        #[test]
+        fn trailing_slash_entry_is_equivalent(entry in abs_path(), child in "[a-z]{1,5}") {
+            let with = vec![format!("{entry}/")];
+            let without = vec![entry.clone()];
+            for p in [entry.clone(), format!("{entry}/{child}"), format!("{entry}{child}")] {
+                prop_assert_eq!(covered(&p, &with), covered(&p, &without), "mismatch for {}", p);
+            }
+        }
+
+        /// Monotonic: adding more entries never revokes existing coverage.
+        #[test]
+        fn adding_entries_preserves_coverage(
+            entry in abs_path(),
+            child in "[a-z]{1,5}",
+            extra in proptest::collection::vec(abs_path(), 0..3),
+        ) {
+            let path = format!("{entry}/{child}");
+            prop_assume!(covered(&path, std::slice::from_ref(&entry)));
+            let mut bigger = extra;
+            bigger.push(entry);
+            prop_assert!(covered(&path, &bigger));
+        }
+    }
 }
