@@ -7,12 +7,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use thiserror::Error;
-use uuid::Uuid;
 
 use crate::step::TaskStep;
 
 mod parse;
-use parse::{build_task_step, parse_steps, RawStep};
+mod validate;
+use parse::{parse_steps, RawStep};
 
 #[derive(Debug, Error)]
 pub enum DecompositionError {
@@ -163,170 +163,9 @@ impl LlmDecomposer {
             return Err(DecompositionError::EmptyPlan);
         }
 
-        // Reject execute/test steps the sandbox can't possibly run, so
-        // the user sees the failure at planning time instead of a
-        // mysterious "step failed" five seconds into execution. The
-        // sandbox runs argv directly — see actions::parse_sandbox_command
-        // for the full list of unsupported shell metacharacters.
-        let allowed: Option<std::collections::HashSet<&str>> = if context.available_tools.is_empty()
-        {
-            None
-        } else {
-            Some(context.available_tools.iter().map(String::as_str).collect())
-        };
-        // Same idea for delegate agents: an empty list means "no registry
-        // wired, can't validate" (skip the check), a non-empty list gates
-        // `implement` steps to real agents.
-        let allowed_agents: Option<std::collections::HashSet<&str>> =
-            if context.available_agents.is_empty() {
-                None
-            } else {
-                Some(
-                    context
-                        .available_agents
-                        .iter()
-                        .map(String::as_str)
-                        .collect(),
-                )
-            };
-
-        for (i, step) in raw_steps.iter().enumerate() {
-            match step.action_type.as_str() {
-                "shell" => {
-                    // Shell steps go through `sh -c` — pipes, redirects,
-                    // $VAR, PATH lookup all work. The only parse-time
-                    // requirement is a non-empty command.
-                    let cmd = step.command.as_deref().unwrap_or("").trim();
-                    if cmd.is_empty() {
-                        return Err(DecompositionError::Parse(format!(
-                            "step {} ({:?}) is action_type=shell but has no `command`",
-                            i + 1,
-                            step.description,
-                        )));
-                    }
-                }
-                "execute" | "test" => {
-                    let cmd = step.command.as_deref().unwrap_or("").trim();
-                    if cmd.is_empty() {
-                        return Err(DecompositionError::Parse(format!(
-                            "step {} ({:?}) is action_type={} but has no `command` — \
-                             the LLM produced an unrunnable plan",
-                            i + 1,
-                            step.description,
-                            step.action_type,
-                        )));
-                    }
-                    let parsed = crate::actions::parse_sandbox_command(cmd).map_err(|why| {
-                        DecompositionError::Parse(format!(
-                            "step {} ({:?}) has an unrunnable command {:?}: {} \
-                             (use action_type=\"shell\" if you need pipes/redirects/$VAR)",
-                            i + 1,
-                            step.description,
-                            cmd,
-                            why,
-                        ))
-                    })?;
-                    // Allowlist check applies only to argv mode; shell
-                    // mode delegates binary lookup to the system shell.
-                    if let Some(allowed) = &allowed {
-                        if let Some(binary) = parsed.argv.first() {
-                            let basename = std::path::Path::new(binary)
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or(binary);
-                            if !allowed.contains(basename) {
-                                return Err(DecompositionError::Parse(format!(
-                                    "step {} ({:?}) calls `{}` which is not on the sandbox allowlist. \
-                                     Allowed binaries: {}. \
-                                     Either re-plan using only allowed tools, switch to \
-                                     action_type=\"shell\", or add `{}` to `security.exec_allowlist`.",
-                                    i + 1,
-                                    step.description,
-                                    basename,
-                                    context.available_tools.join(", "),
-                                    basename,
-                                )));
-                            }
-                        }
-                    }
-                }
-                "implement" => {
-                    // Reject delegations to agents that aren't registered,
-                    // at plan time, so the user sees "no such agent" before
-                    // approving rather than five steps into execution. Only
-                    // an explicitly-named agent is checked — an omitted/
-                    // "default" agent is resolved later by the orchestrator.
-                    if let Some(allowed) = &allowed_agents {
-                        let named = step.agent.as_deref().map(str::trim).unwrap_or("");
-                        if !named.is_empty() && named != "default" && !allowed.contains(named) {
-                            let mut available: Vec<&str> = allowed.iter().copied().collect();
-                            available.sort_unstable();
-                            return Err(DecompositionError::Parse(format!(
-                                "step {} ({:?}) delegates to agent `{}` which is not registered. \
-                                 Available agents: {}. \
-                                 Re-plan using one of those, or install/configure `{}`.",
-                                i + 1,
-                                step.description,
-                                named,
-                                available.join(", "),
-                                named,
-                            )));
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Sequential-default backstop. The system prompt asks the LLM to
-        // chain inherently sequential plans, but model output is unreliable
-        // — we've seen six steps come back with `depends_on: []` for what
-        // is obviously "scan → write → run → verify → review → notify".
-        //
-        // Two cases to repair:
-        //   A. *No* step has any deps → chain the whole plan.
-        //   B. The first step has no deps (legitimate) but later steps
-        //      that ALSO have no deps are mid-plan — they should depend
-        //      on the previous step. We only force this for steps whose
-        //      action_type is one that obviously consumes earlier output
-        //      ("execute", "test", "review", "notify"). Adding spurious
-        //      edges to a Research step would block legitimate parallel
-        //      research.
-        let consumes_prior = |kind: &str| {
-            matches!(
-                kind,
-                "shell" | "execute" | "test" | "review" | "notify" | "implement"
-            )
-        };
-        if raw_steps.len() > 1 {
-            let none_have_deps = raw_steps.iter().all(|s| s.depends_on.is_empty());
-            if none_have_deps {
-                for (i, step) in raw_steps.iter_mut().enumerate().skip(1) {
-                    step.depends_on = vec![i - 1];
-                }
-            } else {
-                for (i, step) in raw_steps.iter_mut().enumerate().skip(1) {
-                    if step.depends_on.is_empty() && consumes_prior(&step.action_type) {
-                        step.depends_on = vec![i - 1];
-                    }
-                }
-            }
-        }
-
-        // Assign UUIDs and convert raw steps to TaskSteps.
-        // deps reference 0-based indices → resolve to UUIDs.
-        let ids: Vec<String> = raw_steps
-            .iter()
-            .map(|_| Uuid::new_v4().to_string())
-            .collect();
-
-        let steps: Vec<TaskStep> = raw_steps
-            .into_iter()
-            .enumerate()
-            .map(|(i, raw)| build_task_step(i, raw, &ids))
-            .collect();
-
-        Ok(steps)
+        validate::validate_steps(&raw_steps, &context)?;
+        validate::apply_sequential_fallback(&mut raw_steps);
+        Ok(validate::finalize(raw_steps))
     }
 }
 
@@ -395,120 +234,12 @@ impl TaskDecomposer for LlmDecomposer {
             return Err(DecompositionError::EmptyPlan);
         }
 
-        // Re-use the same sequential-fallback + parse-time validation
-        // path as the main decompose flow so a bad LLM response can't
-        // create a worse plan than the one we just failed on.
-        let consumes_prior = |kind: &str| {
-            matches!(
-                kind,
-                "shell" | "execute" | "test" | "review" | "notify" | "implement"
-            )
-        };
-        if raw_steps.len() > 1 {
-            let none_have_deps = raw_steps.iter().all(|s| s.depends_on.is_empty());
-            if none_have_deps {
-                for (i, step) in raw_steps.iter_mut().enumerate().skip(1) {
-                    step.depends_on = vec![i - 1];
-                }
-            } else {
-                for (i, step) in raw_steps.iter_mut().enumerate().skip(1) {
-                    if step.depends_on.is_empty() && consumes_prior(&step.action_type) {
-                        step.depends_on = vec![i - 1];
-                    }
-                }
-            }
-        }
-
-        let allowed: Option<std::collections::HashSet<&str>> = if context.available_tools.is_empty()
-        {
-            None
-        } else {
-            Some(context.available_tools.iter().map(String::as_str).collect())
-        };
-        let allowed_agents: Option<std::collections::HashSet<&str>> =
-            if context.available_agents.is_empty() {
-                None
-            } else {
-                Some(
-                    context
-                        .available_agents
-                        .iter()
-                        .map(String::as_str)
-                        .collect(),
-                )
-            };
-
-        for (i, step) in raw_steps.iter().enumerate() {
-            match step.action_type.as_str() {
-                "shell" => {
-                    let cmd = step.command.as_deref().unwrap_or("").trim();
-                    if cmd.is_empty() {
-                        return Err(DecompositionError::Parse(format!(
-                            "replan step {} ({:?}) is action_type=shell but has no command",
-                            i + 1,
-                            step.description
-                        )));
-                    }
-                }
-                "implement" => {
-                    if let Some(allowed) = &allowed_agents {
-                        let named = step.agent.as_deref().map(str::trim).unwrap_or("");
-                        if !named.is_empty() && named != "default" && !allowed.contains(named) {
-                            return Err(DecompositionError::Parse(format!(
-                                "replan step {} delegates to agent `{named}` which is not registered",
-                                i + 1
-                            )));
-                        }
-                    }
-                }
-                "execute" | "test" => {
-                    let cmd = step.command.as_deref().unwrap_or("").trim();
-                    if cmd.is_empty() {
-                        return Err(DecompositionError::Parse(format!(
-                            "replan step {} ({:?}) is action_type={} but has no command",
-                            i + 1,
-                            step.description,
-                            step.action_type
-                        )));
-                    }
-                    let parsed = crate::actions::parse_sandbox_command(cmd).map_err(|why| {
-                        DecompositionError::Parse(format!(
-                            "replan step {} ({:?}) has unrunnable command {:?}: {}",
-                            i + 1,
-                            step.description,
-                            cmd,
-                            why
-                        ))
-                    })?;
-                    if let Some(allowed) = &allowed {
-                        if let Some(binary) = parsed.argv.first() {
-                            let basename = std::path::Path::new(binary)
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or(binary);
-                            if !allowed.contains(basename) {
-                                return Err(DecompositionError::Parse(format!(
-                                    "replan step {} calls `{basename}` which is not on the sandbox allowlist",
-                                    i + 1
-                                )));
-                            }
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let ids: Vec<String> = raw_steps
-            .iter()
-            .map(|_| Uuid::new_v4().to_string())
-            .collect();
-        let steps: Vec<TaskStep> = raw_steps
-            .into_iter()
-            .enumerate()
-            .map(|(i, raw)| build_task_step(i, raw, &ids))
-            .collect();
-        Ok(steps)
+        // Re-use the exact same validation + sequential-fallback path as
+        // the main decompose flow so a bad LLM response can't create a
+        // worse plan than the one we just failed on.
+        validate::validate_steps(&raw_steps, &context)?;
+        validate::apply_sequential_fallback(&mut raw_steps);
+        Ok(validate::finalize(raw_steps))
     }
 
     async fn decompose(
