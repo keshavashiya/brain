@@ -35,6 +35,15 @@ const SIGNAL_NO_RESPONSE: f32 = 0.2;
 /// Negative signal: delivery itself failed (transport error).
 const SIGNAL_DELIVERY_FAIL: f32 = 0.0;
 
+/// One exponential-moving-average step on a learned weight: nudge the prior
+/// weight toward the new `signal` by [`EMA_ALPHA`]. For a `prev` and `signal`
+/// both in `[0.0, 1.0]` this is a convex combination, so the result stays in
+/// range and never overshoots either endpoint — the caller still clamps as a
+/// guard against an out-of-range stored weight.
+fn ema_step(prev: f32, signal: f32) -> f32 {
+    (1.0 - EMA_ALPHA) * prev + EMA_ALPHA * signal
+}
+
 /// One learned preference row.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChannelPreference {
@@ -231,7 +240,7 @@ impl ChannelPreferenceStore for SqlitePreferenceStore {
                         // Pinned — keep user-set weight, just update counters.
                         w
                     } else {
-                        (1.0 - EMA_ALPHA) * w + EMA_ALPHA * signal
+                        ema_step(w, signal)
                     };
                     let weight = weight.clamp(0.0, 1.0);
                     let rc = rc + 1;
@@ -618,5 +627,83 @@ mod tests {
         let all = store.list_all("personal").await.unwrap();
         assert_eq!(all.len(), 2);
         // Sorted by category asc then weight desc
+    }
+
+    // ── Property tests ────────────────────────────────────────────────
+    //
+    // The learned channel weight must stay a valid `[0, 1]` preference under
+    // any stream of interactions: a single EMA step is a convex blend that
+    // can't overshoot, moves toward the observed signal, and converges to a
+    // repeated one. And every interaction classifies to a signal already in
+    // range, so the blend's validity precondition always holds.
+    use proptest::prelude::*;
+
+    fn interaction(delivered_ok: bool, responded: bool) -> RecordedInteraction {
+        let t = Utc::now();
+        RecordedInteraction {
+            namespace: "personal".into(),
+            category: DeliveryCategory::Nudge,
+            channel_id: "c".into(),
+            delivered_at: t,
+            responded_at: responded.then(|| t + Duration::seconds(1)),
+            delivered_ok,
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 512, .. ProptestConfig::default() })]
+
+        /// One EMA step on a valid weight with a valid signal lands within
+        /// the closed span of the two — it never overshoots either endpoint,
+        /// so the learned weight can never leave `[0, 1]`.
+        #[test]
+        fn ema_step_stays_within_endpoints(prev in 0.0f32..=1.0, signal in 0.0f32..=1.0) {
+            let next = ema_step(prev, signal);
+            let lo = prev.min(signal);
+            let hi = prev.max(signal);
+            prop_assert!(next >= lo - f32::EPSILON);
+            prop_assert!(next <= hi + f32::EPSILON);
+            prop_assert!((0.0..=1.0).contains(&next));
+        }
+
+        /// Each step moves the weight toward the signal (or holds it): the
+        /// distance to the signal never grows.
+        #[test]
+        fn ema_step_contracts_toward_signal(prev in 0.0f32..=1.0, signal in 0.0f32..=1.0) {
+            let next = ema_step(prev, signal);
+            prop_assert!((next - signal).abs() <= (prev - signal).abs() + f32::EPSILON);
+        }
+
+        /// A repeated identical signal is a fixed point — once the weight
+        /// equals the signal, the step leaves it there.
+        #[test]
+        fn ema_step_fixed_point_at_equal(x in 0.0f32..=1.0) {
+            prop_assert!((ema_step(x, x) - x).abs() <= f32::EPSILON);
+        }
+
+        /// The step is monotone in the signal: a stronger positive signal
+        /// never produces a lower updated weight (same prior).
+        #[test]
+        fn ema_step_monotone_in_signal(prev in 0.0f32..=1.0, s1 in 0.0f32..=1.0, s2 in 0.0f32..=1.0) {
+            let (lo, hi) = if s1 <= s2 { (s1, s2) } else { (s2, s1) };
+            prop_assert!(ema_step(prev, hi) + f32::EPSILON >= ema_step(prev, lo));
+        }
+
+        /// Every interaction classifies to a signal in `[0, 1]` — the
+        /// precondition the EMA blend relies on. Responded outranks
+        /// no-response outranks delivery-failure.
+        #[test]
+        fn interaction_signal_is_an_ordered_valid_weight(ok in any::<bool>(), responded in any::<bool>()) {
+            let sig = interaction(ok, responded).signal();
+            prop_assert!((0.0..=1.0).contains(&sig));
+            // A failed delivery is the weakest signal; a response the strongest.
+            if !ok {
+                prop_assert_eq!(sig, SIGNAL_DELIVERY_FAIL);
+            } else if responded {
+                prop_assert_eq!(sig, SIGNAL_RESPONDED);
+            } else {
+                prop_assert_eq!(sig, SIGNAL_NO_RESPONSE);
+            }
+        }
     }
 }

@@ -811,6 +811,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "hmac",
+ "proptest",
  "rand 0.8.6",
  "reqwest",
  "rusqlite",
