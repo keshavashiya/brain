@@ -1148,6 +1148,7 @@ dependencies = [
  "brainos-intent",
  "brainos-observe",
  "chrono",
+ "proptest",
  "rand 0.8.6",
  "serde_json",
  "thiserror 2.0.18",

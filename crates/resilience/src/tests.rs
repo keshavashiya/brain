@@ -874,3 +874,105 @@ async fn registry_is_open_for_unknown_tool_does_not_mint() {
     assert!(!reg.is_open("never-seen").await);
     assert!(reg.is_empty().await, "is_open(unknown) must not mint");
 }
+
+// ── Backoff property tests ────────────────────────────────────────────
+//
+// `compute_delay` is the retry backoff curve. Its failure modes are an
+// unbounded sleep (a delay above `max_delay` would stall a retry cycle past
+// its budget) and an overflow panic at a large attempt index (the `<< shift`
+// must saturate, not wrap). These pin the cap, the exact capped-exponential
+// shape, monotonicity, and the jitter window for arbitrary configs.
+use proptest::prelude::*;
+
+/// Recompute the deterministic ceiling the way the implementation does, in
+/// saturating u128, so the property checks share no rounding surprises with
+/// the code under test.
+fn expected_ceiling_ms(base_ms: u64, max_ms: u64, attempt: u32) -> u64 {
+    let shift = (attempt - 1).min(31);
+    let exp = (base_ms as u128).saturating_mul(1u128 << shift);
+    exp.min(max_ms as u128).try_into().unwrap_or(u64::MAX)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 512, .. ProptestConfig::default() })]
+
+    /// The computed delay never exceeds `max_delay` — for any base, any
+    /// jitter, and any attempt index up to `u32::MAX` (the `<< shift` must
+    /// saturate rather than panic).
+    #[test]
+    fn delay_never_exceeds_max_delay(
+        base_ms in 0u64..2_000_000,
+        max_ms in 0u64..2_000_000,
+        jitter in 0.0f32..2.0,
+        attempt in 1u32..=u32::MAX,
+    ) {
+        let cfg = RetryConfig {
+            max_attempts: 1,
+            base_delay: Duration::from_millis(base_ms),
+            max_delay: Duration::from_millis(max_ms),
+            jitter_factor: jitter,
+        };
+        prop_assert!(compute_delay(&cfg, attempt) <= Duration::from_millis(max_ms));
+    }
+
+    /// With jitter off, the delay is exactly the capped exponential
+    /// `min(base * 2^(attempt-1, capped at 31), max)`.
+    #[test]
+    fn deterministic_backoff_is_capped_exponential(
+        base_ms in 0u64..2_000_000,
+        max_ms in 0u64..2_000_000,
+        attempt in 1u32..40,
+    ) {
+        let cfg = RetryConfig {
+            max_attempts: 1,
+            base_delay: Duration::from_millis(base_ms),
+            max_delay: Duration::from_millis(max_ms),
+            jitter_factor: 0.0,
+        };
+        let want = expected_ceiling_ms(base_ms, max_ms, attempt);
+        prop_assert_eq!(compute_delay(&cfg, attempt), Duration::from_millis(want));
+    }
+
+    /// With jitter off, the backoff is monotone non-decreasing in the
+    /// attempt index — each retry waits at least as long as the last.
+    #[test]
+    fn deterministic_backoff_is_monotone(
+        base_ms in 0u64..2_000_000,
+        max_ms in 0u64..2_000_000,
+        a in 1u32..40,
+        b in 1u32..40,
+    ) {
+        let cfg = RetryConfig {
+            max_attempts: 1,
+            base_delay: Duration::from_millis(base_ms),
+            max_delay: Duration::from_millis(max_ms),
+            jitter_factor: 0.0,
+        };
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        prop_assert!(compute_delay(&cfg, lo) <= compute_delay(&cfg, hi));
+    }
+
+    /// Jitter only ever subtracts from the deterministic ceiling: the
+    /// drawn delay stays within `[ceiling * (1 - jitter), ceiling]`, so
+    /// full jitter can reach 0 but nothing ever overshoots the ceiling.
+    #[test]
+    fn jitter_stays_within_floor_and_ceiling(
+        base_ms in 0u64..200_000,
+        max_ms in 0u64..200_000,
+        jitter in 0.0f32..=1.0,
+        attempt in 1u32..24,
+    ) {
+        let cfg = RetryConfig {
+            max_attempts: 1,
+            base_delay: Duration::from_millis(base_ms),
+            max_delay: Duration::from_millis(max_ms),
+            jitter_factor: jitter,
+        };
+        let ceiling = expected_ceiling_ms(base_ms, max_ms, attempt) as f64;
+        let got = compute_delay(&cfg, attempt).as_millis() as f64;
+        prop_assert!(got <= ceiling);
+        // (1 - jitter) of the ceiling is the deterministic floor; allow 1ms
+        // of integer-rounding slack on the jitter mass.
+        prop_assert!(got >= ceiling * (1.0 - jitter as f64) - 1.0);
+    }
+}
