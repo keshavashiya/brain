@@ -163,7 +163,7 @@ jobs:
       # Build the linux/amd64 image so the Dockerfile can't rot (e.g. a
       # RUST_VERSION that drifts below the workspace MSRV). No registry push —
       # publishing multi-arch images is release-automation work (Issue 167).
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
