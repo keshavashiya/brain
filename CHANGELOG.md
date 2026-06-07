@@ -183,6 +183,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Routine dependency bumps.** `clap` 4.5 → 4.6, `tempfile` 3.25 → 3.27,
+  `tracing-subscriber` 0.3.22 → 0.3.23, `ruvector-core` 2.0.5 → 2.2.0, and the
+  `criterion` dev-dependency 0.5 → 0.8 (benchmarks recompile cleanly under the
+  new API). All verified against the Rust 1.91 MSRV. Batches Dependabot #9–#13.
 - **Scheduled intents fire through the pipeline.** The direct-execution
   scheduled-intent poller in `serve` (a fixed 60s ticker that delivered a
   bare `[scheduled] …` notification and bypassed identity, confirmation,

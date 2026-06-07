@@ -183,7 +183,7 @@ metrics = { package = "brainos-metrics", path = "crates/metrics", version = "0.4
 selfmodel = { package = "brainos-selfmodel", path = "crates/selfmodel", version = "0.4.0" }
 
 # Benchmarks
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 
 # Testing
 mockito = "1"
