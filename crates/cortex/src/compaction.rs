@@ -124,4 +124,99 @@ mod tests {
         assert!(plan.is_noop());
         assert!(plan.keep_recent.is_empty());
     }
+
+    // ── Property tests ────────────────────────────────────────────────
+    //
+    // Compaction must never lose, duplicate, or reorder a turn (the summary
+    // path depends on the split being a faithful partition), must keep the
+    // verbatim block within budget, and must keep as much recent context as
+    // fits. These assert all four for arbitrary histories and budgets.
+
+    use proptest::prelude::*;
+
+    fn histories() -> impl Strategy<Value = Vec<Message>> {
+        // Content length drives token cost; vary it widely so cases span
+        // "everything fits" through "even one turn overflows".
+        proptest::collection::vec("[a-z ]{0,120}".prop_map(Message::user), 0..20)
+    }
+
+    fn kept_tokens(plan: &HistoryPlan<'_>) -> usize {
+        plan.keep_recent
+            .iter()
+            .map(|m| estimate_tokens(&m.content))
+            .sum()
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 512, .. ProptestConfig::default() })]
+
+        /// The split is a faithful partition: concatenating `to_summarize`
+        /// then `keep_recent` reproduces the original history exactly — same
+        /// turns, same chronological order, none lost or duplicated.
+        #[test]
+        fn split_is_a_faithful_partition(
+            history in histories(),
+            budget in 0usize..500,
+            reserve in 0usize..200,
+        ) {
+            let plan = plan_history_compaction(&history, budget, reserve);
+            prop_assert_eq!(
+                plan.to_summarize.len() + plan.keep_recent.len(),
+                history.len()
+            );
+            let rejoined = plan
+                .to_summarize
+                .iter()
+                .chain(plan.keep_recent.iter())
+                .map(|m| &m.content);
+            prop_assert!(rejoined.eq(history.iter().map(|m| &m.content)));
+        }
+
+        /// The verbatim block the caller emits never exceeds the effective
+        /// budget (`budget - reserve`) — the whole point of holding turns
+        /// back into the summary.
+        #[test]
+        fn kept_turns_fit_the_effective_budget(
+            history in histories(),
+            budget in 0usize..500,
+            reserve in 0usize..200,
+        ) {
+            let plan = plan_history_compaction(&history, budget, reserve);
+            prop_assert!(kept_tokens(&plan) <= budget.saturating_sub(reserve));
+        }
+
+        /// Greedy maximality: whenever something overflows, the newest
+        /// overflowed turn genuinely didn't fit — adding it to the kept set
+        /// would have exceeded the effective budget. So no turn that could
+        /// have been kept verbatim was needlessly summarized.
+        #[test]
+        fn keeps_as_much_recent_as_fits(
+            history in histories(),
+            budget in 0usize..500,
+            reserve in 0usize..200,
+        ) {
+            let plan = plan_history_compaction(&history, budget, reserve);
+            if let Some(newest_overflow) = plan.to_summarize.last() {
+                let effective = budget.saturating_sub(reserve);
+                let would_be = kept_tokens(&plan) + estimate_tokens(&newest_overflow.content);
+                prop_assert!(
+                    would_be > effective,
+                    "a turn that fit was summarized: {would_be} <= {effective}"
+                );
+            }
+        }
+
+        /// No-op exactly when the whole history fits: `is_noop()` holds iff
+        /// the summed per-turn token cost is within the effective budget.
+        #[test]
+        fn noop_iff_everything_fits(
+            history in histories(),
+            budget in 0usize..500,
+            reserve in 0usize..200,
+        ) {
+            let plan = plan_history_compaction(&history, budget, reserve);
+            let total: usize = history.iter().map(|m| estimate_tokens(&m.content)).sum();
+            prop_assert_eq!(plan.is_noop(), total <= budget.saturating_sub(reserve));
+        }
+    }
 }
