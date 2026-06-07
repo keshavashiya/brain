@@ -478,4 +478,183 @@ mod tests {
             }
         ));
     }
+
+    // ── Property tests ────────────────────────────────────────────────
+    //
+    // `derive_decision` is the cap-enforcement core: it decides Allowed /
+    // Warn / Exceeded for a single (consumed, units, ceiling) tuple. Its
+    // failure mode is a *missed hard stop* — spend that should be denied
+    // slipping through as Allowed/Warn — so the central property is the
+    // exact projected-vs-ceiling boundary. `stricter_decision` folds the
+    // hourly and daily verdicts; it must never relax (the stricter of two
+    // caps wins), so we assert it is a monotone, commutative join.
+    use proptest::prelude::*;
+
+    /// Strictness rank: Allowed < Warn < Exceeded.
+    fn rank(d: &BudgetDecision) -> u8 {
+        match d {
+            BudgetDecision::Allowed => 0,
+            BudgetDecision::Warn { .. } => 1,
+            BudgetDecision::Exceeded { .. } => 2,
+        }
+    }
+
+    /// Build either an Allowed, a Warn(pct), or an Exceeded for lattice tests.
+    fn any_decision() -> impl Strategy<Value = BudgetDecision> {
+        prop_oneof![
+            Just(BudgetDecision::Allowed),
+            (0.0f32..200.0).prop_map(|consumed_pct| BudgetDecision::Warn { consumed_pct }),
+            (any::<u64>(), any::<u64>())
+                .prop_map(|(ceiling, consumed)| BudgetDecision::Exceeded { ceiling, consumed }),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 512, .. ProptestConfig::default() })]
+
+        /// Both "no limit" sentinels — `u64::MAX` (explicitly unbounded) and
+        /// `0` (unset, what `get_ceiling` returns for an unconfigured cap) —
+        /// are always Allowed, regardless of how much is consumed or requested.
+        #[test]
+        fn no_limit_sentinels_always_allowed(consumed in any::<u64>(), units in any::<u64>()) {
+            for ceiling in [0u64, u64::MAX] {
+                prop_assert!(matches!(
+                    derive_decision(consumed, units, ceiling),
+                    BudgetDecision::Allowed
+                ));
+            }
+        }
+
+        /// The hard-stop guarantee, both directions: for any bounded,
+        /// non-zero ceiling the verdict is Exceeded **iff** the saturating
+        /// projection (consumed + units) meets or crosses the ceiling. No
+        /// over-budget request is ever Allowed or merely Warn'd, and no
+        /// under-budget request is ever falsely Exceeded.
+        #[test]
+        fn hard_stop_iff_projection_meets_ceiling(
+            consumed in any::<u64>(),
+            units in any::<u64>(),
+            ceiling in 1u64..u64::MAX,
+        ) {
+            let projected = consumed.saturating_add(units);
+            let exceeded = matches!(
+                derive_decision(consumed, units, ceiling),
+                BudgetDecision::Exceeded { .. }
+            );
+            prop_assert_eq!(exceeded, projected >= ceiling);
+        }
+
+        /// Exceeded carries the true ceiling and the pre-request consumed
+        /// total (not the projection) so the audit/re-approval prompt is
+        /// honest about what was already spent.
+        #[test]
+        fn exceeded_reports_ceiling_and_prior_consumed(
+            consumed in any::<u64>(),
+            units in any::<u64>(),
+            ceiling in 1u64..u64::MAX,
+        ) {
+            if let BudgetDecision::Exceeded { ceiling: c, consumed: cons } =
+                derive_decision(consumed, units, ceiling)
+            {
+                prop_assert_eq!(c, ceiling);
+                prop_assert_eq!(cons, consumed);
+            }
+        }
+
+        /// Spending more never softens the verdict: for a fixed prior
+        /// consumption and ceiling, the strictness rank is non-decreasing
+        /// in the requested units.
+        #[test]
+        fn decision_is_monotone_in_units(
+            consumed in any::<u64>(),
+            a in any::<u64>(),
+            b in any::<u64>(),
+            ceiling in 0u64..=u64::MAX,
+        ) {
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            let d_lo = derive_decision(consumed, lo, ceiling);
+            let d_hi = derive_decision(consumed, hi, ceiling);
+            prop_assert!(rank(&d_hi) >= rank(&d_lo));
+        }
+
+        /// A `Warn` verdict only ever occupies the [50%, 100%) band; below
+        /// 50% is Allowed and at/over 100% is Exceeded (boundaries owned by
+        /// `WarnLevel`, mirrored here on the decision side).
+        #[test]
+        fn warn_band_is_between_50_and_100(
+            consumed in any::<u64>(),
+            units in any::<u64>(),
+            ceiling in 1u64..u64::MAX,
+        ) {
+            if let BudgetDecision::Warn { consumed_pct } =
+                derive_decision(consumed, units, ceiling)
+            {
+                prop_assert!((50.0..100.0).contains(&consumed_pct));
+            }
+        }
+
+        /// `stricter_decision` is a join: its result is at least as strict
+        /// as either input — a permissive hourly verdict can never loosen a
+        /// strict daily one (or vice-versa).
+        #[test]
+        fn stricter_is_at_least_as_strict_as_both(
+            a in any_decision(),
+            b in any_decision(),
+        ) {
+            let merged = stricter_decision(a.clone(), b.clone());
+            prop_assert!(rank(&merged) >= rank(&a));
+            prop_assert!(rank(&merged) >= rank(&b));
+        }
+
+        /// The join is commutative — argument order (hourly-first vs
+        /// daily-first) does not change the verdict's strictness, and for
+        /// two warnings the same max percentage is chosen either way.
+        #[test]
+        fn stricter_is_commutative(a in any_decision(), b in any_decision()) {
+            let ab = stricter_decision(a.clone(), b.clone());
+            let ba = stricter_decision(b, a);
+            prop_assert_eq!(rank(&ab), rank(&ba));
+            if let (BudgetDecision::Warn { consumed_pct: x }, BudgetDecision::Warn { consumed_pct: y }) =
+                (&ab, &ba)
+            {
+                prop_assert_eq!(x, y);
+            }
+        }
+
+        /// Either side being Exceeded forces an Exceeded result (the hard
+        /// stop is absorbing in the lattice).
+        #[test]
+        fn exceeded_absorbs(
+            other in any_decision(),
+            ceiling in any::<u64>(),
+            consumed in any::<u64>(),
+        ) {
+            let exc = BudgetDecision::Exceeded { ceiling, consumed };
+            let left = matches!(
+                stricter_decision(exc.clone(), other.clone()),
+                BudgetDecision::Exceeded { .. }
+            );
+            let right = matches!(
+                stricter_decision(other, exc),
+                BudgetDecision::Exceeded { .. }
+            );
+            prop_assert!(left);
+            prop_assert!(right);
+        }
+
+        /// Folding two warnings keeps the louder one (max percentage).
+        #[test]
+        fn stricter_warn_keeps_max_pct(x in 0.0f32..200.0, y in 0.0f32..200.0) {
+            let merged = stricter_decision(
+                BudgetDecision::Warn { consumed_pct: x },
+                BudgetDecision::Warn { consumed_pct: y },
+            );
+            match merged {
+                BudgetDecision::Warn { consumed_pct } => {
+                    prop_assert_eq!(consumed_pct, x.max(y));
+                }
+                _ => prop_assert!(false, "two warnings must fold to a warning"),
+            }
+        }
+    }
 }
