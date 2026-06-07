@@ -137,7 +137,7 @@ crossterm = "0.28"
 termimad = "0.31"
 
 # LRU cache
-lru = "0.12"
+lru = "0.16"
 
 # HTTP server
 axum = { version = "0.7", features = ["json"] }

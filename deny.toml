@@ -53,12 +53,6 @@ ignore = [
     # Bincode 1.x unmaintained. Pulled in by ruvector-core (vector storage)
     # which hasn't migrated to bincode 2.x yet. No direct usage from our code.
     { id = "RUSTSEC-2025-0141", reason = "transitive via ruvector-core; awaiting upstream bump to bincode 2.x" },
-    # IterMut Stacked-Borrows unsoundness in a transitive crate. Only
-    # exposed under Miri; no impact on production.
-    { id = "RUSTSEC-2026-0002", reason = "transitive; unsoundness only observable under Miri" },
-    # rand custom-logger unsoundness. We do not use rand::rng() with a
-    # custom logger anywhere in our code, and downstream crates don't either.
-    { id = "RUSTSEC-2026-0097", reason = "transitive; we do not call rand::rng() with a custom logger" },
 ]
 
 [bans]
