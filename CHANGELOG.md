@@ -214,6 +214,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   already vendors protoc via `protobuf-src`, and the hardcoded path
   broke Linux builds.
 
+### Fixed
+
+- **Budget: an unset (`0`) provider ceiling no longer blocks every request.**
+  A provider with no configured token cap stores its ceiling as `0`, which the
+  status view already treats as "no limit" — but the spend check read `0` as
+  "block everything", so any check against such a provider was denied as
+  *exceeded* (even a zero-cost one). A `0` ceiling now means unbounded,
+  consistent with the rest of the budget surface; an explicit cap of `1`+ is
+  still enforced exactly as before.
+
 ### Security
 
 - **Patched dependencies flagged by RUSTSEC advisories** (clears the
