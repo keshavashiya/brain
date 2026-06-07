@@ -30,6 +30,7 @@ futures = { workspace = true }
 [dev-dependencies]
 mockito = { workspace = true }
 tokio = { workspace = true }
+proptest = "1"
 
 [lints]
 workspace = true

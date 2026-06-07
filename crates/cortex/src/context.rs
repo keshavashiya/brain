@@ -534,6 +534,108 @@ mod tests {
         assert_eq!(budget.memory_budget(), 0);
     }
 
+    // ── Property tests ────────────────────────────────────────────────
+    //
+    // The estimator and budget split are the safety floor for every prompt
+    // Brain assembles: under-counting tokens overflows the model's real
+    // window, and a budget whose sections sum past `total_context` clips
+    // content the assembler thought it had room for. These assert the
+    // invariants for arbitrary input rather than the hand-picked sizes above.
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 512, .. ProptestConfig::default() })]
+
+        /// The estimator must never *under*-count past a single token's worth
+        /// of characters — that's the whole point of the conservative 3
+        /// chars/token ratio (see `CHARS_PER_TOKEN`). If this breaks, packed
+        /// prompts can silently overflow the provider's context window.
+        #[test]
+        fn estimate_never_undercounts(s in ".*") {
+            let chars = s.chars().count();
+            let est = estimate_tokens(&s);
+            prop_assert!(
+                chars <= est * CHARS_PER_TOKEN,
+                "estimate under-counted: {chars} chars but est*ratio = {}", est * CHARS_PER_TOKEN
+            );
+            // …and never wastefully over-counts by more than one token.
+            prop_assert!(est * CHARS_PER_TOKEN < chars + CHARS_PER_TOKEN);
+            // Zero tokens iff empty.
+            prop_assert_eq!(est == 0, chars == 0);
+        }
+
+        /// The estimate is a function of *character* count, not byte length —
+        /// guards against a regression to `str::len()` that would over-count
+        /// multi-byte (non-ASCII) text and waste budget. A string of N
+        /// multi-byte codepoints must estimate the same as N ASCII ones.
+        #[test]
+        fn estimate_counts_chars_not_bytes(n in 0usize..512) {
+            prop_assert_eq!(
+                estimate_tokens(&"€".repeat(n)), // 3 bytes/char
+                estimate_tokens(&"a".repeat(n)), // 1 byte/char
+            );
+        }
+
+        /// Splitting text and budgeting the pieces separately must never count
+        /// *fewer* tokens than budgeting the whole — otherwise per-section
+        /// accounting could fit content the combined prompt can't hold.
+        #[test]
+        fn estimate_is_subadditive(a in ".*", b in ".*") {
+            let whole = estimate_tokens(&format!("{a}{b}"));
+            let parts = estimate_tokens(&a) + estimate_tokens(&b);
+            prop_assert!(parts >= whole, "split under-counted: {parts} < {whole}");
+        }
+
+        /// The budget split is exact and self-consistent for *any* window: the
+        /// variable pool (history + attachments + memory) always equals the
+        /// window minus the fixed reserve, and the six sections together cover
+        /// exactly the window (or the fixed reserve when the window is too
+        /// small to fund anything — a window that can't fit the fixed prompt).
+        #[test]
+        fn for_context_size_split_is_exact(total in 0usize..8_000_000) {
+            let b = TokenBudget::for_context_size(total);
+            prop_assert_eq!(b.total_context, total);
+
+            let reserved = b.system_prompt + b.user_model + b.response_buffer;
+            let pool = total.saturating_sub(reserved);
+
+            // The three variable sections partition the pool exactly.
+            prop_assert_eq!(
+                b.conversation_history + b.attachments + b.memory_budget(),
+                pool,
+                "variable sections must sum to the pool"
+            );
+
+            // All six sections cover the window exactly, or the fixed reserve
+            // when the window is below it.
+            let used = b.system_prompt
+                + b.user_model
+                + b.conversation_history
+                + b.response_buffer
+                + b.attachments
+                + b.memory_budget();
+            prop_assert_eq!(used, total.max(reserved));
+        }
+
+        /// Fixed overheads never move with the window, and a window at least
+        /// twice the reserve grows both attachments and memory when doubled
+        /// (doubling clears the ±1 floor jitter of the percentage split).
+        #[test]
+        fn for_context_size_scales_monotonically(total in 2_400usize..4_000_000) {
+            let small = TokenBudget::for_context_size(total);
+            let large = TokenBudget::for_context_size(total * 2);
+
+            prop_assert_eq!(large.system_prompt, small.system_prompt);
+            prop_assert_eq!(large.user_model, small.user_model);
+            prop_assert_eq!(large.response_buffer, small.response_buffer);
+
+            prop_assert!(large.attachments > small.attachments);
+            prop_assert!(large.memory_budget() > small.memory_budget());
+            prop_assert!(large.conversation_history > small.conversation_history);
+        }
+    }
+
     #[test]
     fn test_user_profile_to_context() {
         let profile = UserProfile {
