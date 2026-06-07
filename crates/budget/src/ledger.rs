@@ -185,15 +185,18 @@ impl SqliteBudget {
 }
 
 fn derive_decision(consumed: u64, units: u64, ceiling: u64) -> BudgetDecision {
-    if ceiling == u64::MAX {
+    // `u64::MAX` and `0` are both "no limit" sentinels: MAX is an explicitly
+    // unbounded ceiling, 0 is an *unset* one (what `get_ceiling` returns for a
+    // provider with no configured token cap, and what `status()` omits from the
+    // limits envelope). Both must short-circuit to Allowed *before* the
+    // projected-vs-ceiling check — otherwise a 0 ceiling would make `projected
+    // >= 0` (always true for u64) deny every request, even a 0-unit one.
+    if ceiling == u64::MAX || ceiling == 0 {
         return BudgetDecision::Allowed;
     }
     let projected = consumed.saturating_add(units);
     if projected >= ceiling {
         return BudgetDecision::Exceeded { ceiling, consumed };
-    }
-    if ceiling == 0 {
-        return BudgetDecision::Allowed;
     }
     let pct = (projected as f32 / ceiling as f32) * 100.0;
     if pct >= 50.0 {
