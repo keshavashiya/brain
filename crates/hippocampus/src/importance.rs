@@ -311,4 +311,60 @@ mod tests {
         assert!(!contains_whole_word("insurgent attack", "urgent"));
         assert!(!contains_whole_word("urgently needed", "urgent"));
     }
+
+    // ── Property tests ────────────────────────────────────────────────
+    //
+    // The importance score feeds the forgetting curve, so it must stay a
+    // valid weight in [0, 1] and never *fall* when more salience signals
+    // fire — a memory the user flagged as urgent and explicit must not score
+    // below an unflagged one.
+    use proptest::prelude::*;
+
+    fn signals(explicit: bool, urgency: bool, emotional: bool, novelty: bool) -> ImportanceSignals {
+        ImportanceSignals {
+            explicit,
+            urgency,
+            emotional,
+            novelty,
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 256, .. ProptestConfig::default() })]
+
+        /// The score is always a valid weight in [0, 1], for any combination
+        /// of signals (the additive boosts sum past 1.0 and must clamp).
+        #[test]
+        fn score_is_a_valid_weight(e in any::<bool>(), u in any::<bool>(), m in any::<bool>(), n in any::<bool>()) {
+            let s = ImportanceScorer::score_from_signals(&signals(e, u, m, n));
+            prop_assert!((0.0..=1.0).contains(&s));
+        }
+
+        /// Turning a signal on never lowers the score: if every signal set in
+        /// `a` is also set in `b`, then score(a) <= score(b). Salience is
+        /// monotone in evidence.
+        #[test]
+        fn score_is_monotone_in_signals(
+            e1 in any::<bool>(), u1 in any::<bool>(), m1 in any::<bool>(), n1 in any::<bool>(),
+            e2 in any::<bool>(), u2 in any::<bool>(), m2 in any::<bool>(), n2 in any::<bool>(),
+        ) {
+            // a = the pairwise AND (subset), b = the pairwise OR (superset),
+            // so a's signals are always contained in b's.
+            let a = signals(e1 && e2, u1 && u2, m1 && m2, n1 && n2);
+            let b = signals(e1 || e2, u1 || u2, m1 || m2, n1 || n2);
+            let sa = ImportanceScorer::score_from_signals(&a);
+            let sb = ImportanceScorer::score_from_signals(&b);
+            prop_assert!(sa <= sb);
+        }
+
+        /// Detection is novelty-agnostic for text: the `novelty` flag only
+        /// ever adds its own boost, never changes which textual signals fire.
+        #[test]
+        fn novelty_flag_only_adds_its_own_boost(text in ".{0,64}") {
+            let without = ImportanceScorer::score(&text, false);
+            let with = ImportanceScorer::score(&text, true);
+            // Novelty can only raise the score (or be absorbed by the clamp).
+            prop_assert!(with >= without);
+        }
+    }
 }

@@ -528,4 +528,138 @@ mod tests {
         assert!((config.importance_weight - 0.3).abs() < 1e-6);
         assert!((config.recency_weight - 0.2).abs() < 1e-6);
     }
+
+    // ── Property tests ────────────────────────────────────────────────
+    //
+    // `rrf_fuse` ranks recall candidates and `forgetting_curve` reranks them
+    // by recency; a fusion that dropped or duplicated an id, returned an
+    // unsorted list, or a curve that grew retention with elapsed time would
+    // silently corrupt what the kernel remembers. These pin the algebra for
+    // arbitrary inputs.
+    use proptest::prelude::*;
+    use std::collections::HashSet;
+
+    /// A ranked list with ids unique *within* the list, so each id has a
+    /// well-defined rank (the only shape `rrf_fuse` is meant to receive).
+    fn ranked_list() -> impl Strategy<Value = Vec<(String, f64)>> {
+        prop::collection::vec(0u32..50, 0..12).prop_map(|idxs| {
+            let mut seen = HashSet::new();
+            idxs.into_iter()
+                .filter(|i| seen.insert(*i))
+                .map(|i| (format!("id{i}"), 0.0))
+                .collect()
+        })
+    }
+
+    fn ranked_lists() -> impl Strategy<Value = Vec<Vec<(String, f64)>>> {
+        prop::collection::vec(ranked_list(), 0..5)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 512, .. ProptestConfig::default() })]
+
+        /// The fused output is sorted by score, highest first.
+        #[test]
+        fn rrf_output_is_sorted_descending(lists in ranked_lists(), k in 0.5f64..200.0) {
+            let fused = rrf_fuse(&lists, k);
+            for w in fused.windows(2) {
+                prop_assert!(w[0].1 >= w[1].1);
+            }
+        }
+
+        /// Fusion neither invents nor drops ids: the output is exactly the
+        /// set union of the inputs, each appearing once.
+        #[test]
+        fn rrf_output_is_exactly_the_union(lists in ranked_lists(), k in 0.5f64..200.0) {
+            let fused = rrf_fuse(&lists, k);
+            let union: HashSet<&str> = lists
+                .iter()
+                .flat_map(|l| l.iter().map(|(id, _)| id.as_str()))
+                .collect();
+            let got: HashSet<&str> = fused.iter().map(|(id, _)| id.as_str()).collect();
+            prop_assert_eq!(fused.len(), union.len(), "no duplicate ids in output");
+            prop_assert_eq!(got, union);
+        }
+
+        /// Every fused score is positive and bounded by `n_lists / (k+1)` —
+        /// the score an id earns by topping every list.
+        #[test]
+        fn rrf_scores_are_positive_and_bounded(lists in ranked_lists(), k in 0.5f64..200.0) {
+            let fused = rrf_fuse(&lists, k);
+            let ceiling = lists.len() as f64 / (k + 1.0);
+            for (_, score) in &fused {
+                prop_assert!(*score > 0.0);
+                prop_assert!(*score <= ceiling + 1e-12);
+            }
+        }
+
+        /// RRF is additive across lists: fusing a list alongside an identical
+        /// copy doubles every id's score (each appears at the same rank in
+        /// both). Pins the `Σ 1/(k+rank)` contribution.
+        #[test]
+        fn rrf_is_additive_over_repeated_lists(list in ranked_list(), k in 0.5f64..200.0) {
+            let single = rrf_fuse(std::slice::from_ref(&list), k);
+            let doubled = rrf_fuse(&[list.clone(), list], k);
+            let single_map: HashMap<&str, f64> =
+                single.iter().map(|(id, s)| (id.as_str(), *s)).collect();
+            for (id, s) in &doubled {
+                let one = single_map[id.as_str()];
+                prop_assert!((s - 2.0 * one).abs() <= 1e-12);
+            }
+        }
+
+        /// Retention scales linearly with importance: doubling importance
+        /// doubles retention (the curve only touches the time term).
+        #[test]
+        fn forgetting_curve_is_linear_in_importance(
+            importance in 0.0f64..1.0,
+            hours in 0.0f64..10_000.0,
+            decay in 0.0f64..1.0,
+            factor in 0.0f64..5.0,
+        ) {
+            let base = forgetting_curve(importance, hours, decay);
+            let scaled = forgetting_curve(importance * factor, hours, decay);
+            prop_assert!((scaled - factor * base).abs() <= 1e-9 + base.abs() * 1e-9);
+        }
+
+        /// For non-negative inputs, retention never exceeds the starting
+        /// importance and never goes negative — recall can't manufacture
+        /// salience out of decay.
+        #[test]
+        fn forgetting_curve_stays_within_zero_and_importance(
+            importance in 0.0f64..1e6,
+            hours in 0.0f64..10_000.0,
+            decay in 0.0f64..1.0,
+        ) {
+            let r = forgetting_curve(importance, hours, decay);
+            prop_assert!(r >= 0.0);
+            prop_assert!(r <= importance + 1e-9);
+        }
+
+        /// Retention is monotone non-increasing in elapsed time: a memory
+        /// touched longer ago never scores higher on recency.
+        #[test]
+        fn forgetting_curve_is_monotone_in_elapsed(
+            importance in 0.0f64..1e3,
+            decay in 0.0f64..1.0,
+            h1 in 0.0f64..10_000.0,
+            h2 in 0.0f64..10_000.0,
+        ) {
+            let (lo, hi) = if h1 <= h2 { (h1, h2) } else { (h2, h1) };
+            prop_assert!(forgetting_curve(importance, lo, decay) + 1e-12
+                >= forgetting_curve(importance, hi, decay));
+        }
+
+        /// Zero elapsed time (or zero decay) means full retention — the
+        /// importance passes through untouched.
+        #[test]
+        fn forgetting_curve_is_identity_without_decay(
+            importance in 0.0f64..1e3,
+            hours in 0.0f64..10_000.0,
+            decay in 0.0f64..1.0,
+        ) {
+            prop_assert_eq!(forgetting_curve(importance, 0.0, decay), importance);
+            prop_assert_eq!(forgetting_curve(importance, hours, 0.0), importance);
+        }
+    }
 }

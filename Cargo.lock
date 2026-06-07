@@ -952,6 +952,7 @@ dependencies = [
  "chrono",
  "criterion",
  "mockito",
+ "proptest",
  "reqwest",
  "rusqlite",
  "serde",
