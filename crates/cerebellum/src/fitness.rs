@@ -430,4 +430,161 @@ mod tests {
         // No evidence → no bonus.
         assert_eq!(fitness_bonus(&mk(0.0, 0.0, 0)), 0.0);
     }
+
+    // ── Property tests ────────────────────────────────────────────────
+    //
+    // Two pure functions carry correctness load. `decay` is the forgetting
+    // curve: it must never invent mass (grow a value) or go negative, and it
+    // must fade monotonically with elapsed time. `fitness_bonus` is a learned
+    // ranking nudge whose whole safety story is the `[0, 0.99]` bound — it may
+    // only break ties among tools with equal keyword overlap, never overtake a
+    // tool that matched one more query term. If that ceiling ever reached 1.0
+    // the learned signal could hijack capability selection.
+    use proptest::prelude::*;
+
+    fn fitness_from(s: f32, f: f32, uses: i64) -> Fitness {
+        let total = s + f;
+        Fitness {
+            tool_id: "x".into(),
+            success: s,
+            failure: f,
+            uses,
+            ratio: if total > 0.0 { s / total } else { 0.0 },
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 512, .. ProptestConfig::default() })]
+
+        /// Decay never invents mass or goes negative: for a non-negative
+        /// input the result stays in `[0, mass]`, whatever the elapsed time
+        /// or half-life (including the non-positive guard cases).
+        #[test]
+        fn decay_stays_within_zero_and_input(
+            mass in 0.0f64..1e6,
+            hours in -10.0f64..1e6,
+            half_life in -10.0f64..1e6,
+        ) {
+            let d = decay(mass, hours, half_life);
+            prop_assert!(d >= 0.0);
+            prop_assert!(d <= mass);
+        }
+
+        /// More elapsed time never retains more mass — decay is monotone
+        /// non-increasing in the hours elapsed.
+        #[test]
+        fn decay_is_monotone_in_elapsed(
+            mass in 0.01f64..1e4,
+            half_life in 0.1f64..1e4,
+            h1 in 0.0f64..1e5,
+            h2 in 0.0f64..1e5,
+        ) {
+            let (lo, hi) = if h1 <= h2 { (h1, h2) } else { (h2, h1) };
+            let near = decay(mass, lo, half_life);
+            let far = decay(mass, hi, half_life);
+            prop_assert!(near + 1e-9 >= far);
+        }
+
+        /// A longer half-life retains more mass for the same elapsed time —
+        /// decay is monotone non-decreasing in the half-life.
+        #[test]
+        fn decay_is_monotone_in_half_life(
+            mass in 0.01f64..1e4,
+            hours in 0.1f64..1e4,
+            hl1 in 0.1f64..1e4,
+            hl2 in 0.1f64..1e4,
+        ) {
+            let (lo, hi) = if hl1 <= hl2 { (hl1, hl2) } else { (hl2, hl1) };
+            let shorter = decay(mass, hours, lo);
+            let longer = decay(mass, hours, hi);
+            prop_assert!(longer + 1e-9 >= shorter);
+        }
+
+        /// One half-life halves the mass; n half-lives scale by `2^-n`
+        /// (the curve's defining property).
+        #[test]
+        fn decay_halves_each_half_life(
+            mass in 0.1f64..1e3,
+            half_life in 0.1f64..1e3,
+            n in 0u32..6,
+        ) {
+            let elapsed = half_life * n as f64;
+            let got = decay(mass, elapsed, half_life);
+            let expected = mass * 0.5f64.powi(n as i32);
+            prop_assert!((got - expected).abs() <= expected * 1e-6 + 1e-12);
+        }
+
+        /// A non-positive elapsed time leaves the mass untouched (the guard
+        /// branch): nothing decays into the past.
+        #[test]
+        fn decay_is_inert_for_nonpositive_elapsed(
+            mass in 0.0f64..1e6,
+            hours in -1e6f64..=0.0,
+            half_life in 0.1f64..1e4,
+        ) {
+            prop_assert_eq!(decay(mass, hours, half_life), mass);
+        }
+
+        /// The learned ranking nudge is always within `[0, 0.99]` — for any
+        /// fitness record, however heavily and reliably used. This is the
+        /// invariant that keeps a learned boost from ever outranking a real
+        /// keyword match.
+        #[test]
+        fn fitness_bonus_never_reaches_one(
+            s in 0.0f32..1e4,
+            f in 0.0f32..1e4,
+            uses in 0i64..100_000,
+        ) {
+            let b = fitness_bonus(&fitness_from(s, f, uses));
+            prop_assert!((0.0..=0.99).contains(&b));
+        }
+
+        /// No evidence, no nudge: a tool with no recorded uses or no decayed
+        /// success earns exactly zero.
+        #[test]
+        fn fitness_bonus_zero_without_evidence(s in 0.0f32..1e4, f in 0.0f32..1e4) {
+            // uses == 0 (unused) ...
+            prop_assert_eq!(fitness_bonus(&fitness_from(s, f, 0)), 0.0);
+            // ... or zero success mass (only failures recorded).
+            prop_assert_eq!(fitness_bonus(&fitness_from(0.0, f, 5)), 0.0);
+        }
+
+        /// The nudge never exceeds the raw success ratio it is built from
+        /// (the saturation factor is `<= 1`), so a flaky tool can't be
+        /// boosted above its observed reliability.
+        #[test]
+        fn fitness_bonus_never_exceeds_ratio(
+            s in 0.0f32..1e4,
+            f in 0.0f32..1e4,
+            uses in 0i64..100_000,
+        ) {
+            let fit = fitness_from(s, f, uses);
+            prop_assert!(fitness_bonus(&fit) <= fit.ratio + f32::EPSILON);
+        }
+
+        /// More proven wins (failure held at zero, so ratio stays 1.0) only
+        /// ever raise the nudge — the saturation term is monotone in success
+        /// mass.
+        #[test]
+        fn fitness_bonus_monotone_in_success(a in 0.01f32..1e4, b in 0.01f32..1e4) {
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            let weak = fitness_bonus(&fitness_from(lo, 0.0, 10));
+            let strong = fitness_bonus(&fitness_from(hi, 0.0, 10));
+            prop_assert!(strong + f32::EPSILON >= weak);
+        }
+
+        /// Elapsed-hours is never negative and recovers a known past offset:
+        /// a timestamp N hours ago reads back as ~N, a future one clamps to 0.
+        #[test]
+        fn hours_between_nonnegative_and_recovers_offset(offset in 0i64..100_000) {
+            let now = Utc::now();
+            let past = (now - chrono::Duration::hours(offset)).to_rfc3339();
+            let got = hours_between(&past, now);
+            prop_assert!(got >= 0.0);
+            prop_assert!((got - offset as f64).abs() <= 1.0);
+
+            let future = (now + chrono::Duration::hours(offset)).to_rfc3339();
+            prop_assert_eq!(hours_between(&future, now), 0.0);
+        }
+    }
 }
