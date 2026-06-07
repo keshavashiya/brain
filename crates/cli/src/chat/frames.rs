@@ -156,7 +156,10 @@ This action needs your approval, which can't be answered in one-shot mode.
 - Standing grant: pre-authorize it once via the `[confirm] standing_approvals` \
 config so future runs skip the gate.";
 
-pub(super) fn apply_frame(acc: &mut ResponseAccumulator, frame: &serde_json::Value) -> FrameOutcome {
+pub(super) fn apply_frame(
+    acc: &mut ResponseAccumulator,
+    frame: &serde_json::Value,
+) -> FrameOutcome {
     match frame.get("type").and_then(|v| v.as_str()) {
         Some("status") => {
             // Plain (deterministic-subcommand) output suppresses the

@@ -177,8 +177,7 @@ fn default_style_is_chat() {
 fn status_frame_is_recorded_for_spinner() {
     // Chat mode records the stage so the elapsed spinner can display it.
     let mut acc = ResponseAccumulator::new();
-    let status =
-        serde_json::json!({"type": "status", "stage": "thinking", "message": "thinking…"});
+    let status = serde_json::json!({"type": "status", "stage": "thinking", "message": "thinking…"});
     assert!(matches!(
         apply_frame(&mut acc, &status),
         FrameOutcome::Continue
