@@ -11,6 +11,10 @@
 #   2. Transport adapters under `crates/adapters/` may not depend on each
 #      other. Each adapter is a leaf — the binary composes them, they
 #      don't compose siblings.
+#   3. No dependency cycles among internal workspace crates. Cargo refuses
+#      to build a cyclic crate graph, but it reports the failure as a terse
+#      `cyclic package dependency` deep in a compile; detecting it here from
+#      the manifests alone is fast (no build) and prints the offending path.
 #
 # Add new rules below as the architecture stabilises.
 #
@@ -109,6 +113,77 @@ for adir in "${adapter_dirs[@]}"; do
         fi
     done
 done
+
+# Rule 3: no dependency cycles among internal crates.
+note "Rule 3: no dependency cycles among internal workspace crates"
+
+# alias<TAB>crate-path for every internal (path-based) workspace dependency.
+# These aliases are exactly the set of internal crate handles; each crate
+# pulls a sibling via `<alias> = { workspace = true }` in [dependencies].
+alias_paths="$(
+    awk '
+        /^\[workspace\.dependencies\]/ { in_block=1; next }
+        /^\[/ { in_block=0 }
+        in_block && /path[[:space:]]*=[[:space:]]*"crates\// {
+            s=$0
+            sub(/^.*path[[:space:]]*=[[:space:]]*"/, "", s)
+            sub(/".*$/, "", s)
+            print $1 "\t" s
+        }
+    ' Cargo.toml
+)"
+
+# Space-padded set of internal aliases for cheap membership tests.
+internal=" $(printf '%s\n' "$alias_paths" | cut -f1 | tr '\n' ' ') "
+
+# Emit "<from> <to>" runtime-dependency edges (build/dev-deps excluded — cargo
+# permits cycles through those, so they must not count here).
+tab="$(printf '\t')"
+edges="$(
+    printf '%s\n' "$alias_paths" | while IFS="$tab" read -r alias path; do
+        [ -n "$alias" ] || continue
+        [ -f "$path/Cargo.toml" ] || continue
+        deps_block "$path/Cargo.toml" | while IFS= read -r line; do
+            dep="$(printf '%s' "$line" | sed -n 's/^[[:space:]]*\([A-Za-z0-9_-]*\)[[:space:]]*=.*/\1/p')"
+            [ -n "$dep" ] || continue
+            case "$internal" in
+                *" $dep "*) printf '%s %s\n' "$alias" "$dep" ;;
+            esac
+        done
+    done
+)"
+
+# DFS three-colour cycle detection. Prints the offending path top-down back to
+# the repeated node, e.g. "signal <- cortex <- signal".
+cycle="$(
+    printf '%s\n' "$edges" | awk '
+        { if ($1 != "") { adj[$1]=adj[$1] " " $2; nodes[$1]=1; nodes[$2]=1 } }
+        END {
+            for (n in nodes) color[n]=0
+            for (n in nodes) if (color[n]==0) { if (visit(n)) exit 0 }
+        }
+        function visit(u,   i,cnt,arr,v,j,line) {
+            color[u]=1; sp++; stk[sp]=u
+            cnt=split(adj[u], arr, " ")
+            for (i=1;i<=cnt;i++) {
+                v=arr[i]; if (v=="") continue
+                if (color[v]==1) {
+                    line=v
+                    for (j=sp;j>=1;j--) { line=line " <- " stk[j]; if (stk[j]==v) break }
+                    print line
+                    return 1
+                } else if (color[v]==0) {
+                    if (visit(v)) return 1
+                }
+            }
+            color[u]=2; sp--; return 0
+        }
+    '
+)"
+
+if [ -n "$cycle" ]; then
+    fail "internal dependency cycle: $cycle"
+fi
 
 if [ "$violations" -ne 0 ]; then
     echo "" >&2

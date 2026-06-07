@@ -115,6 +115,19 @@ The accepted-license set is mirrored in `deny.toml` and `about.toml`. When
 adding a dependency that introduces a new license, update both files in the
 same PR and regenerate the attribution.
 
+## Dependency hygiene
+
+Dependencies are kept current by Dependabot (weekly) and guarded by `cargo
+audit` + `cargo deny check all` in CI. Declare new dependencies once in root
+`[workspace.dependencies]` and reference them with `{ workspace = true }`; the
+license must already be on the `deny.toml` allow-list. To audit staleness
+locally:
+
+```bash
+cargo install cargo-outdated --locked
+./scripts/check-freshness.sh           # advisory; --strict to fail
+```
+
 ## License
 
 By contributing, you agree your contributions will be licensed under the
