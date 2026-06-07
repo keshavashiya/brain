@@ -870,6 +870,7 @@ dependencies = [
  "chrono",
  "futures",
  "mockito",
+ "proptest",
  "reqwest",
  "serde",
  "serde_json",
@@ -1009,6 +1010,8 @@ version = "0.4.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "criterion",
+ "proptest",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
