@@ -593,4 +593,107 @@ mod tests {
             }
         }
     }
+
+    // ── Tier authorization & confirmation-gate properties ─────────────
+    //
+    // `Tier` is the spine of the security model: authorization is the single
+    // comparison `principal.tier >= action.tier`, and the confirm engine
+    // gates on `requires_confirmation()`. Two failure modes matter — a
+    // *reorder* of the enum silently rewires every `>=` check, and a *gap*
+    // (a dangerous tier that skips confirmation while a milder one requires
+    // it) would let an irreversible action through unprompted. These pin the
+    // ladder and prove the gate is the monotone `>= Destructive` cut.
+
+    fn any_tier() -> impl Strategy<Value = Tier> {
+        prop_oneof![
+            Just(Tier::Read),
+            Just(Tier::Write),
+            Just(Tier::Execute),
+            Just(Tier::Destructive),
+            Just(Tier::External),
+        ]
+    }
+
+    /// The derived `Ord` follows declaration order; this is the canonical
+    /// ladder every `principal >= action` check depends on. A reorder of the
+    /// enum variants would silently change authorization semantics — this
+    /// turns that into a test failure.
+    #[test]
+    fn tier_ladder_is_canonical() {
+        let mut all = [
+            Tier::External,
+            Tier::Read,
+            Tier::Destructive,
+            Tier::Write,
+            Tier::Execute,
+        ];
+        all.sort();
+        assert_eq!(
+            all,
+            [
+                Tier::Read,
+                Tier::Write,
+                Tier::Execute,
+                Tier::Destructive,
+                Tier::External,
+            ]
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 256, .. ProptestConfig::default() })]
+
+        /// The confirmation gate is exactly the `>= Destructive` cut:
+        /// Read/Write/Execute auto-approve, Destructive/External block. This
+        /// ties the predicate to the ordering so the two can't drift apart.
+        #[test]
+        fn confirmation_gate_is_the_destructive_cut(t in any_tier()) {
+            prop_assert_eq!(t.requires_confirmation(), t >= Tier::Destructive);
+        }
+
+        /// Requiring confirmation is upward-closed: if a tier needs a human,
+        /// every higher (more dangerous) tier does too. No gap where a
+        /// stronger action skips the gate a weaker one is held to.
+        #[test]
+        fn confirmation_requirement_is_upward_closed(a in any_tier(), b in any_tier()) {
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            if lo.requires_confirmation() {
+                prop_assert!(hi.requires_confirmation());
+            }
+        }
+
+        /// Authorization (`principal >= required`) is upward-closed in the
+        /// principal: raising a principal's tier never revokes access it
+        /// already had to a given required tier.
+        #[test]
+        fn authorization_is_upward_closed(
+            required in any_tier(),
+            p in any_tier(),
+            q in any_tier(),
+        ) {
+            let (lo, hi) = if p <= q { (p, q) } else { (q, p) };
+            if lo >= required {
+                prop_assert!(hi >= required);
+            }
+        }
+
+        /// A principal satisfies a required tier iff the requirement sits at
+        /// or below it — the whole authorization rule in one line.
+        #[test]
+        fn principal_satisfies_iff_required_at_or_below(
+            principal in any_tier(),
+            required in any_tier(),
+        ) {
+            prop_assert_eq!(principal >= required, required <= principal);
+        }
+
+        /// Every tier carries a positive, humane default timeout (no zero or
+        /// runaway deadline). Deliberately not monotone — External is shorter
+        /// than Destructive by design — so this asserts bounds, not ordering.
+        #[test]
+        fn default_timeout_is_positive_and_bounded(t in any_tier()) {
+            let secs = t.default_timeout().as_secs();
+            prop_assert!((1..=300).contains(&secs));
+        }
+    }
 }
