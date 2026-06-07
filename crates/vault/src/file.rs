@@ -344,8 +344,15 @@ struct StoredMeta {
 
 /// Sanitize tool/key names for use as filesystem components.
 /// Replaces anything outside `[A-Za-z0-9._-]` with `_`.
+///
+/// The allowlist keeps `.`, which alone would let the traversal components
+/// `.` and `..` through — and `entry_paths` joins the sanitized *tool* name
+/// onto the vault dir with no suffix, so a tool literally named `..` would
+/// escape one level up. An empty name would also collapse onto the vault dir
+/// itself. Both cases are neutralized to a safe `Normal` component.
 fn sanitize(s: &str) -> String {
-    s.chars()
+    let mapped: String = s
+        .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
                 c
@@ -353,5 +360,74 @@ fn sanitize(s: &str) -> String {
                 '_'
             }
         })
-        .collect()
+        .collect();
+
+    // "", ".", and ".." are the only mapped results that aren't a single
+    // ordinary path component. Prefix them so they stay inside the vault dir.
+    if mapped.is_empty() || mapped == "." || mapped == ".." {
+        format!("_{mapped}")
+    } else {
+        mapped
+    }
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::sanitize;
+    use proptest::prelude::*;
+    use std::path::{Component, Path};
+
+    /// Fragments weighted toward path metacharacters an attacker-controlled
+    /// tool/key name might carry: traversal dots, separators, NUL, normal text.
+    fn path_fragment() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just(".".to_string()),
+            Just("..".to_string()),
+            Just("/".to_string()),
+            Just("\\".to_string()),
+            Just("\0".to_string()),
+            Just("~".to_string()),
+            "[A-Za-z0-9._-]{0,6}",
+            ".*", // arbitrary, including unicode and control bytes
+        ]
+    }
+
+    fn hostile_name(max: usize) -> impl Strategy<Value = String> {
+        proptest::collection::vec(path_fragment(), 0..max).prop_map(|f| f.concat())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 512, .. ProptestConfig::default() })]
+
+        /// Whatever the input, the sanitized name is always exactly one
+        /// ordinary path component — never empty, never `.`/`..`, never a
+        /// separator — so joining it onto the vault dir can neither traverse
+        /// out of it nor collapse onto the dir itself.
+        #[test]
+        fn sanitize_yields_one_safe_component(s in hostile_name(12)) {
+            let out = sanitize(&s);
+
+            prop_assert!(!out.is_empty(), "empty component for {s:?}");
+            prop_assert!(
+                out.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')),
+                "illegal char survived for {s:?}: {out:?}"
+            );
+
+            let comps: Vec<Component> = Path::new(&out).components().collect();
+            prop_assert_eq!(comps.len(), 1, "not a single component for {:?}: {:?}", s, out);
+            prop_assert!(
+                matches!(comps[0], Component::Normal(_)),
+                "non-Normal component (traversal/root) for {s:?}: {out:?}"
+            );
+        }
+
+        /// The bytes the tool/key actually appears under stay inside the
+        /// vault dir: `dir.join(sanitize(name))` is always a direct child.
+        #[test]
+        fn sanitized_join_stays_under_dir(s in hostile_name(12)) {
+            let dir = Path::new("/vault/root");
+            let joined = dir.join(sanitize(&s));
+            prop_assert_eq!(joined.parent(), Some(dir), "escaped vault dir for {:?}", s);
+        }
+    }
 }

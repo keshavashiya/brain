@@ -1301,6 +1301,7 @@ dependencies = [
  "brainos-audit",
  "brainos-storage",
  "chrono",
+ "proptest",
  "rand 0.8.6",
  "rpassword",
  "secret-service",

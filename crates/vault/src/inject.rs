@@ -85,6 +85,50 @@ impl InjectedCredential {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn injection_shape() -> impl Strategy<Value = InjectionShape> {
+        prop_oneof![
+            ".*".prop_map(|name| InjectionShape::EnvVar { name }),
+            ".*".prop_map(|name| InjectionShape::Header { name }),
+            any::<usize>().prop_map(|position| InjectionShape::Arg { position }),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 512, .. ProptestConfig::default() })]
+
+        /// Security invariant: a credential's secret value must never appear
+        /// in its Debug rendering — only a byte count. Stated as an exact
+        /// equality so it can't leak even a prefix.
+        #[test]
+        fn debug_never_prints_secret(s in ".*") {
+            let cred = CredentialValue::new(s.clone());
+            prop_assert_eq!(
+                format!("{cred:?}"),
+                format!("CredentialValue(<redacted, {} bytes>)", s.len())
+            );
+            // len()/is_empty() track the wrapped value (byte length).
+            prop_assert_eq!(cred.len(), s.len());
+            prop_assert_eq!(cred.is_empty(), s.is_empty());
+        }
+
+        /// InjectionShape is persisted as JSON (the `.meta` sidecar and the
+        /// keychain/secret-service payloads). Serializing then deserializing
+        /// must round-trip exactly, including the internal `shape` tag, for
+        /// any field contents.
+        #[test]
+        fn injection_shape_json_round_trips(shape in injection_shape()) {
+            let json = serde_json::to_string(&shape).unwrap();
+            let back: InjectionShape = serde_json::from_str(&json).unwrap();
+            prop_assert_eq!(back, shape);
+        }
+    }
+}
+
 /// Metadata returned by `list` / `get` (without the value). Safe to log.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CredentialMetadata {
