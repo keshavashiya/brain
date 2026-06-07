@@ -210,6 +210,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   already vendors protoc via `protobuf-src`, and the hardcoded path
   broke Linux builds.
 
+### Security
+
+- **Patched dependencies flagged by RUSTSEC advisories** (clears the
+  `cargo-deny` advisory gate and the corresponding Dependabot alerts):
+  `rkyv` 0.8.15 → 0.8.16 (panic-safety bug in `InlineVec`/`SerVec::clear`
+  that could enable arbitrary code execution; transitive via
+  `ruvector-core`), `rpassword` 7.4.0 → 7.5.4 (partial password reveal on
+  interrupted input), `rand` 0.8.5 → 0.8.6 and 0.9.2 → 0.9.4
+  (custom-logger unsoundness), and `lru` 0.12 → 0.16 (`IterMut`
+  Stacked-Borrows violation). The now-resolved advisory ignores were
+  dropped from `deny.toml`.
+
 ## [0.4.0] — unreleased
 
 "Wire the Pillars + Fix the Stubs" release. v0.3.0 → v0.4.0 promotes
