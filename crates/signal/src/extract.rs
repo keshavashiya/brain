@@ -51,12 +51,20 @@ pub(crate) fn read_path_as_text(path: &Path, cap: usize) -> Result<String, Extra
     // the single chokepoint every file-content grounding path funnels through
     // (chat attachments, directory inline, decompose excerpts).
     let masked = crate::secrets::mask_secrets(&raw);
-    if masked.len() > cap {
-        let mut s: String = masked.chars().take(cap).collect();
+    Ok(truncate_to_cap(&masked, cap))
+}
+
+/// Cap grounding text at `cap`, appending a marker when it was actually cut.
+/// The slice is taken on `char` boundaries (`chars().take`), so the result is
+/// always valid UTF-8 and the function can never panic on a multibyte boundary.
+/// Returns the text unchanged when it already fits.
+fn truncate_to_cap(text: &str, cap: usize) -> String {
+    if text.len() > cap {
+        let mut s: String = text.chars().take(cap).collect();
         s.push_str("\n…[truncated]");
-        Ok(s)
+        s
     } else {
-        Ok(masked)
+        text.to_string()
     }
 }
 
@@ -108,6 +116,41 @@ mod tests {
         let s = read_path_as_text(&p, 100).unwrap();
         assert!(s.starts_with(&"x".repeat(100)));
         assert!(s.contains("[truncated]"));
+    }
+
+    // ── Fuzz target (F5) ─────────────────────────────────────────────────
+    //
+    // `truncate_to_cap` caps untrusted file content (extracted + secret-masked)
+    // before it becomes LLM grounding. It slices a `&str` at a `char` count,
+    // which is the classic spot to panic on a UTF-8 boundary — this proves it
+    // can't, across arbitrary text and any cap (including 0), and pins the
+    // truncation contract.
+    const TRUNC_MARKER: &str = "\n…[truncated]";
+
+    #[test]
+    fn fuzz_truncate_to_cap_invariants() {
+        bolero::check!()
+            .with_type::<(String, u16)>()
+            .for_each(|(text, cap): &(String, u16)| {
+                let cap = *cap as usize;
+                let out = truncate_to_cap(text, cap);
+
+                if text.len() <= cap {
+                    // Fits: returned verbatim, no marker added.
+                    assert_eq!(&out, text, "short text was altered: {text:?} @ {cap}");
+                } else {
+                    // Cut: ends with the marker, and the kept prefix is at most
+                    // `cap` chars (the slice is char-counted, never byte-sliced).
+                    let kept = out
+                        .strip_suffix(TRUNC_MARKER)
+                        .expect("truncated output must carry the marker");
+                    assert!(
+                        kept.chars().count() <= cap,
+                        "kept more than cap chars: {} > {cap}",
+                        kept.chars().count()
+                    );
+                }
+            });
     }
 
     #[test]

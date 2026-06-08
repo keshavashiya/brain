@@ -92,6 +92,34 @@ not in the hook — run them manually before pushing a substantive change.
   (`http_polled`, `webhook_inbound`, `webhook_outbound`) configured via YAML
   presets. Do not add Telegram/Slack/Discord-specific Rust code.
 
+## Testing & fuzzing
+
+Three layers, all run by `cargo test --workspace`:
+
+- **Unit / integration tests** — the default; example-based, colocated in `src`
+  or in each crate's `tests/`.
+- **Property tests** (`proptest`) — pin bounded/ordering/round-trip invariants
+  of pure-logic seams across the kernel.
+- **Fuzz targets** (`bolero`) — coverage-guided fuzzing of the untrusted-input
+  parsers (the secret masker, the approval-correlation parser, the regex intent
+  classifier, the markdown render pipeline, grounding-text truncation). Each is
+  a `fuzz_*` test that asserts no-panic plus a couple of semantic invariants.
+
+Fuzz targets are written with `bolero::check!()`, so they run in bounded
+property mode under plain `cargo test` on **stable** — no nightly needed — and
+double as regression tests. To run a target coverage-guided (libfuzzer), use
+the [`cargo-bolero`](https://github.com/camshaft/bolero) driver on nightly:
+
+```bash
+cargo install cargo-bolero
+cargo bolero list                                              # discover targets
+cargo bolero test -p brainos-signal fuzz_mask_secrets_invariants   # fuzz one
+```
+
+Crash inputs are written under the owning crate's `tests/` corpus and replay
+automatically on the next `cargo test`. When you touch a parser that consumes
+untrusted bytes or strings, add or extend a `fuzz_*` target alongside it.
+
 ## Reporting issues
 
 - **Bugs:** use the bug report template. Include `brain --version`, OS, and
