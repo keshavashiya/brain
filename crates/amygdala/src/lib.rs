@@ -408,4 +408,49 @@ mod tests {
             "Should fallback on timeout, got {score}"
         );
     }
+
+    // ── Property tests ────────────────────────────────────────────────
+    //
+    // The canonical keyword math (additive boosts, the [0, 1] clamp, signal
+    // monotonicity) is pinned in `hippocampus`. These cover what this wrapper
+    // adds on top: the stateful per-process novelty cache and the clamp on an
+    // LLM-reported score.
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 512, .. ProptestConfig::default() })]
+
+        /// The public score stays a valid weight in [0, 1] for arbitrary text,
+        /// end-to-end through novelty tracking and the canonical scorer.
+        #[test]
+        fn score_is_a_valid_weight(text in ".*") {
+            let s = ImportanceScorer::new().score(&text);
+            prop_assert!((0.0..=1.0).contains(&s));
+        }
+
+        /// Novelty is a one-shot bonus: once a text's tokens are seen, scoring
+        /// it again never raises the score (the bonus only ever adds), and a
+        /// third identical score is a fixed point — the cache has absorbed
+        /// every token, so repeats are stable.
+        #[test]
+        fn novelty_bonus_applies_at_most_once(text in ".*") {
+            let scorer = ImportanceScorer::new();
+            let s1 = scorer.score(&text);
+            let s2 = scorer.score(&text);
+            let s3 = scorer.score(&text);
+            prop_assert!(s2 <= s1 + f32::EPSILON);
+            prop_assert!((s3 - s2).abs() <= f32::EPSILON);
+        }
+
+        /// An LLM-reported score is clamped into [0, 1] regardless of what the
+        /// model returns — an out-of-range value is folded to the nearest
+        /// endpoint, an in-range one passes through unchanged.
+        #[test]
+        fn parse_clamps_reported_score_to_unit(reported in -1000.0f32..=1000.0) {
+            let raw = format!(r#"{{"score":{reported},"reason":"x"}}"#);
+            let parsed = parse_importance_response(&raw).unwrap();
+            prop_assert!((0.0..=1.0).contains(&parsed));
+            prop_assert!((parsed - reported.clamp(0.0, 1.0)).abs() <= f32::EPSILON);
+        }
+    }
 }

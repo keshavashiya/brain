@@ -25,6 +25,7 @@ lru = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 criterion = { workspace = true }
+proptest = "1"
 
 [[bench]]
 name = "scoring"
