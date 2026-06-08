@@ -328,4 +328,43 @@ mod tests {
         assert!(!out.contains("ghp_bbbb"));
         assert_eq!(out.matches("[redacted]").count(), 2);
     }
+
+    // ─── Fuzz target (F1) ────────────────────────────────────────────────────
+    //
+    // `mask_secrets` is a hand-rolled byte/char scanner that runs over
+    // *untrusted on-disk file content* before it becomes LLM grounding — the
+    // one place a raw secret could leak off the machine. The unit tests above
+    // pin specific shapes; this fuzzes arbitrary UTF-8 to prove the scanner
+    // can't panic (UTF-8 boundary math, `min_body` edges, multibyte chars
+    // adjacent to a token prefix) and holds two structural invariants.
+    //
+    // Runs in property mode under plain `cargo test` (stable); coverage-guided
+    // under `cargo bolero test -p brainos-signal fuzz_mask_secrets_invariants`.
+    #[test]
+    fn fuzz_mask_secrets_invariants() {
+        bolero::check!()
+            .with_type::<String>()
+            .for_each(|input: &String| {
+                let out = mask_secrets(input);
+
+                // (1) Masking is strictly per-line (`split_inclusive('\n')`, with the
+                // trailing newline re-attached and `[redacted]` carrying none), so the
+                // line count must be preserved exactly — never adds or drops a line.
+                assert_eq!(
+                    out.matches('\n').count(),
+                    input.matches('\n').count(),
+                    "newline count changed: {input:?} -> {out:?}"
+                );
+
+                // (2) Idempotence: `[redacted]` is neither a sensitive-key value worth
+                // re-masking nor a known token shape, so a second pass must be a fixed
+                // point. This is the strong proxy for "fully masked" — and it would
+                // catch a masker that ever re-introduces a maskable shape.
+                assert_eq!(
+                    mask_secrets(&out),
+                    out,
+                    "not idempotent: {input:?} -> {out:?}"
+                );
+            });
+    }
 }
