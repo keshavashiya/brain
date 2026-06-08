@@ -1291,6 +1291,7 @@ dependencies = [
  "brainos-cortex",
  "brainos-intent",
  "chrono",
+ "proptest",
  "regex",
  "serde",
  "serde_json",

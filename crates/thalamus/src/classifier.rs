@@ -92,7 +92,7 @@ pub(crate) fn normalize_command(raw: &str) -> String {
 }
 
 /// True if `tok` is a leading filler word. `cmd:` is filler; bare `cmd` is not.
-fn is_command_filler(tok: &str) -> bool {
+pub(crate) fn is_command_filler(tok: &str) -> bool {
     let lc = tok.to_ascii_lowercase();
     if lc == "cmd:" {
         return true;

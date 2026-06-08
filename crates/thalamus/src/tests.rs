@@ -172,6 +172,49 @@ fn normalize_command_strips_filler_and_wrappers() {
     assert_eq!(normalize_command("cmd: dir"), "dir");
 }
 
+// ── Property tests ────────────────────────────────────────────────
+//
+// `normalize_command` only ever *strips* — shell wrappers and leading filler —
+// to leave the real binary at the head. These pin that contract over arbitrary
+// input: it never panics, never invents tokens or characters, returns a trimmed
+// string, and the head it leaves is never itself a filler token.
+mod normalize_command_props {
+    use crate::classifier::{is_command_filler, normalize_command};
+    use proptest::prelude::*;
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 512, .. ProptestConfig::default() })]
+
+        /// The result is always trimmed — no leading or trailing whitespace
+        /// survives the peel-and-join.
+        #[test]
+        fn output_is_trimmed(raw in ".*") {
+            let out = normalize_command(&raw);
+            prop_assert_eq!(&out, out.trim());
+        }
+
+        /// Normalization only removes: it never invents a token or a byte.
+        /// The output has no more whitespace tokens than the input and is no
+        /// longer than the trimmed input.
+        #[test]
+        fn never_invents_tokens_or_length(raw in ".*") {
+            let out = normalize_command(&raw);
+            prop_assert!(out.split_whitespace().count() <= raw.split_whitespace().count());
+            prop_assert!(out.len() <= raw.trim().len());
+        }
+
+        /// The core guarantee: whatever is left at the head is the real binary,
+        /// never a leading-filler token — an empty result is the only exception.
+        #[test]
+        fn head_is_never_filler(raw in ".*") {
+            let out = normalize_command(&raw);
+            if let Some(head) = out.split_whitespace().next() {
+                prop_assert!(!is_command_filler(head));
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn test_classify_execute_command_with_filler_phrasing() {
     let classifier = IntentClassifier::new();
