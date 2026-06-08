@@ -215,6 +215,52 @@ mod normalize_command_props {
     }
 }
 
+// ── Fuzz target (F3) ──────────────────────────────────────────────
+//
+// `classify_regex` runs ~30 regexes plus their capture extractors over raw,
+// untrusted natural-language input — the regex path of intent classification.
+// (`normalize_command` is already covered by the property tests above; the
+// `ExecuteCommand` extractor calls it internally, so this fuzz subsumes that
+// path while also exercising every other pattern + extractor.) The regex
+// crate guarantees linear-time matching (no ReDoS), so the open question is
+// whether any extractor panics on an adversarial capture — this proves it
+// doesn't, and pins two output invariants. The classifier is built once and
+// shared across iterations (the regex set compiles only at construction).
+mod classify_regex_fuzz {
+    use super::*;
+
+    #[test]
+    fn fuzz_classify_regex_invariants() {
+        bolero::check!()
+            .with_type::<String>()
+            .for_each(|input: &String| {
+                // Built per-iteration: bolero runs the body under
+                // `catch_unwind`, and `IntentClassifier` holds a `dyn
+                // IntentFallback` that isn't `RefUnwindSafe`, so it can't be
+                // captured across the boundary. Construction is cheap — it only
+                // clones `Arc`s off the static `PATTERNS` regex set.
+                let classifier = IntentClassifier::new();
+                let Some(c) = classifier.classify_regex(input) else {
+                    return;
+                };
+                // (1) The regex path only ever produces Regex-method results.
+                assert!(
+                    matches!(c.method, ClassificationMethod::Regex),
+                    "non-regex method from classify_regex: {input:?} -> {c:?}"
+                );
+                // (2) An ExecuteCommand binary is the head token after
+                // normalization — always a single whitespace-free token (or
+                // empty when the capture normalized away).
+                if let Intent::ExecuteCommand { command, .. } = &c.intent {
+                    assert!(
+                        !command.contains(char::is_whitespace),
+                        "ExecuteCommand binary contains whitespace: {input:?} -> {command:?}"
+                    );
+                }
+            });
+    }
+}
+
 #[tokio::test]
 async fn test_classify_execute_command_with_filler_phrasing() {
     let classifier = IntentClassifier::new();

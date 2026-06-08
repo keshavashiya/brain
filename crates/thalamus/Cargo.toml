@@ -25,6 +25,7 @@ async-trait = { workspace = true }
 
 [dev-dependencies]
 proptest = "1"
+bolero = "0.13"
 
 [lints]
 workspace = true
