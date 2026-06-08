@@ -1170,6 +1170,7 @@ dependencies = [
  "brainos-core",
  "chrono",
  "libc",
+ "proptest",
  "serde",
  "serde_json",
  "tempfile",

@@ -716,4 +716,103 @@ mod tests {
         assert_eq!(outcome.exit_code, 0, "stderr: {:?}", outcome.stderr);
         assert!(outcome.stdout.contains("shell-tilde-ok"));
     }
+
+    // ── Property tests ────────────────────────────────────────────────
+    //
+    // `validate` is the pure, fail-closed gate every execution passes through.
+    // These pin its security invariants over arbitrary commands without
+    // spawning anything: an empty allowlist denies everything, the deny-list
+    // overrides the allow-list, a clean allowlisted binary is never spuriously
+    // refused, and the cloud-metadata IP is blocked wherever it appears.
+    mod props {
+        use super::super::*;
+        use proptest::prelude::*;
+
+        /// Binaries that are valid allowlist entries and are *not* in the
+        /// default deny-list seeded by `IsolatedSandbox::new`.
+        fn safe_basename() -> impl Strategy<Value = String> {
+            prop_oneof![
+                Just("echo".to_string()),
+                Just("true".to_string()),
+                Just("false".to_string()),
+                Just("sleep".to_string()),
+                Just("ls".to_string()),
+                Just("cat".to_string()),
+                Just("grep".to_string()),
+                Just("mytool".to_string()),
+            ]
+        }
+
+        /// An argument with no dots, so it can never contain the metadata IP.
+        fn clean_arg() -> impl Strategy<Value = String> {
+            "[a-z0-9_-]{0,10}".prop_map(|s| s.to_string())
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 256, .. ProptestConfig::default() })]
+
+            /// Fail-closed: with an empty allowlist no command validates —
+            /// any binary, any args, shell mode or not.
+            #[test]
+            fn empty_allowlist_denies_everything(
+                binary in "[a-zA-Z0-9_/.-]{1,16}",
+                args in proptest::collection::vec("[a-zA-Z0-9 _/.-]{0,12}", 0..4),
+                shell_mode in any::<bool>(),
+            ) {
+                let sb = IsolatedSandbox::new(vec![], Duration::from_secs(5));
+                let mut cmd = SandboxCommand::new(binary, args);
+                cmd.shell_mode = shell_mode;
+                prop_assert!(sb.validate(&cmd).is_err());
+            }
+
+            /// The deny-list overrides the allow-list: a basename present in
+            /// both is rejected, whether invoked bare or via an absolute path.
+            #[test]
+            fn forbidden_basename_rejected_even_when_allowlisted(
+                base in safe_basename(),
+                with_dir in any::<bool>(),
+                args in proptest::collection::vec(clean_arg(), 0..3),
+            ) {
+                let sb = IsolatedSandbox::new(vec![base.clone()], Duration::from_secs(5))
+                    .with_forbidden_commands(vec![base.clone()]);
+                let binary = if with_dir { format!("/usr/bin/{base}") } else { base.clone() };
+                let cmd = SandboxCommand::new(binary, args);
+                prop_assert!(sb.validate(&cmd).is_err());
+            }
+
+            /// No spurious refusal: an allowlisted, non-forbidden binary with
+            /// clean args validates — its basename resolves through an
+            /// absolute path too, and an empty path-allowlist imposes no
+            /// workdir restriction.
+            #[test]
+            fn allowlisted_clean_binary_passes(
+                base in safe_basename(),
+                with_dir in any::<bool>(),
+                args in proptest::collection::vec(clean_arg(), 0..3),
+            ) {
+                let sb = IsolatedSandbox::new(vec![base.clone()], Duration::from_secs(5));
+                let binary = if with_dir { format!("/usr/bin/{base}") } else { base.clone() };
+                let cmd = SandboxCommand::new(binary, args);
+                prop_assert!(sb.validate(&cmd).is_ok());
+            }
+
+            /// The cloud-metadata IP is blocked wherever it sits in the args,
+            /// even for an otherwise-allowed binary.
+            #[test]
+            fn cloud_metadata_ip_in_any_arg_is_rejected(
+                base in safe_basename(),
+                prefix in "[a-z/:.]{0,8}",
+                suffix in "[a-z/]{0,8}",
+                pos in 0usize..4,
+                extra in proptest::collection::vec(clean_arg(), 0..3),
+            ) {
+                let mut args = extra;
+                let at = pos.min(args.len());
+                args.insert(at, format!("{prefix}169.254.169.254{suffix}"));
+                let sb = IsolatedSandbox::new(vec![base.clone()], Duration::from_secs(5));
+                let cmd = SandboxCommand::new(base, args);
+                prop_assert!(sb.validate(&cmd).is_err());
+            }
+        }
+    }
 }
