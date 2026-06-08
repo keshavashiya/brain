@@ -909,6 +909,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "futures",
+ "proptest",
  "rusqlite",
  "serde",
  "serde_json",

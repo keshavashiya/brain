@@ -8,6 +8,22 @@ use storage::SqlitePool;
 
 use crate::{GangliaError, ProactiveMessage, TopicPattern};
 
+/// True if `current` falls inside the half-open quiet window `[start, end)`.
+///
+/// When `start <= end` the window is a plain same-day span; when `start > end`
+/// it wraps past midnight (e.g. 22:00–08:00) and is read as the union of
+/// `[start, 24:00)` and `[00:00, end)`. Both ends are half-open: `start` is
+/// always inside a non-empty window and `end` is always outside, so a window
+/// and its inverse `(end, start)` partition the day with no overlap or gap.
+fn in_quiet_window(current: NaiveTime, start: NaiveTime, end: NaiveTime) -> bool {
+    if start <= end {
+        current >= start && current < end
+    } else {
+        // Overnight window e.g. 22:00–08:00
+        current >= start || current < end
+    }
+}
+
 /// Habit engine configuration (mirrors `core::ProactivityConfig`).
 #[derive(Debug, Clone)]
 pub struct HabitConfig {
@@ -169,12 +185,7 @@ impl HabitEngine {
         let start = parse(&self.config.quiet_start);
         let end = parse(&self.config.quiet_end);
 
-        if start <= end {
-            current >= start && current < end
-        } else {
-            // Overnight window e.g. 22:00–08:00
-            current >= start || current < end
-        }
+        in_quiet_window(current, start, end)
     }
 
     /// Returns the number of proactive messages sent today (UTC calendar day).
@@ -417,5 +428,53 @@ mod tests {
         engine.ensure_tables().unwrap();
         let result = engine.generate_proactive().unwrap();
         assert!(result.is_none());
+    }
+
+    // ── Property tests ────────────────────────────────────────────────
+    //
+    // The quiet-hours gate is half-open `[start, end)` with an overnight wrap.
+    // These pin the invariants `can_send_proactive` and the existing tests
+    // rely on: an empty window is never quiet, a window and its inverse exactly
+    // partition the day, and the endpoints are start-inclusive / end-exclusive.
+    use proptest::prelude::*;
+
+    fn naive(h: u32, m: u32) -> NaiveTime {
+        NaiveTime::from_hms_opt(h, m, 0).unwrap()
+    }
+
+    prop_compose! {
+        fn any_time()(h in 0u32..24, m in 0u32..60) -> NaiveTime {
+            naive(h, m)
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: 512, .. ProptestConfig::default() })]
+
+        /// A degenerate window (`start == end`) is never quiet — this is what
+        /// `quiet_start == quiet_end == "00:00"` relies on to mean "always on".
+        #[test]
+        fn empty_window_is_never_quiet(current in any_time(), edge in any_time()) {
+            prop_assert!(!in_quiet_window(current, edge, edge));
+        }
+
+        /// A window and its inverse partition the day: for any two distinct
+        /// endpoints, every instant is quiet in exactly one of `(a, b)` and
+        /// `(b, a)` — no overlap, no gap (a consequence of both ends half-open).
+        #[test]
+        fn window_and_inverse_partition_the_day(current in any_time(), a in any_time(), b in any_time()) {
+            prop_assume!(a != b);
+            prop_assert_ne!(in_quiet_window(current, a, b), in_quiet_window(current, b, a));
+        }
+
+        /// Half-open endpoints: for a non-empty window the start instant is
+        /// always inside and the end instant is always outside, whether the
+        /// window wraps past midnight or not.
+        #[test]
+        fn endpoints_are_start_inclusive_end_exclusive(start in any_time(), end in any_time()) {
+            prop_assume!(start != end);
+            prop_assert!(in_quiet_window(start, start, end));
+            prop_assert!(!in_quiet_window(end, start, end));
+        }
     }
 }

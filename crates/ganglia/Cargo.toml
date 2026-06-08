@@ -28,6 +28,7 @@ chrono-tz = { workspace = true }
 tempfile = "3"
 async-trait = { workspace = true }
 futures = { workspace = true }
+proptest = "1"
 
 [lints]
 workspace = true
