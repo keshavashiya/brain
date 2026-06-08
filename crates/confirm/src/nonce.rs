@@ -815,4 +815,66 @@ mod tests {
             }
         ));
     }
+
+    // ── Property tests ────────────────────────────────────────────────
+    //
+    // An `ApprovalSpec` is persisted (its `escalation`, `alternatives`, and
+    // `grant_key` are serialized into the `approval_requests` row and parsed
+    // back). This pins that deserialization preserves everything the serializer
+    // emits — no field, including the sub-second `timeout` Duration or an
+    // optional channel, is silently dropped on the way back from storage.
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+        use std::time::Duration;
+
+        fn any_tier() -> impl Strategy<Value = ActionTier> {
+            prop_oneof![
+                Just(ActionTier::Read),
+                Just(ActionTier::Write),
+                Just(ActionTier::Execute),
+                Just(ActionTier::Destructive),
+                Just(ActionTier::External),
+            ]
+        }
+
+        fn any_escalation() -> impl Strategy<Value = EscalationPolicy> {
+            prop_oneof![
+                Just(EscalationPolicy::Abort),
+                Just(EscalationPolicy::NotifyAndAbort),
+                Just(EscalationPolicy::Defer),
+                Just(EscalationPolicy::AutoApprove),
+            ]
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig { cases: 256, .. ProptestConfig::default() })]
+
+            /// Round-tripping a spec through JSON is a fixed point: deserializing
+            /// the serialized form and re-serializing yields identical bytes, so
+            /// a persisted request always reloads exactly as it was stored.
+            #[test]
+            fn approval_spec_survives_a_persistence_round_trip(
+                desc in ".*",
+                tier in any_tier(),
+                esc in any_escalation(),
+                nanos in 0u64..=10_000_000_000,
+                channel in proptest::option::of("[a-z]{1,8}"),
+                alts in proptest::collection::vec(".*", 0..4),
+            ) {
+                let mut spec = ApprovalSpec::new(desc, tier)
+                    .with_timeout(Duration::from_nanos(nanos))
+                    .with_escalation(esc)
+                    .with_alternatives(alts);
+                if let Some(c) = channel {
+                    spec = spec.with_channel(c);
+                }
+
+                let j1 = serde_json::to_string(&spec).unwrap();
+                let back: ApprovalSpec = serde_json::from_str(&j1).unwrap();
+                let j2 = serde_json::to_string(&back).unwrap();
+                prop_assert_eq!(j1, j2);
+            }
+        }
+    }
 }

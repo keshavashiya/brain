@@ -836,6 +836,7 @@ dependencies = [
  "brainos-core",
  "brainos-storage",
  "chrono",
+ "proptest",
  "rusqlite",
  "serde",
  "serde_json",
