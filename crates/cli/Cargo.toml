@@ -79,6 +79,7 @@ tokio-tungstenite = { workspace = true }
 futures-util = "0.3"
 tonic = { version = "0.14", features = ["transport"] }
 tempfile = "3"
+bolero = "0.13"
 
 [lints]
 workspace = true

@@ -125,6 +125,44 @@ fn text_without_tables_is_unchanged() {
     assert_eq!(reflow_wide_tables(input, 80), input);
 }
 
+// ── Fuzz target (F4) ─────────────────────────────────────────────────────
+//
+// The markdown preprocessing pipeline (preprocess_markdown → strip_code_fence_
+// langs → reflow_wide_tables) runs over *untrusted LLM output* before termimad
+// renders it. Every stage does manual byte slicing — leading-indent slices,
+// `<`-tag scanning, table-cell width math — so adversarial markdown is a real
+// panic surface. This fuzzes the full pure pipeline (termimad excluded) over
+// arbitrary text at an arbitrary width.
+#[test]
+fn fuzz_render_preprocessing_invariants() {
+    bolero::check!()
+        .with_type::<(String, u16)>()
+        .for_each(|(input, width): &(String, u16)| {
+            let width = *width as usize;
+
+            // No stage may panic on adversarial input or width (incl. 0).
+            let pre = preprocess_markdown(input);
+            let fenced = strip_code_fence_langs(&pre);
+            let _reflowed = reflow_wide_tables(&fenced, width);
+
+            // preprocess_markdown only *deletes* `<br>` tags (replaced with
+            // newlines) and never emits one, so a second pass is a fixed point.
+            assert_eq!(
+                preprocess_markdown(&pre),
+                pre,
+                "preprocess_markdown not idempotent: {input:?}"
+            );
+            // strip_code_fence_langs rewrites an opening fence to a bare fence,
+            // which it then leaves untouched — also a fixed point regardless of
+            // the surrounding content.
+            assert_eq!(
+                strip_code_fence_langs(&fenced),
+                fenced,
+                "strip_code_fence_langs not idempotent: {input:?}"
+            );
+        });
+}
+
 #[test]
 fn extract_complete_body_signal_response_shape() {
     let frame = serde_json::json!({
