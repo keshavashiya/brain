@@ -193,7 +193,7 @@ jobs:
             --tests \
             --fail-under 50
       - name: Upload coverage
-        uses: codecov/codecov-action@v6
+        uses: codecov/codecov-action@v7
         with:
           files: cobertura.xml
           fail_ci_if_error: false
