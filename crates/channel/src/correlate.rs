@@ -357,6 +357,98 @@ mod tests {
         assert!(!looks_like_uuid_v4("zzze8400-e29b-41d4-a716-446655440000"));
     }
 
+    // ── Fuzz target (F2) ─────────────────────────────────────────────────
+    //
+    // `parse_command` runs over *untrusted inbound channel messages* (any
+    // transport — CLI, HTTP, WS, relay) and decides whether a message
+    // approves or rejects a pending action. It is a security boundary: a
+    // parse must never panic, and it must never let a non-nonce token stand
+    // in for the correlation nonce or smuggle a flag token into the reason.
+    //
+    // Two complementary inputs: raw arbitrary UTF-8 (the literal wire shape)
+    // and a structured token stream that biases generation toward the
+    // verb+nonce+reason branches so the semantic invariants are exercised
+    // even under plain `cargo test` (stable) — not just coverage-guided runs.
+
+    /// Invariants any `Some` result must satisfy, regardless of input.
+    fn assert_parse_invariants(input: &str) {
+        let Some(cmd) = parse_command(input) else {
+            return;
+        };
+        // (1) A parsed command always carries a genuine UUID-layout nonce —
+        // the parser only ever lifts the nonce from a token that passed
+        // `looks_like_uuid_v4`, so garbage can never stand in as a nonce.
+        assert!(
+            looks_like_uuid_v4(cmd.nonce()),
+            "parsed nonce is not UUID-shaped: {input:?} -> {cmd:?}"
+        );
+        // (2) A reject reason is built from trailing tokens with the dedicated
+        // flag tokens stripped, so it must never contain them verbatim.
+        if let CorrelatedCommand::Reject {
+            reason: Some(reason),
+            ..
+        } = &cmd
+        {
+            for tok in reason.split_whitespace() {
+                assert!(
+                    !matches!(tok, "--reason" | "reason" | "-"),
+                    "flag token survived into reason: {input:?} -> {reason:?}"
+                );
+            }
+        }
+    }
+
+    /// One token of a synthetic channel message, mapped to its wire string.
+    #[derive(Debug, Clone, Copy, bolero::TypeGenerator)]
+    enum Tok {
+        Approve,
+        Reject,
+        Yes,
+        Nonce,
+        ReasonFlag,
+        ReasonWord,
+        Dash,
+        Garnish,
+        Word,
+    }
+
+    impl Tok {
+        fn as_str(self) -> &'static str {
+            match self {
+                Tok::Approve => "approve",
+                Tok::Reject => "reject",
+                Tok::Yes => "yes",
+                Tok::Nonce => "550e8400-e29b-41d4-a716-446655440000",
+                Tok::ReasonFlag => "--reason",
+                Tok::ReasonWord => "reason",
+                Tok::Dash => "-",
+                Tok::Garnish => "[\"/:,.!?>]",
+                Tok::Word => "details",
+            }
+        }
+    }
+
+    #[test]
+    fn fuzz_parse_command_raw() {
+        bolero::check!()
+            .with_type::<String>()
+            .for_each(|input: &String| assert_parse_invariants(input));
+    }
+
+    #[test]
+    fn fuzz_parse_command_structured() {
+        bolero::check!()
+            .with_type::<Vec<Tok>>()
+            .for_each(|toks: &Vec<Tok>| {
+                let input = toks
+                    .iter()
+                    .map(|t| t.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                assert_parse_invariants(&input);
+            });
+    }
+
     // ── Engine integration (with mock engine) ───────────────────────────
 
     #[derive(Default)]
