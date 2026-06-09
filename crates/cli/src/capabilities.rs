@@ -47,6 +47,12 @@ pub struct WiredNatives {
     /// Read-only security-posture audit (`security.audit`) — always wired;
     /// pure config inspection, no I/O.
     pub security_audit: bool,
+    /// Read-only log pattern analysis (`logs.analyze`) — always wired; reads
+    /// the daemon's own (or the OS) log offline.
+    pub logs: bool,
+    /// System-baseline capture/diff/list (`baseline.*`) — always wired; local
+    /// snapshot files, no network.
+    pub baseline: bool,
 }
 
 impl WiredNatives {
@@ -63,6 +69,8 @@ impl WiredNatives {
             fs_read: true,
             net_diag: true,
             security_audit: true,
+            logs: true,
+            baseline: true,
         }
     }
 }
@@ -152,6 +160,12 @@ pub fn native_descriptors(w: WiredNatives) -> Vec<ToolDescriptor> {
     };
     let security = || ToolSource::NativeBackend {
         backend: BackendId::new("security"),
+    };
+    let logs = || ToolSource::NativeBackend {
+        backend: BackendId::new("logs"),
+    };
+    let baseline = || ToolSource::NativeBackend {
+        backend: BackendId::new("baseline"),
     };
 
     let mut out = Vec::new();
@@ -365,7 +379,80 @@ pub fn native_descriptors(w: WiredNatives) -> Vec<ToolDescriptor> {
         ));
     }
 
+    if w.logs {
+        out.push(native(
+            "logs",
+            "analyze",
+            logs(),
+            read_only(),
+            usage(
+                "The user asks what's been going wrong, to scan recent logs, or to surface recurring errors/warnings.",
+                "For reading a specific file's contents — use fs.read.",
+                &["The daemon has written logs (or the OS log is readable)."],
+                "free / local log read (offline; optional LLM narration)",
+                "\"Any recurring errors in the logs lately?\"",
+            ),
+        ));
+    }
+
+    if w.baseline {
+        out.push(native(
+            "baseline",
+            "capture",
+            baseline(),
+            ToolAnnotations::default(),
+            usage(
+                "The user wants to record the current system state so future drift can be detected.",
+                "For comparing against an existing snapshot — use baseline.diff.",
+                &["None — offline config + capability snapshot."],
+                "free / local snapshot file",
+                "\"Capture a baseline of the current setup\"",
+            ),
+        ));
+        out.push(native(
+            "baseline",
+            "diff",
+            baseline(),
+            read_only(),
+            usage(
+                "The user asks what has changed since a baseline, or to detect configuration drift.",
+                "When no baseline has been captured yet — capture one first.",
+                &["At least one baseline has been captured."],
+                "free / local snapshot comparison",
+                "\"What's drifted since my last baseline?\"",
+            ),
+        ));
+        out.push(native(
+            "baseline",
+            "list",
+            baseline(),
+            read_only(),
+            usage(
+                "The user wants to see which baseline snapshots have been stored.",
+                "For the contents of a specific snapshot — use baseline.diff.",
+                &["None."],
+                "free / local directory listing",
+                "\"List the baselines I've captured\"",
+            ),
+        ));
+    }
+
     out
+}
+
+/// Flatten the live native descriptors into the [`backends::CapabilitySummary`]
+/// inventory the baseline backend snapshots. The descriptor list is the single
+/// source of which capabilities are live this run; passing it in keeps the
+/// baseline core a pure function of its inputs (no reach-back into the binary).
+pub fn capability_inventory(config: &brain::BrainConfig) -> Vec<backends::CapabilitySummary> {
+    native_descriptors(WiredNatives::from_config(config))
+        .into_iter()
+        .map(|d| backends::CapabilitySummary {
+            namespace: d.verb.namespace,
+            action: d.verb.action,
+            tier: d.usage.tier.unwrap_or_else(|| "unknown".to_string()),
+        })
+        .collect()
 }
 
 /// Register every live native capability into `registry`. Idempotent at
@@ -413,6 +500,8 @@ mod tests {
             fs_read: true,
             net_diag: true,
             security_audit: true,
+            logs: true,
+            baseline: true,
         }
     }
 
@@ -456,6 +545,8 @@ mod tests {
             fs_read: true,
             net_diag: true,
             security_audit: true,
+            logs: true,
+            baseline: true,
         };
         let ds = native_descriptors(w);
         // The egress verb (net.http) is gated by web search; diagnostics are not.

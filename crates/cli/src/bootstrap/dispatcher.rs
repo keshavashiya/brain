@@ -193,5 +193,19 @@ pub(super) fn build_action_dispatcher(
     dispatcher = dispatcher
         .with_security_audit_backend(Arc::new(ConfigSecurityAuditor::new(config.clone())));
 
+    // ── Log-analysis backend ─────────────────────────────────────────────
+    // Always wired: an offline, deterministic pattern pass over the daemon's
+    // own (or the OS) log. Read-only, no network.
+    dispatcher = dispatcher.with_log_analysis_backend(Arc::new(LogAnalysis::new(config.clone())));
+
+    // ── Baseline backend ─────────────────────────────────────────────────
+    // Always wired: local snapshot capture + drift detection. The capability
+    // inventory is injected from the live native descriptors so the backend
+    // core stays a pure function of its inputs (no reach-back into the binary).
+    dispatcher = dispatcher.with_baseline_backend(Arc::new(BaselineProvider::new(
+        config.clone(),
+        crate::capabilities::capability_inventory(config),
+    )));
+
     Ok(dispatcher)
 }

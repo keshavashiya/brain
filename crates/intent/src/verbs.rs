@@ -222,6 +222,31 @@ pub const VERBS: &[VerbSpec] = &[
         tier_hint: TierHint::Read,
         summary: "Audit the security posture of the current configuration.",
     },
+    // ── System inspection (logs + baselines) ──────────────────────────
+    VerbSpec {
+        ns: "logs",
+        action: "analyze",
+        tier_hint: TierHint::Read,
+        summary: "Analyse recent logs for recurring error/warning patterns.",
+    },
+    VerbSpec {
+        ns: "baseline",
+        action: "capture",
+        tier_hint: TierHint::Write,
+        summary: "Capture a system-baseline snapshot for later drift detection.",
+    },
+    VerbSpec {
+        ns: "baseline",
+        action: "diff",
+        tier_hint: TierHint::Read,
+        summary: "Diff a baseline against another snapshot or the live state.",
+    },
+    VerbSpec {
+        ns: "baseline",
+        action: "list",
+        tier_hint: TierHint::Read,
+        summary: "List stored baseline snapshots.",
+    },
     // ── Channel / preferences ─────────────────────────────────────────
     VerbSpec {
         ns: "channel",
@@ -347,9 +372,10 @@ mod tests {
     #[test]
     fn vocabulary_contains_expected_size() {
         // Spot-check: 23 verbs through v0.4.0, +3 net diagnostics
-        // (net.check/trace/cert, Issue 139), +1 security.audit
-        // (Issue 140) = 27. Bumping this intentionally is fine — the
-        // test exists so silent additions (or removals) surface in review.
-        assert_eq!(VERBS.len(), 27);
+        // (net.check/trace/cert), +1 security.audit, +1 logs.analyze,
+        // +3 baseline.* (capture/diff/list) = 31. Bumping this intentionally
+        // is fine — the test exists so silent additions (or removals)
+        // surface in review.
+        assert_eq!(VERBS.len(), 31);
     }
 }

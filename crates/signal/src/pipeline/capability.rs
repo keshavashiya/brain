@@ -254,6 +254,21 @@ fn token_to_action(token: &intent::IntentToken) -> Option<cortex::actions::Actio
             target: net_target(v)?,
         }),
         ("security", "audit") => Some(Action::SecurityAudit),
+        // System inspection — all fields optional with sensible defaults, so the
+        // model can fire them bare ("analyze the logs", "capture a baseline").
+        ("logs", "analyze") => Some(Action::AnalyzeLogs {
+            system: first_bool(v, &["system"]).unwrap_or(false),
+            since: first_str(v, &["since", "window"]).unwrap_or_else(|| "1h".to_string()),
+            lines: first_u64(v, &["lines", "limit"]).unwrap_or(2000) as usize,
+        }),
+        ("baseline", "capture") => Some(Action::BaselineCapture {
+            label: first_str(v, &["label", "name", "note"]),
+        }),
+        ("baseline", "diff") => Some(Action::BaselineDiff {
+            from: first_u64(v, &["from"]).map(|n| n as u32),
+            to: first_u64(v, &["to"]).map(|n| n as u32),
+        }),
+        ("baseline", "list") => Some(Action::BaselineList),
         ("shell", "exec") => Some(Action::ExecuteCommand {
             command: first_str(v, &["command", "cmd", "program"])?,
             args: str_array(v, &["args", "arguments"]),
@@ -299,6 +314,10 @@ pub(crate) const TOOL_LOOP_NATIVE_VERBS: &[(&str, &str)] = &[
     ("schedule", "create"),
     ("notify", "send"),
     ("security", "audit"),
+    ("logs", "analyze"),
+    ("baseline", "capture"),
+    ("baseline", "diff"),
+    ("baseline", "list"),
 ];
 
 /// True when a native- or terminal-sourced verb has a chat-tool-loop executor
@@ -347,7 +366,34 @@ fn first_str(v: &serde_json::Value, keys: &[&str]) -> Option<String> {
 /// The target host for a `net.check/trace/cert` probe, tolerant of the key
 /// the model picks (`target`/`host`/`url`/`address`/`domain`).
 fn net_target(v: &serde_json::Value) -> Option<String> {
-    first_str(v, &["target", "host", "url", "address", "domain", "hostname"])
+    first_str(
+        v,
+        &["target", "host", "url", "address", "domain", "hostname"],
+    )
+}
+
+/// First boolean value among `keys`, tolerant of a JSON bool or a `"true"`/
+/// `"false"` string (the model sometimes quotes booleans).
+fn first_bool(v: &serde_json::Value, keys: &[&str]) -> Option<bool> {
+    let obj = v.as_object()?;
+    keys.iter().find_map(|k| {
+        obj.get(*k).and_then(|x| {
+            x.as_bool()
+                .or_else(|| x.as_str().and_then(|s| s.trim().parse::<bool>().ok()))
+        })
+    })
+}
+
+/// First unsigned integer among `keys`, tolerant of a JSON number or a numeric
+/// string (the model sometimes quotes numbers).
+fn first_u64(v: &serde_json::Value, keys: &[&str]) -> Option<u64> {
+    let obj = v.as_object()?;
+    keys.iter().find_map(|k| {
+        obj.get(*k).and_then(|x| {
+            x.as_u64()
+                .or_else(|| x.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+        })
+    })
 }
 
 /// String array under the first present key among `keys`, or empty.

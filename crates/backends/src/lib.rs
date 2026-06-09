@@ -2,8 +2,10 @@
 //!
 //! Extracted from the CLI crate so they can be reused by adapters and tests.
 
+pub mod baseline;
 pub mod error;
 pub mod fetch;
+pub mod logs;
 pub mod memory;
 pub mod messaging;
 pub mod net;
@@ -12,8 +14,10 @@ pub mod scheduling;
 pub mod search;
 pub mod security;
 
+pub use baseline::{BaselineProvider, CapabilitySummary};
 pub use error::BackendInitError;
 pub use fetch::BasicUrlFetcher;
+pub use logs::LogAnalysis;
 pub use memory::DefaultMemoryBackend;
 pub use messaging::{
     json_escape, render_message_template, WebhookMessageBackend, DEFAULT_MESSAGE_BODY,

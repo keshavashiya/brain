@@ -65,6 +65,19 @@ pub enum Action {
     NetDiagnostic { probe: NetProbe, target: String },
     /// Run a read-only audit of the security posture.
     SecurityAudit,
+    /// Analyse recent logs for recurring patterns (read-only). `system` selects
+    /// the OS log source instead of the daemon's own log.
+    AnalyzeLogs {
+        system: bool,
+        since: String,
+        lines: usize,
+    },
+    /// Capture a new system-baseline snapshot (local write).
+    BaselineCapture { label: Option<String> },
+    /// Diff two baselines, or the latest baseline against live state (read-only).
+    BaselineDiff { from: Option<u32>, to: Option<u32> },
+    /// List stored baseline snapshots (read-only).
+    BaselineList,
 }
 
 /// Which network diagnostic to run. Backs the `net.check` / `net.trace` /
@@ -213,6 +226,26 @@ pub trait SecurityAuditBackend: Send + Sync {
     async fn audit(&self) -> Result<String, ActionError>;
 }
 
+/// Optional backend for read-only log pattern analysis. Reads recent
+/// log lines (daemon log, or the OS log when `system`), groups them into
+/// recurring signatures, and returns the deterministic digest. Narration by the
+/// reasoner is a separate concern — the capability only returns counts.
+#[async_trait::async_trait]
+pub trait LogAnalysisBackend: Send + Sync {
+    async fn analyze(&self, system: bool, since: &str, lines: usize)
+        -> Result<String, ActionError>;
+}
+
+/// Optional backend for system-baseline capture + drift detection.
+/// Each method returns a rendered report. `capture` is a local write (a snapshot
+/// file); `diff` and `list` are read-only.
+#[async_trait::async_trait]
+pub trait BaselineBackend: Send + Sync {
+    async fn capture(&self, label: Option<&str>) -> Result<String, ActionError>;
+    async fn diff(&self, from: Option<u32>, to: Option<u32>) -> Result<String, ActionError>;
+    async fn list(&self) -> Result<String, ActionError>;
+}
+
 impl ActionResult {
     /// Create a successful result.
     pub fn success(output: impl Into<String>) -> Self {
@@ -283,6 +316,8 @@ pub struct ActionDispatcher {
     message_backend: Option<Arc<dyn MessageBackend>>,
     net_diagnostics_backend: Option<Arc<dyn NetDiagnosticsBackend>>,
     security_audit_backend: Option<Arc<dyn SecurityAuditBackend>>,
+    log_analysis_backend: Option<Arc<dyn LogAnalysisBackend>>,
+    baseline_backend: Option<Arc<dyn BaselineBackend>>,
     /// Sandbox executor that backs `Action::ExecuteCommand` (Issue 121).
     /// When unset the action refuses with an explicit error rather than
     /// silently shelling out via raw `tokio::process::Command`.
@@ -302,6 +337,8 @@ impl ActionDispatcher {
             message_backend: None,
             net_diagnostics_backend: None,
             security_audit_backend: None,
+            log_analysis_backend: None,
+            baseline_backend: None,
             sandbox_executor: None,
             namespace: "personal".to_string(),
         }
@@ -354,20 +391,26 @@ impl ActionDispatcher {
     }
 
     /// Attach a network-diagnostics backend (`net.check`/`trace`/`cert`).
-    pub fn with_net_diagnostics_backend(
-        mut self,
-        backend: Arc<dyn NetDiagnosticsBackend>,
-    ) -> Self {
+    pub fn with_net_diagnostics_backend(mut self, backend: Arc<dyn NetDiagnosticsBackend>) -> Self {
         self.net_diagnostics_backend = Some(backend);
         self
     }
 
     /// Attach a security-audit backend (`security.audit`).
-    pub fn with_security_audit_backend(
-        mut self,
-        backend: Arc<dyn SecurityAuditBackend>,
-    ) -> Self {
+    pub fn with_security_audit_backend(mut self, backend: Arc<dyn SecurityAuditBackend>) -> Self {
         self.security_audit_backend = Some(backend);
+        self
+    }
+
+    /// Attach a log-analysis backend (`logs.analyze`).
+    pub fn with_log_analysis_backend(mut self, backend: Arc<dyn LogAnalysisBackend>) -> Self {
+        self.log_analysis_backend = Some(backend);
+        self
+    }
+
+    /// Attach a baseline backend (`baseline.capture`/`diff`/`list`).
+    pub fn with_baseline_backend(mut self, backend: Arc<dyn BaselineBackend>) -> Self {
+        self.baseline_backend = Some(backend);
         self
     }
 
@@ -414,6 +457,59 @@ impl ActionDispatcher {
             } => self.send_message(channel, recipient, content).await,
             Action::NetDiagnostic { probe, target } => self.net_diagnostic(*probe, target).await,
             Action::SecurityAudit => self.security_audit().await,
+            Action::AnalyzeLogs {
+                system,
+                since,
+                lines,
+            } => self.analyze_logs(*system, since, *lines).await,
+            Action::BaselineCapture { label } => self.baseline_capture(label.as_deref()).await,
+            Action::BaselineDiff { from, to } => self.baseline_diff(*from, *to).await,
+            Action::BaselineList => self.baseline_list().await,
+        }
+    }
+
+    /// Analyse recent logs through the wired [`LogAnalysisBackend`]. Without one
+    /// configured this returns an explicit failure rather than silently nothing.
+    async fn analyze_logs(&self, system: bool, since: &str, lines: usize) -> ActionResult {
+        let Some(backend) = self.log_analysis_backend.as_ref() else {
+            return ActionResult::failure("log-analysis backend not configured in this deployment");
+        };
+        match backend.analyze(system, since, lines).await {
+            Ok(report) => ActionResult::success(report),
+            Err(e) => ActionResult::failure(e.to_string()),
+        }
+    }
+
+    /// Capture a baseline snapshot through the wired [`BaselineBackend`].
+    async fn baseline_capture(&self, label: Option<&str>) -> ActionResult {
+        let Some(backend) = self.baseline_backend.as_ref() else {
+            return ActionResult::failure("baseline backend not configured in this deployment");
+        };
+        match backend.capture(label).await {
+            Ok(report) => ActionResult::success(report),
+            Err(e) => ActionResult::failure(e.to_string()),
+        }
+    }
+
+    /// Diff baselines through the wired [`BaselineBackend`].
+    async fn baseline_diff(&self, from: Option<u32>, to: Option<u32>) -> ActionResult {
+        let Some(backend) = self.baseline_backend.as_ref() else {
+            return ActionResult::failure("baseline backend not configured in this deployment");
+        };
+        match backend.diff(from, to).await {
+            Ok(report) => ActionResult::success(report),
+            Err(e) => ActionResult::failure(e.to_string()),
+        }
+    }
+
+    /// List baselines through the wired [`BaselineBackend`].
+    async fn baseline_list(&self) -> ActionResult {
+        let Some(backend) = self.baseline_backend.as_ref() else {
+            return ActionResult::failure("baseline backend not configured in this deployment");
+        };
+        match backend.list().await {
+            Ok(report) => ActionResult::success(report),
+            Err(e) => ActionResult::failure(e.to_string()),
         }
     }
 

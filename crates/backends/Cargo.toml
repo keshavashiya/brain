@@ -12,6 +12,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+anyhow        = { workspace = true }
 brain         = { workspace = true }
 metrics       = { workspace = true }
 cortex = { workspace = true }
@@ -20,6 +21,7 @@ storage = { workspace = true }
 signal = { workspace = true }
 observe = { workspace = true }
 resilience = { workspace = true }
+sandbox = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
 tokio-rustls = { workspace = true }
@@ -36,6 +38,7 @@ async-trait = { workspace = true }
 criterion = { workspace = true }
 mockito = { workspace = true }
 tokio = { workspace = true }
+tempfile = "3"
 
 [lints]
 workspace = true

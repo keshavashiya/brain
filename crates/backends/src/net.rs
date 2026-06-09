@@ -214,7 +214,10 @@ impl CertReport {
         s.push_str(&format!("  Subject:  {}\n", self.subject));
         s.push_str(&format!("  Issuer:   {}\n", self.issuer));
         if let Some(nb) = self.not_before {
-            s.push_str(&format!("  Valid:    {}\n", nb.format("%Y-%m-%d %H:%M UTC")));
+            s.push_str(&format!(
+                "  Valid:    {}\n",
+                nb.format("%Y-%m-%d %H:%M UTC")
+            ));
         }
         match (self.not_after, self.days_until_expiry()) {
             (Some(na), Some(days)) => {
@@ -253,10 +256,8 @@ impl tokio_rustls::rustls::client::danger::ServerCertVerifier for AcceptAny {
         _server_name: &tokio_rustls::rustls::pki_types::ServerName<'_>,
         _ocsp: &[u8],
         _now: tokio_rustls::rustls::pki_types::UnixTime,
-    ) -> Result<
-        tokio_rustls::rustls::client::danger::ServerCertVerified,
-        tokio_rustls::rustls::Error,
-    > {
+    ) -> Result<tokio_rustls::rustls::client::danger::ServerCertVerified, tokio_rustls::rustls::Error>
+    {
         Ok(tokio_rustls::rustls::client::danger::ServerCertVerified::assertion())
     }
 
@@ -456,7 +457,9 @@ pub async fn trace(target: &str) -> Result<TraceReport, NetError> {
 
 #[cfg(not(unix))]
 pub async fn trace(_target: &str) -> Result<TraceReport, NetError> {
-    Err(NetError::msg("`net trace` is only supported on Unix platforms"))
+    Err(NetError::msg(
+        "`net trace` is only supported on Unix platforms",
+    ))
 }
 
 // ─── cortex backend wiring ──────────────────────────────────────────────────
@@ -484,7 +487,10 @@ impl cortex::actions::NetDiagnosticsBackend for NetDiagnostics {
     }
 
     async fn cert(&self, target: &str) -> Result<String, cortex::actions::ActionError> {
-        cert(target).await.map(|r| r.render()).map_err(to_action_err)
+        cert(target)
+            .await
+            .map(|r| r.render())
+            .map_err(to_action_err)
     }
 }
 
@@ -564,7 +570,9 @@ mod tests {
             not_before: Some(chrono::Utc::now() - chrono::Duration::days(30)),
             // +1h buffer so the truncating `num_days()` lands on 40 and not 39
             // when `days_until_expiry()` re-reads the clock microseconds later.
-            not_after: Some(chrono::Utc::now() + chrono::Duration::days(40) + chrono::Duration::hours(1)),
+            not_after: Some(
+                chrono::Utc::now() + chrono::Duration::days(40) + chrono::Duration::hours(1),
+            ),
             sans: vec!["h".into(), "www.h".into()],
             chain_len: 2,
         };

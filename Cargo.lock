@@ -821,6 +821,7 @@ dependencies = [
 name = "brainos-backends"
 version = "0.4.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "brainos-core",
  "brainos-cortex",
@@ -828,6 +829,7 @@ dependencies = [
  "brainos-metrics",
  "brainos-observe",
  "brainos-resilience",
+ "brainos-sandbox",
  "brainos-signal",
  "brainos-storage",
  "chrono",
@@ -836,6 +838,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-rustls",
