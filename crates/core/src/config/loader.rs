@@ -474,6 +474,7 @@ impl Default for BrainConfig {
             reflex: ReflexConfig::default(),
             logging: crate::config::LoggingConfig::default(),
             learning: crate::config::LearningConfig::default(),
+            observability: crate::config::ObservabilityConfig::default(),
         }
     }
 }

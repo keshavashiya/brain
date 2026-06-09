@@ -219,6 +219,19 @@ learning:
     enabled: true                   # record outcomes + boost ranking + surface
     half_life_days: 30              # how long an observation keeps half its weight
 
+# ── Observability ──────────────────────────────────────────────────────────────
+# Runtime resource gauges. A single background task samples process RSS, CPU,
+# open SQLite connections, and `~/.brain` disk usage; crossing a ceiling emits an
+# edge-triggered `ResourcePressure` event onto the bus (visible in `brain tail`,
+# `brain doctor --deep`, and `/status`). Ceilings are generous and fail-safe —
+# set any threshold to 0 to disable it.
+observability:
+  resource_sample_secs: 30          # seconds between resource samples
+  thresholds:
+    rss_mb: 2048                    # resident-set-size ceiling (MiB)
+    cpu_pct: 90.0                   # process CPU ceiling (percent, single-core basis)
+    disk_mb: 10240                  # ~/.brain disk-usage ceiling (MiB)
+
 # ── Channel Relays ─────────────────────────────────────────────────────────────
 # Bidirectional WebSocket gateways. Unlike webhooks these are long-lived
 # connections — approval responses from any relay are correlated automatically.

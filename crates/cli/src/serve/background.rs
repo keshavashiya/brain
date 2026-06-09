@@ -200,6 +200,80 @@ pub(super) fn spawn_graph_compactor(
     tracing::info!("Graph compactor scheduled (every 24h, default half-life 7d)");
 }
 
+/// Resource sampler: one bounded task that gauges process RSS, CPU, open
+/// SQLite connections, and `~/.brain` disk usage every `sample_secs`, writing
+/// the readings into the shared [`metrics::ResourceMetrics`] store.
+///
+/// The probe is built once and reused across ticks so `sysinfo` can compute CPU
+/// as a delta since the previous sample — the first tick therefore reports `0%`
+/// CPU (no baseline) but populates every other gauge immediately. This loop is
+/// itself the source of the resource gauges, so it satisfies the "no background
+/// loop without a metric" invariant by construction.
+pub(super) fn spawn_resource_sampler(
+    processor: Arc<signal::SignalProcessor>,
+    resource_metrics: Arc<metrics::ResourceMetrics>,
+    data_dir: std::path::PathBuf,
+    sample_secs: u64,
+    thresholds: brain::config::ResourceThresholds,
+    set: &mut tokio::task::JoinSet<anyhow::Result<()>>,
+) {
+    let p = processor.clone();
+    set.spawn(async move {
+        let mut probe = super::resource::ResourceProbe::new(data_dir);
+        let mut tracker = super::resource::PressureTracker::default();
+        // No leading `tick()` skip here (unlike consolidation): we want gauges
+        // populated as soon as the daemon comes up, not one interval later.
+        let mut ticker =
+            tokio::time::interval(tokio::time::Duration::from_secs(sample_secs.max(1)));
+        loop {
+            ticker.tick().await;
+            let connections = u64::from(p.episodic().pool().open_connections());
+            let snap = probe.sample(Some(connections));
+
+            resource_metrics.set_rss_bytes(snap.rss_bytes);
+            resource_metrics.set_cpu_pct(snap.cpu_pct);
+            resource_metrics.set_open_connections(snap.open_connections);
+            resource_metrics.set_disk_bytes(snap.disk_bytes);
+
+            tracing::debug!(
+                rss_mb = snap.rss_bytes.map(|b| b / (1024 * 1024)),
+                cpu_pct = snap.cpu_pct,
+                open_connections = snap.open_connections,
+                disk_mb = snap.disk_bytes.map(|b| b / (1024 * 1024)),
+                "Resource sample"
+            );
+
+            // Edge-triggered: publish a ResourcePressure only on a fresh
+            // crossing, so the bus isn't spammed while a gauge stays over.
+            let crossings = tracker.evaluate(&snap, &thresholds);
+            if !crossings.is_empty() {
+                if let Some(observer) = p.observer() {
+                    for c in crossings {
+                        tracing::warn!(
+                            gauge = c.gauge,
+                            value = c.value,
+                            threshold = c.threshold,
+                            severity = c.severity,
+                            "Resource pressure: {} over ceiling",
+                            c.gauge
+                        );
+                        let ev = observe::BrainEvent::ResourcePressure {
+                            id: uuid::Uuid::new_v4(),
+                            gauge: c.gauge.to_string(),
+                            value: c.value,
+                            threshold: c.threshold,
+                            severity: c.severity.to_string(),
+                            ts: chrono::Utc::now(),
+                        };
+                        let _ = observer.publish(ev).await;
+                    }
+                }
+            }
+        }
+    });
+    tracing::info!(sample_secs, "Resource sampler scheduled");
+}
+
 pub(crate) async fn promote_candidates(
     processor: &signal::SignalProcessor,
     candidates: &[hippocampus::PromotionCandidate],

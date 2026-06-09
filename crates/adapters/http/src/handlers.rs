@@ -498,6 +498,7 @@ fn brain_event_ts(ev: &observe::BrainEvent) -> chrono::DateTime<chrono::Utc> {
         | ReflexFired { ts, .. }
         | AuditAppended { ts, .. }
         | BudgetCrossed { ts, .. }
+        | ResourcePressure { ts, .. }
         | BreakerStateChange { ts, .. }
         | Error { ts, .. }
         | TerminalSessionOpened { ts, .. }

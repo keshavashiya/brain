@@ -29,6 +29,37 @@ fn test_default_config() {
     assert!(config.adapters.http.enabled);
 }
 
+/// `observability` defaults: the struct `Default`, the embedded `default.yaml`
+/// section, and the `#[serde(default)]` fallback for an absent section must all
+/// agree. Guards against yaml/struct drift the way the proactivity defaults do.
+#[test]
+fn observability_defaults_are_synced() {
+    use figment::providers::{Format, Yaml};
+
+    // Struct defaults.
+    let config = BrainConfig::default();
+    assert_eq!(config.observability.resource_sample_secs, 30);
+    assert_eq!(config.observability.thresholds.rss_mb, 2048);
+    assert_eq!(config.observability.thresholds.cpu_pct, 90.0);
+    assert_eq!(config.observability.thresholds.disk_mb, 10_240);
+
+    // Embedded default.yaml parses to the same values.
+    let from_yaml: BrainConfig = Figment::new()
+        .merge(Yaml::string(DEFAULT_CONFIG))
+        .extract()
+        .expect("default.yaml must parse");
+    assert_eq!(from_yaml.observability.resource_sample_secs, 30);
+    assert_eq!(from_yaml.observability.thresholds.rss_mb, 2048);
+    assert_eq!(from_yaml.observability.thresholds.cpu_pct, 90.0);
+    assert_eq!(from_yaml.observability.thresholds.disk_mb, 10_240);
+
+    // An absent `observability:` section falls back to the struct defaults
+    // via `#[serde(default)]` (every field is individually defaulted).
+    let absent: ObservabilityConfig = Figment::new().extract().expect("serde defaults");
+    assert_eq!(absent.resource_sample_secs, 30);
+    assert_eq!(absent.thresholds.disk_mb, 10_240);
+}
+
 /// Issue 40 regression: `validate()` must warn when the legacy
 /// `llm.provider` is set alongside `llm.providers[]`, so operators
 /// notice the deprecated single-shape field that `providers[]` now

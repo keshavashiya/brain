@@ -496,6 +496,91 @@ async fn run_deep_checks(config: &BrainConfig, daemon_up: bool, failures: &mut u
             println!("  [fail] embedder init          {e}");
         }
     }
+
+    // ── runtime resource gauges ──────────────────────────────────────────
+    check_resource_gauges(config, pool.as_ref()).await;
+}
+
+/// One-shot resource-gauge block for `--deep`: RSS / CPU / open connections /
+/// `~/.brain` disk usage, each flagged `⚠` when over its configured ceiling.
+///
+/// This samples *this* `brain doctor` process — the live daemon's gauges stream
+/// continuously via `brain tail` — so RSS/CPU reflect the doctor invocation,
+/// while the disk gauge measures the shared `~/.brain` footprint and the
+/// connection count comes from the pool opened for the deep checks. Over-ceiling
+/// gauges print `[warn]` but do not fail the run (a health signal, not a broken
+/// environment), matching the scheduling-consistency warning above.
+async fn check_resource_gauges(config: &BrainConfig, pool: Option<&storage::SqlitePool>) {
+    let mut probe = crate::serve::resource::ResourceProbe::new(config.data_dir());
+    // sysinfo computes CPU as a delta between refreshes, so the first sample
+    // only seeds the baseline — sample again after a short gap for a real read.
+    let _ = probe.sample(None);
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let connections = pool.map(|p| u64::from(p.open_connections()));
+    let snap = probe.sample(connections);
+    let th = &config.observability.thresholds;
+
+    println!();
+    println!("Resource gauges (this process; live daemon gauges stream via `brain tail`)");
+    gauge_mib_line("rss", snap.rss_bytes, th.rss_mb);
+    gauge_pct_line("cpu", snap.cpu_pct, th.cpu_pct);
+    gauge_count_line("connections", snap.open_connections);
+    gauge_mib_line("disk (~/.brain)", snap.disk_bytes, th.disk_mb);
+}
+
+/// Print one `doctor` status line with the body aligned to the rest of the
+/// report regardless of the tag's width (`ok` / `warn` / `--`).
+fn status_line(tag: &str, body: &str) {
+    let bracketed = format!("[{tag}]");
+    println!("  {bracketed:<6} {body}");
+}
+
+/// A gauge measured in bytes, rendered as MiB against a MiB ceiling. A ceiling
+/// of `0` means "no limit configured".
+fn gauge_mib_line(label: &str, bytes: Option<u64>, ceiling_mb: u64) {
+    match bytes {
+        None => status_line("--", &format!("{label:<18} unavailable")),
+        Some(b) => {
+            let mib = b / (1024 * 1024);
+            if ceiling_mb == 0 {
+                status_line("ok", &format!("{label:<18} {mib} MiB (no ceiling)"));
+            } else if mib >= ceiling_mb {
+                status_line(
+                    "warn",
+                    &format!("{label:<18} {mib} MiB / {ceiling_mb} MiB  ⚠ over ceiling"),
+                );
+            } else {
+                status_line("ok", &format!("{label:<18} {mib} MiB / {ceiling_mb} MiB"));
+            }
+        }
+    }
+}
+
+/// A percent gauge against a percent ceiling.
+fn gauge_pct_line(label: &str, pct: Option<f64>, ceiling_pct: f64) {
+    match pct {
+        None => status_line("--", &format!("{label:<18} unavailable")),
+        Some(v) => {
+            if ceiling_pct <= 0.0 {
+                status_line("ok", &format!("{label:<18} {v:.1}% (no ceiling)"));
+            } else if v >= ceiling_pct {
+                status_line(
+                    "warn",
+                    &format!("{label:<18} {v:.1}% / {ceiling_pct:.0}%  ⚠ over ceiling"),
+                );
+            } else {
+                status_line("ok", &format!("{label:<18} {v:.1}% / {ceiling_pct:.0}%"));
+            }
+        }
+    }
+}
+
+/// A plain count gauge with no configured ceiling (informational).
+fn gauge_count_line(label: &str, count: Option<u64>) {
+    match count {
+        None => status_line("--", &format!("{label:<18} unavailable")),
+        Some(n) => status_line("ok", &format!("{label:<18} {n}")),
+    }
 }
 
 /// Verify the audit log's `prev_hash` linkage is contiguous: each row's

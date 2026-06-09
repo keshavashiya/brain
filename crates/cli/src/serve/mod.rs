@@ -23,6 +23,8 @@ mod adapters;
 mod background;
 mod dlq;
 mod reflex;
+// `pub(crate)` so `brain doctor --deep` can run a one-shot `ResourceProbe`.
+pub(crate) mod resource;
 mod transports;
 
 use std::sync::Arc;
@@ -314,6 +316,19 @@ pub(crate) async fn cmd_serve(
     }
     background::spawn_graph_compactor(processor.clone(), &mut set);
     dlq::spawn_dlq_drain(processor.clone(), &mut set);
+
+    // Runtime resource gauges (RSS/CPU/connections/disk). The shared store is
+    // updated by the sampler each tick; later surfaces (doctor/status/tail and
+    // the pressure-event emitter) read from it.
+    let resource_metrics = Arc::new(metrics::ResourceMetrics::new());
+    background::spawn_resource_sampler(
+        processor.clone(),
+        resource_metrics.clone(),
+        config.data_dir(),
+        config.observability.resource_sample_secs,
+        config.observability.thresholds.clone(),
+        &mut set,
+    );
 
     // ── Channel relay adapters ────────────────────────────────────────
     if !config.channel.relays.is_empty() {

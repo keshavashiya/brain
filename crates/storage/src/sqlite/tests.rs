@@ -20,6 +20,16 @@ fn test_open_memory() {
 }
 
 #[test]
+fn open_connections_reports_pool_state() {
+    let pool = SqlitePool::open_memory().unwrap();
+    // The in-memory pool is built with max_size = 1; opening establishes at
+    // least one connection, and the gauge never exceeds the configured cap.
+    let n = pool.open_connections();
+    assert!(n >= 1, "an opened pool must hold at least one connection");
+    assert!(n <= 1, "in-memory pool is capped at max_size = 1");
+}
+
+#[test]
 fn test_migrations_idempotent() {
     let pool = SqlitePool::open_memory().unwrap();
     pool.migrate().unwrap();

@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Runtime resource gauges + pressure events.** A single bounded background
+  task now samples process RSS, CPU, open SQLite connections, and `~/.brain`
+  disk usage every `observability.resource_sample_secs` (30s default), writing
+  into a lock-free `ResourceMetrics` store. Crossing a configured ceiling
+  (`observability.thresholds.{rss_mb,cpu_pct,disk_mb}`) emits an edge-triggered
+  `ResourcePressure` event onto the bus — once per crossing, the same discipline
+  as `BudgetCrossed` — visible in `brain tail`. The gauges are also surfaced
+  one-shot in `brain doctor --deep` and `brain status` (Vitals). Ceilings are
+  generous and fail-safe; set any threshold to `0` to disable it. Unsupported
+  platforms degrade individual gauges to "unavailable" rather than failing.
+
 - **Per-principal capability scoping (modifier constraints).** An identity
   principal can now constrain individual action *modifiers*, not just the
   filesystem path. A new `constraints:` list under each principal scopes any

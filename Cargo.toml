@@ -110,6 +110,11 @@ rusqlite = { version = "0.39", features = ["bundled"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.34"
 
+# Runtime resource probe (RSS/CPU gauges). `system` feature only — disk usage
+# is hand-rolled over std::fs, so the heavier disk/network/component probes stay
+# out of the build.
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+
 # Encryption
 aes-gcm = "0.10"
 argon2 = "0.5"

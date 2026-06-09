@@ -57,6 +57,11 @@ pub struct BrainConfig {
     /// and the SOUL capability digest. Default is on with a 30-day half-life.
     #[serde(default)]
     pub learning: LearningConfig,
+    /// Runtime resource-observability knobs — the resource sampler's cadence
+    /// and the per-gauge ceilings that trip a `ResourcePressure` event.
+    /// Default is a 30s sample with generous, fail-safe ceilings.
+    #[serde(default)]
+    pub observability: ObservabilityConfig,
 }
 
 /// Learned self-model configuration.
@@ -99,6 +104,78 @@ impl Default for CapabilityFitnessConfig {
         Self {
             enabled: Self::default_enabled(),
             half_life_days: Self::default_half_life_days(),
+        }
+    }
+}
+
+/// Runtime resource-observability configuration. Drives the resource sampler
+/// that gauges process RSS, CPU, open SQLite connections, and `~/.brain` disk
+/// usage, plus the thresholds at which a `ResourcePressure` event is emitted.
+/// Default is a 30s sample cadence with generous, fail-safe ceilings, so a
+/// fresh install never trips a pressure event under normal load.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObservabilityConfig {
+    /// Seconds between resource samples. The sampler is a single bounded
+    /// background task; lower = more responsive pressure detection at a
+    /// slightly higher idle cost.
+    #[serde(default = "ObservabilityConfig::default_resource_sample_secs")]
+    pub resource_sample_secs: u64,
+    /// Per-gauge ceilings above which a `ResourcePressure` event fires
+    /// (edge-triggered, not per sample).
+    #[serde(default)]
+    pub thresholds: ResourceThresholds,
+}
+
+impl ObservabilityConfig {
+    fn default_resource_sample_secs() -> u64 {
+        30
+    }
+}
+
+impl Default for ObservabilityConfig {
+    fn default() -> Self {
+        Self {
+            resource_sample_secs: Self::default_resource_sample_secs(),
+            thresholds: ResourceThresholds::default(),
+        }
+    }
+}
+
+/// Per-gauge pressure ceilings. A gauge crossing its ceiling emits a
+/// `ResourcePressure` event; defaults are generous so normal operation is
+/// silent. A `0` disables that gauge's threshold (it never fires).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceThresholds {
+    /// Resident-set-size ceiling, in mebibytes.
+    #[serde(default = "ResourceThresholds::default_rss_mb")]
+    pub rss_mb: u64,
+    /// Process CPU-utilisation ceiling, in percent (single-core basis, so
+    /// values above 100 are possible on a multi-core busy loop).
+    #[serde(default = "ResourceThresholds::default_cpu_pct")]
+    pub cpu_pct: f64,
+    /// `~/.brain` data-directory disk-usage ceiling, in mebibytes.
+    #[serde(default = "ResourceThresholds::default_disk_mb")]
+    pub disk_mb: u64,
+}
+
+impl ResourceThresholds {
+    fn default_rss_mb() -> u64 {
+        2048
+    }
+    fn default_cpu_pct() -> f64 {
+        90.0
+    }
+    fn default_disk_mb() -> u64 {
+        10_240
+    }
+}
+
+impl Default for ResourceThresholds {
+    fn default() -> Self {
+        Self {
+            rss_mb: Self::default_rss_mb(),
+            cpu_pct: Self::default_cpu_pct(),
+            disk_mb: Self::default_disk_mb(),
         }
     }
 }

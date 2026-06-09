@@ -41,6 +41,7 @@ pub(crate) fn brain_event_ts(ev: &observe::BrainEvent) -> chrono::DateTime<chron
         | ReflexFired { ts, .. }
         | AuditAppended { ts, .. }
         | BudgetCrossed { ts, .. }
+        | ResourcePressure { ts, .. }
         | BreakerStateChange { ts, .. }
         | Error { ts, .. }
         | TerminalSessionOpened { ts, .. }

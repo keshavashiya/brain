@@ -222,6 +222,14 @@ impl SqlitePool {
         f(&conn)
     }
 
+    /// Number of connections the r2d2 pool currently holds (idle + checked
+    /// out), capped by the configured `max_size`. Backs the open-connections
+    /// resource gauge; a value pinned at the max for a sustained period is a
+    /// sign of connection-pressure or a leak.
+    pub fn open_connections(&self) -> u32 {
+        self.pool.state().connections
+    }
+
     /// Attach an encryptor to this pool (builder pattern).
     ///
     /// Once set, `encrypt_content` / `decrypt_content` are active on all

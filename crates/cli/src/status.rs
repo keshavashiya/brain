@@ -114,6 +114,23 @@ pub(crate) async fn show_status(config: &brain::BrainConfig) -> anyhow::Result<(
         }
     );
 
+    // ── Vitals: one-shot resource gauges, same probe + ceilings as
+    //    `brain doctor --deep`. Connections are omitted here because /status
+    //    intentionally avoids opening SQLite (see the daemon-stats note below);
+    //    RSS/CPU reflect this process, Disk measures the shared `~/.brain`.
+    {
+        let mut probe = crate::serve::resource::ResourceProbe::new(config.data_dir());
+        // sysinfo needs an interval between refreshes for a real CPU reading.
+        let _ = probe.sample(None);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let snap = probe.sample(None);
+        let th = &config.observability.thresholds;
+        println!("\n  Vitals:");
+        print_vital_mib("RSS", snap.rss_bytes, th.rss_mb);
+        print_vital_pct("CPU", snap.cpu_pct, th.cpu_pct);
+        print_vital_mib("Disk", snap.disk_bytes, th.disk_mb);
+    }
+
     // Database stats — only query via HTTP when daemon is running.
     // Opening SQLite directly causes RuVector lock contention.
     if let Some(base_url) = daemon_running {
@@ -190,4 +207,37 @@ pub(crate) async fn show_status(config: &brain::BrainConfig) -> anyhow::Result<(
     }
 
     Ok(())
+}
+
+/// A byte-measured vital rendered as MiB against a MiB ceiling, in the themed
+/// `    Label     : value` style of the Synapses block. `⚠` marks an over-ceiling
+/// reading; a `0` ceiling means none is configured.
+fn print_vital_mib(label: &str, bytes: Option<u64>, ceiling_mb: u64) {
+    match bytes {
+        None => println!("    {label:<10}: unavailable"),
+        Some(b) => {
+            let mib = b / (1024 * 1024);
+            if ceiling_mb == 0 {
+                println!("    {label:<10}: {mib} MiB");
+            } else {
+                let mark = if mib >= ceiling_mb { "  ⚠" } else { "" };
+                println!("    {label:<10}: {mib} MiB / {ceiling_mb} MiB{mark}");
+            }
+        }
+    }
+}
+
+/// A percent vital against a percent ceiling, themed to match `print_vital_mib`.
+fn print_vital_pct(label: &str, pct: Option<f64>, ceiling_pct: f64) {
+    match pct {
+        None => println!("    {label:<10}: unavailable"),
+        Some(v) => {
+            if ceiling_pct <= 0.0 {
+                println!("    {label:<10}: {v:.1}%");
+            } else {
+                let mark = if v >= ceiling_pct { "  ⚠" } else { "" };
+                println!("    {label:<10}: {v:.1}% / {ceiling_pct:.0}%{mark}");
+            }
+        }
+    }
 }

@@ -87,6 +87,26 @@ pub enum BrainEvent {
         window: String,
         ts: DateTime<Utc>,
     },
+    /// Emitted by the resource sampler when a runtime gauge crosses a configured
+    /// ceiling. Edge-triggered — once per crossing, not once per sample — the
+    /// same discipline as `BudgetCrossed`. `gauge` and `severity` are strings so
+    /// `observe` stays free of an `observability`/config dependency, exactly as
+    /// `BreakerStateChange` keeps it free of `resilience`.
+    ResourcePressure {
+        id: Uuid,
+        /// Which gauge crossed: `"rss" | "cpu" | "disk"`. (The connection gauge
+        /// has no configured ceiling, so it never appears here.)
+        gauge: String,
+        /// Sampled value at the crossing, in the gauge's threshold unit — MiB
+        /// for `rss`/`disk`, percent for `cpu` — so it is directly comparable to
+        /// `threshold`.
+        value: f64,
+        /// The configured ceiling that was crossed, same unit as `value`.
+        threshold: f64,
+        /// `"warn" | "critical"`.
+        severity: String,
+        ts: DateTime<Utc>,
+    },
     BreakerStateChange {
         id: Uuid,
         tool_id: String,
@@ -146,6 +166,7 @@ impl BrainEvent {
             BrainEvent::ReflexFired { .. } => "reflex_fired",
             BrainEvent::AuditAppended { .. } => "audit_appended",
             BrainEvent::BudgetCrossed { .. } => "budget_crossed",
+            BrainEvent::ResourcePressure { .. } => "resource_pressure",
             BrainEvent::BreakerStateChange { .. } => "breaker_state_change",
             BrainEvent::Error { .. } => "error",
             BrainEvent::TerminalSessionOpened { .. } => "terminal_session_opened",
@@ -167,6 +188,7 @@ impl BrainEvent {
             | BrainEvent::ReflexFired { id, .. }
             | BrainEvent::AuditAppended { id, .. }
             | BrainEvent::BudgetCrossed { id, .. }
+            | BrainEvent::ResourcePressure { id, .. }
             | BrainEvent::BreakerStateChange { id, .. }
             | BrainEvent::Error { id, .. }
             | BrainEvent::TerminalSessionOpened { id, .. }
@@ -268,5 +290,42 @@ mod tests {
         };
         assert_eq!(ev.id(), id);
         assert_eq!(ev.tool_id(), None);
+    }
+
+    #[test]
+    fn roundtrip_resource_pressure_through_json() {
+        let id = Uuid::new_v4();
+        let ts = Utc::now();
+        let original = BrainEvent::ResourcePressure {
+            id,
+            gauge: "rss".into(),
+            value: 2304.0,
+            threshold: 2048.0,
+            severity: "warn".into(),
+            ts,
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: BrainEvent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.kind(), "resource_pressure");
+        assert_eq!(decoded.id(), id);
+        // Not tool-scoped, so it never matches a `?tool_id=` filter.
+        assert_eq!(decoded.tool_id(), None);
+        match decoded {
+            BrainEvent::ResourcePressure {
+                gauge,
+                value,
+                threshold,
+                severity,
+                ..
+            } => {
+                assert_eq!(gauge, "rss");
+                assert_eq!(value, 2304.0);
+                assert_eq!(threshold, 2048.0);
+                assert_eq!(severity, "warn");
+            }
+            other => panic!("decoded to the wrong variant: {other:?}"),
+        }
     }
 }
