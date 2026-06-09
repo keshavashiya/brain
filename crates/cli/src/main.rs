@@ -12,6 +12,7 @@ mod errors;
 mod export;
 mod init;
 mod logging;
+mod logs;
 mod serve;
 mod service;
 mod status;
@@ -222,6 +223,21 @@ enum Commands {
         since: Option<String>,
     },
 
+    /// Read the brain's logs — scan for recurring error/warning patterns.
+    ///
+    /// A deterministic pattern pass (level counts + recurring signatures) always
+    /// runs offline; an optional LLM summary narrates the digest on top.
+    ///
+    /// Examples:
+    ///   brain logs analyze                     # own daemon log, last 1h
+    ///   brain logs analyze --since 30m         # narrower window
+    ///   brain logs analyze --source system     # OS log (sandboxed log show/journalctl)
+    ///   brain logs analyze --no-llm            # deterministic digest only
+    Logs {
+        #[command(subcommand)]
+        action: logs::LogsAction,
+    },
+
     /// Manage the credential vault — store, retrieve, list, delete secrets.
     ///
     /// Raw values are never passed on argv or logged. `set` reads from stdin;
@@ -409,6 +425,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             )
             .await?
         }
+        Commands::Logs { action } => logs::cmd_logs(&config, action).await?,
     }
 
     Ok(())
