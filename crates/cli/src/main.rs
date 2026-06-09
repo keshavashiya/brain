@@ -1,3 +1,4 @@
+mod baseline;
 mod bootstrap;
 mod bridge;
 mod capabilities;
@@ -238,6 +239,23 @@ enum Commands {
         action: logs::LogsAction,
     },
 
+    /// Capture system baselines and detect drift from them.
+    ///
+    /// A baseline is an offline snapshot of stable system facts (version,
+    /// platform, LLM/embedding wiring, adapters, action toggles, the native
+    /// capability inventory, security surface), stored as a versioned JSON
+    /// file. `diff` reports what changed since a baseline.
+    ///
+    /// Examples:
+    ///   brain baseline capture --label "post-install"  # snapshot now
+    ///   brain baseline list                            # stored versions
+    ///   brain baseline diff                            # latest vs live state
+    ///   brain baseline diff --from 1 --to 3            # two stored snapshots
+    Baseline {
+        #[command(subcommand)]
+        action: baseline::BaselineAction,
+    },
+
     /// Manage the credential vault — store, retrieve, list, delete secrets.
     ///
     /// Raw values are never passed on argv or logged. `set` reads from stdin;
@@ -426,6 +444,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             .await?
         }
         Commands::Logs { action } => logs::cmd_logs(&config, action).await?,
+        Commands::Baseline { action } => baseline::cmd_baseline(&config, action).await?,
     }
 
     Ok(())
