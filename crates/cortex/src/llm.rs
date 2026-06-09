@@ -499,7 +499,7 @@ pub async fn select_provider(llm: &brain::LlmConfig) -> Result<Box<dyn LlmProvid
 /// error (429 / 5xx / unavailable / timeout).
 pub async fn build_failover_chain(
     llm: &brain::LlmConfig,
-) -> Result<failover::FalloverProvider, LlmError> {
+) -> Result<failover::FailoverProvider, LlmError> {
     let entries = synthesise_entries(llm);
     let max_tokens = llm.max_tokens as i32;
 
@@ -570,7 +570,7 @@ pub async fn build_failover_chain(
         }
     }
 
-    Ok(failover::FalloverProvider::new(providers))
+    Ok(failover::FailoverProvider::new(providers))
 }
 
 fn synthesise_entries(llm: &brain::LlmConfig) -> Vec<brain::ProviderEntry> {
