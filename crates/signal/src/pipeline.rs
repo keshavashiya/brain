@@ -341,9 +341,15 @@ impl SignalProcessor {
         history: Option<&[cortex::llm::Message]>,
     ) -> thalamus::Classification {
         let history = history.unwrap_or(&[]);
+        // Feed the live capability manifest into the classifier so it shares
+        // the same view of available tools the SOUL and external clients see.
+        // Lightweight — registry list only, no fitness query; only the
+        // LLM-fallback branch consults it.
+        let capability_summary = self.planner_capabilities().await.join("\n");
+        let capabilities = (!capability_summary.is_empty()).then_some(capability_summary.as_str());
         let classification = self
             .classifier
-            .classify_with_history(&signal.content, history)
+            .classify_with_context(&signal.content, history, capabilities)
             .await;
         self.metrics.inc_intent_classification();
         if matches!(classification.method, thalamus::ClassificationMethod::Llm) {

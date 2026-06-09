@@ -785,10 +785,13 @@ async fn cancel_signal_regex_captures_uuid() {
         .classify("cancel signal 550e8400-e29b-41d4-a716-446655440000")
         .await;
     match result.intent {
-        Intent::CancelSignal { signal_id } => {
-            assert_eq!(signal_id, "550e8400-e29b-41d4-a716-446655440000");
+        Intent::Cancel {
+            target: CancelTarget::Signal,
+            id,
+        } => {
+            assert_eq!(id, "550e8400-e29b-41d4-a716-446655440000");
         }
-        other => panic!("Expected CancelSignal, got {other:?}"),
+        other => panic!("Expected Cancel(Signal), got {other:?}"),
     }
 }
 
@@ -797,8 +800,11 @@ async fn cancel_signal_does_not_collide_with_cancel_task() {
     let classifier = IntentClassifier::new();
     let result = classifier.classify("cancel task 42").await;
     match result.intent {
-        Intent::CancelTask { .. } => {} // expected
-        other => panic!("'cancel task 42' should classify as CancelTask, got {other:?}"),
+        Intent::Cancel {
+            target: CancelTarget::Task,
+            ..
+        } => {} // expected
+        other => panic!("'cancel task 42' should classify as Cancel(Task), got {other:?}"),
     }
 }
 
@@ -962,8 +968,14 @@ async fn approval_list_slash_classifies_to_list_standing_approvals() {
     let classifier = IntentClassifier::new();
     let result = classifier.classify("/approval-list").await;
     assert!(
-        matches!(result.intent, Intent::ListStandingApprovals),
-        "expected ListStandingApprovals, got {:?}",
+        matches!(
+            result.intent,
+            Intent::List {
+                resource: Resource::StandingApprovals,
+                ..
+            }
+        ),
+        "expected List(StandingApprovals), got {:?}",
         result.intent
     );
 }
@@ -973,8 +985,11 @@ async fn approval_revoke_slash_carries_id() {
     let classifier = IntentClassifier::new();
     let result = classifier.classify("/approval-revoke abc-123").await;
     match result.intent {
-        Intent::RevokeStandingApproval { id } => assert_eq!(id, "abc-123"),
-        other => panic!("expected RevokeStandingApproval, got {other:?}"),
+        Intent::Cancel {
+            target: CancelTarget::StandingApproval,
+            id,
+        } => assert_eq!(id, "abc-123"),
+        other => panic!("expected Cancel(StandingApproval), got {other:?}"),
     }
 }
 
@@ -983,7 +998,13 @@ async fn approval_revoke_slash_without_id_falls_through() {
     let classifier = IntentClassifier::new();
     let result = classifier.classify("/approval-revoke").await;
     assert!(
-        !matches!(result.intent, Intent::RevokeStandingApproval { .. }),
+        !matches!(
+            result.intent,
+            Intent::Cancel {
+                target: CancelTarget::StandingApproval,
+                ..
+            }
+        ),
         "bare /approval-revoke must not classify (id is required)"
     );
 }
@@ -993,8 +1014,14 @@ async fn task_list_slash_classifies_to_list_tasks() {
     let classifier = IntentClassifier::new();
     let result = classifier.classify("/task-list").await;
     assert!(
-        matches!(result.intent, Intent::ListTasks),
-        "expected ListTasks, got {:?}",
+        matches!(
+            result.intent,
+            Intent::List {
+                resource: Resource::Tasks,
+                ..
+            }
+        ),
+        "expected List(Tasks), got {:?}",
         result.intent
     );
 }
@@ -1014,8 +1041,11 @@ async fn task_cancel_slash_carries_id() {
     let classifier = IntentClassifier::new();
     let result = classifier.classify("/task-cancel abc-123").await;
     match result.intent {
-        Intent::CancelTask { task_id } => assert_eq!(task_id, "abc-123"),
-        other => panic!("expected CancelTask, got {other:?}"),
+        Intent::Cancel {
+            target: CancelTarget::Task,
+            id,
+        } => assert_eq!(id, "abc-123"),
+        other => panic!("expected Cancel(Task), got {other:?}"),
     }
 }
 
@@ -1024,7 +1054,13 @@ async fn task_cancel_slash_without_id_falls_through() {
     let classifier = IntentClassifier::new();
     let result = classifier.classify("/task-cancel").await;
     assert!(
-        !matches!(result.intent, Intent::CancelTask { .. }),
+        !matches!(
+            result.intent,
+            Intent::Cancel {
+                target: CancelTarget::Task,
+                ..
+            }
+        ),
         "bare /task-cancel must not classify (id is required)"
     );
 }
@@ -1048,10 +1084,40 @@ fn every_intent_variant() -> Vec<Intent> {
         Intent::SystemStatus,
         Intent::ProactivityStatus,
         Intent::BudgetStatus { window: None },
-        Intent::ListApprovals { status: None },
-        Intent::ListStandingApprovals,
-        Intent::ListSchedules,
-        Intent::ListTasks,
+        // One List sample per Resource so the per-key category derivation is
+        // exercised for every listable collection.
+        Intent::List {
+            resource: Resource::Approvals,
+            filter: None,
+        },
+        Intent::List {
+            resource: Resource::StandingApprovals,
+            filter: None,
+        },
+        Intent::List {
+            resource: Resource::Schedules,
+            filter: None,
+        },
+        Intent::List {
+            resource: Resource::Tasks,
+            filter: None,
+        },
+        Intent::List {
+            resource: Resource::Channels,
+            filter: None,
+        },
+        Intent::List {
+            resource: Resource::TerminalSessions,
+            filter: None,
+        },
+        Intent::List {
+            resource: Resource::McpServers,
+            filter: None,
+        },
+        Intent::List {
+            resource: Resource::Capabilities,
+            filter: None,
+        },
         Intent::TaskStatus {
             task_id: "t".into(),
         },
@@ -1063,13 +1129,10 @@ fn every_intent_variant() -> Vec<Intent> {
             since: None,
             limit: None,
         },
-        Intent::ListChannels,
         Intent::ChannelPreferences {
             namespace: None,
             category: None,
         },
-        Intent::ListTerminalSessions,
-        Intent::ListMcpServers,
         // Memory
         Intent::StoreFact {
             subject: "s".into(),
@@ -1097,15 +1160,21 @@ fn every_intent_variant() -> Vec<Intent> {
             description: "d".into(),
             cron: None,
         },
-        Intent::CancelSchedule { id: "1".into() },
+        // The Lifecycle-category Cancel targets.
+        Intent::Cancel {
+            target: CancelTarget::Schedule,
+            id: "1".into(),
+        },
         Intent::DecomposeTask {
             request: "build".into(),
         },
-        Intent::CancelTask {
-            task_id: "1".into(),
+        Intent::Cancel {
+            target: CancelTarget::Task,
+            id: "1".into(),
         },
-        Intent::CancelSignal {
-            signal_id: "1".into(),
+        Intent::Cancel {
+            target: CancelTarget::Signal,
+            id: "1".into(),
         },
         Intent::OpenTerminalSession {
             program: "bash".into(),
@@ -1126,7 +1195,11 @@ fn every_intent_variant() -> Vec<Intent> {
             nonce: "n".into(),
             decision: "approve".into(),
         },
-        Intent::RevokeStandingApproval { id: "g".into() },
+        // The Governance-category Cancel target.
+        Intent::Cancel {
+            target: CancelTarget::StandingApproval,
+            id: "g".into(),
+        },
         Intent::PruneAudit {
             older_than: "30d".into(),
         },
@@ -1256,18 +1329,20 @@ fn every_category_has_at_least_one_variant() {
 }
 
 /// Tripwire: `every_intent_variant()` must enumerate one example per
-/// `Intent` variant. If the enum grows without the helper being
-/// updated, the per-variant category coverage assertions silently
-/// stop checking the new variant. The exact count is intentional —
-/// bump it deliberately when adding a variant, and add a sample to
-/// `every_intent_variant()` in the same change.
+/// `Intent` variant — and, for the generic `List` / `Cancel` verbs, one per
+/// [`Resource`] / [`CancelTarget`] value so the per-key category derivation is
+/// fully exercised. If the enum (or a Resource/CancelTarget) grows without the
+/// helper being updated, the per-variant category coverage assertions silently
+/// stop checking the new case. The exact count is intentional — bump it
+/// deliberately and add a sample in the same change.
 #[test]
 fn every_intent_variant_helper_is_exhaustive() {
     assert_eq!(
         every_intent_variant().len(),
-        38,
-        "every_intent_variant() must list one example per Intent variant; \
-         update it (and bump this count) when the enum changes"
+        39,
+        "every_intent_variant() must list one example per Intent variant \
+         (and per Resource / CancelTarget value); update it (and bump this \
+         count) when the enum changes"
     );
 }
 
@@ -1284,34 +1359,31 @@ fn every_intent_variant_has_the_expected_category() {
             | Intent::SystemStatus
             | Intent::ProactivityStatus
             | Intent::BudgetStatus { .. }
-            | Intent::ListApprovals { .. }
-            | Intent::ListStandingApprovals
-            | Intent::ListSchedules
-            | Intent::ListTasks
+            | Intent::List { .. }
             | Intent::TaskStatus { .. }
             | Intent::QueryAgents { .. }
             | Intent::QueryAudit { .. }
-            | Intent::ListChannels
-            | Intent::ChannelPreferences { .. }
-            | Intent::ListTerminalSessions
-            | Intent::ListMcpServers
-            | Intent::ListCapabilities => IntentCategory::Inspection,
+            | Intent::ChannelPreferences { .. } => IntentCategory::Inspection,
             Intent::StoreFact { .. } | Intent::Forget { .. } => IntentCategory::Memory,
             Intent::ExecuteCommand { .. }
             | Intent::WebSearch { .. }
             | Intent::SendMessage { .. }
             | Intent::DelegateTask { .. } => IntentCategory::Action,
+            // A standing-approval revoke is Governance; the other Cancel targets
+            // (schedule/task/signal) are Lifecycle — the split the per-key
+            // derivation is meant to capture.
+            Intent::Cancel {
+                target: CancelTarget::StandingApproval,
+                ..
+            } => IntentCategory::Governance,
             Intent::Schedule { .. }
-            | Intent::CancelSchedule { .. }
+            | Intent::Cancel { .. }
             | Intent::DecomposeTask { .. }
-            | Intent::CancelTask { .. }
-            | Intent::CancelSignal { .. }
             | Intent::OpenTerminalSession { .. }
             | Intent::CloseTerminalSession { .. }
             | Intent::MountMcpServer { .. }
             | Intent::UnmountMcpServer { .. } => IntentCategory::Lifecycle,
             Intent::RespondToApproval { .. }
-            | Intent::RevokeStandingApproval { .. }
             | Intent::PruneAudit { .. }
             | Intent::SetChannelPreference { .. }
             | Intent::SetProactivity { .. } => IntentCategory::Governance,
@@ -1378,10 +1450,39 @@ mod taxonomy_drift_guards {
             Intent::SystemStatus,
             Intent::ProactivityStatus,
             Intent::BudgetStatus { window: None },
-            Intent::ListApprovals { status: None },
-            Intent::ListStandingApprovals,
-            Intent::ListSchedules,
-            Intent::ListTasks,
+            // One List per Resource — each is a distinct wire key.
+            Intent::List {
+                resource: Resource::Approvals,
+                filter: None,
+            },
+            Intent::List {
+                resource: Resource::StandingApprovals,
+                filter: None,
+            },
+            Intent::List {
+                resource: Resource::Schedules,
+                filter: None,
+            },
+            Intent::List {
+                resource: Resource::Tasks,
+                filter: None,
+            },
+            Intent::List {
+                resource: Resource::Channels,
+                filter: None,
+            },
+            Intent::List {
+                resource: Resource::TerminalSessions,
+                filter: None,
+            },
+            Intent::List {
+                resource: Resource::McpServers,
+                filter: None,
+            },
+            Intent::List {
+                resource: Resource::Capabilities,
+                filter: None,
+            },
             Intent::TaskStatus { task_id: s() },
             Intent::QueryAgents { filter: s() },
             Intent::QueryAudit {
@@ -1389,14 +1490,10 @@ mod taxonomy_drift_guards {
                 since: None,
                 limit: None,
             },
-            Intent::ListChannels,
             Intent::ChannelPreferences {
                 namespace: None,
                 category: None,
             },
-            Intent::ListTerminalSessions,
-            Intent::ListMcpServers,
-            Intent::ListCapabilities,
             // Memory
             Intent::StoreFact {
                 subject: s(),
@@ -1424,10 +1521,19 @@ mod taxonomy_drift_guards {
                 description: s(),
                 cron: None,
             },
-            Intent::CancelSchedule { id: s() },
+            Intent::Cancel {
+                target: CancelTarget::Schedule,
+                id: s(),
+            },
             Intent::DecomposeTask { request: s() },
-            Intent::CancelTask { task_id: s() },
-            Intent::CancelSignal { signal_id: s() },
+            Intent::Cancel {
+                target: CancelTarget::Task,
+                id: s(),
+            },
+            Intent::Cancel {
+                target: CancelTarget::Signal,
+                id: s(),
+            },
             Intent::OpenTerminalSession {
                 program: s(),
                 args: Vec::new(),
@@ -1445,7 +1551,10 @@ mod taxonomy_drift_guards {
                 nonce: s(),
                 decision: s(),
             },
-            Intent::RevokeStandingApproval { id: s() },
+            Intent::Cancel {
+                target: CancelTarget::StandingApproval,
+                id: s(),
+            },
             Intent::PruneAudit { older_than: s() },
             Intent::SetChannelPreference {
                 channel: s(),

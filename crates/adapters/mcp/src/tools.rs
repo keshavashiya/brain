@@ -231,8 +231,8 @@ impl McpServer {
 
     /// `brain_capabilities` — expose Brain's live capability manifest to
     /// external MCP clients. Same text the internal
-    /// `ListCapabilities` intent renders, so internal reasoner and
-    /// external clients read one manifest.
+    /// `List { resource: Capabilities }` intent renders, so internal reasoner
+    /// and external clients read one manifest.
     pub(crate) async fn tool_capabilities(&self) -> Result<Value, (i32, String)> {
         Ok(tool_result_text(self.processor.capability_manifest().await))
     }

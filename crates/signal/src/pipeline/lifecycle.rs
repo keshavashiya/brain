@@ -32,19 +32,25 @@ impl LifecycleAuth for SignalProcessor {
                 AuthorizationRequest::new("schedule", "create"),
                 Tier::External,
             )),
-            thalamus::Intent::CancelSchedule { .. } => {
-                Some((AuthorizationRequest::new("schedule", "cancel"), Tier::Write))
-            }
+            // The lifecycle Cancel targets (schedule/task/signal) — each its own
+            // verb, all Write. The StandingApproval target is Governance-category
+            // and is handled in governance.rs, so it falls through to `_ => None`.
+            thalamus::Intent::Cancel {
+                target: thalamus::CancelTarget::Schedule,
+                ..
+            } => Some((AuthorizationRequest::new("schedule", "cancel"), Tier::Write)),
+            thalamus::Intent::Cancel {
+                target: thalamus::CancelTarget::Task,
+                ..
+            } => Some((AuthorizationRequest::new("task", "cancel"), Tier::Write)),
+            thalamus::Intent::Cancel {
+                target: thalamus::CancelTarget::Signal,
+                ..
+            } => Some((AuthorizationRequest::new("signal", "cancel"), Tier::Write)),
             thalamus::Intent::DecomposeTask { .. } => Some((
                 AuthorizationRequest::new("task", "decompose"),
                 Tier::Execute,
             )),
-            thalamus::Intent::CancelTask { .. } => {
-                Some((AuthorizationRequest::new("task", "cancel"), Tier::Write))
-            }
-            thalamus::Intent::CancelSignal { .. } => {
-                Some((AuthorizationRequest::new("signal", "cancel"), Tier::Write))
-            }
             thalamus::Intent::OpenTerminalSession { program, cwd, .. } => Some((
                 AuthorizationRequest::new("terminal", "open").with_modifiers(serde_json::json!({
                     "program": program,
@@ -96,7 +102,10 @@ impl LifecycleHandler for SignalProcessor {
         prepend_nudges: &NudgeFn<'_>,
     ) -> Result<PipelineResult, SignalError> {
         match intent {
-            thalamus::Intent::CancelSchedule { id } => {
+            thalamus::Intent::Cancel {
+                target: thalamus::CancelTarget::Schedule,
+                id,
+            } => {
                 self.handle_cancel_schedule(ctx.signal_id, id, prepend_nudges)
                     .await
             }
@@ -104,14 +113,18 @@ impl LifecycleHandler for SignalProcessor {
                 self.handle_decompose_task(ctx.signal_id, request, prepend_nudges)
                     .await
             }
-            thalamus::Intent::CancelTask { task_id } => {
-                self.handle_cancel_task(ctx.signal_id, task_id, prepend_nudges)
+            thalamus::Intent::Cancel {
+                target: thalamus::CancelTarget::Task,
+                id,
+            } => {
+                self.handle_cancel_task(ctx.signal_id, id, prepend_nudges)
                     .await
             }
-            thalamus::Intent::CancelSignal {
-                signal_id: target_id,
+            thalamus::Intent::Cancel {
+                target: thalamus::CancelTarget::Signal,
+                id,
             } => {
-                self.handle_cancel_signal(ctx.signal_id, target_id, prepend_nudges)
+                self.handle_cancel_signal(ctx.signal_id, id, prepend_nudges)
                     .await
             }
             thalamus::Intent::OpenTerminalSession { program, args, cwd } => {

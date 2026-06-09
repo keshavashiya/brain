@@ -98,7 +98,7 @@ pub struct MountedServer {
     pub tools: Vec<ToolDescriptor>,
 }
 
-/// Snapshot for `list_servers` / `Intent::ListMcpServers`.
+/// Snapshot for `list_servers` / `Intent::List { resource: McpServers }`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerStatus {
     pub name: String,

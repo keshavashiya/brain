@@ -4,7 +4,7 @@
 //! taxonomy (`fs.*`, `net.*`, `shell.*`, `memory.*`, etc.) plus the
 //! minimum tier the principal must hold. Returning `None` means the
 //! intent is unguarded — pure-conversation intents (Chat) and inspection
-//! intents that touch nothing destructive (ListChannels, BudgetStatus,
+//! intents that touch nothing destructive (List, BudgetStatus,
 //! SystemStatus).
 //!
 //! Per-category mappings live alongside their dispatchers in
@@ -57,7 +57,7 @@ pub(crate) fn tier_for_verb(verb_ns: &str, verb_action: &str) -> Tier {
         // matching rationale in `pipeline/lifecycle.rs` (Issue 126 / W3). Kept
         // here so the typed and abstract paths converge on the same tier.
         // schedule.cancel stays a Write (undo of a create), matching
-        // `Intent::CancelSchedule` in lifecycle.rs.
+        // `Intent::Cancel { target: Schedule }` in lifecycle.rs.
         ("schedule", "create") => Tier::External,
         ("memory", "store")
         | ("memory", "import")
@@ -149,7 +149,8 @@ mod tests {
     fn cancel_schedule_tier_agrees_across_typed_and_abstract_paths() {
         // schedule.cancel is the reversible undo of a create — a Write on
         // both paths.
-        let (req, typed_tier) = intent_to_auth(&Intent::CancelSchedule {
+        let (req, typed_tier) = intent_to_auth(&Intent::Cancel {
+            target: thalamus::CancelTarget::Schedule,
             id: "review-prs".into(),
         })
         .unwrap();
@@ -185,17 +186,26 @@ mod tests {
 
     #[test]
     fn list_mcp_servers_unguarded() {
-        assert!(intent_to_auth(&Intent::ListMcpServers).is_none());
+        assert!(intent_to_auth(&Intent::List {
+            resource: thalamus::Resource::McpServers,
+            filter: None,
+        })
+        .is_none());
     }
 
     #[test]
     fn list_standing_approvals_is_unguarded() {
-        assert!(intent_to_auth(&Intent::ListStandingApprovals).is_none());
+        assert!(intent_to_auth(&Intent::List {
+            resource: thalamus::Resource::StandingApprovals,
+            filter: None,
+        })
+        .is_none());
     }
 
     #[test]
     fn revoke_standing_approval_is_write_tier_with_id_modifier() {
-        let intent = Intent::RevokeStandingApproval {
+        let intent = Intent::Cancel {
+            target: thalamus::CancelTarget::StandingApproval,
             id: "grant-42".into(),
         };
         let (req, tier) = intent_to_auth(&intent).unwrap();
@@ -340,15 +350,20 @@ mod tests {
                 description: "d".into(),
                 cron: None,
             },
-            Intent::CancelSchedule { id: "1".into() },
+            Intent::Cancel {
+                target: thalamus::CancelTarget::Schedule,
+                id: "1".into(),
+            },
             Intent::DecomposeTask {
                 request: "build".into(),
             },
-            Intent::CancelTask {
-                task_id: "1".into(),
+            Intent::Cancel {
+                target: thalamus::CancelTarget::Task,
+                id: "1".into(),
             },
-            Intent::CancelSignal {
-                signal_id: "1".into(),
+            Intent::Cancel {
+                target: thalamus::CancelTarget::Signal,
+                id: "1".into(),
             },
             Intent::DelegateTask {
                 agent: "claude-code".into(),
@@ -385,7 +400,10 @@ mod tests {
                 command_or_url: "x".into(),
             },
             Intent::UnmountMcpServer { name: "m".into() },
-            Intent::RevokeStandingApproval { id: "1".into() },
+            Intent::Cancel {
+                target: thalamus::CancelTarget::StandingApproval,
+                id: "1".into(),
+            },
         ];
 
         for variant in &typed {

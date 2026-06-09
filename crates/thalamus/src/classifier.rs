@@ -3,7 +3,7 @@ use std::sync::{Arc, LazyLock};
 
 use regex::Regex;
 
-use crate::{Classification, ClassificationMethod, Intent, IntentFallback};
+use crate::{CancelTarget, Classification, ClassificationMethod, Intent, IntentFallback, Resource};
 
 /// Pre-compiled regex patterns compiled once at first access via LazyLock.
 /// Each pattern is paired with its base intent and named capture group extractors.
@@ -330,7 +330,10 @@ pub(crate) const PATTERNS: &[PatternDef] = &[
     },
     PatternDef {
         regex: &LIST_APPROVALS_RE,
-        base_intent: Intent::ListApprovals { status: None },
+        base_intent: Intent::List {
+            resource: Resource::Approvals,
+            filter: None,
+        },
         extractors: &[],
     },
     PatternDef {
@@ -357,12 +360,18 @@ pub(crate) const PATTERNS: &[PatternDef] = &[
     },
     PatternDef {
         regex: &LIST_SCHEDULES_RE,
-        base_intent: Intent::ListSchedules,
+        base_intent: Intent::List {
+            resource: Resource::Schedules,
+            filter: None,
+        },
         extractors: &[],
     },
     PatternDef {
         regex: &CANCEL_SCHEDULE_RE,
-        base_intent: Intent::CancelSchedule { id: String::new() },
+        base_intent: Intent::Cancel {
+            target: CancelTarget::Schedule,
+            id: String::new(),
+        },
         extractors: &[("id", 1)],
     },
     PatternDef {
@@ -404,7 +413,10 @@ pub(crate) const PATTERNS: &[PatternDef] = &[
     },
     PatternDef {
         regex: &LIST_TASKS_RE,
-        base_intent: Intent::ListTasks,
+        base_intent: Intent::List {
+            resource: Resource::Tasks,
+            filter: None,
+        },
         extractors: &[],
     },
     PatternDef {
@@ -416,15 +428,17 @@ pub(crate) const PATTERNS: &[PatternDef] = &[
     },
     PatternDef {
         regex: &CANCEL_TASK_RE,
-        base_intent: Intent::CancelTask {
-            task_id: String::new(),
+        base_intent: Intent::Cancel {
+            target: CancelTarget::Task,
+            id: String::new(),
         },
         extractors: &[("task_id", 1)],
     },
     PatternDef {
         regex: &CANCEL_SIGNAL_RE,
-        base_intent: Intent::CancelSignal {
-            signal_id: String::new(),
+        base_intent: Intent::Cancel {
+            target: CancelTarget::Signal,
+            id: String::new(),
         },
         extractors: &[("signal_id", 1)],
     },
@@ -450,7 +464,10 @@ pub(crate) const PATTERNS: &[PatternDef] = &[
     },
     PatternDef {
         regex: &LIST_CHANNELS_RE,
-        base_intent: Intent::ListChannels,
+        base_intent: Intent::List {
+            resource: Resource::Channels,
+            filter: None,
+        },
         extractors: &[],
     },
     PatternDef {
@@ -648,8 +665,12 @@ impl IntentClassifier {
                     request: get_group("request"),
                 }
             }
-            Intent::CancelSignal { .. } => Intent::CancelSignal {
-                signal_id: get_group("signal_id").trim().to_string(),
+            Intent::Cancel {
+                target: CancelTarget::Signal,
+                ..
+            } => Intent::Cancel {
+                target: CancelTarget::Signal,
+                id: get_group("signal_id").trim().to_string(),
             },
             Intent::SetChannelPreference { .. } => {
                 let verb = get_group("verb").to_lowercase();
@@ -690,7 +711,10 @@ impl IntentClassifier {
         // test. LLM-payload paths can route the same intents later.
         if trimmed == "/terminal-list" {
             return Some(Classification {
-                intent: Intent::ListTerminalSessions,
+                intent: Intent::List {
+                    resource: Resource::TerminalSessions,
+                    filter: None,
+                },
                 confidence: 1.0,
                 method: ClassificationMethod::Regex,
                 extracted_facts: Vec::new(),
@@ -730,7 +754,10 @@ impl IntentClassifier {
         // natural-language story for MCP control.
         if trimmed == "/mcp-list" {
             return Some(Classification {
-                intent: Intent::ListMcpServers,
+                intent: Intent::List {
+                    resource: Resource::McpServers,
+                    filter: None,
+                },
                 confidence: 1.0,
                 method: ClassificationMethod::Regex,
                 extracted_facts: Vec::new(),
@@ -741,7 +768,10 @@ impl IntentClassifier {
         // can you actually do?" deterministically.
         if trimmed == "/capabilities" || trimmed == "/caps" {
             return Some(Classification {
-                intent: Intent::ListCapabilities,
+                intent: Intent::List {
+                    resource: Resource::Capabilities,
+                    filter: None,
+                },
                 confidence: 1.0,
                 method: ClassificationMethod::Regex,
                 extracted_facts: Vec::new(),
@@ -784,7 +814,10 @@ impl IntentClassifier {
         // both wired in signal::authz.
         if trimmed == "/approval-list" || trimmed.starts_with("/approval-list ") {
             return Some(Classification {
-                intent: Intent::ListStandingApprovals,
+                intent: Intent::List {
+                    resource: Resource::StandingApprovals,
+                    filter: None,
+                },
                 confidence: 1.0,
                 method: ClassificationMethod::Regex,
                 extracted_facts: Vec::new(),
@@ -794,7 +827,10 @@ impl IntentClassifier {
             let id = rest.trim();
             if !id.is_empty() {
                 return Some(Classification {
-                    intent: Intent::RevokeStandingApproval { id: id.to_string() },
+                    intent: Intent::Cancel {
+                        target: CancelTarget::StandingApproval,
+                        id: id.to_string(),
+                    },
                     confidence: 1.0,
                     method: ClassificationMethod::Regex,
                     extracted_facts: Vec::new(),
@@ -808,7 +844,10 @@ impl IntentClassifier {
         // matching the /terminal-* / /mcp-* / /approval-* shapes.
         if trimmed == "/task-list" {
             return Some(Classification {
-                intent: Intent::ListTasks,
+                intent: Intent::List {
+                    resource: Resource::Tasks,
+                    filter: None,
+                },
                 confidence: 1.0,
                 method: ClassificationMethod::Regex,
                 extracted_facts: Vec::new(),
@@ -831,8 +870,9 @@ impl IntentClassifier {
             let id = rest.trim();
             if !id.is_empty() {
                 return Some(Classification {
-                    intent: Intent::CancelTask {
-                        task_id: id.to_string(),
+                    intent: Intent::Cancel {
+                        target: CancelTarget::Task,
+                        id: id.to_string(),
                     },
                     confidence: 1.0,
                     method: ClassificationMethod::Regex,
@@ -911,6 +951,21 @@ impl IntentClassifier {
         input: &str,
         history: &[cortex::llm::Message],
     ) -> Classification {
+        self.classify_with_context(input, history, None).await
+    }
+
+    /// Capability-aware classification. Identical to
+    /// [`Self::classify_with_history`] but also threads a rendered capability
+    /// summary into the LLM fallback's prompt (only the LLM branch consults it;
+    /// the deterministic slash/explicit/regex fast-paths are unaffected and pay
+    /// nothing). This is how the classifier becomes a fed consumer of the live
+    /// capability manifest.
+    pub async fn classify_with_context(
+        &self,
+        input: &str,
+        history: &[cortex::llm::Message],
+        capabilities: Option<&str>,
+    ) -> Classification {
         if input.starts_with('/') {
             if let Some(c) = self.classify_slash_command(input) {
                 return c;
@@ -927,8 +982,11 @@ impl IntentClassifier {
 
         if let Some(fallback) = &self.llm_fallback {
             let timeout = self.llm_timeout;
-            match tokio::time::timeout(timeout, fallback.classify_with_history(input, history))
-                .await
+            match tokio::time::timeout(
+                timeout,
+                fallback.classify_with_context(input, history, capabilities),
+            )
+            .await
             {
                 Ok(Some(classification)) => return classification,
                 Ok(None) => {

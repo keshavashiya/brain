@@ -197,7 +197,7 @@ pub(crate) async fn handle_streaming_request(
     // round-trip emits zero BrainEvents and `brain tail` looks broken.
     processor.publish_signal_received(&signal).await;
 
-    // Register a cancellation notify so a concurrent `Intent::CancelSignal`
+    // Register a cancellation notify so a concurrent `Intent::Cancel(Signal)`
     // for this id reaches the prepare/chunk loops below. The standard
     // pipeline installs this via `CancelGuard` inside `process()`, but
     // streaming bypasses `process()`, so we own the lifecycle here — the

@@ -102,21 +102,40 @@ impl InspectionHandler for SignalProcessor {
                 self.handle_budget_status(ctx.signal_id, window, prepend_nudges)
                     .await
             }
-            thalamus::Intent::ListApprovals { status } => {
-                self.handle_list_approvals(ctx.signal_id, status, prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::ListStandingApprovals => {
-                self.handle_list_standing_approvals(ctx.signal_id, prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::ListSchedules => {
-                self.handle_list_schedules(ctx.signal_id, prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::ListTasks => {
-                self.handle_list_tasks(ctx.signal_id, prepend_nudges).await
-            }
+            // One generic List verb fans out to the per-resource handlers.
+            thalamus::Intent::List { resource, filter } => match resource {
+                thalamus::Resource::Approvals => {
+                    self.handle_list_approvals(ctx.signal_id, filter, prepend_nudges)
+                        .await
+                }
+                thalamus::Resource::StandingApprovals => {
+                    self.handle_list_standing_approvals(ctx.signal_id, prepend_nudges)
+                        .await
+                }
+                thalamus::Resource::Schedules => {
+                    self.handle_list_schedules(ctx.signal_id, prepend_nudges)
+                        .await
+                }
+                thalamus::Resource::Tasks => {
+                    self.handle_list_tasks(ctx.signal_id, prepend_nudges).await
+                }
+                thalamus::Resource::Channels => {
+                    self.handle_list_channels(ctx.signal_id, prepend_nudges)
+                        .await
+                }
+                thalamus::Resource::TerminalSessions => {
+                    self.handle_list_terminal_sessions(ctx.signal_id, prepend_nudges)
+                        .await
+                }
+                thalamus::Resource::McpServers => {
+                    self.handle_list_mcp_servers(ctx.signal_id, prepend_nudges)
+                        .await
+                }
+                thalamus::Resource::Capabilities => {
+                    self.handle_list_capabilities(ctx.signal_id, prepend_nudges)
+                        .await
+                }
+            },
             thalamus::Intent::TaskStatus { task_id } => {
                 self.handle_task_status(ctx.signal_id, task_id, prepend_nudges)
                     .await
@@ -132,27 +151,11 @@ impl InspectionHandler for SignalProcessor {
                 self.handle_query_audit(ctx.signal_id, filter, since, limit, prepend_nudges)
                     .await
             }
-            thalamus::Intent::ListChannels => {
-                self.handle_list_channels(ctx.signal_id, prepend_nudges)
-                    .await
-            }
             thalamus::Intent::ChannelPreferences {
                 namespace,
                 category,
             } => {
                 self.handle_channel_preferences(ctx.signal_id, namespace, category, prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::ListTerminalSessions => {
-                self.handle_list_terminal_sessions(ctx.signal_id, prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::ListMcpServers => {
-                self.handle_list_mcp_servers(ctx.signal_id, prepend_nudges)
-                    .await
-            }
-            thalamus::Intent::ListCapabilities => {
-                self.handle_list_capabilities(ctx.signal_id, prepend_nudges)
                     .await
             }
             other => unreachable!(

@@ -61,17 +61,16 @@ pub enum Intent {
     ProactivityStatus,
     /// Check LLM budget and usage status.
     BudgetStatus { window: Option<String> },
-    /// List pending approvals.
-    ListApprovals { status: Option<String> },
-    /// List active standing approvals — every `(agent_id, verb_ns,
-    /// verb_action)` triple currently pre-granted to bypass the
-    /// human-confirm prompt. Read-only inspection so the user can
-    /// audit what their reflexes are allowed to do unattended.
-    ListStandingApprovals,
-    /// List active background schedules.
-    ListSchedules,
-    /// List active or recent tasks.
-    ListTasks,
+    /// List a collection of control-plane resources (read-only inspection).
+    /// One generic verb over a [`Resource`] replaces the former per-collection
+    /// `List*` variants; `filter` narrows the listing where the resource
+    /// supports it (e.g. approvals by status). Each `(List, resource)` pair
+    /// keeps its own stable wire [`Intent::key`], so the classifier vocabulary
+    /// is unchanged.
+    List {
+        resource: Resource,
+        filter: Option<String>,
+    },
     /// Get the status of a specific task.
     TaskStatus { task_id: String },
     /// Ask about available specialist agents (delegates). Optional
@@ -83,9 +82,6 @@ pub enum Intent {
         since: Option<String>,
         limit: Option<usize>,
     },
-    /// List registered channels (router-known descriptors). The
-    /// natural-language replacement for inspection CLIs.
-    ListChannels,
     /// Show learned channel preferences for a (namespace, category).
     /// `category` is one of: confirm, nudge, report, response, alert.
     /// `namespace` defaults to "personal".
@@ -93,14 +89,6 @@ pub enum Intent {
         namespace: Option<String>,
         category: Option<String>,
     },
-    /// List currently-active terminal sessions (read-only inspection).
-    ListTerminalSessions,
-    /// List currently-mounted MCP servers (read-only inspection).
-    ListMcpServers,
-    /// List the live capability manifest — every native/terminal/MCP tool
-    /// the kernel can dispatch to, plus delegate agents, with their tier
-    /// (read-only inspection).
-    ListCapabilities,
 
     // ── Memory ─ episodic / semantic mutations ─────────────────────────────
     /// Store a fact explicitly.
@@ -135,17 +123,15 @@ pub enum Intent {
         description: String,
         cron: Option<String>,
     },
-    /// Cancel a scheduled intent.
-    CancelSchedule { id: String },
     /// Decompose a complex request into an executable task plan.
     DecomposeTask { request: String },
-    /// Cancel a running task.
-    CancelTask { task_id: String },
-    /// Cancel an in-flight signal by its id. Wires the Live-tab cancel
-    /// button in the observability UI. Distinct from `CancelTask` —
-    /// that aborts an orchestrated multi-step plan; this aborts a
-    /// single Signal's pipeline.
-    CancelSignal { signal_id: String },
+    /// Cancel / revoke a single resource instance by id. One generic verb over
+    /// a [`CancelTarget`] replaces the former `CancelSchedule` / `CancelTask` /
+    /// `CancelSignal` / `RevokeStandingApproval` variants; each `(Cancel,
+    /// target)` pair keeps its own stable wire [`Intent::key`] (and its own
+    /// category — schedule/task/signal cancels are Lifecycle, a standing-approval
+    /// revoke is Governance — resolved through the taxonomy table).
+    Cancel { target: CancelTarget, id: String },
     /// Open a new terminal session via the Terminal Bridge. Returns the
     /// session id so the caller can `Attach` or close it later.
     OpenTerminalSession {
@@ -171,10 +157,6 @@ pub enum Intent {
     // ── Governance ─ approvals, audit, config mutation, proactivity ────────
     /// Respond to a pending approval.
     RespondToApproval { nonce: String, decision: String },
-    /// Revoke a previously-granted standing approval by id. Idempotent —
-    /// revoking an unknown or already-revoked id returns a friendly
-    /// "not found" rather than failing.
-    RevokeStandingApproval { id: String },
     /// Prune the audit trail.
     PruneAudit { older_than: String },
     /// Pin or unpin a channel preference. Pinned weights bypass the
@@ -207,6 +189,45 @@ pub enum Intent {
     Chat { content: String },
 }
 
+/// A listable collection of control-plane resources — the operand of the
+/// generic [`Intent::List`] verb. Each arm corresponds to exactly one
+/// `list_*` wire key (see [`Intent::key`]); adding a listable resource is one
+/// arm here plus its [`taxonomy::INTENT_SPECS`] row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Resource {
+    /// Pending confirmations (`list_approvals`; `filter` = status).
+    Approvals,
+    /// Standing approval grants (`list_standing_approvals`).
+    StandingApprovals,
+    /// Background schedules (`list_schedules`).
+    Schedules,
+    /// Multi-step orchestrator tasks (`list_tasks`).
+    Tasks,
+    /// Registered channels (`list_channels`).
+    Channels,
+    /// Active terminal sessions (`list_terminal_sessions`).
+    TerminalSessions,
+    /// Mounted MCP servers (`list_mcp_servers`).
+    McpServers,
+    /// The live capability manifest (`list_capabilities`).
+    Capabilities,
+}
+
+/// A cancelable single resource instance — the operand of the generic
+/// [`Intent::Cancel`] verb. Each arm corresponds to exactly one cancel/revoke
+/// wire key (see [`Intent::key`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CancelTarget {
+    /// A background schedule (`cancel_schedule`).
+    Schedule,
+    /// A running multi-step task (`cancel_task`).
+    Task,
+    /// An in-flight signal pipeline run (`cancel_signal`).
+    Signal,
+    /// A standing approval grant (`revoke_standing_approval`).
+    StandingApproval,
+}
+
 /// Side-effect class of an [`Intent`]. Aligns with the auth tiers in
 /// `signal::authz::intent_to_auth` so trait-dispatch (Issue 111) and tier
 /// resolution (Issue 112) can share a single cut of the enum.
@@ -233,63 +254,19 @@ pub enum IntentCategory {
 }
 
 impl Intent {
-    /// Side-effect class of this intent. Exhaustive over all variants so
-    /// adding a new variant without declaring its category is a compile
-    /// error. See [`IntentCategory`].
+    /// Side-effect class of this intent, resolved through the taxonomy SSOT:
+    /// [`Intent::key`] is the compiler-checked variant→key map, and
+    /// [`taxonomy::INTENT_SPECS`] owns each key's category. Deriving it here
+    /// (rather than a second parallel match) means a verb's category lives in
+    /// exactly one place, and a generic verb whose category depends on its
+    /// operand (e.g. `Cancel` — Lifecycle for schedule/task/signal, Governance
+    /// for a standing-approval revoke) is handled per wire key for free. The
+    /// key↔spec bijection is a hard invariant (drift-guard test), so the
+    /// fallback is unreachable in practice.
     pub fn category(&self) -> IntentCategory {
-        match self {
-            // ── Inspection ────────────────────────────────────────────────
-            Intent::Recall { .. }
-            | Intent::MemorySummary
-            | Intent::SystemStatus
-            | Intent::ProactivityStatus
-            | Intent::BudgetStatus { .. }
-            | Intent::ListApprovals { .. }
-            | Intent::ListStandingApprovals
-            | Intent::ListSchedules
-            | Intent::ListTasks
-            | Intent::TaskStatus { .. }
-            | Intent::QueryAgents { .. }
-            | Intent::QueryAudit { .. }
-            | Intent::ListChannels
-            | Intent::ChannelPreferences { .. }
-            | Intent::ListTerminalSessions
-            | Intent::ListMcpServers
-            | Intent::ListCapabilities => IntentCategory::Inspection,
-
-            // ── Memory ────────────────────────────────────────────────────
-            Intent::StoreFact { .. } | Intent::Forget { .. } => IntentCategory::Memory,
-
-            // ── Action ────────────────────────────────────────────────────
-            Intent::ExecuteCommand { .. }
-            | Intent::WebSearch { .. }
-            | Intent::SendMessage { .. }
-            | Intent::DelegateTask { .. } => IntentCategory::Action,
-
-            // ── Lifecycle ─────────────────────────────────────────────────
-            Intent::Schedule { .. }
-            | Intent::CancelSchedule { .. }
-            | Intent::DecomposeTask { .. }
-            | Intent::CancelTask { .. }
-            | Intent::CancelSignal { .. }
-            | Intent::OpenTerminalSession { .. }
-            | Intent::CloseTerminalSession { .. }
-            | Intent::MountMcpServer { .. }
-            | Intent::UnmountMcpServer { .. } => IntentCategory::Lifecycle,
-
-            // ── Governance ────────────────────────────────────────────────
-            Intent::RespondToApproval { .. }
-            | Intent::RevokeStandingApproval { .. }
-            | Intent::PruneAudit { .. }
-            | Intent::SetChannelPreference { .. }
-            | Intent::SetProactivity { .. } => IntentCategory::Governance,
-
-            // ── Capability ────────────────────────────────────────────────
-            Intent::ToolCall(_) => IntentCategory::Capability,
-
-            // ── Conversation ──────────────────────────────────────────────
-            Intent::Chat { .. } => IntentCategory::Conversation,
-        }
+        taxonomy::spec_for_key(self.key())
+            .map(|s| s.category)
+            .unwrap_or(IntentCategory::Conversation)
     }
 
     /// Stable snake_case wire key for this intent — the identifier shared by
@@ -307,18 +284,21 @@ impl Intent {
             Intent::SystemStatus => "system_status",
             Intent::ProactivityStatus => "proactivity_status",
             Intent::BudgetStatus { .. } => "budget_status",
-            Intent::ListApprovals { .. } => "list_approvals",
-            Intent::ListStandingApprovals => "list_standing_approvals",
-            Intent::ListSchedules => "list_schedules",
-            Intent::ListTasks => "list_tasks",
+            // Generic List over a Resource — each collection keeps its own key.
+            Intent::List { resource, .. } => match resource {
+                Resource::Approvals => "list_approvals",
+                Resource::StandingApprovals => "list_standing_approvals",
+                Resource::Schedules => "list_schedules",
+                Resource::Tasks => "list_tasks",
+                Resource::Channels => "list_channels",
+                Resource::TerminalSessions => "list_terminal_sessions",
+                Resource::McpServers => "list_mcp_servers",
+                Resource::Capabilities => "list_capabilities",
+            },
             Intent::TaskStatus { .. } => "task_status",
             Intent::QueryAgents { .. } => "query_agents",
             Intent::QueryAudit { .. } => "query_audit",
-            Intent::ListChannels => "list_channels",
             Intent::ChannelPreferences { .. } => "channel_preferences",
-            Intent::ListTerminalSessions => "list_terminal_sessions",
-            Intent::ListMcpServers => "list_mcp_servers",
-            Intent::ListCapabilities => "list_capabilities",
             // ── Memory ────────────────────────────────────────────────────
             Intent::StoreFact { .. } => "store_fact",
             Intent::Forget { .. } => "forget",
@@ -329,17 +309,21 @@ impl Intent {
             Intent::DelegateTask { .. } => "delegate_task",
             // ── Lifecycle ─────────────────────────────────────────────────
             Intent::Schedule { .. } => "schedule",
-            Intent::CancelSchedule { .. } => "cancel_schedule",
             Intent::DecomposeTask { .. } => "decompose_task",
-            Intent::CancelTask { .. } => "cancel_task",
-            Intent::CancelSignal { .. } => "cancel_signal",
+            // Generic Cancel over a CancelTarget — each target keeps its own key
+            // (and, via the taxonomy table, its own category).
+            Intent::Cancel { target, .. } => match target {
+                CancelTarget::Schedule => "cancel_schedule",
+                CancelTarget::Task => "cancel_task",
+                CancelTarget::Signal => "cancel_signal",
+                CancelTarget::StandingApproval => "revoke_standing_approval",
+            },
             Intent::OpenTerminalSession { .. } => "open_terminal_session",
             Intent::CloseTerminalSession { .. } => "close_terminal_session",
             Intent::MountMcpServer { .. } => "mount_mcp_server",
             Intent::UnmountMcpServer { .. } => "unmount_mcp_server",
             // ── Governance ────────────────────────────────────────────────
             Intent::RespondToApproval { .. } => "respond_to_approval",
-            Intent::RevokeStandingApproval { .. } => "revoke_standing_approval",
             Intent::PruneAudit { .. } => "prune_audit",
             Intent::SetChannelPreference { .. } => "set_channel_preference",
             Intent::SetProactivity { .. } => "set_proactivity",
@@ -498,6 +482,23 @@ pub trait IntentFallback: Send + Sync {
         _history: &[cortex::llm::Message],
     ) -> Option<Classification> {
         self.classify_with_llm(input).await
+    }
+
+    /// Capability-aware variant. `capabilities` is a rendered, lightweight
+    /// summary of the tools/agents the kernel can currently dispatch to — the
+    /// same live manifest the SOUL prompt and external `tools/list` see. Feeding
+    /// it here makes the classifier the *third* consumer of one manifest rather
+    /// than a blind one, so it can disambiguate capability-shaped requests
+    /// (route to chat/`tool_call`) from look-alikes. The default ignores it and
+    /// delegates to [`Self::classify_with_history`], so existing implementors
+    /// stay backwards-compatible.
+    async fn classify_with_context(
+        &self,
+        input: &str,
+        history: &[cortex::llm::Message],
+        _capabilities: Option<&str>,
+    ) -> Option<Classification> {
+        self.classify_with_history(input, history).await
     }
 }
 
@@ -697,6 +698,15 @@ impl IntentFallback for LlmIntentFallback {
         input: &str,
         history: &[cortex::llm::Message],
     ) -> Option<Classification> {
+        self.classify_with_context(input, history, None).await
+    }
+
+    async fn classify_with_context(
+        &self,
+        input: &str,
+        history: &[cortex::llm::Message],
+        capabilities: Option<&str>,
+    ) -> Option<Classification> {
         use cortex::llm::{Message, Role};
 
         // Build a compact transcript from at most the last 4 turns. The
@@ -736,10 +746,22 @@ impl IntentFallback for LlmIntentFallback {
             format!("{transcript}New input to classify:\n{input}")
         };
 
-        let messages = vec![
-            Message::system(CLASSIFIER_SYSTEM_PROMPT.as_str()),
-            Message::user(user_content),
-        ];
+        // Feed the live capability manifest so the classifier shares the same
+        // view of available tools the SOUL and external clients have. It is
+        // context for disambiguation only — the valid *intents* are still the
+        // fixed control-plane vocabulary, and the classifier never emits
+        // `tool_call` from prose (the tool-loop owns that path).
+        let system_prompt = match capabilities {
+            Some(caps) if !caps.trim().is_empty() => format!(
+                "{}\n\nCurrently available capabilities (for disambiguation only — \
+                 not new intents; route capability requests to chat):\n{}",
+                CLASSIFIER_SYSTEM_PROMPT.as_str(),
+                caps.trim()
+            ),
+            _ => CLASSIFIER_SYSTEM_PROMPT.clone(),
+        };
+
+        let messages = vec![Message::system(system_prompt), Message::user(user_content)];
 
         let response = match self.llm.generate(&messages).await {
             Ok(r) => r,
@@ -826,8 +848,9 @@ impl IntentFallback for LlmIntentFallback {
             "prune_audit" => Intent::PruneAudit {
                 older_than: payload.older_than.unwrap_or_else(|| "30d".to_string()),
             },
-            "list_approvals" => Intent::ListApprovals {
-                status: payload.status,
+            "list_approvals" => Intent::List {
+                resource: Resource::Approvals,
+                filter: payload.status,
             },
             "respond_to_approval" => Intent::RespondToApproval {
                 nonce: payload.nonce.unwrap_or_default(),
@@ -846,8 +869,12 @@ impl IntentFallback for LlmIntentFallback {
                     cron: payload.cron,
                 }
             }
-            "list_schedules" => Intent::ListSchedules,
-            "cancel_schedule" => Intent::CancelSchedule {
+            "list_schedules" => Intent::List {
+                resource: Resource::Schedules,
+                filter: None,
+            },
+            "cancel_schedule" => Intent::Cancel {
+                target: CancelTarget::Schedule,
                 id: payload.id.unwrap_or_default(),
             },
             "send_message" => {
@@ -873,15 +900,20 @@ impl IntentFallback for LlmIntentFallback {
                     .or(payload.description)
                     .unwrap_or_else(|| input.to_string()),
             },
-            "list_tasks" => Intent::ListTasks,
+            "list_tasks" => Intent::List {
+                resource: Resource::Tasks,
+                filter: None,
+            },
             "task_status" => Intent::TaskStatus {
                 task_id: payload.task_id.unwrap_or_default(),
             },
-            "cancel_task" => Intent::CancelTask {
-                task_id: payload.task_id.unwrap_or_default(),
+            "cancel_task" => Intent::Cancel {
+                target: CancelTarget::Task,
+                id: payload.task_id.unwrap_or_default(),
             },
-            "cancel_signal" => Intent::CancelSignal {
-                signal_id: payload.signal_id.unwrap_or_default(),
+            "cancel_signal" => Intent::Cancel {
+                target: CancelTarget::Signal,
+                id: payload.signal_id.unwrap_or_default(),
             },
             "query_agents" => Intent::QueryAgents {
                 filter: payload.query.unwrap_or_default(),

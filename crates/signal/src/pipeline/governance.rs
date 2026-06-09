@@ -23,8 +23,13 @@ impl GovernanceAuth for SignalProcessor {
                 Tier::Write,
             )),
             // Granting a standing approval is config-declared at startup, not
-            // slash-driven; only revoke is exposed as a runtime intent.
-            thalamus::Intent::RevokeStandingApproval { id } => Some((
+            // slash-driven; only revoke is exposed as a runtime intent. A
+            // standing-approval revoke is the Governance-category Cancel target
+            // (the schedule/task/signal targets route to lifecycle instead).
+            thalamus::Intent::Cancel {
+                target: thalamus::CancelTarget::StandingApproval,
+                id,
+            } => Some((
                 AuthorizationRequest::new("approval", "revoke")
                     .with_modifiers(serde_json::json!({ "id": id })),
                 Tier::Write,
@@ -59,7 +64,10 @@ impl GovernanceHandler for SignalProcessor {
                 self.handle_respond_to_approval(ctx.signal_id, nonce, decision, prepend_nudges)
                     .await
             }
-            thalamus::Intent::RevokeStandingApproval { id } => {
+            thalamus::Intent::Cancel {
+                target: thalamus::CancelTarget::StandingApproval,
+                id,
+            } => {
                 self.handle_revoke_standing_approval(ctx.signal_id, id, prepend_nudges)
                     .await
             }
