@@ -74,6 +74,49 @@ struct Inner {
     probe_successes: u32,
 }
 
+// ─── Breaker trait ───────────────────────────────────────────────────────────
+
+/// The circuit-breaker contract callers depend on, so resilience consumers
+/// (`backends::resilient_send`, the per-tool registry, tests) can be written
+/// against the behaviour rather than the concrete [`CircuitBreaker`] struct —
+/// the SOLID dependency-inversion seam for the breaker.
+///
+/// This is the full lifecycle contract (gate + record both outcomes);
+/// [`intent::BreakerCheck`] is the narrower cross-crate *read-only* seam the
+/// capability router and `retry` use to gate on `is_open` alone.
+///
+/// The blanket [`Breaker`] impl on `Arc<B>` lets a shared `Arc<CircuitBreaker>`
+/// be passed wherever `&impl Breaker` is expected without a manual deref.
+#[async_trait]
+pub trait Breaker: Send + Sync {
+    /// Opaque identifier the breaker guards — used in logs, audit, and the
+    /// `BreakerOpen` error message.
+    fn tool_id(&self) -> &str;
+    /// `true` only when the breaker is actively rejecting calls. May
+    /// transparently drive `Open → HalfOpen` once the cooldown elapses.
+    async fn is_open(&self) -> bool;
+    /// Record a successful call against the guarded target.
+    async fn record_success(&self);
+    /// Record a failed call against the guarded target.
+    async fn record_failure(&self);
+}
+
+#[async_trait]
+impl<B: Breaker + ?Sized> Breaker for Arc<B> {
+    fn tool_id(&self) -> &str {
+        (**self).tool_id()
+    }
+    async fn is_open(&self) -> bool {
+        (**self).is_open().await
+    }
+    async fn record_success(&self) {
+        (**self).record_success().await
+    }
+    async fn record_failure(&self) {
+        (**self).record_failure().await
+    }
+}
+
 // ─── Breaker ────────────────────────────────────────────────────────────────
 
 /// Per-target circuit breaker. The `tool_id` is opaque to the breaker but
@@ -230,6 +273,25 @@ impl CircuitBreaker {
                 })
                 .await;
         }
+    }
+}
+
+/// The concrete breaker is the canonical [`Breaker`] implementation; the
+/// trait methods delegate to the inherent ones (which take method-resolution
+/// priority, so existing concrete callers are unaffected).
+#[async_trait]
+impl Breaker for CircuitBreaker {
+    fn tool_id(&self) -> &str {
+        CircuitBreaker::tool_id(self)
+    }
+    async fn is_open(&self) -> bool {
+        CircuitBreaker::is_open(self).await
+    }
+    async fn record_success(&self) {
+        CircuitBreaker::record_success(self).await
+    }
+    async fn record_failure(&self) {
+        CircuitBreaker::record_failure(self).await
     }
 }
 

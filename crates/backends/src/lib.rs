@@ -16,7 +16,7 @@ pub use memory::DefaultMemoryBackend;
 pub use messaging::{
     json_escape, render_message_template, WebhookMessageBackend, DEFAULT_MESSAGE_BODY,
 };
-pub use resilience::{resilient_send, CircuitBreaker, ResilientSendError};
+pub use resilience::{resilient_send, Breaker, CircuitBreaker, ResilientSendError};
 pub use scheduling::DefaultSchedulingBackend;
 pub use search::{
     CustomSearchBackend, DuckDuckGoSearchBackend, SearxngSearchBackend, TavilySearchBackend,

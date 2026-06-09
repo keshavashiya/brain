@@ -20,7 +20,7 @@ use observe::{BrainEvent, ObserveError, Observer};
 use resilience::BreakerConfig;
 use tokio::sync::broadcast;
 
-pub use resilience::CircuitBreaker;
+pub use resilience::{Breaker, CircuitBreaker};
 
 /// Default capacity for the metrics-observer rebroadcast channel. Tiny
 /// because nothing in-tree actually subscribes; the value exists only to
@@ -124,7 +124,7 @@ pub enum ResilientSendError {
 /// Send an HTTP request with retry + circuit breaker.
 pub async fn resilient_send<F>(
     build_request: F,
-    circuit_breaker: &CircuitBreaker,
+    circuit_breaker: &impl Breaker,
     max_retries: u32,
     retry_base_ms: u64,
 ) -> Result<reqwest::Response, ResilientSendError>

@@ -976,3 +976,63 @@ proptest! {
         prop_assert!(got >= ceiling * (1.0 - jitter as f64) - 1.0);
     }
 }
+
+// ── Breaker trait seam (Issue 115) ──────────────────────────────────────
+//
+// The trait is the SOLID abstraction over the concrete breaker: consumers
+// can depend on `Breaker` (or hold `&dyn Breaker` / a mock) instead of the
+// concrete `CircuitBreaker`. These pin object-safety, the `Arc` blanket
+// impl that lets a shared breaker flow into `&impl Breaker`, and that a
+// test double can be substituted.
+
+#[tokio::test]
+async fn concrete_breaker_drives_through_trait_object() {
+    let cb = CircuitBreaker::new("t", fast_config());
+    let dyn_cb: &dyn Breaker = &cb;
+    assert_eq!(dyn_cb.tool_id(), "t");
+    assert!(!dyn_cb.is_open().await);
+    dyn_cb.record_failure().await;
+    dyn_cb.record_failure().await;
+    assert!(
+        dyn_cb.is_open().await,
+        "trait object observes the same state machine"
+    );
+}
+
+#[tokio::test]
+async fn arc_blanket_impl_delegates_to_inner() {
+    let cb: Arc<CircuitBreaker> = Arc::new(CircuitBreaker::new("arc", fast_config()));
+    // `Arc<CircuitBreaker>: Breaker` via the blanket impl — usable wherever
+    // `&impl Breaker` is expected without a manual deref.
+    fn assert_breaker<B: Breaker>(_: &B) {}
+    assert_breaker(&cb);
+    cb.record_failure().await;
+    cb.record_failure().await;
+    assert!(
+        Breaker::is_open(&cb).await,
+        "Arc delegates is_open to the inner breaker"
+    );
+}
+
+struct AlwaysOpenBreaker;
+
+#[async_trait::async_trait]
+impl Breaker for AlwaysOpenBreaker {
+    fn tool_id(&self) -> &str {
+        "always-open"
+    }
+    async fn is_open(&self) -> bool {
+        true
+    }
+    async fn record_success(&self) {}
+    async fn record_failure(&self) {}
+}
+
+#[tokio::test]
+async fn mock_breaker_can_be_substituted() {
+    // A test double implementing the contract without the real state
+    // machine — the swappability the abstraction exists to enable.
+    let mock: Arc<dyn Breaker> = Arc::new(AlwaysOpenBreaker);
+    assert!(mock.is_open().await);
+    assert_eq!(mock.tool_id(), "always-open");
+}
