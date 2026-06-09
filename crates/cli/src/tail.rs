@@ -16,6 +16,9 @@ pub struct TailFilter {
     /// `BrainEvent` variant discriminant (e.g. `signal_received`).
     pub kind: Option<String>,
     pub tool_id: Option<String>,
+    /// Correlation id: reconstruct a single signal flow — every event sharing
+    /// this id belongs to the same turn.
+    pub correlation: Option<String>,
     pub principal: Option<String>,
     /// RFC3339 timestamp; only events with `ts >= since` are forwarded.
     pub since: Option<String>,
@@ -39,6 +42,9 @@ impl TailFilter {
         }
         if let Some(v) = &self.tool_id {
             push("tool_id", v);
+        }
+        if let Some(v) = &self.correlation {
+            push("correlation", v);
         }
         if let Some(v) = &self.principal {
             push("principal", v);
@@ -149,9 +155,7 @@ mod tests {
     fn query_builder_skips_empty_fields() {
         let f = TailFilter {
             kind: Some("signal_received".into()),
-            tool_id: None,
-            principal: None,
-            since: None,
+            ..Default::default()
         };
         let mut url = String::from("http://x/v1/events");
         f.append_query(&mut url);
@@ -159,12 +163,23 @@ mod tests {
     }
 
     #[test]
+    fn query_builder_appends_correlation() {
+        let f = TailFilter {
+            correlation: Some("abc-123".into()),
+            ..Default::default()
+        };
+        let mut url = String::from("http://x/v1/events");
+        f.append_query(&mut url);
+        assert_eq!(url, "http://x/v1/events?correlation=abc-123");
+    }
+
+    #[test]
     fn query_builder_concatenates_multiple_filters() {
         let f = TailFilter {
             kind: Some("tool_call_started".into()),
             tool_id: Some("mcp:fs:read".into()),
-            principal: None,
             since: Some("2026-05-14T00:00:00Z".into()),
+            ..Default::default()
         };
         let mut url = String::from("http://x/v1/events");
         f.append_query(&mut url);

@@ -69,6 +69,12 @@ impl SignalProcessor {
         name = "signal.process",
         skip(self, signal),
         fields(
+            // `correlation_id` is the signal's id; every log line emitted while
+            // processing this signal — and every BrainEvent on the bus — shares
+            // it, so one turn can be reconstructed end-to-end (`brain tail
+            // --correlation <id>`). Kept alongside `signal_id` for back-compat
+            // with existing log filters.
+            correlation_id = %signal.id,
             signal_id = %signal.id,
             source = ?signal.source,
             namespace = %signal.namespace

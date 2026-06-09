@@ -202,6 +202,7 @@ enum Commands {
     ///   brain tail
     ///   brain tail --kind signal_received
     ///   brain tail --tool-id mcp:fs:read --since 2026-05-14T00:00:00Z
+    ///   brain tail --correlation <signal-uuid>   # one turn, end-to-end
     Tail {
         /// BrainEvent variant discriminant (e.g. signal_received, tool_call_started).
         #[arg(long)]
@@ -209,6 +210,10 @@ enum Commands {
         /// Filter to a specific tool_id (matches tool-bound events only).
         #[arg(long = "tool-id")]
         tool_id: Option<String>,
+        /// Correlation id — reconstruct a single signal flow (every event in
+        /// one turn shares the originating signal's id).
+        #[arg(long)]
+        correlation: Option<String>,
         /// Principal filter — forward-compatible; bus events do not yet carry one.
         #[arg(long)]
         principal: Option<String>,
@@ -388,6 +393,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Tail {
             kind,
             tool_id,
+            correlation,
             principal,
             since,
         } => {
@@ -396,6 +402,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 tail::TailFilter {
                     kind,
                     tool_id,
+                    correlation,
                     principal,
                     since,
                 },
