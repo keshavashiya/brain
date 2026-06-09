@@ -22,6 +22,7 @@
 mod adapters;
 mod background;
 mod dlq;
+mod health;
 mod reflex;
 // `pub(crate)` so `brain doctor --deep` can run a one-shot `ResourceProbe`.
 pub(crate) mod resource;
@@ -330,6 +331,13 @@ pub(crate) async fn cmd_serve(
         config.observability.log_sampling.high_volume_1_in_n,
         &mut set,
     );
+
+    // External-service health probes (Issue 135). One bounded loop per
+    // configured service; an empty list spawns none. Each alerts on an
+    // up↔down transition through the same router as resource-pressure.
+    for svc in &config.monitoring.services {
+        background::spawn_service_monitor(processor.clone(), svc.clone(), &mut set);
+    }
 
     // ── Channel relay adapters ────────────────────────────────────────
     if !config.channel.relays.is_empty() {

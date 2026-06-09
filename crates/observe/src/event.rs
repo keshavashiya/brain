@@ -150,6 +150,24 @@ pub enum BrainEvent {
         to: String,
         ts: DateTime<Utc>,
     },
+    /// Emitted by a service-health probe when a monitored endpoint crosses
+    /// between reachable and unreachable. Edge-triggered — once per transition,
+    /// not once per probe — the same discipline as `ResourcePressure`. `target`
+    /// and `detail` are strings so `observe` stays free of a config dependency.
+    ServiceHealthChanged {
+        id: Uuid,
+        /// Configured service label (`monitoring.services[].name`).
+        service: String,
+        /// The probed endpoint: a URL (`http`) or `host:port` (`tcp`).
+        target: String,
+        /// `true` when the service just became reachable, `false` when it just
+        /// became unreachable.
+        healthy: bool,
+        /// Human-readable reason for the new state — the failure cause on the
+        /// way down, empty on recovery.
+        detail: String,
+        ts: DateTime<Utc>,
+    },
 }
 
 impl BrainEvent {
@@ -173,6 +191,7 @@ impl BrainEvent {
             BrainEvent::TerminalSessionOpened { .. } => "terminal_session_opened",
             BrainEvent::TerminalSessionClosed { .. } => "terminal_session_closed",
             BrainEvent::TaskStateChange { .. } => "task_state_change",
+            BrainEvent::ServiceHealthChanged { .. } => "service_health_changed",
         }
     }
 
@@ -194,7 +213,8 @@ impl BrainEvent {
             | BrainEvent::Error { id, .. }
             | BrainEvent::TerminalSessionOpened { id, .. }
             | BrainEvent::TerminalSessionClosed { id, .. }
-            | BrainEvent::TaskStateChange { id, .. } => *id,
+            | BrainEvent::TaskStateChange { id, .. }
+            | BrainEvent::ServiceHealthChanged { id, .. } => *id,
         }
     }
 
@@ -325,6 +345,43 @@ mod tests {
                 assert_eq!(value, 2304.0);
                 assert_eq!(threshold, 2048.0);
                 assert_eq!(severity, "warn");
+            }
+            other => panic!("decoded to the wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_service_health_changed_through_json() {
+        let id = Uuid::new_v4();
+        let ts = Utc::now();
+        let original = BrainEvent::ServiceHealthChanged {
+            id,
+            service: "ollama".into(),
+            target: "http://localhost:11434/api/tags".into(),
+            healthy: false,
+            detail: "connection refused".into(),
+            ts,
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: BrainEvent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.kind(), "service_health_changed");
+        assert_eq!(decoded.id(), id);
+        // Not tool-scoped, so it never matches a `?tool_id=` filter.
+        assert_eq!(decoded.tool_id(), None);
+        match decoded {
+            BrainEvent::ServiceHealthChanged {
+                service,
+                target,
+                healthy,
+                detail,
+                ..
+            } => {
+                assert_eq!(service, "ollama");
+                assert_eq!(target, "http://localhost:11434/api/tags");
+                assert!(!healthy);
+                assert_eq!(detail, "connection refused");
             }
             other => panic!("decoded to the wrong variant: {other:?}"),
         }

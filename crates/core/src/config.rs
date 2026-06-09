@@ -62,6 +62,11 @@ pub struct BrainConfig {
     /// Default is a 30s sample with generous, fail-safe ceilings.
     #[serde(default)]
     pub observability: ObservabilityConfig,
+    /// External-service health monitoring — a list of HTTP/TCP endpoints to
+    /// probe on a cadence, alerting on up↔down transitions. Default is empty,
+    /// so a fresh install probes nothing.
+    #[serde(default)]
+    pub monitoring: MonitoringConfig,
 }
 
 /// Learned self-model configuration.
@@ -217,6 +222,68 @@ impl Default for ResourceThresholds {
             disk_mb: Self::default_disk_mb(),
             open_fds: Self::default_open_fds(),
         }
+    }
+}
+
+/// External-service health monitoring. Each [`ServiceCheck`] drives one bounded
+/// background probe loop that periodically reaches a service (HTTP or raw TCP)
+/// and, on an up↔down *transition*, surfaces a proactive notification through
+/// the same router the resource sampler uses. Default is an empty list, so a
+/// fresh install spawns no probes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MonitoringConfig {
+    /// Services to health-check. One bounded background loop is spawned per
+    /// entry; an empty list (the default) spawns none.
+    #[serde(default)]
+    pub services: Vec<ServiceCheck>,
+}
+
+/// Probe protocol for a [`ServiceCheck`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceCheckKind {
+    /// HTTP(S) GET — healthy when the response status matches `expect_status`
+    /// (or is any 2xx when that is unset).
+    #[default]
+    Http,
+    /// Raw TCP connect — healthy when the connection is accepted before the
+    /// timeout. `target` is `host:port`.
+    Tcp,
+}
+
+/// One external service to health-check. `target` is a URL for the `http` kind
+/// or `host:port` for the `tcp` kind. Probes are edge-triggered: a notification
+/// fires only when the service crosses between reachable and unreachable, never
+/// once per interval while it stays in one state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceCheck {
+    /// Stable label used in the alert text and the notification's
+    /// `triggered_by` (`service_health:<name>`).
+    pub name: String,
+    /// Probe protocol. Defaults to `http`.
+    #[serde(default)]
+    pub kind: ServiceCheckKind,
+    /// URL (`http` kind) or `host:port` (`tcp` kind) to reach.
+    pub target: String,
+    /// Seconds between probes. Default 60.
+    #[serde(default = "ServiceCheck::default_interval_secs")]
+    pub interval_secs: u64,
+    /// Per-probe timeout in seconds — a probe that does not complete in this
+    /// window counts as unreachable. Default 10.
+    #[serde(default = "ServiceCheck::default_timeout_secs")]
+    pub timeout_secs: u64,
+    /// HTTP only: the exact status code that counts as healthy. When unset,
+    /// any 2xx response is healthy. Ignored for the `tcp` kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect_status: Option<u16>,
+}
+
+impl ServiceCheck {
+    fn default_interval_secs() -> u64 {
+        60
+    }
+    fn default_timeout_secs() -> u64 {
+        10
     }
 }
 

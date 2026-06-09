@@ -46,6 +46,7 @@ pub(crate) fn brain_event_ts(ev: &observe::BrainEvent) -> chrono::DateTime<chron
         | Error { ts, .. }
         | TerminalSessionOpened { ts, .. }
         | TerminalSessionClosed { ts, .. }
-        | TaskStateChange { ts, .. } => *ts,
+        | TaskStateChange { ts, .. }
+        | ServiceHealthChanged { ts, .. } => *ts,
     }
 }

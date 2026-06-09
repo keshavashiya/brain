@@ -235,6 +235,25 @@ observability:
   log_sampling:
     high_volume_1_in_n: 1           # emit 1 in N high-volume log lines (heartbeat); 1 = log all
 
+# ── Service health monitoring ──────────────────────────────────────────────────
+# External endpoints to health-check. Each entry spawns one bounded background
+# probe loop (HTTP GET or raw TCP connect). Probes are edge-triggered: a
+# proactive notification fires only when a service crosses between reachable and
+# unreachable — never once per interval while it stays in one state — and is
+# delivered through the same router as resource-pressure alerts. Empty by default.
+monitoring:
+  services: []
+  # - name: ollama                  # label used in the alert + triggered_by
+  #   kind: http                    # http | tcp
+  #   target: "http://localhost:11434/api/tags"   # URL (http) or host:port (tcp)
+  #   interval_secs: 60             # seconds between probes
+  #   timeout_secs: 10              # a probe over this window counts as down
+  #   expect_status: 200            # http only; omit to accept any 2xx
+  # - name: postgres
+  #   kind: tcp
+  #   target: "127.0.0.1:5432"
+  #   interval_secs: 30
+
 # ── Channel Relays ─────────────────────────────────────────────────────────────
 # Bidirectional WebSocket gateways. Unlike webhooks these are long-lived
 # connections — approval responses from any relay are correlated automatically.

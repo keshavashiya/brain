@@ -283,6 +283,45 @@ impl BrainConfig {
             }
         }
 
+        let mut service_names: HashMap<&str, ()> = HashMap::new();
+        for svc in &self.monitoring.services {
+            if svc.name.trim().is_empty() {
+                warnings.push(
+                    "monitoring.services has an entry with an empty name; its alerts will be hard to attribute.".to_string(),
+                );
+            } else if service_names.insert(svc.name.as_str(), ()).is_some() {
+                warnings.push(format!(
+                    "monitoring.services has a duplicate name '{}'; both probe loops still run but their alerts are indistinguishable.",
+                    svc.name
+                ));
+            }
+            if svc.target.trim().is_empty() {
+                warnings.push(format!(
+                    "monitoring.services.{}: target is empty; this probe will always report the service as down.",
+                    svc.name
+                ));
+            } else if matches!(svc.kind, ServiceCheckKind::Http)
+                && !svc.target.starts_with("http://")
+                && !svc.target.starts_with("https://")
+            {
+                warnings.push(format!(
+                    "monitoring.services.{}: kind is 'http' but target '{}' is not an http(s) URL; probes will fail.",
+                    svc.name, svc.target
+                ));
+            } else if matches!(svc.kind, ServiceCheckKind::Tcp) && !svc.target.contains(':') {
+                warnings.push(format!(
+                    "monitoring.services.{}: kind is 'tcp' but target '{}' is not 'host:port'; probes will fail.",
+                    svc.name, svc.target
+                ));
+            }
+            if svc.interval_secs == 0 {
+                warnings.push(format!(
+                    "monitoring.services.{}: interval_secs is 0 — it will be clamped to 1s at runtime, probing in a tight loop.",
+                    svc.name
+                ));
+            }
+        }
+
         let res = &self.actions.resilience;
         if res.max_retries > 10 {
             warnings.push(format!("actions.resilience.max_retries is {} (>10) — excessive retries may amplify failures.", res.max_retries));
@@ -475,6 +514,7 @@ impl Default for BrainConfig {
             logging: crate::config::LoggingConfig::default(),
             learning: crate::config::LearningConfig::default(),
             observability: crate::config::ObservabilityConfig::default(),
+            monitoring: crate::config::MonitoringConfig::default(),
         }
     }
 }

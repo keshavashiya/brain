@@ -296,6 +296,86 @@ pub(super) fn spawn_resource_sampler(
     tracing::info!(sample_secs, "Resource sampler scheduled");
 }
 
+/// Spawn one bounded health-probe loop for a single configured service
+/// (Issue 135). The loop probes `svc.target` every `svc.interval_secs`, and on
+/// an up↔down *transition* both publishes a `ServiceHealthChanged` event (for
+/// the Live tab / metrics) and delivers a proactive, actionable notification
+/// through the router — the same two surfaces the resource sampler feeds.
+///
+/// One task per service keeps each probe on its own cadence with a private
+/// edge state, so there is no shared map to lock. The probe itself is the only
+/// I/O, so the loop satisfies the bounded-task invariant by construction.
+pub(super) fn spawn_service_monitor(
+    processor: Arc<signal::SignalProcessor>,
+    svc: brain::config::ServiceCheck,
+    set: &mut tokio::task::JoinSet<anyhow::Result<()>>,
+) {
+    let name = svc.name.clone();
+    let p = processor.clone();
+    set.spawn(async move {
+        // One client per loop, carrying the per-probe timeout. `build` only
+        // fails on a TLS/backend misconfiguration; fall back to a default
+        // client so a single bad timeout can't silence the monitor.
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(svc.timeout_secs.max(1)))
+            .build()
+            .unwrap_or_default();
+        let mut edge = super::health::HealthEdge::default();
+        let mut ticker =
+            tokio::time::interval(std::time::Duration::from_secs(svc.interval_secs.max(1)));
+        // No leading-tick skip: probe as soon as the daemon comes up so an
+        // already-down service is surfaced immediately, not one interval later.
+        loop {
+            ticker.tick().await;
+            let (healthy, detail) = match super::health::probe(&client, &svc).await {
+                Ok(()) => (true, String::new()),
+                Err(reason) => (false, reason),
+            };
+            // Edge-triggered: act only when reachability flips, so neither the
+            // bus nor the user is spammed while a service holds one state.
+            let Some(now_healthy) = edge.evaluate(healthy) else {
+                continue;
+            };
+            if now_healthy {
+                tracing::info!(service = %svc.name, target = %svc.target, "Service recovered");
+            } else {
+                tracing::warn!(
+                    service = %svc.name,
+                    target = %svc.target,
+                    detail = %detail,
+                    "Service unreachable"
+                );
+            }
+            if let Some(observer) = p.observer() {
+                let ev = observe::BrainEvent::ServiceHealthChanged {
+                    id: uuid::Uuid::new_v4(),
+                    service: svc.name.clone(),
+                    target: svc.target.clone(),
+                    healthy: now_healthy,
+                    detail: detail.clone(),
+                    ts: chrono::Utc::now(),
+                };
+                let _ = observer.publish(ev).await;
+            }
+            if let Some(router) = p.notification_router() {
+                // Operational health alert — delivered regardless of the
+                // proactivity toggle (that gates habit-style nudges, not
+                // self-health warnings). Priority 2 outranks habit nudges (1),
+                // matching the resource-pressure path.
+                router
+                    .deliver(signal::notification::ProactiveNotification {
+                        content: super::health::advisory(&svc, now_healthy, &detail),
+                        triggered_by: format!("service_health:{}", svc.name),
+                        priority: 2,
+                        agent: None,
+                    })
+                    .await;
+            }
+        }
+    });
+    tracing::info!(service = %name, "Service health monitor scheduled");
+}
+
 pub(crate) async fn promote_candidates(
     processor: &signal::SignalProcessor,
     candidates: &[hippocampus::PromotionCandidate],
