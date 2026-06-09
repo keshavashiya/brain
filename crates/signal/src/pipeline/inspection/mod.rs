@@ -80,16 +80,7 @@ impl InspectionHandler for SignalProcessor {
     ) -> Result<PipelineResult, SignalError> {
         match intent {
             thalamus::Intent::Recall { query } => {
-                self.handle_recall(
-                    ctx.signal_id,
-                    ctx.signal,
-                    query,
-                    ctx.conversation_history,
-                    ctx.procedure_context,
-                    prepend_nudges,
-                    ctx.progress,
-                )
-                .await
+                self.handle_recall(&ctx, query, prepend_nudges).await
             }
             thalamus::Intent::MemorySummary => {
                 self.handle_memory_summary(

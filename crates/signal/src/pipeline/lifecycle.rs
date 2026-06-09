@@ -115,15 +115,8 @@ impl LifecycleHandler for SignalProcessor {
                     .await
             }
             thalamus::Intent::OpenTerminalSession { program, args, cwd } => {
-                self.handle_open_terminal_session(
-                    ctx.signal_id,
-                    ctx.signal,
-                    program,
-                    args,
-                    cwd,
-                    prepend_nudges,
-                )
-                .await
+                self.handle_open_terminal_session(&ctx, program, args, cwd, prepend_nudges)
+                    .await
             }
             thalamus::Intent::CloseTerminalSession { session_id } => {
                 self.handle_close_terminal_session(ctx.signal_id, session_id, prepend_nudges)
@@ -297,13 +290,15 @@ impl SignalProcessor {
     /// carry it.
     pub(super) async fn handle_open_terminal_session(
         &self,
-        signal_id: Uuid,
-        signal: &Signal,
+        ctx: &HandlerContext<'_>,
         program: String,
         args: Vec<String>,
         cwd: Option<String>,
         prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
+        let &HandlerContext {
+            signal_id, signal, ..
+        } = ctx;
         let Some(bridge) = self.terminal_bridge() else {
             let resp = prepend_nudges(SignalResponse::ok(
                 signal_id,

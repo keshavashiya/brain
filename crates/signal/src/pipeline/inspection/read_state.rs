@@ -3,20 +3,24 @@ use uuid::Uuid;
 use crate::types::*;
 use crate::SignalProcessor;
 
+use super::super::dispatch::HandlerContext;
 use super::{episode_within_window, render_budget_window, RECENT_ACTIVITY_WINDOW_DAYS};
 
 impl SignalProcessor {
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn handle_recall(
         &self,
-        signal_id: Uuid,
-        signal: &Signal,
+        ctx: &HandlerContext<'_>,
         query: String,
-        conversation_history: Option<&[cortex::llm::Message]>,
-        procedure_context: &[String],
         prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
-        progress: Option<&tokio::sync::mpsc::Sender<&'static str>>,
     ) -> Result<PipelineResult, SignalError> {
+        let &HandlerContext {
+            signal_id,
+            signal,
+            conversation_history,
+            procedure_context,
+            progress,
+            ..
+        } = ctx;
         let top_k = self.config.memory.semantic.max_results as usize;
         if let Some(tx) = progress {
             let _ = tx.try_send("searching…");

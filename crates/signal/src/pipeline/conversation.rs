@@ -6,8 +6,6 @@
 //!
 //! Variant: [`thalamus::Intent::Chat`].
 
-use uuid::Uuid;
-
 use identity::{AuthorizationRequest, Tier};
 
 use super::dispatch::{ConversationAuth, ConversationHandler, HandlerContext, NudgeFn};
@@ -31,17 +29,7 @@ impl ConversationHandler for SignalProcessor {
     ) -> Result<PipelineResult, SignalError> {
         match intent {
             thalamus::Intent::Chat { content } => {
-                self.handle_chat(
-                    ctx.signal_id,
-                    ctx.signal,
-                    content,
-                    ctx.importance,
-                    ctx.conversation_history,
-                    ctx.procedure_context,
-                    prepend_nudges,
-                    ctx.progress,
-                )
-                .await
+                self.handle_chat(&ctx, content, prepend_nudges).await
             }
             other => unreachable!(
                 "non-conversation variant routed to dispatch_conversation: {other:?} \
@@ -52,18 +40,20 @@ impl ConversationHandler for SignalProcessor {
 }
 
 impl SignalProcessor {
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn handle_chat(
         &self,
-        signal_id: Uuid,
-        signal: &Signal,
+        ctx: &HandlerContext<'_>,
         content: String,
-        importance: f32,
-        conversation_history: Option<&[cortex::llm::Message]>,
-        procedure_context: &[String],
         prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
-        progress: Option<&tokio::sync::mpsc::Sender<&'static str>>,
     ) -> Result<PipelineResult, SignalError> {
+        let &HandlerContext {
+            signal_id,
+            signal,
+            importance,
+            conversation_history,
+            procedure_context,
+            progress,
+        } = ctx;
         // Scale the number of memory recall candidates with the available
         // memory budget so large-window models surface more relevant context
         // instead of being clipped to the conservative static default.

@@ -2,8 +2,6 @@
 //!
 //! Variants: [`thalamus::Intent::StoreFact`], [`thalamus::Intent::Forget`].
 
-use uuid::Uuid;
-
 use identity::{AuthorizationRequest, Tier};
 
 use super::dispatch::{HandlerContext, MemoryAuth, MemoryHandler, NudgeFn};
@@ -39,21 +37,11 @@ impl MemoryHandler for SignalProcessor {
                 predicate,
                 object,
             } => {
-                self.handle_store_fact(
-                    ctx.signal_id,
-                    &ctx.signal.namespace,
-                    ctx.signal.agent.as_deref(),
-                    subject,
-                    predicate,
-                    object,
-                    ctx.importance,
-                    prepend_nudges,
-                )
-                .await
+                self.handle_store_fact(&ctx, subject, predicate, object, prepend_nudges)
+                    .await
             }
             thalamus::Intent::Forget { target } => {
-                self.handle_forget(ctx.signal_id, ctx.signal, target, prepend_nudges)
-                    .await
+                self.handle_forget(&ctx, target, prepend_nudges).await
             }
             other => unreachable!(
                 "non-memory variant routed to dispatch_memory: {other:?} \
@@ -64,18 +52,22 @@ impl MemoryHandler for SignalProcessor {
 }
 
 impl SignalProcessor {
-    #[allow(clippy::too_many_arguments)]
     pub(super) async fn handle_store_fact(
         &self,
-        signal_id: Uuid,
-        namespace: &str,
-        agent: Option<&str>,
+        ctx: &HandlerContext<'_>,
         subject: String,
         predicate: String,
         object: String,
-        importance: f32,
         prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
+        let &HandlerContext {
+            signal_id,
+            signal,
+            importance,
+            ..
+        } = ctx;
+        let namespace = &signal.namespace;
+        let agent = signal.agent.as_deref();
         let fact_text = format!("{subject} {predicate} {object}");
         let vector = self.embed_text(&fact_text).await;
 
@@ -117,11 +109,13 @@ impl SignalProcessor {
 
     pub(super) async fn handle_forget(
         &self,
-        signal_id: Uuid,
-        signal: &Signal,
+        ctx: &HandlerContext<'_>,
         target: String,
         prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
+        let &HandlerContext {
+            signal_id, signal, ..
+        } = ctx;
         let mut deleted_count = 0usize;
 
         if let Some(semantic) = &self.memory.semantic {
