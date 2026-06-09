@@ -104,21 +104,37 @@ fn is_transient(err: &reqwest::Error) -> bool {
     err.status().is_some_and(is_transient_status)
 }
 
+/// Failure from [`resilient_send`]. Kept local to `backends` so this
+/// low-level HTTP resilience primitive does not depend on the higher-level
+/// `cortex::actions::ActionError` (resilience sits *below* actions in the
+/// layering). Callers map it into their own domain error — the action
+/// backends do so via `ActionError::ExecutionFailed(e.to_string())`, which
+/// preserves the original message verbatim.
+#[derive(Debug, thiserror::Error)]
+pub enum ResilientSendError {
+    /// The circuit breaker for this backend is open; the call was not issued.
+    #[error("{0} circuit breaker is open — backend disabled until cooldown elapses")]
+    BreakerOpen(String),
+    /// All attempts failed (transient retries exhausted, or a non-transient
+    /// error). Carries the last underlying error message.
+    #[error("{0}")]
+    Failed(String),
+}
+
 /// Send an HTTP request with retry + circuit breaker.
 pub async fn resilient_send<F>(
     build_request: F,
     circuit_breaker: &CircuitBreaker,
     max_retries: u32,
     retry_base_ms: u64,
-) -> Result<reqwest::Response, cortex::actions::ActionError>
+) -> Result<reqwest::Response, ResilientSendError>
 where
     F: Fn() -> reqwest::RequestBuilder,
 {
     if circuit_breaker.is_open().await {
-        return Err(cortex::actions::ActionError::ExecutionFailed(format!(
-            "{} circuit breaker is open — backend disabled until cooldown elapses",
-            circuit_breaker.tool_id()
-        )));
+        return Err(ResilientSendError::BreakerOpen(
+            circuit_breaker.tool_id().to_string(),
+        ));
     }
 
     let attempts = 1 + max_retries;
@@ -148,7 +164,7 @@ where
             Err(e) => {
                 if !is_transient(&e) {
                     circuit_breaker.record_failure().await;
-                    return Err(cortex::actions::ActionError::ExecutionFailed(e.to_string()));
+                    return Err(ResilientSendError::Failed(e.to_string()));
                 }
                 tracing::debug!(
                     backend = %circuit_breaker.tool_id(),
@@ -162,9 +178,9 @@ where
     }
 
     circuit_breaker.record_failure().await;
-    Err(cortex::actions::ActionError::ExecutionFailed(
-        last_err.unwrap_or_else(|| "all retry attempts exhausted".to_string()),
-    ))
+    Err(ResilientSendError::Failed(last_err.unwrap_or_else(|| {
+        "all retry attempts exhausted".to_string()
+    })))
 }
 
 #[cfg(test)]

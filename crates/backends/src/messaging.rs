@@ -199,7 +199,8 @@ impl cortex::actions::MessageBackend for WebhookMessageBackend {
             self.max_retries,
             self.retry_base_ms,
         )
-        .await?;
+        .await
+        .map_err(|e| cortex::actions::ActionError::ExecutionFailed(e.to_string()))?;
 
         if !response.status().is_success() {
             return Err(cortex::actions::ActionError::ExecutionFailed(format!(
