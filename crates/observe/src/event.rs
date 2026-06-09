@@ -94,8 +94,9 @@ pub enum BrainEvent {
     /// `BreakerStateChange` keeps it free of `resilience`.
     ResourcePressure {
         id: Uuid,
-        /// Which gauge crossed: `"rss" | "cpu" | "disk"`. (The connection gauge
-        /// has no configured ceiling, so it never appears here.)
+        /// Which gauge crossed: `"rss" | "cpu" | "disk" | "fds"`. (The
+        /// SQLite-connection gauge has no configured ceiling, so it never
+        /// appears here.)
         gauge: String,
         /// Sampled value at the crossing, in the gauge's threshold unit — MiB
         /// for `rss`/`disk`, percent for `cpu` — so it is directly comparable to

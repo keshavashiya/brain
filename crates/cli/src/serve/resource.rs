@@ -48,6 +48,7 @@ impl ResourceProbe {
             rss_bytes,
             cpu_pct,
             open_connections,
+            open_fds: open_fd_count(),
             disk_bytes: dir_size(&self.data_dir),
         }
     }
@@ -68,6 +69,26 @@ impl ResourceProbe {
             None => (None, None),
         }
     }
+}
+
+/// Count of open file descriptors held by this process — the early-warning
+/// gauge for an fd leak (sockets/files/pipes that never get closed).
+///
+/// Read from the kernel's per-process fd directory: `/proc/self/fd` on Linux,
+/// `/dev/fd` on macOS/BSD. Both list one entry per open descriptor. The reading
+/// itself transiently opens one fd (the directory handle), so the count is
+/// `actual + 1` while sampling — immaterial for a leak gauge watching a trend.
+/// Returns `None` on platforms without such a directory (e.g. Windows), the
+/// same degrade-to-unavailable contract as the other gauges.
+fn open_fd_count() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    let fd_dir = "/proc/self/fd";
+    #[cfg(not(target_os = "linux"))]
+    let fd_dir = "/dev/fd";
+
+    fs::read_dir(fd_dir)
+        .ok()
+        .map(|entries| entries.flatten().count() as u64)
 }
 
 /// Total size in bytes of every regular file under `dir`, walked iteratively.
@@ -123,6 +144,7 @@ pub(crate) struct PressureTracker {
     rss_over: bool,
     cpu_over: bool,
     disk_over: bool,
+    fds_over: bool,
 }
 
 /// Bytes per mebibyte — the unit the RSS/disk thresholds are expressed in.
@@ -143,7 +165,7 @@ impl PressureTracker {
         thresholds: &brain::config::ResourceThresholds,
     ) -> Vec<Crossing> {
         let mut out = Vec::new();
-        let checks: [(&mut bool, Option<f64>, f64, &'static str); 3] = [
+        let checks: [(&mut bool, Option<f64>, f64, &'static str); 4] = [
             (
                 &mut self.rss_over,
                 snap.rss_bytes.map(|b| b as f64 / MIB),
@@ -156,6 +178,12 @@ impl PressureTracker {
                 snap.disk_bytes.map(|b| b as f64 / MIB),
                 thresholds.disk_mb as f64,
                 "disk",
+            ),
+            (
+                &mut self.fds_over,
+                snap.open_fds.map(|n| n as f64),
+                thresholds.open_fds as f64,
+                "fds",
             ),
         ];
         for (was_over, value, threshold, gauge) in checks {
@@ -222,6 +250,14 @@ mod tests {
         assert_eq!(snap.cpu_pct.is_some(), snap.rss_bytes.is_some());
         // Connection count is passed through verbatim.
         assert_eq!(snap.open_connections, Some(3));
+        // A live process always holds at least stdio (fds 0/1/2) on the
+        // platforms with an fd directory (Linux /proc/self/fd, macOS /dev/fd).
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert!(
+            snap.open_fds.is_some_and(|n| n >= 3),
+            "live process must report its open fds, got {:?}",
+            snap.open_fds
+        );
     }
 
     #[test]
@@ -250,6 +286,7 @@ mod tests {
             rss_mb: 100,
             cpu_pct: 50.0,
             disk_mb: 100,
+            open_fds: 200,
         }
     }
 
@@ -326,6 +363,7 @@ mod tests {
             cpu_pct: Some(75.0),
             disk_bytes: Some(10 * 1024 * 1024), // under the 100 MiB disk ceiling
             open_connections: Some(2),
+            open_fds: Some(10), // under the 200 fd ceiling
         };
         let mut crossings = tracker.evaluate(&snap, &th);
         crossings.sort_by_key(|c| c.gauge);
@@ -333,5 +371,30 @@ mod tests {
         assert_eq!(crossings[0].gauge, "cpu");
         assert_eq!(crossings[0].value, 75.0);
         assert_eq!(crossings[1].gauge, "rss");
+    }
+
+    #[test]
+    fn fd_gauge_crosses_its_own_ceiling() {
+        let th = test_thresholds(); // open_fds ceiling = 200
+        let mut tracker = PressureTracker::default();
+
+        let under = metrics::ResourceSnapshot {
+            open_fds: Some(50),
+            ..Default::default()
+        };
+        assert!(tracker.evaluate(&under, &th).is_empty());
+
+        let over = metrics::ResourceSnapshot {
+            open_fds: Some(250),
+            ..Default::default()
+        };
+        let crossings = tracker.evaluate(&over, &th);
+        assert_eq!(crossings.len(), 1);
+        assert_eq!(crossings[0].gauge, "fds");
+        assert_eq!(crossings[0].value, 250.0);
+        assert_eq!(crossings[0].threshold, 200.0);
+
+        // Edge discipline holds for the new gauge too: silent while it stays over.
+        assert!(tracker.evaluate(&over, &th).is_empty());
     }
 }

@@ -128,6 +128,7 @@ pub(crate) async fn show_status(config: &brain::BrainConfig) -> anyhow::Result<(
         println!("\n  Vitals:");
         print_vital_mib("RSS", snap.rss_bytes, th.rss_mb);
         print_vital_pct("CPU", snap.cpu_pct, th.cpu_pct);
+        print_vital_count("Open FDs", snap.open_fds, th.open_fds);
         print_vital_mib("Disk", snap.disk_bytes, th.disk_mb);
     }
 
@@ -238,6 +239,19 @@ fn print_vital_pct(label: &str, pct: Option<f64>, ceiling_pct: f64) {
                 let mark = if v >= ceiling_pct { "  ⚠" } else { "" };
                 println!("    {label:<10}: {v:.1}% / {ceiling_pct:.0}%{mark}");
             }
+        }
+    }
+}
+
+/// A count vital against a count ceiling (`0` = no ceiling), themed to match
+/// `print_vital_mib`.
+fn print_vital_count(label: &str, count: Option<u64>, ceiling: u64) {
+    match count {
+        None => println!("    {label:<10}: unavailable"),
+        Some(n) if ceiling == 0 => println!("    {label:<10}: {n}"),
+        Some(n) => {
+            let mark = if n >= ceiling { "  ⚠" } else { "" };
+            println!("    {label:<10}: {n} / {ceiling}{mark}");
         }
     }
 }

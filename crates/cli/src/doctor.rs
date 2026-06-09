@@ -532,6 +532,7 @@ async fn check_resource_gauges(config: &BrainConfig, pool: Option<&storage::Sqli
     gauge_mib_line("rss", snap.rss_bytes, th.rss_mb);
     gauge_pct_line("cpu", snap.cpu_pct, th.cpu_pct);
     gauge_count_line("connections", snap.open_connections);
+    gauge_count_ceiling_line("open fds", snap.open_fds, th.open_fds);
     gauge_mib_line("disk (~/.brain)", snap.disk_bytes, th.disk_mb);
 }
 
@@ -587,6 +588,19 @@ fn gauge_count_line(label: &str, count: Option<u64>) {
     match count {
         None => status_line("--", &format!("{label:<18} unavailable")),
         Some(n) => status_line("ok", &format!("{label:<18} {n}")),
+    }
+}
+
+/// A count gauge checked against a ceiling (`0` = no ceiling configured).
+fn gauge_count_ceiling_line(label: &str, count: Option<u64>, ceiling: u64) {
+    match count {
+        None => status_line("--", &format!("{label:<18} unavailable")),
+        Some(n) if ceiling == 0 => status_line("ok", &format!("{label:<18} {n} (no ceiling)")),
+        Some(n) if n >= ceiling => status_line(
+            "warn",
+            &format!("{label:<18} {n} / {ceiling}  ⚠ over ceiling"),
+        ),
+        Some(n) => status_line("ok", &format!("{label:<18} {n} / {ceiling}")),
     }
 }
 
