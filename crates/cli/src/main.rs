@@ -275,6 +275,36 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     //
     // Loaded before tracing init so the logging policy (`[logging]`) can drive
     // the subscriber. Config-load failures use `eprintln!` (no tracing yet).
+    //
+    // Forward-migrate an older config file *before* loading it, so renamed or
+    // moved keys survive into the typed struct instead of being silently
+    // dropped by figment. A migration hiccup is non-fatal: the original file
+    // is snapshotted first, and any real corruption surfaces at load below.
+    match brain::BrainConfig::migrate_user_config_if_needed() {
+        Ok(Some(outcome)) => {
+            eprintln!(
+                "config: migrated v{} → v{} ({} change(s))",
+                outcome.from_version,
+                outcome.to_version,
+                outcome.changes.len()
+            );
+            for change in &outcome.changes {
+                eprintln!("  - {change}");
+            }
+            if let Some(backup) = &outcome.backup_path {
+                eprintln!("  backup: {}", backup.display());
+            }
+            for key in &outcome.unknown_keys {
+                eprintln!(
+                    "config: warning: unrecognized key '{key}' \
+                     (typo, or removed in this version — left as-is)"
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(e) => eprintln!("config: migration skipped ({e})"),
+    }
+
     let config =
         brain::BrainConfig::load().map_err(|e| anyhow::anyhow!("failed to load config: {e}"))?;
 

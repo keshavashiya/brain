@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Config file migration across versions.** The user's `config.yaml` carries a
+  `brain.version` stamp; a newer binary now forward-migrates an older file at
+  startup *before* loading it, so values stored under renamed or moved keys
+  survive instead of being silently dropped (figment would otherwise ignore the
+  old key and back-fill the new one from defaults). An ordered transform registry
+  (`config::migrate`, keyed by the version that introduced each change) applies
+  any migrations in `(file, binary]`, the prior file is snapshotted to
+  `config.yaml.bak-v<old>`, and the file is rewritten with the new stamp.
+  Unrecognized keys (typos, or fields removed in a newer version) are warned
+  about and left in place — never deleted. Version comparison is numeric
+  (`0.9 < 0.10`). An older binary reading a newer config is untouched (figment is
+  already tolerant). Explicit `--config <path>` files are not auto-migrated.
+
 - **Schema version reconciliation + pre-migration backups (data-loss
   prevention).** Opening the database now reconciles the on-disk schema version
   against the version this build supports *before* any migration runs. A

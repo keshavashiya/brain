@@ -1131,6 +1131,7 @@ impl Default for TerminalAdapterConfig {
 impl BrainConfig {}
 
 mod loader;
+pub mod migrate;
 
 #[cfg(test)]
 mod tests;
