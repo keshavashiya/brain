@@ -190,9 +190,8 @@ pub(super) fn build_action_dispatcher(
     // ── Security audit backend ───────────────────────────────────────────
     // Always wired: a pure, offline audit over a snapshot of the loaded
     // config. Read-only (Read tier), no network, no key.
-    dispatcher = dispatcher.with_security_audit_backend(Arc::new(
-        crate::security::ConfigSecurityAuditor::new(config.clone()),
-    ));
+    dispatcher = dispatcher
+        .with_security_audit_backend(Arc::new(ConfigSecurityAuditor::new(config.clone())));
 
     Ok(dispatcher)
 }

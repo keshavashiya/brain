@@ -10,6 +10,7 @@ pub mod net;
 pub mod resilience;
 pub mod scheduling;
 pub mod search;
+pub mod security;
 
 pub use error::BackendInitError;
 pub use fetch::BasicUrlFetcher;
@@ -23,3 +24,4 @@ pub use scheduling::DefaultSchedulingBackend;
 pub use search::{
     CustomSearchBackend, DuckDuckGoSearchBackend, SearxngSearchBackend, TavilySearchBackend,
 };
+pub use security::ConfigSecurityAuditor;
