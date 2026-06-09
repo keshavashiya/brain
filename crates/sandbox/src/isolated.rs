@@ -253,6 +253,8 @@ impl IsolatedSandbox {
 
     #[cfg(target_os = "macos")]
     fn write_macos_profile() -> std::io::Result<PathBuf> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
         // Seatbelt profile: deny outbound network by default, let everything
         // else inherit macOS defaults. Keeps compatibility with git/cargo/etc.
         // which need to read system frameworks and write inside the workdir.
@@ -262,7 +264,17 @@ impl IsolatedSandbox {
 (allow network-outbound (local ip))
 (allow network-outbound (remote unix-socket))
 "#;
-        let path = std::env::temp_dir().join(format!("brain-sandbox-{}.sb", std::process::id()));
+        // Key the filename on a process-wide counter, not just the PID:
+        // many `IsolatedSandbox` instances (notably concurrent tests) share
+        // one process, and a PID-only path means one `std::fs::write`
+        // truncating the file races against another instance's
+        // `sandbox-exec` reading it — the reader then sees an empty profile
+        // and fails with "sandbox-exec: no version specified". A unique
+        // suffix per instance gives each its own file.
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("brain-sandbox-{}-{}.sb", std::process::id(), seq));
         std::fs::write(&path, profile)?;
         Ok(path)
     }
