@@ -14,9 +14,11 @@
 pub mod event;
 pub mod observer;
 pub mod redact;
+pub mod sampling;
 
 pub use event::{
     BrainEvent, IntentSummary, OutcomeSummary, PrincipalSummary, SignalSummary, ToolRouteSummary,
 };
 pub use observer::{BroadcastObserver, ObserveError, Observer, DEFAULT_BROADCAST_CAPACITY};
 pub use redact::{Redactor, SENTINEL_PREFIX, SENTINEL_SUFFIX};
+pub use sampling::LogSampler;

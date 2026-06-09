@@ -92,7 +92,8 @@ impl UrlFetchBackend for BasicUrlFetcher {
             self.max_retries,
             self.retry_base_ms,
         )
-        .await?;
+        .await
+        .map_err(|e| ActionError::ExecutionFailed(e.to_string()))?;
 
         if !response.status().is_success() {
             return Err(ActionError::ExecutionFailed(format!(

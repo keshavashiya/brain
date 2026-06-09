@@ -215,10 +215,16 @@ pub(super) fn spawn_resource_sampler(
     data_dir: std::path::PathBuf,
     sample_secs: u64,
     thresholds: brain::config::ResourceThresholds,
+    log_sample_1_in_n: u32,
     set: &mut tokio::task::JoinSet<anyhow::Result<()>>,
 ) {
     let p = processor.clone();
     set.spawn(async move {
+        // The per-tick "Resource sample" line is a heartbeat: high-volume and
+        // low-information once gauges are also on `/metrics` and the bus. Throttle
+        // it to 1-in-N so a fast sample cadence doesn't flood the log; pressure
+        // crossings below are never sampled — they always log.
+        let heartbeat_sampler = observe::LogSampler::one_in(log_sample_1_in_n);
         let mut probe = super::resource::ResourceProbe::new(data_dir);
         let mut tracker = super::resource::PressureTracker::default();
         // No leading `tick()` skip here (unlike consolidation): we want gauges
@@ -233,15 +239,18 @@ pub(super) fn spawn_resource_sampler(
             resource_metrics.set_rss_bytes(snap.rss_bytes);
             resource_metrics.set_cpu_pct(snap.cpu_pct);
             resource_metrics.set_open_connections(snap.open_connections);
+            resource_metrics.set_open_fds(snap.open_fds);
             resource_metrics.set_disk_bytes(snap.disk_bytes);
 
-            tracing::debug!(
-                rss_mb = snap.rss_bytes.map(|b| b / (1024 * 1024)),
-                cpu_pct = snap.cpu_pct,
-                open_connections = snap.open_connections,
-                disk_mb = snap.disk_bytes.map(|b| b / (1024 * 1024)),
-                "Resource sample"
-            );
+            if heartbeat_sampler.should_emit() {
+                tracing::debug!(
+                    rss_mb = snap.rss_bytes.map(|b| b / (1024 * 1024)),
+                    cpu_pct = snap.cpu_pct,
+                    open_connections = snap.open_connections,
+                    disk_mb = snap.disk_bytes.map(|b| b / (1024 * 1024)),
+                    "Resource sample"
+                );
+            }
 
             // Edge-triggered: publish a ResourcePressure only on a fresh
             // crossing, so the bus isn't spammed while a gauge stays over.

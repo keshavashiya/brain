@@ -86,6 +86,24 @@ pub(crate) fn sanitize_fts5_query(query: &str) -> String {
 }
 
 /// Episodic memory store — manages conversations via SQLite.
+///
+/// # Examples
+///
+/// ```
+/// use brainos_hippocampus::EpisodicStore;
+/// use storage::SqlitePool;
+///
+/// // An in-memory pool keeps the example self-contained (no files touched).
+/// let store = EpisodicStore::new(SqlitePool::open_memory().unwrap());
+/// let session = store.create_session("example").unwrap();
+///
+/// // `store_episode` returns the new episode's id; `count` reflects the write.
+/// let id = store
+///     .store_episode(&session, "user", "remember this", 0.7, None, None)
+///     .unwrap();
+/// assert!(!id.is_empty());
+/// assert_eq!(store.count().unwrap(), 1);
+/// ```
 pub struct EpisodicStore {
     db: SqlitePool,
 }

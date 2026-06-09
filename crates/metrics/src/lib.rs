@@ -136,6 +136,20 @@ const CPU_PCT_SCALE: f64 = 1000.0;
 /// sampler overwrites with [`set_*`](ResourceMetrics::set_rss_bytes) rather
 /// than adding. Unavailable gauges hold [`GAUGE_UNSET`] and read back as
 /// `None`; a freshly-constructed store reads all-`None` until the first sample.
+///
+/// # Examples
+///
+/// ```
+/// use brainos_metrics::ResourceMetrics;
+///
+/// let gauges = ResourceMetrics::new();
+/// // Before the first sample, every gauge reads unavailable.
+/// assert_eq!(gauges.snapshot().open_fds, None);
+///
+/// // The sampler writes levels; readers snapshot them.
+/// gauges.set_open_fds(Some(42));
+/// assert_eq!(gauges.snapshot().open_fds, Some(42));
+/// ```
 #[derive(Debug)]
 pub struct ResourceMetrics {
     /// Resident set size, in bytes.
@@ -144,6 +158,9 @@ pub struct ResourceMetrics {
     cpu_millipct: AtomicU64,
     /// Open SQLite connections held by the pool.
     open_connections: AtomicU64,
+    /// Open OS file descriptors held by the process (all kinds — sockets,
+    /// files, pipes — not just SQLite). The early-warning gauge for an fd leak.
+    open_fds: AtomicU64,
     /// `~/.brain` data-directory disk usage, in bytes.
     disk_bytes: AtomicU64,
 }
@@ -155,6 +172,7 @@ impl Default for ResourceMetrics {
             rss_bytes: AtomicU64::new(GAUGE_UNSET),
             cpu_millipct: AtomicU64::new(GAUGE_UNSET),
             open_connections: AtomicU64::new(GAUGE_UNSET),
+            open_fds: AtomicU64::new(GAUGE_UNSET),
             disk_bytes: AtomicU64::new(GAUGE_UNSET),
         }
     }
@@ -198,6 +216,12 @@ impl ResourceMetrics {
         Self::store(&self.open_connections, n);
     }
 
+    /// Set (or clear, with `None`) the open-file-descriptors gauge.
+    #[inline]
+    pub fn set_open_fds(&self, n: Option<u64>) {
+        Self::store(&self.open_fds, n);
+    }
+
     /// Set (or clear, with `None`) the `~/.brain` disk-usage gauge, in bytes.
     #[inline]
     pub fn set_disk_bytes(&self, bytes: Option<u64>) {
@@ -211,6 +235,7 @@ impl ResourceMetrics {
             rss_bytes: Self::load(&self.rss_bytes),
             cpu_pct: Self::load(&self.cpu_millipct).map(|m| m as f64 / CPU_PCT_SCALE),
             open_connections: Self::load(&self.open_connections),
+            open_fds: Self::load(&self.open_fds),
             disk_bytes: Self::load(&self.disk_bytes),
         }
     }
@@ -223,6 +248,7 @@ pub struct ResourceSnapshot {
     pub rss_bytes: Option<u64>,
     pub cpu_pct: Option<f64>,
     pub open_connections: Option<u64>,
+    pub open_fds: Option<u64>,
     pub disk_bytes: Option<u64>,
 }
 
@@ -241,11 +267,13 @@ mod tests {
         let m = ResourceMetrics::new();
         m.set_rss_bytes(Some(512 * 1024 * 1024));
         m.set_open_connections(Some(4));
+        m.set_open_fds(Some(37));
         m.set_disk_bytes(Some(1_234_567));
 
         let snap = m.snapshot();
         assert_eq!(snap.rss_bytes, Some(512 * 1024 * 1024));
         assert_eq!(snap.open_connections, Some(4));
+        assert_eq!(snap.open_fds, Some(37));
         assert_eq!(snap.disk_bytes, Some(1_234_567));
     }
 

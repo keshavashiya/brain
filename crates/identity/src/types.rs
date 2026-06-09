@@ -61,6 +61,20 @@ impl From<String> for AgentId {
 /// ceremony. `Read`/`Write`/`Execute` are auto-approved (with audit
 /// recording); `Destructive` and `External` block on explicit human
 /// approval.
+///
+/// # Examples
+///
+/// ```
+/// use brainos_identity::Tier;
+///
+/// // Tiers are ordered by escalating risk.
+/// assert!(Tier::Read < Tier::Write);
+/// assert!(Tier::Execute < Tier::External);
+///
+/// // Only the top two tiers block on explicit human approval.
+/// assert!(!Tier::Execute.requires_confirmation());
+/// assert!(Tier::Destructive.requires_confirmation());
+/// ```
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Tier {

@@ -450,6 +450,11 @@ pub struct EventQuery {
     pub kind: Option<String>,
     /// Filter to a specific tool_id (only applies to tool-bound BrainEvents).
     pub tool_id: Option<String>,
+    /// Correlation-id filter. Every event in one signal flow shares the
+    /// originating signal's id via [`observe::BrainEvent::id`], so
+    /// `?correlation=<uuid>` reconstructs a single turn end-to-end. Matched as
+    /// a string so a malformed value simply matches nothing rather than 400.
+    pub correlation: Option<String>,
     /// Principal filter — accepted for forward compatibility; current events
     /// do not yet carry a principal on the bus, so this filter matches
     /// nothing when set.
@@ -468,6 +473,11 @@ impl EventQuery {
         }
         if let Some(t) = &self.tool_id {
             if ev.tool_id() != Some(t.as_str()) {
+                return false;
+            }
+        }
+        if let Some(c) = &self.correlation {
+            if ev.id().to_string() != *c {
                 return false;
             }
         }
@@ -697,4 +707,52 @@ fn build_webhook_response(
         *fallback.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
         fallback
     })
+}
+
+#[cfg(test)]
+mod event_query_tests {
+    use super::EventQuery;
+    use chrono::Utc;
+    use uuid::Uuid;
+
+    fn signal_received(id: Uuid) -> observe::BrainEvent {
+        observe::BrainEvent::SignalReceived {
+            id,
+            signal: observe::SignalSummary {
+                source: "cli".into(),
+                channel: "c".into(),
+                sender: "s".into(),
+                namespace: "personal".into(),
+                content_preview: "hi".into(),
+            },
+            ts: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn correlation_filter_matches_only_its_flow() {
+        let mine = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let filter = EventQuery {
+            correlation: Some(mine.to_string()),
+            ..Default::default()
+        };
+        assert!(filter.matches(&signal_received(mine)));
+        assert!(!filter.matches(&signal_received(other)));
+    }
+
+    #[test]
+    fn malformed_correlation_matches_nothing_rather_than_erroring() {
+        let filter = EventQuery {
+            correlation: Some("not-a-uuid".into()),
+            ..Default::default()
+        };
+        assert!(!filter.matches(&signal_received(Uuid::new_v4())));
+    }
+
+    #[test]
+    fn absent_correlation_does_not_constrain() {
+        let filter = EventQuery::default();
+        assert!(filter.matches(&signal_received(Uuid::new_v4())));
+    }
 }

@@ -231,6 +231,9 @@ observability:
     rss_mb: 2048                    # resident-set-size ceiling (MiB)
     cpu_pct: 90.0                   # process CPU ceiling (percent, single-core basis)
     disk_mb: 10240                  # ~/.brain disk-usage ceiling (MiB)
+    open_fds: 1024                  # open file-descriptor ceiling (count; fd-leak warning)
+  log_sampling:
+    high_volume_1_in_n: 1           # emit 1 in N high-volume log lines (heartbeat); 1 = log all
 
 # ── Channel Relays ─────────────────────────────────────────────────────────────
 # Bidirectional WebSocket gateways. Unlike webhooks these are long-lived

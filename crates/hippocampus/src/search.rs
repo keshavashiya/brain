@@ -106,6 +106,20 @@ pub fn rrf_fuse(ranked_lists: &[Vec<(String, f64)>], k: f64) -> Vec<(String, f64
 /// Calculate retention using a simplified forgetting curve.
 ///
 /// `retention = importance * e^(-decay_rate * hours_since_access)`
+///
+/// # Examples
+///
+/// ```
+/// use brainos_hippocampus::search::forgetting_curve;
+///
+/// // With no time elapsed, retention equals the starting importance.
+/// let fresh = forgetting_curve(0.8, 0.0, 0.01);
+/// assert!((fresh - 0.8).abs() < 1e-9);
+///
+/// // Retention decays toward zero as time passes, but never goes negative.
+/// let stale = forgetting_curve(0.8, 500.0, 0.01);
+/// assert!(stale < 0.8 && stale > 0.0);
+/// ```
 pub fn forgetting_curve(importance: f64, hours_since_access: f64, decay_rate: f64) -> f64 {
     importance * (-decay_rate * hours_since_access).exp()
 }

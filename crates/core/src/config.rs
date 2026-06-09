@@ -124,6 +124,10 @@ pub struct ObservabilityConfig {
     /// (edge-triggered, not per sample).
     #[serde(default)]
     pub thresholds: ResourceThresholds,
+    /// Sampling for high-volume, low-information log lines (the resource
+    /// sampler heartbeat, etc.).
+    #[serde(default)]
+    pub log_sampling: LogSamplingConfig,
 }
 
 impl ObservabilityConfig {
@@ -137,6 +141,32 @@ impl Default for ObservabilityConfig {
         Self {
             resource_sample_secs: Self::default_resource_sample_secs(),
             thresholds: ResourceThresholds::default(),
+            log_sampling: LogSamplingConfig::default(),
+        }
+    }
+}
+
+/// Log-sampling policy: emit only 1 in N of designated high-volume log lines
+/// so a hot loop doesn't drown the log. The metric/event behind each line is
+/// still recorded every time — only the *log line* is throttled.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogSamplingConfig {
+    /// Emit 1 in N of high-volume log lines. `1` (the default) logs every
+    /// line — sampling off. Raise it in production to thin periodic chatter.
+    #[serde(default = "LogSamplingConfig::default_high_volume_1_in_n")]
+    pub high_volume_1_in_n: u32,
+}
+
+impl LogSamplingConfig {
+    fn default_high_volume_1_in_n() -> u32 {
+        1
+    }
+}
+
+impl Default for LogSamplingConfig {
+    fn default() -> Self {
+        Self {
+            high_volume_1_in_n: Self::default_high_volume_1_in_n(),
         }
     }
 }
@@ -156,6 +186,12 @@ pub struct ResourceThresholds {
     /// `~/.brain` data-directory disk-usage ceiling, in mebibytes.
     #[serde(default = "ResourceThresholds::default_disk_mb")]
     pub disk_mb: u64,
+    /// Open-file-descriptor ceiling (count). Crossing it warns of a possible
+    /// fd leak before the process hits its OS `RLIMIT_NOFILE` and starts
+    /// failing to open files/sockets. Generous by default so normal operation
+    /// is silent.
+    #[serde(default = "ResourceThresholds::default_open_fds")]
+    pub open_fds: u64,
 }
 
 impl ResourceThresholds {
@@ -168,6 +204,9 @@ impl ResourceThresholds {
     fn default_disk_mb() -> u64 {
         10_240
     }
+    fn default_open_fds() -> u64 {
+        1024
+    }
 }
 
 impl Default for ResourceThresholds {
@@ -176,6 +215,7 @@ impl Default for ResourceThresholds {
             rss_mb: Self::default_rss_mb(),
             cpu_pct: Self::default_cpu_pct(),
             disk_mb: Self::default_disk_mb(),
+            open_fds: Self::default_open_fds(),
         }
     }
 }
