@@ -6,6 +6,7 @@ This document covers the internal design of Brain OS: key abstractions, data flo
 
 ## Table of Contents
 
+- [Design Principle: One Capability, Many Faces](#design-principle-one-capability-many-faces)
 - [Crate Map](#crate-map)
 - [Data Flow](#data-flow-signal-ingestion)
 - [Key Types](#key-types)
@@ -15,6 +16,17 @@ This document covers the internal design of Brain OS: key abstractions, data flo
 - [Memory Namespaces](#memory-namespaces)
 - [Security Model](#security-model)
 - [Channel Integration Pattern](#channel-integration-pattern)
+
+---
+
+## Design Principle: One Capability, Many Faces
+
+Brain is a kernel, so "what the system can do" is modelled once and projected to every consumer. A **capability** is a typed entry — id, safety tier (read / write / destructive), preconditions, when-to-use, cost — in a single registry. The transports (CLI, HTTP, WebSocket, gRPC, MCP) and the resident reasoner (the SOUL) are all **faces** over that one registry; they hold no private capabilities and no business logic of their own. The reference implementation is the `net` family: the probe logic lives in `backends::net`, the CLI is a thin wrapper, and the capability registry dispatches to the same core — *one core, many faces*.
+
+Two rules follow:
+
+- **Capability vs. operator command.** If something *observes or acts on the user's world* (search, read a file, run a command, probe a host, audit config), it is a capability — a backend core plus a registered descriptor, reachable by every face. If it *manages Brain's own installation or process* (`init`, `doctor`, `service`, `update`, `start`/`stop`/`serve`, `vault`, `config`), it is an operator command and stays CLI-only by design. A kernel's syscalls don't include "reinstall the kernel."
+- **Awareness is not permission.** Every descriptor carries its authorization tier. The reasoner *knows* an action needs consent and says so up front; execution still flows through the confirmation, audit, and budget gates. Knowing ≠ doing.
 
 ---
 
@@ -841,3 +853,25 @@ Features:
 - `BridgeConfig` with configurable `max_backoff_secs`, `ping_interval_secs`, `connection_timeout_secs`
 
 </details>
+
+
+
+---
+
+## Extending Brain
+
+Brain exposes four extension points today. Each is reachable without modifying the kernel, and every one routes through the same shared `SignalProcessor` and the same identity, consent, audit, and budget gates.
+
+| Contract | Direction | What plugs in | Wire format |
+|----------|-----------|---------------|-------------|
+| **Adapters** | apps → Brain | LLM agents, IDE extensions, custom tools | HTTP / WebSocket / gRPC / MCP |
+| **Capabilities** | Brain → tools | external tools, system actions | MCP servers (stdio / Streamable HTTP / SSE), Terminal Bridge (PTY), native backends |
+| **Agents** | Brain → AIs | Claude Code, Cursor, Aider, and other subprocess agents | `AgentDelegate` trait + subprocess transport |
+| **Channels** | Brain ↔ humans | any HTTP/WebSocket gateway (Telegram, Discord, Slack, custom) | `channel.transports[]` (polled / webhook-in / webhook-out) + Bridge library |
+
+- **Adapters** let any application talk to the one shared memory + reasoning engine over a standard protocol — no per-app memory, no special casing. A fact stored via MCP is immediately visible via HTTP.
+- **Capabilities** are how Brain reaches outward. Mount an MCP server and its tools auto-register into the capability manifest; the Terminal Bridge and native backends register the same way and carry the same safety tiers.
+- **Agents** hand a subtask to a specialist CLI/HTTP agent through a single subprocess-backed delegate, discovered from `PATH` or `~/.brain/agents.yaml`.
+- **Channels** carry messages to and from humans through three generic transport kinds (`http_polled`, `webhook_inbound`, `webhook_outbound`) plus the Bridge relay library. Brain ships no platform-specific code; platforms are expressed entirely as YAML presets.
+
+See [Channel Integration Pattern](#channel-integration-pattern) for the bridge-relay design in detail.

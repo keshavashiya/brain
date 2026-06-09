@@ -46,6 +46,12 @@ Input → Intent Classification → Importance Scoring → Memory Store/Recall �
 
 The memory engine combines vector search (HNSW) with full-text search (BM25 FTS5), fuses results via Reciprocal Rank Fusion, and reranks by importance and recency. A forgetting curve runs every 24 hours to prune low-value memories and promote reinforced episodes to permanent semantic facts.
 
+### Beyond memory: the kernel it grew into
+
+Memory is the hook — but the same daemon also *mediates* what your AI tools can do. Every capability it exposes — search the web, run a sandboxed command, send a notification, probe a host, audit its own config — is a typed entry in one **capability manifest**, each tagged with a safety tier and routed through the same consent, audit, and budget gates. Whether a request comes from your terminal, an MCP client like Claude or Cursor, or Brain's own resident reasoner, it sees the *same* manifest and is held to the *same* rules. No client — not even Brain's own mind — gets privileges the others don't.
+
+That's the longer arc: a memory layer that became the local mediation layer between any AI model and the systems it acts on — local-first and protocol-agnostic the whole way down.
+
 ---
 
 ## Table of Contents
