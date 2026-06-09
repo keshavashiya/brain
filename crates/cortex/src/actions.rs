@@ -61,6 +61,20 @@ pub enum Action {
         recipient: String,
         content: String,
     },
+    /// Run a read-only network diagnostic probe against a target host.
+    NetDiagnostic { probe: NetProbe, target: String },
+}
+
+/// Which network diagnostic to run. Backs the `net.check` / `net.trace` /
+/// `net.cert` native capabilities (Issue 139).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NetProbe {
+    /// DNS resolution + a timed TCP connect to a host[:port].
+    Check,
+    /// `traceroute` to a host (Unix; privileged child process).
+    Trace,
+    /// Inspect the TLS certificate chain a host presents.
+    Cert,
 }
 
 /// Result of an action execution.
@@ -174,6 +188,21 @@ pub trait MessageBackend: Send + Sync {
     ) -> Result<MessageOutcome, ActionError>;
 }
 
+/// Optional backend for read-only network diagnostics (Issue 139). Each method
+/// runs one probe against `target` and returns a human/LLM-legible report. Kept
+/// as its own trait — separate from the egress-oriented `WebSearchBackend` —
+/// because diagnostics neither search nor fetch: they resolve, connect, trace,
+/// and inspect, and stay wired even when web search is disabled.
+#[async_trait::async_trait]
+pub trait NetDiagnosticsBackend: Send + Sync {
+    /// DNS resolution + timed TCP connect to `target` (host[:port] or URL).
+    async fn check(&self, target: &str) -> Result<String, ActionError>;
+    /// Trace the network route to `target`.
+    async fn trace(&self, target: &str) -> Result<String, ActionError>;
+    /// Inspect the TLS certificate chain `target` presents.
+    async fn cert(&self, target: &str) -> Result<String, ActionError>;
+}
+
 impl ActionResult {
     /// Create a successful result.
     pub fn success(output: impl Into<String>) -> Self {
@@ -242,6 +271,7 @@ pub struct ActionDispatcher {
     url_fetch_backend: Option<Arc<dyn UrlFetchBackend>>,
     scheduling_backend: Option<Arc<dyn SchedulingBackend>>,
     message_backend: Option<Arc<dyn MessageBackend>>,
+    net_diagnostics_backend: Option<Arc<dyn NetDiagnosticsBackend>>,
     /// Sandbox executor that backs `Action::ExecuteCommand` (Issue 121).
     /// When unset the action refuses with an explicit error rather than
     /// silently shelling out via raw `tokio::process::Command`.
@@ -259,6 +289,7 @@ impl ActionDispatcher {
             url_fetch_backend: None,
             scheduling_backend: None,
             message_backend: None,
+            net_diagnostics_backend: None,
             sandbox_executor: None,
             namespace: "personal".to_string(),
         }
@@ -310,6 +341,15 @@ impl ActionDispatcher {
         self
     }
 
+    /// Attach a network-diagnostics backend (`net.check`/`trace`/`cert`).
+    pub fn with_net_diagnostics_backend(
+        mut self,
+        backend: Arc<dyn NetDiagnosticsBackend>,
+    ) -> Self {
+        self.net_diagnostics_backend = Some(backend);
+        self
+    }
+
     /// Attach the sandbox executor used by `Action::ExecuteCommand`.
     /// Without one wired, the action returns an explicit error instead
     /// of executing — this is the production hardening from Issue 121.
@@ -351,6 +391,31 @@ impl ActionDispatcher {
                 recipient,
                 content,
             } => self.send_message(channel, recipient, content).await,
+            Action::NetDiagnostic { probe, target } => self.net_diagnostic(*probe, target).await,
+        }
+    }
+
+    /// Run a read-only network diagnostic through the wired
+    /// [`NetDiagnosticsBackend`]. Without one configured this returns an
+    /// explicit failure rather than silently doing nothing.
+    async fn net_diagnostic(&self, probe: NetProbe, target: &str) -> ActionResult {
+        let Some(backend) = self.net_diagnostics_backend.as_ref() else {
+            return ActionResult::failure(
+                "network diagnostics backend not configured in this deployment",
+            );
+        };
+        let target = target.trim();
+        if target.is_empty() {
+            return ActionResult::failure("net diagnostic needs a target host");
+        }
+        let result = match probe {
+            NetProbe::Check => backend.check(target).await,
+            NetProbe::Trace => backend.trace(target).await,
+            NetProbe::Cert => backend.cert(target).await,
+        };
+        match result {
+            Ok(report) => ActionResult::success(report),
+            Err(e) => ActionResult::failure(e.to_string()),
         }
     }
 

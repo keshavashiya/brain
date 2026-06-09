@@ -241,6 +241,18 @@ fn token_to_action(token: &intent::IntentToken) -> Option<cortex::actions::Actio
         ("net", "http") => Some(Action::WebSearch {
             query: first_str(v, &["query", "q", "url", "text", "input", "prompt"])?,
         }),
+        ("net", "check") => Some(Action::NetDiagnostic {
+            probe: cortex::actions::NetProbe::Check,
+            target: net_target(v)?,
+        }),
+        ("net", "trace") => Some(Action::NetDiagnostic {
+            probe: cortex::actions::NetProbe::Trace,
+            target: net_target(v)?,
+        }),
+        ("net", "cert") => Some(Action::NetDiagnostic {
+            probe: cortex::actions::NetProbe::Cert,
+            target: net_target(v)?,
+        }),
         ("shell", "exec") => Some(Action::ExecuteCommand {
             command: first_str(v, &["command", "cmd", "program"])?,
             args: str_array(v, &["args", "arguments"]),
@@ -278,6 +290,9 @@ fn token_to_action(token: &intent::IntentToken) -> Option<cortex::actions::Actio
 /// with `token_to_action`.
 pub(crate) const TOOL_LOOP_NATIVE_VERBS: &[(&str, &str)] = &[
     ("net", "http"),
+    ("net", "check"),
+    ("net", "trace"),
+    ("net", "cert"),
     ("shell", "exec"),
     ("memory", "store"),
     ("schedule", "create"),
@@ -325,6 +340,12 @@ fn first_str(v: &serde_json::Value, keys: &[&str]) -> Option<String> {
             .filter(|s| !s.is_empty())
             .map(str::to_string)
     })
+}
+
+/// The target host for a `net.check/trace/cert` probe, tolerant of the key
+/// the model picks (`target`/`host`/`url`/`address`/`domain`).
+fn net_target(v: &serde_json::Value) -> Option<String> {
+    first_str(v, &["target", "host", "url", "address", "domain", "hostname"])
 }
 
 /// String array under the first present key among `keys`, or empty.
@@ -543,6 +564,9 @@ mod tool_call_dispatch_tests {
         let args_for = |ns: &str, action: &str| -> serde_json::Value {
             match (ns, action) {
                 ("net", "http") => serde_json::json!({ "query": "x" }),
+                ("net", "check") | ("net", "trace") | ("net", "cert") => {
+                    serde_json::json!({ "target": "example.com" })
+                }
                 ("shell", "exec") => serde_json::json!({ "command": "ls" }),
                 ("memory", "store") => {
                     serde_json::json!({ "subject": "s", "predicate": "p", "object": "o" })

@@ -105,6 +105,12 @@ reqwest = { version = "0.13", features = ["json", "stream", "blocking", "query",
 # URL parsing
 url = "2"
 
+# TLS + X.509 parsing for `brain net cert` certificate inspection. `tokio-rustls`
+# re-exports `rustls` (+ `rustls::pki_types`), so we don't depend on them
+# separately; `x509-cert` reuses the already-present `der` 0.7.
+tokio-rustls = "0.26"
+x509-cert = "0.2"
+
 # Database
 rusqlite = { version = "0.39", features = ["bundled"] }
 r2d2 = "0.8"

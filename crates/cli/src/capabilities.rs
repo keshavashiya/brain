@@ -41,6 +41,9 @@ pub struct WiredNatives {
     pub terminal: bool,
     /// Path-scoped filesystem read — always wired.
     pub fs_read: bool,
+    /// Read-only network diagnostics (`net.check`/`trace`/`cert`) — always
+    /// wired; they neither search nor fetch, so they don't track web_search.
+    pub net_diag: bool,
 }
 
 impl WiredNatives {
@@ -55,6 +58,7 @@ impl WiredNatives {
             messaging: config.actions.messaging.enabled,
             terminal: true,
             fs_read: true,
+            net_diag: true,
         }
     }
 }
@@ -296,6 +300,48 @@ pub fn native_descriptors(w: WiredNatives) -> Vec<ToolDescriptor> {
         ));
     }
 
+    if w.net_diag {
+        out.push(native(
+            "net",
+            "check",
+            net(),
+            read_only(),
+            usage(
+                "The user asks whether a host/endpoint is reachable, or to diagnose a connectivity problem.",
+                "For fetching a page's contents — use net.http (web search/fetch).",
+                &["Network egress is permitted."],
+                "network call (DNS + a single TCP connect)",
+                "\"Can you reach api.github.com:443?\"",
+            ),
+        ));
+        out.push(native(
+            "net",
+            "trace",
+            net(),
+            read_only(),
+            usage(
+                "The user wants to see the network path/hops to a host, e.g. to locate where traffic stalls.",
+                "When only reachability matters — net.check is faster.",
+                &["Network egress is permitted.", "`traceroute` is available (Unix)."],
+                "network call (spawns a bounded traceroute child process)",
+                "\"Trace the route to example.com\"",
+            ),
+        ));
+        out.push(native(
+            "net",
+            "cert",
+            net(),
+            read_only(),
+            usage(
+                "The user asks about a site's TLS certificate — expiry, issuer, or SANs.",
+                "For plain reachability — use net.check.",
+                &["Network egress is permitted."],
+                "network call (a single TLS handshake)",
+                "\"When does the cert for example.com expire?\"",
+            ),
+        ));
+    }
+
     out
 }
 
@@ -342,6 +388,7 @@ mod tests {
             messaging: true,
             terminal: true,
             fs_read: true,
+            net_diag: true,
         }
     }
 
@@ -383,14 +430,17 @@ mod tests {
             messaging: false,
             terminal: true,
             fs_read: true,
+            net_diag: true,
         };
         let ds = native_descriptors(w);
-        assert!(!ds.iter().any(|d| d.verb.namespace == "net"));
+        // The egress verb (net.http) is gated by web search; diagnostics are not.
+        assert!(!ds.iter().any(|d| d.verb == Verb::new("net", "http")));
         assert!(!ds.iter().any(|d| d.verb.namespace == "schedule"));
         assert!(!ds.iter().any(|d| d.verb.namespace == "notify"));
         // Always-on + terminal still present.
         assert!(ds.iter().any(|d| d.verb == Verb::new("memory", "store")));
         assert!(ds.iter().any(|d| d.verb == Verb::new("shell", "exec")));
+        assert!(ds.iter().any(|d| d.verb == Verb::new("net", "check")));
     }
 
     #[test]

@@ -22,6 +22,8 @@ observe = { workspace = true }
 resilience = { workspace = true }
 reqwest = { workspace = true }
 tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+x509-cert = { workspace = true }
 url = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

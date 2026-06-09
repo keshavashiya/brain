@@ -133,6 +133,24 @@ pub const VERBS: &[VerbSpec] = &[
         summary: "Perform an outbound HTTP request (web search, fetch).",
     },
     VerbSpec {
+        ns: "net",
+        action: "check",
+        tier_hint: TierHint::External,
+        summary: "Check reachability of a host: DNS resolution + timed TCP connect.",
+    },
+    VerbSpec {
+        ns: "net",
+        action: "trace",
+        tier_hint: TierHint::External,
+        summary: "Trace the network route (hops) to a host.",
+    },
+    VerbSpec {
+        ns: "net",
+        action: "cert",
+        tier_hint: TierHint::External,
+        summary: "Inspect the TLS certificate chain a host presents (validity, SANs).",
+    },
+    VerbSpec {
         ns: "notify",
         action: "send",
         tier_hint: TierHint::External,
@@ -322,9 +340,10 @@ mod tests {
 
     #[test]
     fn vocabulary_contains_expected_size() {
-        // Spot-check: as of v0.4.0 we have 23 verbs. Bumping this
+        // Spot-check: 23 verbs through v0.4.0, +3 net diagnostics
+        // (net.check/trace/cert, Issue 139) = 26. Bumping this
         // intentionally is fine — the test exists so silent additions
         // (or removals) surface in review.
-        assert_eq!(VERBS.len(), 23);
+        assert_eq!(VERBS.len(), 26);
     }
 }

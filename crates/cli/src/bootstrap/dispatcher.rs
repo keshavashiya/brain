@@ -181,5 +181,11 @@ pub(super) fn build_action_dispatcher(
         }
     }
 
+    // ── Network diagnostics backend ──────────────────────────────────────
+    // Always wired: read-only probes (check/trace/cert) with no config gate
+    // and no API key. Pure std/tokio + rustls; egress consent is enforced at
+    // the External tier when dispatched.
+    dispatcher = dispatcher.with_net_diagnostics_backend(Arc::new(NetDiagnostics));
+
     Ok(dispatcher)
 }

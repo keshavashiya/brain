@@ -14,6 +14,7 @@ mod export;
 mod init;
 mod logging;
 mod logs;
+mod net;
 mod serve;
 mod service;
 mod status;
@@ -256,6 +257,21 @@ enum Commands {
         action: baseline::BaselineAction,
     },
 
+    /// Network diagnostics — reachability, route tracing, and TLS certificates.
+    ///
+    /// Read-only probes that resolve, connect, trace, and inspect — they never
+    /// fetch page contents (use the chat for that). `trace` needs the system
+    /// `traceroute` (Unix).
+    ///
+    /// Examples:
+    ///   brain net check api.github.com:443   # DNS + timed TCP connect
+    ///   brain net trace example.com          # route hops
+    ///   brain net cert example.com           # TLS cert: expiry, issuer, SANs
+    Net {
+        #[command(subcommand)]
+        action: net::NetAction,
+    },
+
     /// Manage the credential vault — store, retrieve, list, delete secrets.
     ///
     /// Raw values are never passed on argv or logged. `set` reads from stdin;
@@ -445,6 +461,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         }
         Commands::Logs { action } => logs::cmd_logs(&config, action).await?,
         Commands::Baseline { action } => baseline::cmd_baseline(&config, action).await?,
+        Commands::Net { action } => net::cmd_net(action).await?,
     }
 
     Ok(())
