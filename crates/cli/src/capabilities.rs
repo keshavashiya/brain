@@ -44,6 +44,9 @@ pub struct WiredNatives {
     /// Read-only network diagnostics (`net.check`/`trace`/`cert`) — always
     /// wired; they neither search nor fetch, so they don't track web_search.
     pub net_diag: bool,
+    /// Read-only security-posture audit (`security.audit`) — always wired;
+    /// pure config inspection, no I/O.
+    pub security_audit: bool,
 }
 
 impl WiredNatives {
@@ -59,6 +62,7 @@ impl WiredNatives {
             terminal: true,
             fs_read: true,
             net_diag: true,
+            security_audit: true,
         }
     }
 }
@@ -145,6 +149,9 @@ pub fn native_descriptors(w: WiredNatives) -> Vec<ToolDescriptor> {
     };
     let fs = || ToolSource::NativeBackend {
         backend: BackendId::new("fs"),
+    };
+    let security = || ToolSource::NativeBackend {
+        backend: BackendId::new("security"),
     };
 
     let mut out = Vec::new();
@@ -342,6 +349,22 @@ pub fn native_descriptors(w: WiredNatives) -> Vec<ToolDescriptor> {
         ));
     }
 
+    if w.security_audit {
+        out.push(native(
+            "security",
+            "audit",
+            security(),
+            read_only(),
+            usage(
+                "The user asks about the security posture, hardening, exposure, or whether the configuration is safe.",
+                "For changing settings — this only reports; it never edits config.",
+                &["None — offline config inspection."],
+                "free / local config inspection",
+                "\"Audit my security setup\" / \"Is anything exposed?\"",
+            ),
+        ));
+    }
+
     out
 }
 
@@ -389,6 +412,7 @@ mod tests {
             terminal: true,
             fs_read: true,
             net_diag: true,
+            security_audit: true,
         }
     }
 
@@ -431,6 +455,7 @@ mod tests {
             terminal: true,
             fs_read: true,
             net_diag: true,
+            security_audit: true,
         };
         let ds = native_descriptors(w);
         // The egress verb (net.http) is gated by web search; diagnostics are not.

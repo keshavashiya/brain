@@ -253,6 +253,7 @@ fn token_to_action(token: &intent::IntentToken) -> Option<cortex::actions::Actio
             probe: cortex::actions::NetProbe::Cert,
             target: net_target(v)?,
         }),
+        ("security", "audit") => Some(Action::SecurityAudit),
         ("shell", "exec") => Some(Action::ExecuteCommand {
             command: first_str(v, &["command", "cmd", "program"])?,
             args: str_array(v, &["args", "arguments"]),
@@ -297,6 +298,7 @@ pub(crate) const TOOL_LOOP_NATIVE_VERBS: &[(&str, &str)] = &[
     ("memory", "store"),
     ("schedule", "create"),
     ("notify", "send"),
+    ("security", "audit"),
 ];
 
 /// True when a native- or terminal-sourced verb has a chat-tool-loop executor
@@ -575,6 +577,7 @@ mod tool_call_dispatch_tests {
                 ("notify", "send") => {
                     serde_json::json!({ "channel": "c", "content": "m" })
                 }
+                // security.audit takes no args — the wildcard `{}` is correct.
                 _ => serde_json::json!({}),
             }
         };

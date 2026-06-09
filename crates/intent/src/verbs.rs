@@ -216,6 +216,12 @@ pub const VERBS: &[VerbSpec] = &[
         tier_hint: TierHint::Destructive,
         summary: "Prune audit-log rows older than the given duration.",
     },
+    VerbSpec {
+        ns: "security",
+        action: "audit",
+        tier_hint: TierHint::Read,
+        summary: "Audit the security posture of the current configuration.",
+    },
     // ── Channel / preferences ─────────────────────────────────────────
     VerbSpec {
         ns: "channel",
@@ -341,9 +347,9 @@ mod tests {
     #[test]
     fn vocabulary_contains_expected_size() {
         // Spot-check: 23 verbs through v0.4.0, +3 net diagnostics
-        // (net.check/trace/cert, Issue 139) = 26. Bumping this
-        // intentionally is fine — the test exists so silent additions
-        // (or removals) surface in review.
-        assert_eq!(VERBS.len(), 26);
+        // (net.check/trace/cert, Issue 139), +1 security.audit
+        // (Issue 140) = 27. Bumping this intentionally is fine — the
+        // test exists so silent additions (or removals) surface in review.
+        assert_eq!(VERBS.len(), 27);
     }
 }

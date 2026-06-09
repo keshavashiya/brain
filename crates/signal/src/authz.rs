@@ -70,7 +70,7 @@ pub(crate) fn tier_for_verb(verb_ns: &str, verb_action: &str) -> Tier {
         | ("channel", "configure")
         | ("proactivity", "configure")
         | ("terminal", "close") => Tier::Write,
-        ("fs", "read") => Tier::Read,
+        ("fs", "read") | ("security", "audit") => Tier::Read,
         ("shell", _) | ("terminal", "open") | ("task", "decompose") | ("agent", "delegate") => {
             Tier::Execute
         }

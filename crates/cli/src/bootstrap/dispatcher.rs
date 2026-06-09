@@ -187,5 +187,12 @@ pub(super) fn build_action_dispatcher(
     // the External tier when dispatched.
     dispatcher = dispatcher.with_net_diagnostics_backend(Arc::new(NetDiagnostics));
 
+    // ── Security audit backend ───────────────────────────────────────────
+    // Always wired: a pure, offline audit over a snapshot of the loaded
+    // config. Read-only (Read tier), no network, no key.
+    dispatcher = dispatcher.with_security_audit_backend(Arc::new(
+        crate::security::ConfigSecurityAuditor::new(config.clone()),
+    ));
+
     Ok(dispatcher)
 }

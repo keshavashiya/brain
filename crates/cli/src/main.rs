@@ -15,6 +15,7 @@ mod init;
 mod logging;
 mod logs;
 mod net;
+mod security;
 mod serve;
 mod service;
 mod status;
@@ -272,6 +273,20 @@ enum Commands {
         action: net::NetAction,
     },
 
+    /// Security — audit the running configuration's security posture.
+    ///
+    /// Offline, read-only review of network exposure, authentication, egress,
+    /// secret handling, the execution sandbox surface, and at-rest encryption.
+    /// Reports severity-ranked findings; it never changes anything.
+    ///
+    /// Examples:
+    ///   brain security audit          # human-readable findings
+    ///   brain security audit --json   # machine-readable findings
+    Security {
+        #[command(subcommand)]
+        action: security::SecurityAction,
+    },
+
     /// Manage the credential vault — store, retrieve, list, delete secrets.
     ///
     /// Raw values are never passed on argv or logged. `set` reads from stdin;
@@ -462,6 +477,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Logs { action } => logs::cmd_logs(&config, action).await?,
         Commands::Baseline { action } => baseline::cmd_baseline(&config, action).await?,
         Commands::Net { action } => net::cmd_net(action).await?,
+        Commands::Security { action } => security::cmd_security(&config, action).await?,
     }
 
     Ok(())

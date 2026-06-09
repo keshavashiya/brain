@@ -63,6 +63,8 @@ pub enum Action {
     },
     /// Run a read-only network diagnostic probe against a target host.
     NetDiagnostic { probe: NetProbe, target: String },
+    /// Run a read-only audit of the security posture.
+    SecurityAudit,
 }
 
 /// Which network diagnostic to run. Backs the `net.check` / `net.trace` /
@@ -203,6 +205,14 @@ pub trait NetDiagnosticsBackend: Send + Sync {
     async fn cert(&self, target: &str) -> Result<String, ActionError>;
 }
 
+/// Optional backend for a read-only security-posture audit (Issue 140).
+/// Inspects the loaded config and returns a rendered, severity-ranked report.
+/// No network, no LLM — a deterministic consequence of the configuration.
+#[async_trait::async_trait]
+pub trait SecurityAuditBackend: Send + Sync {
+    async fn audit(&self) -> Result<String, ActionError>;
+}
+
 impl ActionResult {
     /// Create a successful result.
     pub fn success(output: impl Into<String>) -> Self {
@@ -272,6 +282,7 @@ pub struct ActionDispatcher {
     scheduling_backend: Option<Arc<dyn SchedulingBackend>>,
     message_backend: Option<Arc<dyn MessageBackend>>,
     net_diagnostics_backend: Option<Arc<dyn NetDiagnosticsBackend>>,
+    security_audit_backend: Option<Arc<dyn SecurityAuditBackend>>,
     /// Sandbox executor that backs `Action::ExecuteCommand` (Issue 121).
     /// When unset the action refuses with an explicit error rather than
     /// silently shelling out via raw `tokio::process::Command`.
@@ -290,6 +301,7 @@ impl ActionDispatcher {
             scheduling_backend: None,
             message_backend: None,
             net_diagnostics_backend: None,
+            security_audit_backend: None,
             sandbox_executor: None,
             namespace: "personal".to_string(),
         }
@@ -350,6 +362,15 @@ impl ActionDispatcher {
         self
     }
 
+    /// Attach a security-audit backend (`security.audit`).
+    pub fn with_security_audit_backend(
+        mut self,
+        backend: Arc<dyn SecurityAuditBackend>,
+    ) -> Self {
+        self.security_audit_backend = Some(backend);
+        self
+    }
+
     /// Attach the sandbox executor used by `Action::ExecuteCommand`.
     /// Without one wired, the action returns an explicit error instead
     /// of executing — this is the production hardening from Issue 121.
@@ -392,6 +413,22 @@ impl ActionDispatcher {
                 content,
             } => self.send_message(channel, recipient, content).await,
             Action::NetDiagnostic { probe, target } => self.net_diagnostic(*probe, target).await,
+            Action::SecurityAudit => self.security_audit().await,
+        }
+    }
+
+    /// Run the security-posture audit through the wired
+    /// [`SecurityAuditBackend`]. Without one configured this returns an
+    /// explicit failure rather than silently doing nothing.
+    async fn security_audit(&self) -> ActionResult {
+        let Some(backend) = self.security_audit_backend.as_ref() else {
+            return ActionResult::failure(
+                "security audit backend not configured in this deployment",
+            );
+        };
+        match backend.audit().await {
+            Ok(report) => ActionResult::success(report),
+            Err(e) => ActionResult::failure(e.to_string()),
         }
     }
 
