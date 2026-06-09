@@ -756,6 +756,7 @@ dependencies = [
  "brainos-wsadapter",
  "chrono",
  "clap",
+ "criterion",
  "crossterm 0.28.1",
  "futures",
  "futures-util",

@@ -16,6 +16,7 @@ mod serve;
 mod service;
 mod status;
 mod tail;
+mod update;
 mod vault;
 
 use clap::{Parser, Subcommand};
@@ -253,6 +254,31 @@ enum Commands {
     /// with its safety tier, plus the registered delegate agents. This is
     /// the same manifest the reasoner sees.
     Capabilities,
+
+    /// Regenerate — check for a newer release and self-update via the installer.
+    ///
+    /// Queries the GitHub Releases API for the latest version and, if it is
+    /// newer than the running binary, runs the official one-line installer
+    /// (which handles arch detection + checksum verification) pinned to that
+    /// tag. This is the only command that touches the network for updates;
+    /// nothing checks passively.
+    ///
+    /// Examples:
+    ///   brain update          # check, then install on confirmation
+    ///   brain update --check  # report availability only, install nothing
+    ///   brain update --yes    # install without the confirmation prompt
+    ///   brain update --tag v0.5.0  # install a specific release (reinstall/pin)
+    Update {
+        /// Report whether a newer release exists, then exit without installing.
+        #[arg(long)]
+        check: bool,
+        /// Skip the confirmation prompt before installing.
+        #[arg(long, short)]
+        yes: bool,
+        /// Install this exact release tag instead of the latest.
+        #[arg(long)]
+        tag: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -358,6 +384,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         Commands::Vault { action } => vault::cmd_vault(&config, action).await?,
         Commands::Config { action } => config::cmd_config(&config, action)?,
         Commands::Capabilities => capabilities::cmd_capabilities(&config).await?,
+        Commands::Update { check, yes, tag } => update::cmd_update(check, yes, tag).await?,
         Commands::Tail {
             kind,
             tool_id,

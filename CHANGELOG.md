@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`brain update` — self-update via the official installer.** A new command
+  queries the GitHub Releases API for the latest tag and, if it is newer than the
+  running binary, runs the documented one-line installer pinned to that version
+  (the installer owns arch detection + SHA-256 verification, so there is one
+  audited download path). `--check` reports availability without installing,
+  `--yes` skips the confirmation prompt, and `--tag <v>` pins an exact release
+  for reinstall/downgrade. This is the **only** place Brain probes for updates —
+  `brain --version` and daemon startup never touch the network (no passive
+  checks). Self-install is Unix-only; Windows is pointed at `cargo install` / the
+  releases page.
+
+- **Startup benchmark.** A `startup` criterion bench (`cargo bench -p brainos
+  --bench startup`) pins the two dominant cold-start costs — config resolution
+  from defaults and a fresh database open + full migration walk — so a regression
+  surfaces as a number.
+
 - **Config file migration across versions.** The user's `config.yaml` carries a
   `brain.version` stamp; a newer binary now forward-migrates an older file at
   startup *before* loading it, so values stored under renamed or moved keys
