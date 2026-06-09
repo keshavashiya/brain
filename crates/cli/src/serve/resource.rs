@@ -134,6 +134,46 @@ pub(crate) struct Crossing {
     pub(crate) severity: &'static str,
 }
 
+impl Crossing {
+    /// A human-readable, actionable advisory — the body of the proactive
+    /// notification surfaced to the user when a gauge crosses its ceiling.
+    ///
+    /// Each line describes what Brain *actually* measures (this process and its
+    /// `~/.brain` data directory), never an OS-wide claim, and suggests a
+    /// concrete next step. Edge-triggering upstream guarantees one advisory per
+    /// crossing rather than one per sample.
+    pub(crate) fn advisory(&self) -> String {
+        match self.gauge {
+            "rss" => format!(
+                "Brain's memory use is {:.0} MiB, over the {:.0} MiB ceiling. \
+                 If it keeps climbing, restart the daemon to reclaim it.",
+                self.value, self.threshold
+            ),
+            "cpu" => format!(
+                "Brain's CPU use is {:.0}%, over the {:.0}% ceiling. \
+                 A background task may be stuck — check `brain status`.",
+                self.value, self.threshold
+            ),
+            "disk" => format!(
+                "Brain's data directory (~/.brain) is using {:.0} MiB, over the \
+                 {:.0} MiB ceiling. Run memory consolidation or prune old \
+                 episodes to reclaim space.",
+                self.value, self.threshold
+            ),
+            "fds" => format!(
+                "Brain is holding {:.0} open file descriptors, over the {:.0} \
+                 ceiling. This can signal a descriptor leak — restart the daemon \
+                 if it keeps climbing.",
+                self.value, self.threshold
+            ),
+            other => format!(
+                "Brain resource '{other}' is at {:.0}, over its {:.0} ceiling.",
+                self.value, self.threshold
+            ),
+        }
+    }
+}
+
 /// Per-gauge over/under state for edge-triggered pressure detection. A gauge
 /// that rises above its ceiling yields one [`Crossing`]; while it stays over it
 /// yields nothing more; only after it drops back under and re-crosses does it
@@ -371,6 +411,47 @@ mod tests {
         assert_eq!(crossings[0].gauge, "cpu");
         assert_eq!(crossings[0].value, 75.0);
         assert_eq!(crossings[1].gauge, "rss");
+    }
+
+    #[test]
+    fn advisory_is_gauge_specific_and_actionable() {
+        // Each gauge gets a distinct, actionable line that names what was
+        // actually measured (process / ~/.brain), with the value + ceiling.
+        let cases = [
+            ("rss", "memory", "restart"),
+            ("cpu", "CPU", "brain status"),
+            ("disk", "~/.brain", "consolidation"),
+            ("fds", "file descriptors", "leak"),
+        ];
+        for (gauge, names, advises) in cases {
+            let c = Crossing {
+                gauge,
+                value: 150.0,
+                threshold: 100.0,
+                severity: "warn",
+            };
+            let msg = c.advisory();
+            assert!(msg.contains(names), "{gauge}: expected '{names}' in: {msg}");
+            assert!(
+                msg.contains(advises),
+                "{gauge}: expected advice '{advises}' in: {msg}"
+            );
+            assert!(msg.contains("150"), "{gauge}: value missing in: {msg}");
+            assert!(msg.contains("100"), "{gauge}: ceiling missing in: {msg}");
+        }
+    }
+
+    #[test]
+    fn advisory_handles_unknown_gauge() {
+        let c = Crossing {
+            gauge: "future_gauge",
+            value: 9.0,
+            threshold: 5.0,
+            severity: "warn",
+        };
+        let msg = c.advisory();
+        assert!(msg.contains("future_gauge"));
+        assert!(msg.contains('9') && msg.contains('5'));
     }
 
     #[test]

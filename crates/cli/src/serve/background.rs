@@ -252,30 +252,43 @@ pub(super) fn spawn_resource_sampler(
                 );
             }
 
-            // Edge-triggered: publish a ResourcePressure only on a fresh
-            // crossing, so the bus isn't spammed while a gauge stays over.
-            let crossings = tracker.evaluate(&snap, &thresholds);
-            if !crossings.is_empty() {
+            // Edge-triggered: act on a fresh crossing only, so neither the bus
+            // nor the user is spammed while a gauge stays over its ceiling. Each
+            // crossing both publishes a `ResourcePressure` event (for the Live
+            // tab / metrics) and delivers a proactive, actionable notification
+            // (Issue 136) — the latter is what reaches the user out-of-band.
+            for c in tracker.evaluate(&snap, &thresholds) {
+                tracing::warn!(
+                    gauge = c.gauge,
+                    value = c.value,
+                    threshold = c.threshold,
+                    severity = c.severity,
+                    "Resource pressure: {} over ceiling",
+                    c.gauge
+                );
                 if let Some(observer) = p.observer() {
-                    for c in crossings {
-                        tracing::warn!(
-                            gauge = c.gauge,
-                            value = c.value,
-                            threshold = c.threshold,
-                            severity = c.severity,
-                            "Resource pressure: {} over ceiling",
-                            c.gauge
-                        );
-                        let ev = observe::BrainEvent::ResourcePressure {
-                            id: uuid::Uuid::new_v4(),
-                            gauge: c.gauge.to_string(),
-                            value: c.value,
-                            threshold: c.threshold,
-                            severity: c.severity.to_string(),
-                            ts: chrono::Utc::now(),
-                        };
-                        let _ = observer.publish(ev).await;
-                    }
+                    let ev = observe::BrainEvent::ResourcePressure {
+                        id: uuid::Uuid::new_v4(),
+                        gauge: c.gauge.to_string(),
+                        value: c.value,
+                        threshold: c.threshold,
+                        severity: c.severity.to_string(),
+                        ts: chrono::Utc::now(),
+                    };
+                    let _ = observer.publish(ev).await;
+                }
+                if let Some(router) = p.notification_router() {
+                    // Operational health alert — delivered regardless of the
+                    // proactivity toggle (that gates habit-style nudges, not
+                    // self-health warnings). Priority 2 outranks habit nudges (1).
+                    router
+                        .deliver(signal::notification::ProactiveNotification {
+                            content: c.advisory(),
+                            triggered_by: format!("resource_pressure:{}", c.gauge),
+                            priority: 2,
+                            agent: None,
+                        })
+                        .await;
                 }
             }
         }
