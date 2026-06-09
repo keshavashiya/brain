@@ -7,6 +7,29 @@ use metrics::SubsystemMetrics;
 
 use crate::resilience::{http_breaker, resilient_send, CircuitBreaker};
 
+/// The capability this backend declares: outbound HTTP for web search + URL
+/// fetch, gated on `actions.web_search.enabled` (the same flag the dispatcher
+/// keys the search/fetch backends off).
+pub fn capabilities(config: &brain::BrainConfig) -> Vec<intent::ToolDescriptor> {
+    use crate::capabilities::{backend, native, read_only, usage};
+    if !config.actions.web_search.enabled {
+        return Vec::new();
+    }
+    vec![native(
+        "net",
+        "http",
+        backend("net"),
+        read_only(),
+        usage(
+            "The answer needs fresh, external, or post-training-cutoff information, or the user references a URL to read.",
+            "The answer is in memory, the conversation, or general knowledge.",
+            &["actions.web_search.enabled = true", "Network egress is permitted."],
+            "network call (latency + possible API quota)",
+            "\"What's the latest release of ripgrep?\"",
+        ),
+    )]
+}
+
 fn make_cb(
     name: &str,
     resilience: &brain::config::ResilienceConfig,

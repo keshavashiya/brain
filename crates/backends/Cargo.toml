@@ -16,6 +16,7 @@ anyhow        = { workspace = true }
 brain         = { workspace = true }
 metrics       = { workspace = true }
 cortex = { workspace = true }
+intent = { workspace = true }
 hippocampus = { workspace = true }
 storage = { workspace = true }
 signal = { workspace = true }

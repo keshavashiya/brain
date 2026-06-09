@@ -1,5 +1,44 @@
 //! Scheduling backend — persists scheduled intents to SQLite.
 
+/// The capabilities this backend declares: schedule create/cancel, gated on
+/// `actions.scheduling.enabled`.
+pub fn capabilities(config: &brain::BrainConfig) -> Vec<intent::ToolDescriptor> {
+    use crate::capabilities::{backend, native, usage};
+    use intent::ToolAnnotations;
+    if !config.actions.scheduling.enabled {
+        return Vec::new();
+    }
+    let sched = || backend("scheduling");
+    vec![
+        native(
+            "schedule",
+            "create",
+            sched(),
+            ToolAnnotations::default(),
+            usage(
+                "The user wants something to happen later or on a recurring cadence.",
+                "For one-shot actions to run right now.",
+                &["actions.scheduling.enabled = true"],
+                "free / local row",
+                "\"Remind me to rotate the certs every 90 days\"",
+            ),
+        ),
+        native(
+            "schedule",
+            "cancel",
+            sched(),
+            ToolAnnotations::default(),
+            usage(
+                "The user wants to stop a previously scheduled item.",
+                "When the schedule id / description is unknown.",
+                &["actions.scheduling.enabled = true"],
+                "free / local row",
+                "\"Cancel the nightly backup reminder\"",
+            ),
+        ),
+    ]
+}
+
 #[derive(Clone)]
 pub struct DefaultSchedulingBackend {
     pub db: storage::SqlitePool,

@@ -34,6 +34,56 @@ use anyhow::{Context, Result};
 use brain::BrainConfig;
 use serde::{Deserialize, Serialize};
 
+/// The capabilities this backend declares: baseline capture/diff/list. Always
+/// wired — local snapshot files, no network. `capture` is a local write;
+/// `diff`/`list` are read-only.
+pub fn capabilities(_config: &BrainConfig) -> Vec<intent::ToolDescriptor> {
+    use crate::capabilities::{backend, native, read_only, usage};
+    use intent::ToolAnnotations;
+    let base = || backend("baseline");
+    vec![
+        native(
+            "baseline",
+            "capture",
+            base(),
+            ToolAnnotations::default(),
+            usage(
+                "The user wants to record the current system state so future drift can be detected.",
+                "For comparing against an existing snapshot — use baseline.diff.",
+                &["None — offline config + capability snapshot."],
+                "free / local snapshot file",
+                "\"Capture a baseline of the current setup\"",
+            ),
+        ),
+        native(
+            "baseline",
+            "diff",
+            base(),
+            read_only(),
+            usage(
+                "The user asks what has changed since a baseline, or to detect configuration drift.",
+                "When no baseline has been captured yet — capture one first.",
+                &["At least one baseline has been captured."],
+                "free / local snapshot comparison",
+                "\"What's drifted since my last baseline?\"",
+            ),
+        ),
+        native(
+            "baseline",
+            "list",
+            base(),
+            read_only(),
+            usage(
+                "The user wants to see which baseline snapshots have been stored.",
+                "For the contents of a specific snapshot — use baseline.diff.",
+                &["None."],
+                "free / local directory listing",
+                "\"List the baselines I've captured\"",
+            ),
+        ),
+    ]
+}
+
 /// One native capability, flattened for the baseline snapshot. The composition
 /// root builds these from the registered descriptors and hands them to
 /// [`capture`] / [`diff`], so this core never depends on the descriptor source.

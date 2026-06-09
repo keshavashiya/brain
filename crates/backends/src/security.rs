@@ -16,6 +16,25 @@
 use brain::BrainConfig;
 use serde::Serialize;
 
+/// The capability this backend declares: a read-only, offline security-posture
+/// audit. Always wired — pure config inspection, no I/O.
+pub fn capabilities(_config: &BrainConfig) -> Vec<intent::ToolDescriptor> {
+    use crate::capabilities::{backend, native, read_only, usage};
+    vec![native(
+        "security",
+        "audit",
+        backend("security"),
+        read_only(),
+        usage(
+            "The user asks about the security posture, hardening, exposure, or whether the configuration is safe.",
+            "For changing settings — this only reports; it never edits config.",
+            &["None — offline config inspection."],
+            "free / local config inspection",
+            "\"Audit my security setup\" / \"Is anything exposed?\"",
+        ),
+    )]
+}
+
 /// Finding severity, ordered most-to-least serious. Derived `Ord` follows
 /// declaration order, so sorting ascending puts the worst findings first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]

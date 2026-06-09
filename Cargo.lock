@@ -826,6 +826,7 @@ dependencies = [
  "brainos-core",
  "brainos-cortex",
  "brainos-hippocampus",
+ "brainos-intent",
  "brainos-metrics",
  "brainos-observe",
  "brainos-resilience",

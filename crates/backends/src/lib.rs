@@ -3,6 +3,7 @@
 //! Extracted from the CLI crate so they can be reused by adapters and tests.
 
 pub mod baseline;
+pub mod capabilities;
 pub mod error;
 pub mod fetch;
 pub mod logs;
@@ -15,6 +16,7 @@ pub mod search;
 pub mod security;
 
 pub use baseline::{BaselineProvider, CapabilitySummary};
+pub use capabilities::native_capabilities;
 pub use error::BackendInitError;
 pub use fetch::BasicUrlFetcher;
 pub use logs::LogAnalysis;

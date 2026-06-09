@@ -35,6 +35,25 @@ use anyhow::{Context, Result};
 use brain::BrainConfig;
 use chrono::{DateTime, Utc};
 
+/// The capability this backend declares: read-only log pattern analysis. Always
+/// wired — it reads the daemon's own (or the OS) log offline.
+pub fn capabilities(_config: &BrainConfig) -> Vec<intent::ToolDescriptor> {
+    use crate::capabilities::{backend, native, read_only, usage};
+    vec![native(
+        "logs",
+        "analyze",
+        backend("logs"),
+        read_only(),
+        usage(
+            "The user asks what's been going wrong, to scan recent logs, or to surface recurring errors/warnings.",
+            "For reading a specific file's contents — use fs.read.",
+            &["The daemon has written logs (or the OS log is readable)."],
+            "free / local log read (offline; optional LLM narration)",
+            "\"Any recurring errors in the logs lately?\"",
+        ),
+    )]
+}
+
 /// Where to read logs from. A plain enum (no `clap` derive) so the backends
 /// crate stays free of the CLI's arg-parsing dependency; the CLI maps its own
 /// `--source` value onto this.

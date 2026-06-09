@@ -7,6 +7,32 @@ use metrics::SubsystemMetrics;
 
 use crate::resilience::{http_breaker, resilient_send, CircuitBreaker};
 
+/// The capability this backend declares: outbound messaging through the channel
+/// dispatcher, gated on `actions.messaging.enabled`.
+pub fn capabilities(config: &brain::BrainConfig) -> Vec<intent::ToolDescriptor> {
+    use crate::capabilities::{backend, native, usage};
+    use intent::ToolAnnotations;
+    if !config.actions.messaging.enabled {
+        return Vec::new();
+    }
+    vec![native(
+        "notify",
+        "send",
+        backend("messaging"),
+        ToolAnnotations::default(),
+        usage(
+            "The user asks to send a message/notification out through a configured channel.",
+            "For replying inside the current conversation — just answer.",
+            &[
+                "actions.messaging.enabled = true",
+                "A channel transport is configured.",
+            ],
+            "network call (external delivery)",
+            "\"Ping the ops webhook when the job finishes\"",
+        ),
+    )]
+}
+
 pub const DEFAULT_MESSAGE_BODY: &str = r#"{"channel":"{{channel}}","recipient":"{{recipient}}","content":"{{content}}","namespace":"{{namespace}}","timestamp":"{{timestamp}}"}"#;
 
 /// JSON-escape a string value (without surrounding quotes).

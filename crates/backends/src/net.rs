@@ -27,6 +27,55 @@ use std::time::{Duration, Instant};
 
 use tokio::net::TcpStream;
 
+/// The capabilities this backend declares: read-only network diagnostics
+/// (check/trace/cert). Always wired — they neither search nor fetch, so they
+/// don't track `actions.web_search`; egress consent is enforced at dispatch.
+pub fn capabilities(_config: &brain::BrainConfig) -> Vec<intent::ToolDescriptor> {
+    use crate::capabilities::{backend, native, read_only, usage};
+    let net = || backend("net");
+    vec![
+        native(
+            "net",
+            "check",
+            net(),
+            read_only(),
+            usage(
+                "The user asks whether a host/endpoint is reachable, or to diagnose a connectivity problem.",
+                "For fetching a page's contents — use net.http (web search/fetch).",
+                &["Network egress is permitted."],
+                "network call (DNS + a single TCP connect)",
+                "\"Can you reach api.github.com:443?\"",
+            ),
+        ),
+        native(
+            "net",
+            "trace",
+            net(),
+            read_only(),
+            usage(
+                "The user wants to see the network path/hops to a host, e.g. to locate where traffic stalls.",
+                "When only reachability matters — net.check is faster.",
+                &["Network egress is permitted.", "`traceroute` is available (Unix)."],
+                "network call (spawns a bounded traceroute child process)",
+                "\"Trace the route to example.com\"",
+            ),
+        ),
+        native(
+            "net",
+            "cert",
+            net(),
+            read_only(),
+            usage(
+                "The user asks about a site's TLS certificate — expiry, issuer, or SANs.",
+                "For plain reachability — use net.check.",
+                &["Network egress is permitted."],
+                "network call (a single TLS handshake)",
+                "\"When does the cert for example.com expire?\"",
+            ),
+        ),
+    ]
+}
+
 /// Default port used when a `check`/`cert` target names only a host. 443 is the
 /// most useful default for a local-first kernel probing HTTPS API endpoints.
 pub const DEFAULT_PORT: u16 = 443;

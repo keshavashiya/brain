@@ -2,6 +2,42 @@
 
 use std::sync::Arc;
 
+/// The capabilities this backend declares for the one manifest. Semantic-memory
+/// store/delete are always wired, so the config is not consulted.
+pub fn capabilities(_config: &brain::BrainConfig) -> Vec<intent::ToolDescriptor> {
+    use crate::capabilities::{backend, destructive, native, usage};
+    use intent::ToolAnnotations;
+    let mem = || backend("memory");
+    vec![
+        native(
+            "memory",
+            "store",
+            mem(),
+            ToolAnnotations::default(),
+            usage(
+                "The user states a durable fact about themselves, their world, projects, or preferences that should survive the session.",
+                "Transient chit-chat, or content already captured as an episodic turn.",
+                &["A subject-predicate-object triple can be extracted from the statement."],
+                "free / local SQLite + embedding",
+                "\"Remember that my deploy script lives in ops/deploy.sh\"",
+            ),
+        ),
+        native(
+            "memory",
+            "delete",
+            mem(),
+            destructive(),
+            usage(
+                "The user asks to forget or correct a previously stored fact.",
+                "When unsure which facts match — deletion is irreversible.",
+                &["A matching subject/predicate is known."],
+                "free / local",
+                "\"Forget what I said about the old API key\"",
+            ),
+        ),
+    ]
+}
+
 #[derive(Clone)]
 pub struct DefaultMemoryBackend {
     pub semantic: Option<hippocampus::SemanticStore>,
