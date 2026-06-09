@@ -397,7 +397,14 @@ async fn run_deep_checks(config: &BrainConfig, daemon_up: bool, failures: &mut u
     let pool = match storage::SqlitePool::open(&config.sqlite_path()) {
         Ok(pool) => match pool.schema_version() {
             Ok(version) => {
-                println!("  [ok]   sqlite schema          v{version} (migrations applied)");
+                // A successful open auto-migrates, so `version` is current;
+                // report it next to the build's supported version to make any
+                // skew explicit. (A future/downgrade schema can't reach here —
+                // `open` would have refused with SchemaTooNew.)
+                let supported = storage::SqlitePool::latest_schema_version();
+                println!(
+                    "  [ok]   sqlite schema          v{version} (build supports v{supported})"
+                );
                 Some(pool)
             }
             Err(e) => {

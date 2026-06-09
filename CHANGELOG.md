@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Schema version reconciliation + pre-migration backups (data-loss
+  prevention).** Opening the database now reconciles the on-disk schema version
+  against the version this build supports *before* any migration runs. A
+  database written by a **newer** build is refused outright (`SchemaTooNew`)
+  instead of being operated on by an older binary against a future schema — the
+  forward-only corruption path; a recovery/export caller can opt in via the
+  downgrade override. When a **forward** migration is pending against an existing
+  database, a consistent `db/brain.db.bak-v<old>` snapshot (via `VACUUM INTO`,
+  capturing committed + WAL state) is written first. `brain doctor --deep` now
+  reports the on-disk schema version alongside the build's supported version so
+  skew is explicit. Fresh databases are unaffected (nothing to back up).
+
 - **Runtime resource gauges + pressure events.** A single bounded background
   task now samples process RSS, CPU, open SQLite connections, and `~/.brain`
   disk usage every `observability.resource_sample_secs` (30s default), writing

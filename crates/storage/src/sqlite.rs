@@ -47,6 +47,23 @@ pub enum SqliteError {
 
     #[error("Migration failed: {0}")]
     Migration(String),
+
+    /// The on-disk schema is newer than this binary knows how to run.
+    /// Forward-only migrations can't walk a schema *backwards*, so opening
+    /// would mean operating an old binary on a future schema — the
+    /// data-corruption path. Refused unless the caller opts into a
+    /// downgrade override.
+    #[error(
+        "database schema v{found} is newer than this build supports (v{supported}); \
+         upgrade brain, or re-open with the downgrade override if you accept the risk"
+    )]
+    SchemaTooNew { found: i64, supported: i64 },
+
+    /// A pre-migration snapshot of the database could not be written.
+    /// Treated as fatal: we will not mutate an existing schema without a
+    /// recoverable copy in hand.
+    #[error("pre-migration backup failed: {0}")]
+    Backup(String),
 }
 
 impl From<r2d2::Error> for SqliteError {
@@ -157,8 +174,19 @@ impl SqlitePool {
     /// - Creates the file if it doesn't exist
     /// - Enables WAL mode for concurrent reads
     /// - Enables foreign keys
+    /// - Reconciles the on-disk schema version against this build
+    ///   (refuses a future schema; snapshots before a forward migration)
     /// - Runs all schema migrations
     pub fn open(path: &Path) -> Result<Self, SqliteError> {
+        Self::open_with(path, false)
+    }
+
+    /// Like [`SqlitePool::open`], but `allow_downgrade` suppresses the
+    /// [`SqliteError::SchemaTooNew`] guard so an older binary can be forced
+    /// onto a newer on-disk schema. The forward-only migration runner still
+    /// won't alter the schema downward — this only un-gates the open so a
+    /// recovery/export path can read what it can.
+    pub fn open_with(path: &Path, allow_downgrade: bool) -> Result<Self, SqliteError> {
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -176,6 +204,11 @@ impl SqlitePool {
             encryptor: None,
         };
 
+        // Version skew is checked *before* any DDL runs: refuse a future
+        // schema outright, and snapshot an existing database before a
+        // forward migration mutates it.
+        p.reconcile_schema_version(path, allow_downgrade)?;
+
         // Run migrations on one borrowed connection — DDL is persisted
         // to the file so subsequent pool checkouts see the new schema.
         p.migrate()?;
@@ -185,6 +218,72 @@ impl SqlitePool {
             path.display()
         );
         Ok(p)
+    }
+
+    /// Pre-migration safety gate. Compares the on-disk schema version (0 on
+    /// a fresh file) against the latest migration this build carries:
+    ///
+    /// - **on-disk > build** → [`SqliteError::SchemaTooNew`] (data-loss
+    ///   prevention: an old binary must not run a future schema), unless
+    ///   `allow_downgrade`.
+    /// - **0 < on-disk < build** → a forward migration is pending against an
+    ///   existing database, so a consistent snapshot is written first.
+    /// - **on-disk == build** or a fresh file → nothing to do.
+    fn reconcile_schema_version(
+        &self,
+        path: &Path,
+        allow_downgrade: bool,
+    ) -> Result<(), SqliteError> {
+        let found = self.schema_version()?;
+        let supported = Self::latest_schema_version();
+
+        if found > supported {
+            if allow_downgrade {
+                info!(
+                    "Opening schema v{found} with an older build (supports v{supported}) — \
+                     downgrade override active"
+                );
+            } else {
+                return Err(SqliteError::SchemaTooNew { found, supported });
+            }
+        }
+
+        if found > 0 && found < supported {
+            self.backup_before_migration(path, found)?;
+        }
+
+        Ok(())
+    }
+
+    /// Write a consistent snapshot of the database to a sibling
+    /// `*.bak-v<version>` file before a forward migration runs. Uses
+    /// `VACUUM INTO` so the copy reflects committed + WAL state as one
+    /// atomic image (a plain file copy could miss un-checkpointed WAL).
+    fn backup_before_migration(&self, path: &Path, version: i64) -> Result<(), SqliteError> {
+        let file_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("brain.db");
+        let backup = path.with_file_name(format!("{file_name}.bak-v{version}"));
+
+        // VACUUM INTO refuses to overwrite; clear a stale same-version copy.
+        if backup.exists() {
+            std::fs::remove_file(&backup)
+                .map_err(|e| SqliteError::Backup(format!("{}: {e}", backup.display())))?;
+        }
+
+        let target = backup.to_string_lossy().to_string();
+        self.with_conn(|conn| {
+            conn.execute("VACUUM INTO ?1", rusqlite::params![target])?;
+            Ok(())
+        })
+        .map_err(|e| SqliteError::Backup(e.to_string()))?;
+
+        info!(
+            "Pre-migration backup written to {} (schema v{version})",
+            backup.display()
+        );
+        Ok(())
     }
 
     /// Open an in-memory database (for testing).

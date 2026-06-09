@@ -448,6 +448,16 @@ impl SqlitePool {
         ]
     }
 
+    /// The highest schema version this build knows how to apply — the
+    /// version a freshly migrated database lands on. Used by the open-time
+    /// reconciliation gate to detect a future (downgrade) schema and by
+    /// `doctor` to report binary-vs-disk skew.
+    pub fn latest_schema_version() -> i64 {
+        Self::migrations()
+            .last()
+            .map_or(0, |(version, _, _)| *version)
+    }
+
     /// Get the current schema version.
     pub fn schema_version(&self) -> Result<i64, SqliteError> {
         self.with_conn(|conn| {

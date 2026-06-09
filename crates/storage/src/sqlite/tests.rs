@@ -423,3 +423,92 @@ fn test_list_namespaces_with_counts() {
     })
     .unwrap();
 }
+
+// ── version reconciliation gate (downgrade guard + pre-migration backup) ──
+
+/// `latest_schema_version()` tracks the declared migration list, so the
+/// open-time gate and `doctor` agree with what `migrate()` actually applies.
+#[test]
+fn latest_schema_version_matches_declared_head() {
+    let head = *EXPECTED_MIGRATION_VERSIONS.last().unwrap();
+    assert_eq!(SqlitePool::latest_schema_version(), head);
+    // A migrated database lands exactly on that version.
+    let pool = SqlitePool::open_memory().unwrap();
+    assert_eq!(pool.schema_version().unwrap(), head);
+}
+
+/// A database whose schema is newer than this build is refused with
+/// `SchemaTooNew` — an old binary must never operate a future schema.
+#[test]
+fn open_refuses_future_schema() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("brain.db");
+
+    // Stand up a normal DB, then forge a migration row one past the head to
+    // simulate a file written by a newer build.
+    let future = SqlitePool::latest_schema_version() + 1;
+    {
+        let pool = SqlitePool::open(&path).unwrap();
+        pool.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO _migrations (version, name) VALUES (?1, 'from_the_future')",
+                rusqlite::params![future],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    match SqlitePool::open(&path) {
+        Err(SqliteError::SchemaTooNew { found, supported }) => {
+            assert_eq!(found, future);
+            assert_eq!(supported, SqlitePool::latest_schema_version());
+        }
+        Err(e) => panic!("expected SchemaTooNew, got a different error: {e}"),
+        Ok(_) => panic!("expected SchemaTooNew, but open succeeded"),
+    }
+
+    // The downgrade override un-gates the open.
+    assert!(SqlitePool::open_with(&path, true).is_ok());
+}
+
+/// A pending forward migration on an existing database writes a consistent
+/// `*.bak-v<old>` snapshot before mutating the schema; a fresh open writes
+/// none.
+#[test]
+fn forward_migration_snapshots_existing_db() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("brain.db");
+
+    // Fresh open: nothing to snapshot (no prior schema).
+    SqlitePool::open(&path).unwrap();
+    let bak_after_fresh: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains(".bak-v"))
+        .collect();
+    assert!(
+        bak_after_fresh.is_empty(),
+        "a fresh open must not produce a backup"
+    );
+
+    // Rewind the recorded version to simulate an older on-disk schema, so the
+    // next open sees a pending forward migration against existing data.
+    let head = SqlitePool::latest_schema_version();
+    {
+        let pool = SqlitePool::open(&path).unwrap();
+        pool.with_conn(|conn| {
+            conn.execute("DELETE FROM _migrations WHERE version >= ?1", [head])?;
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    SqlitePool::open(&path).unwrap();
+    let backup = path.with_file_name(format!("brain.db.bak-v{}", head - 1));
+    assert!(
+        backup.exists(),
+        "expected pre-migration snapshot at {}",
+        backup.display()
+    );
+}
