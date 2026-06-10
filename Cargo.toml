@@ -50,7 +50,7 @@ result_large_err = "allow"
 large_enum_variant = "allow"
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 # MSRV policy: support the current stable and the two prior minor releases
 # (N, N-1, N-2). Verified in CI by the `msrv` job. Bumps must be called out
@@ -160,38 +160,38 @@ futures-core = "0.3"
 tokio-tungstenite = "0.26"
 
 # Internal crates
-brain = { package = "brainos-core", path = "crates/core", version = "0.4.0" }
-storage = { package = "brainos-storage", path = "crates/storage", version = "0.4.0", default-features = false }
-hippocampus = { package = "brainos-hippocampus", path = "crates/hippocampus", version = "0.4.0" }
-cortex = { package = "brainos-cortex", path = "crates/cortex", version = "0.4.0" }
-thalamus = { package = "brainos-thalamus", path = "crates/thalamus", version = "0.4.0" }
-amygdala = { package = "brainos-amygdala", path = "crates/amygdala", version = "0.4.0" }
-signal = { package = "brainos-signal", path = "crates/signal", version = "0.4.0", default-features = false }
-httpadapter = { package = "brainos-httpadapter", path = "crates/adapters/http", version = "0.4.0" }
-wsadapter = { package = "brainos-wsadapter", path = "crates/adapters/ws", version = "0.4.0" }
-grpcadapter = { package = "brainos-grpcadapter", path = "crates/adapters/grpc", version = "0.4.0" }
-mcp = { package = "brainos-mcp", path = "crates/adapters/mcp", version = "0.4.0" }
-cerebellum = { package = "brainos-cerebellum", path = "crates/cerebellum", version = "0.4.0" }
-ganglia = { package = "brainos-ganglia", path = "crates/ganglia", version = "0.4.0" }
-bridge = { package = "brainos-bridge", path = "crates/bridge", version = "0.4.0" }
-backends = { package = "brainos-backends", path = "crates/backends", version = "0.4.0" }
-audit = { package = "brainos-audit", path = "crates/audit", version = "0.4.0" }
-confirm = { package = "brainos-confirm", path = "crates/confirm", version = "0.4.0" }
-budget = { package = "brainos-budget", path = "crates/budget", version = "0.4.0" }
-sandbox = { package = "brainos-sandbox", path = "crates/sandbox", version = "0.4.0" }
-vault = { package = "brainos-vault", path = "crates/vault", version = "0.4.0" }
-orchestrate = { package = "brainos-orchestrate", path = "crates/orchestrate", version = "0.4.0" }
-channel = { package = "brainos-channel", path = "crates/channel", version = "0.4.0" }
-delegate = { package = "brainos-delegate", path = "crates/delegate", version = "0.4.0" }
-observe = { package = "brainos-observe", path = "crates/observe", version = "0.4.0" }
-identity = { package = "brainos-identity", path = "crates/identity", version = "0.4.0" }
-terminal = { package = "brainos-terminal", path = "crates/adapters/terminal", version = "0.4.0" }
-mcphost = { package = "brainos-mcphost", path = "crates/mcphost", version = "0.4.0" }
-intent = { package = "brainos-intent", path = "crates/intent", version = "0.4.0" }
-reflex = { package = "brainos-reflex", path = "crates/reflex", version = "0.4.0" }
-resilience = { package = "brainos-resilience", path = "crates/resilience", version = "0.4.0" }
-metrics = { package = "brainos-metrics", path = "crates/metrics", version = "0.4.0" }
-selfmodel = { package = "brainos-selfmodel", path = "crates/selfmodel", version = "0.4.0" }
+brain = { package = "brainos-core", path = "crates/core", version = "0.5.0" }
+storage = { package = "brainos-storage", path = "crates/storage", version = "0.5.0", default-features = false }
+hippocampus = { package = "brainos-hippocampus", path = "crates/hippocampus", version = "0.5.0" }
+cortex = { package = "brainos-cortex", path = "crates/cortex", version = "0.5.0" }
+thalamus = { package = "brainos-thalamus", path = "crates/thalamus", version = "0.5.0" }
+amygdala = { package = "brainos-amygdala", path = "crates/amygdala", version = "0.5.0" }
+signal = { package = "brainos-signal", path = "crates/signal", version = "0.5.0", default-features = false }
+httpadapter = { package = "brainos-httpadapter", path = "crates/adapters/http", version = "0.5.0" }
+wsadapter = { package = "brainos-wsadapter", path = "crates/adapters/ws", version = "0.5.0" }
+grpcadapter = { package = "brainos-grpcadapter", path = "crates/adapters/grpc", version = "0.5.0" }
+mcp = { package = "brainos-mcp", path = "crates/adapters/mcp", version = "0.5.0" }
+cerebellum = { package = "brainos-cerebellum", path = "crates/cerebellum", version = "0.5.0" }
+ganglia = { package = "brainos-ganglia", path = "crates/ganglia", version = "0.5.0" }
+bridge = { package = "brainos-bridge", path = "crates/bridge", version = "0.5.0" }
+backends = { package = "brainos-backends", path = "crates/backends", version = "0.5.0" }
+audit = { package = "brainos-audit", path = "crates/audit", version = "0.5.0" }
+confirm = { package = "brainos-confirm", path = "crates/confirm", version = "0.5.0" }
+budget = { package = "brainos-budget", path = "crates/budget", version = "0.5.0" }
+sandbox = { package = "brainos-sandbox", path = "crates/sandbox", version = "0.5.0" }
+vault = { package = "brainos-vault", path = "crates/vault", version = "0.5.0" }
+orchestrate = { package = "brainos-orchestrate", path = "crates/orchestrate", version = "0.5.0" }
+channel = { package = "brainos-channel", path = "crates/channel", version = "0.5.0" }
+delegate = { package = "brainos-delegate", path = "crates/delegate", version = "0.5.0" }
+observe = { package = "brainos-observe", path = "crates/observe", version = "0.5.0" }
+identity = { package = "brainos-identity", path = "crates/identity", version = "0.5.0" }
+terminal = { package = "brainos-terminal", path = "crates/adapters/terminal", version = "0.5.0" }
+mcphost = { package = "brainos-mcphost", path = "crates/mcphost", version = "0.5.0" }
+intent = { package = "brainos-intent", path = "crates/intent", version = "0.5.0" }
+reflex = { package = "brainos-reflex", path = "crates/reflex", version = "0.5.0" }
+resilience = { package = "brainos-resilience", path = "crates/resilience", version = "0.5.0" }
+metrics = { package = "brainos-metrics", path = "crates/metrics", version = "0.5.0" }
+selfmodel = { package = "brainos-selfmodel", path = "crates/selfmodel", version = "0.5.0" }
 
 # Benchmarks
 criterion = { version = "0.8", features = ["html_reports"] }

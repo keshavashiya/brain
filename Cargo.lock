@@ -719,7 +719,7 @@ dependencies = [
 
 [[package]]
 name = "brainos"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -781,7 +781,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-amygdala"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "brainos-cortex",
@@ -799,7 +799,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-audit"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "brainos-core",
@@ -819,7 +819,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-backends"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -850,7 +850,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-bridge"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "futures-util",
@@ -865,7 +865,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-budget"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "brainos-audit",
@@ -886,7 +886,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-cerebellum"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "brainos-core",
  "brainos-storage",
@@ -903,7 +903,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-channel"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "bolero",
@@ -934,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-confirm"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "brainos-core",
@@ -953,7 +953,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "brainos-identity",
  "figment",
@@ -968,7 +968,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-cortex"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -990,7 +990,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-delegate"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1005,7 +1005,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-ganglia"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "brainos-core",
@@ -1026,7 +1026,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-grpcadapter"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "brainos-core",
@@ -1052,7 +1052,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-hippocampus"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "brainos-core",
@@ -1074,7 +1074,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-httpadapter"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1103,7 +1103,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-identity"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "proptest",
@@ -1118,7 +1118,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-intent"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1133,7 +1133,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-mcp"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -1153,7 +1153,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-mcphost"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "axum 0.7.9",
@@ -1182,11 +1182,11 @@ dependencies = [
 
 [[package]]
 name = "brainos-metrics"
-version = "0.4.0"
+version = "0.5.0"
 
 [[package]]
 name = "brainos-observe"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1201,7 +1201,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-orchestrate"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "brainos-audit",
@@ -1231,7 +1231,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-reflex"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "brainos-storage",
@@ -1250,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-resilience"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "blake3",
@@ -1268,7 +1268,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-sandbox"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "brainos-core",
@@ -1285,14 +1285,14 @@ dependencies = [
 
 [[package]]
 name = "brainos-selfmodel"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "brainos-core",
 ]
 
 [[package]]
 name = "brainos-signal"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1339,7 +1339,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-storage"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -1364,7 +1364,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-terminal"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1392,7 +1392,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-thalamus"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "bolero",
@@ -1410,7 +1410,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-vault"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -1434,7 +1434,7 @@ dependencies = [
 
 [[package]]
 name = "brainos-wsadapter"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "async-trait",

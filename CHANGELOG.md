@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-06-10
+
 ### Added
 
 - **`brain update` — self-update via the official installer.** A new command
@@ -278,6 +280,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- **Tool outputs are fenced as untrusted before re-entering model context.**
+  Results fed back to the model by the chat tool-use loop (MCP response
+  bodies, fetched pages, file contents, shell stdout) now get the same
+  labeled-fence treatment as MCP tool descriptions — control/ANSI
+  stripping, fence defanging, an explicit truncation marker, and a header
+  marking the block as data, not instructions — closing a prompt-injection
+  path where a hostile tool result could steer the surrounding
+  conversation. Property tests pin the fence as inescapable for arbitrary
+  adversarial bytes.
+
 - **Patched dependencies flagged by RUSTSEC advisories** (clears the
   `cargo-deny` advisory gate and the corresponding Dependabot alerts):
   `rkyv` 0.8.15 → 0.8.16 (panic-safety bug in `InlineVec`/`SerVec::clear`
@@ -288,7 +300,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   Stacked-Borrows violation). The now-resolved advisory ignores were
   dropped from `deny.toml`.
 
-## [0.4.0] — unreleased
+## [0.4.0] — 2026-05-20
 
 "Wire the Pillars + Fix the Stubs" release. v0.3.0 → v0.4.0 promotes
 every pillar crate shipped between v0.3.0 and this release from
