@@ -46,25 +46,28 @@ brain/
 │   │
 │   ├── thalamus/       # Intent classification — the primary user-facing surface
 │   │                     Regex fast-path (compiled at startup) + async LLM fallback with timeout
-│   │                     Intent surface (grouped, ~39 variants — see `crates/thalamus/src/lib.rs`):
+│   │                     Intent surface (30 enum variants / 41 wire keys — see
+│   │                     `crates/thalamus/src/lib.rs` + `taxonomy.rs`; the generic
+│   │                     `List { resource }` / `Cancel { target }` variants expand to one
+│   │                     wire key per Resource / CancelTarget value):
 │   │                       memory:    StoreFact, Recall, Forget, MemorySummary
 │   │                                  (path references in chat are read as attachments, not a
 │   │                                   separate intent — the old ProjectInspect intent was removed)
 │   │                       chat:      Chat, SystemStatus, ProactivityStatus, SetProactivity
-│   │                       actions:   WebSearch, ExecuteCommand, SendMessage,
-│   │                                  Schedule, ListSchedules, CancelSchedule
+│   │                       actions:   WebSearch, ExecuteCommand, SendMessage, Schedule
 │   │                       audit:     QueryAudit, PruneAudit
-│   │                       approvals: ListApprovals, RespondToApproval,
-│   │                                  ListStandingApprovals, RevokeStandingApproval
+│   │                       approvals: RespondToApproval
 │   │                       budget:    BudgetStatus
-│   │                       tasks:     DecomposeTask, ListTasks, TaskStatus,
-│   │                                  CancelTask, CancelSignal
+│   │                       tasks:     DecomposeTask, TaskStatus
 │   │                       agents:    QueryAgents, DelegateTask
-│   │                       mcp:       MountMcpServer, UnmountMcpServer, ListMcpServers,
-│   │                                  ListCapabilities, ToolCall(IntentToken)
-│   │                       terminal:  OpenTerminalSession, CloseTerminalSession,
-│   │                                  ListTerminalSessions
-│   │                       channels:  ChannelPreferences, SetChannelPreference, ListChannels
+│   │                       mcp:       MountMcpServer, UnmountMcpServer, ReconsentMcpServer,
+│   │                                  ToolCall(IntentToken)
+│   │                       terminal:  OpenTerminalSession, CloseTerminalSession
+│   │                       channels:  ChannelPreferences, SetChannelPreference
+│   │                       generic:   List { resource: Approvals | StandingApprovals | Schedules |
+│   │                                         Tasks | Channels | TerminalSessions | McpServers |
+│   │                                         Capabilities }
+│   │                                  Cancel { target: Schedule | Task | Signal | StandingApproval }
 │   │                     (New user-facing features add intents here, not CLI subcommands.)
 │   │
 │   ├── amygdala/       # Importance scoring with per-process novelty detection → [0.0, 1.0]
@@ -187,12 +190,13 @@ brain/
 │   │                     breakers wired by intent router.
 │   │
 │   ├── storage/        # Storage abstraction layer
-│   │   ├── sqlite      # SqlitePool: 20 migrations through v22, WAL mode,
+│   │   ├── sqlite      # SqlitePool: 22 migrations through schema v24, WAL mode,
 │   │   │                 thread-safe Mutex<Connection>
 │   │   │                 Tables: semantic_facts, episodes, procedures, scheduled_intents,
 │   │   │                 _migrations, FTS5 virtual tables (episodes_fts),
 │   │   │                 dlq_entries (v19), graph nodes/edges (v20),
-│   │   │                 standing_approvals (v21), task_states (v22).
+│   │   │                 standing_approvals (v21), task_states (v22),
+│   │   │                 nodes_fts graph full-text (v23), capability_fitness (v24).
 │   │   ├── ruvector    # RuVectorStore: wraps ruvector-core (external crate, crates.io)
 │   │   │                 Multi-table interface: facts_vec.db, episodes_vec.db
 │   │   │                 Vector sanitization, deterministic jitter on insert,
@@ -252,7 +256,7 @@ brain/
 
 ### Workspace Members
 
-31 crates total:
+33 crates total:
 
 ```
 core  storage  hippocampus  cortex  thalamus  amygdala  signal
@@ -261,8 +265,14 @@ cerebellum  ganglia  bridge  backends
 audit  confirm  budget  sandbox  vault
 orchestrate  delegate  channel
 observe  identity  intent  mcphost  reflex  resilience
+metrics  selfmodel
 cli
 ```
+
+`metrics` holds the shared cross-subsystem counters behind the Prometheus
+exposition; `selfmodel` is the product self-model — grounded knowledge of
+Brain's own CLI, config, and policy surface that keeps the SOUL from
+inventing commands.
 
 ### Dependency Graph
 
@@ -358,7 +368,7 @@ Classification feeds **two distinct routing planes**, and they have opposite dyn
 - **Control plane** — Brain's own fixed verbs (memory ops, schedules, tasks, approvals, budget, channels, terminal/MCP lifecycle). These live in the closed `Intent` enum and are matched by the regex fast-path + the LLM fallback's static taxonomy. This is the kernel's *syscall table*: it is fixed by design, not discovered at runtime. (The LLM fallback covers the natural-language subset of these; the lifecycle/terminal/MCP/channel verbs are reached via deterministic `/slash` forms and narrow regexes.)
 - **Capability plane** — open-ended tool/agent invocation. Routed as `Intent::ToolCall(IntentToken)` → SIT → `CapabilityIndex` (semantic hybrid scoring) → `ToolRegistry`. This is fully **runtime-dynamic**: mounted MCP servers, native backends, and registered agents populate the index on mount and are retrieved top-k by relevance. There are exactly two `ToolCall` producers by design — the explicit `/tool <ns>.<action>` form and the chat **tool-loop** (the reasoner proposes calls in-band with full schemas). The classifier deliberately does **not** guess tools from free text; that belongs to the tool-loop.
 
-The resident reasoner (SOUL) is grounded against the **capability plane** every turn via a live capability digest + product self-model (`signal/pipeline/conversation.rs`). The classifier prompt is *not* yet fed that live manifest — it reasons about the fixed control-plane taxonomy only.
+The resident reasoner (SOUL) is grounded against the **capability plane** every turn via a live capability digest + product self-model (`signal/pipeline/conversation.rs`). The classifier's LLM fallback receives the same rendered digest (`classify_with_context`), so both consumers reason against one manifest — but the classifier still only *classifies* into the fixed control-plane taxonomy; proposing capability-plane calls from free text remains the tool-loop's job.
 
 ---
 
@@ -498,7 +508,7 @@ impl SignalProcessor {
 
 ### SQLite
 
-Migration-based schema — 20 migrations through v22. WAL mode enabled. Thread safety via `Mutex<Connection>`. Individual crates that own private tables (e.g. `audit`, `confirm`, `ganglia`) provision them via their own `ensure_tables()` rather than through the shared migrations file; the version numbers below refer to the central `crates/storage/src/sqlite/migrations.rs` log only.
+Migration-based schema — 22 migrations through schema v24. WAL mode enabled. Thread safety via `Mutex<Connection>`. Individual crates that own private tables (e.g. `audit`, `confirm`, `ganglia`) provision them via their own `ensure_tables()` rather than through the shared migrations file; the version numbers below refer to the central `crates/storage/src/sqlite/migrations.rs` log only.
 
 <details>
 <summary><strong>Tables</strong></summary>
@@ -519,6 +529,8 @@ Migration-based schema — 20 migrations through v22. WAL mode enabled. Thread s
 | `nodes`, `edges` | Episodic graph — recursive provenance trace, half-life decay | **v20** |
 | `standing_approvals` | Declared, revocable bypass rules for the confirmation engine | **v21** |
 | `task_states` | TaskOrchestrator state-machine history | **v22** |
+| `nodes_fts` | FTS5 virtual table over graph node content (BM25 recall on the episodic graph) | **v23** |
+| `capability_fitness` | Learned per-tool success/failure mass with forgetting-curve decay | **v24** |
 | `habit_state` | Rate-limit state for proactivity engine | crate-managed (`ganglia::ensure_tables`) |
 | `audit_entries` | Append-only entries with `principal_json` (identity round-trip) | crate-managed (`audit::ensure_tables`) |
 | `_migrations` | Applied migration version log | always present |

@@ -686,7 +686,7 @@ pre-commit setup, and local CI parity steps.
 <details>
 <summary><strong>Workspace Structure</strong></summary>
 
-The project is a Cargo workspace with 31 crates. All internal dependencies use both `path` (for local development) and `version` (for crates.io), so no Cargo.toml changes are needed to switch between local and published builds.
+The project is a Cargo workspace with 33 crates. All internal dependencies use both `path` (for local development) and `version` (for crates.io), so no Cargo.toml changes are needed to switch between local and published builds.
 
 ```
 crates/
@@ -715,6 +715,8 @@ crates/
 ├── mcphost/        # brainos-mcphost     — External MCP server host (stdio/HTTP/SSE)
 ├── reflex/         # brainos-reflex      — Reactive signal sources (fs, cron, sysstate, composite)
 ├── resilience/     # brainos-resilience  — Circuit breaker, retry, rate-limit, DLQ, loop detector
+├── metrics/        # brainos-metrics     — Shared cross-subsystem counters (Prometheus exposition)
+├── selfmodel/      # brainos-selfmodel   — Product self-model (Brain's own CLI/config/policy surface)
 ├── adapters/
 │   ├── http/       # brainos-httpadapter — Axum REST API
 │   ├── ws/         # brainos-wsadapter   — WebSocket adapter
