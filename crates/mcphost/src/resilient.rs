@@ -128,6 +128,9 @@ impl ResilientMcpHost {
         if let Some(breakers) = &self.breakers {
             match &result {
                 Ok(outcome) if !outcome.is_error => breakers.record_success(tool_id).await,
+                // A quarantine refusal is the host enforcing consent policy,
+                // not the tool failing — it must not poison the breaker.
+                Err(McpHostError::Quarantined(_)) => {}
                 _ => breakers.record_failure(tool_id).await,
             }
         }
@@ -172,6 +175,11 @@ impl MCPHost for ResilientMcpHost {
 
     async fn list_all_tools(&self) -> Vec<ToolDescriptor> {
         self.inner.list_all_tools().await
+    }
+
+    async fn reconsent(&self, server: &str) -> Result<usize, McpHostError> {
+        // Consent is a control-plane action: no retry/breaker/DLQ wrapping.
+        self.inner.reconsent(server).await
     }
 
     async fn call(
@@ -281,6 +289,10 @@ impl MCPHost for ResilientMcpHost {
                 }
                 Ok(outcome)
             }
+            // A quarantine refusal is a deliberate policy block — replaying
+            // it from the DLQ would re-attempt a call the user has not
+            // re-approved, so it never lands there.
+            Err(RetryOutcome::Exhausted(e @ McpHostError::Quarantined(_))) => Err(e),
             Err(RetryOutcome::Exhausted(e)) => {
                 self.enqueue_dlq(
                     &tool_id,

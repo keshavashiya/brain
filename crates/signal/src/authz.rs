@@ -52,7 +52,9 @@ pub(crate) fn tier_for_verb(verb_ns: &str, verb_action: &str) -> Tier {
         ("memory", "delete") | ("audit", "prune") => Tier::Destructive,
         (_, "delete") | (_, "drop") | (_, "destroy") => Tier::Destructive,
         ("net", _) | ("notify", _) => Tier::External,
-        ("mcp", "mount") => Tier::External,
+        // Both mount and reconsent admit (or re-admit) an external server's
+        // untrusted tool catalog into routing — the same consent weight.
+        ("mcp", "mount") | ("mcp", "reconsent") => Tier::External,
         // schedule.create gates up-front but is a reversible create — see the
         // matching rationale in `pipeline/lifecycle.rs` (Issue 126 / W3). Kept
         // here so the typed and abstract paths converge on the same tier.

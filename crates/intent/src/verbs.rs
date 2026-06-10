@@ -280,14 +280,20 @@ pub const VERBS: &[VerbSpec] = &[
         tier_hint: TierHint::Write,
         summary: "Unmount a previously-mounted MCP server.",
     },
+    VerbSpec {
+        ns: "mcp",
+        action: "reconsent",
+        tier_hint: TierHint::External,
+        summary: "Re-approve a quarantined MCP server's changed tool catalog.",
+    },
 ];
 
 /// Look up a verb by namespace + action. Returns `None` for verbs not
 /// in the kernel vocabulary — callers should treat this as a hard
 /// invariant violation for typed Intent variants, and as expected for
 /// dynamically-discovered MCP tool verbs (`mcp.{tool_name}` is *not*
-/// in [`VERBS`]; only the bare `mcp.mount` / `mcp.unmount` host-control
-/// verbs are).
+/// in [`VERBS`]; only the `mcp.mount` / `mcp.unmount` / `mcp.reconsent`
+/// host-control verbs are).
 pub fn lookup(ns: &str, action: &str) -> Option<&'static VerbSpec> {
     VERBS.iter().find(|v| v.ns == ns && v.action == action)
 }
@@ -352,7 +358,8 @@ mod tests {
     #[test]
     fn lookup_returns_none_for_unknown_pair() {
         assert!(lookup("not", "real").is_none());
-        // mcp.{tool_name} is dynamic — only mount/unmount are static.
+        // mcp.{tool_name} is dynamic — only the host-control verbs
+        // (mount/unmount/reconsent) are static.
         assert!(lookup("mcp", "any_tool_name").is_none());
     }
 
@@ -373,9 +380,9 @@ mod tests {
     fn vocabulary_contains_expected_size() {
         // Spot-check: 23 verbs through v0.4.0, +3 net diagnostics
         // (net.check/trace/cert), +1 security.audit, +1 logs.analyze,
-        // +3 baseline.* (capture/diff/list) = 31. Bumping this intentionally
-        // is fine — the test exists so silent additions (or removals)
-        // surface in review.
-        assert_eq!(VERBS.len(), 31);
+        // +3 baseline.* (capture/diff/list), +1 mcp.reconsent = 32.
+        // Bumping this intentionally is fine — the test exists so silent
+        // additions (or removals) surface in review.
+        assert_eq!(VERBS.len(), 32);
     }
 }

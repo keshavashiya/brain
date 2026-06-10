@@ -116,6 +116,7 @@ fn intent_variant_name(intent: &thalamus::Intent) -> &'static str {
         CloseTerminalSession { .. } => "CloseTerminalSession",
         MountMcpServer { .. } => "MountMcpServer",
         UnmountMcpServer { .. } => "UnmountMcpServer",
+        ReconsentMcpServer { .. } => "ReconsentMcpServer",
         // Generic List/Cancel keep per-resource telemetry names so metric
         // cardinality is unchanged by the variant collapse.
         List { resource, .. } => match resource {

@@ -334,9 +334,15 @@ impl SignalProcessor {
             let mut buf = format!("{} mounted MCP server(s):\n", servers.len());
             for s in &servers {
                 use std::fmt::Write;
+                let quarantine_note = if s.quarantined {
+                    " — ⚠ QUARANTINED: tool catalog changed since approval; \
+                     tools disabled until `/mcp-reconsent` or unmount"
+                } else {
+                    ""
+                };
                 let _ = writeln!(
                     buf,
-                    "  {} — {} tool(s) (mounted {})",
+                    "  {} — {} tool(s) (mounted {}){quarantine_note}",
                     s.name,
                     s.tool_count,
                     s.mounted_at.to_rfc3339(),

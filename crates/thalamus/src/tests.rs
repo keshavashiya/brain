@@ -994,6 +994,26 @@ async fn approval_revoke_slash_carries_id() {
 }
 
 #[tokio::test]
+async fn mcp_reconsent_slash_carries_server_name() {
+    let classifier = IntentClassifier::new();
+    let result = classifier.classify("/mcp-reconsent github").await;
+    match result.intent {
+        Intent::ReconsentMcpServer { name } => assert_eq!(name, "github"),
+        other => panic!("expected ReconsentMcpServer, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn mcp_reconsent_slash_without_name_falls_through() {
+    let classifier = IntentClassifier::new();
+    let result = classifier.classify("/mcp-reconsent").await;
+    assert!(
+        !matches!(result.intent, Intent::ReconsentMcpServer { .. }),
+        "bare /mcp-reconsent must not classify (server name is required)"
+    );
+}
+
+#[tokio::test]
 async fn approval_revoke_slash_without_id_falls_through() {
     let classifier = IntentClassifier::new();
     let result = classifier.classify("/approval-revoke").await;
@@ -1190,6 +1210,7 @@ fn every_intent_variant() -> Vec<Intent> {
             command_or_url: "x".into(),
         },
         Intent::UnmountMcpServer { name: "m".into() },
+        Intent::ReconsentMcpServer { name: "m".into() },
         // Governance
         Intent::RespondToApproval {
             nonce: "n".into(),
@@ -1339,7 +1360,7 @@ fn every_category_has_at_least_one_variant() {
 fn every_intent_variant_helper_is_exhaustive() {
     assert_eq!(
         every_intent_variant().len(),
-        39,
+        40,
         "every_intent_variant() must list one example per Intent variant \
          (and per Resource / CancelTarget value); update it (and bump this \
          count) when the enum changes"
@@ -1382,7 +1403,8 @@ fn every_intent_variant_has_the_expected_category() {
             | Intent::OpenTerminalSession { .. }
             | Intent::CloseTerminalSession { .. }
             | Intent::MountMcpServer { .. }
-            | Intent::UnmountMcpServer { .. } => IntentCategory::Lifecycle,
+            | Intent::UnmountMcpServer { .. }
+            | Intent::ReconsentMcpServer { .. } => IntentCategory::Lifecycle,
             Intent::RespondToApproval { .. }
             | Intent::PruneAudit { .. }
             | Intent::SetChannelPreference { .. }
@@ -1546,6 +1568,7 @@ mod taxonomy_drift_guards {
                 command_or_url: s(),
             },
             Intent::UnmountMcpServer { name: s() },
+            Intent::ReconsentMcpServer { name: s() },
             // Governance
             Intent::RespondToApproval {
                 nonce: s(),

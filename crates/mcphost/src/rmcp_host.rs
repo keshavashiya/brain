@@ -7,10 +7,16 @@
 //!   client (the rmcp transport speaks both shapes against the same endpoint).
 //!
 //! Per-server tool catalogs are hash-pinned: the SHA-256 of the canonicalized
-//! `tools/list` response is captured at mount time. On a refresh (driven by
-//! `notifications/tools/list_changed` in a later PR) a hash change emits a
-//! `BrainEvent::Error { source: "mcphost", message: "tools/list hash changed …" }`
-//! — that's the "rug-pull" signal the consent UI surfaces to the user.
+//! `tools/list` response is captured at mount time — the shape the user
+//! approved when consenting to the mount. On a refresh, a hash change
+//! **quarantines** the server: its tools are deregistered from routing and
+//! `call` fails closed with [`McpHostError::Quarantined`] until the user
+//! re-approves the new catalog (`reconsent`) or unmounts. A `BrainEvent::Error
+//! { source: "mcphost", … }` is emitted on both edges (quarantine entered /
+//! lifted). If a later refresh shows the catalog reverted to the approved
+//! shape, the quarantine lifts automatically — the consented contract holds
+//! again. This closes the rug-pull window (CVE-2025-54136 class) where a
+//! changed tool stayed callable on the strength of the original consent.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -56,14 +62,26 @@ pub struct RmcpHost {
 
 struct Mounted {
     record: MountedServer,
-    /// SHA-256 of the canonicalized initial `tools/list` response. A later
-    /// `notifications/tools/list_changed` refresh that produces a different
-    /// hash is the "rug-pull" signal (CVE-2025-54136 class).
+    /// SHA-256 of the canonicalized `tools/list` response the user consented
+    /// to (at mount, or at the last re-consent). A refresh that produces a
+    /// different hash is the "rug-pull" signal (CVE-2025-54136 class) and
+    /// quarantines the server until re-consent.
     tools_hash: String,
+    /// Active catalog-change quarantine, if any. While set, the server's
+    /// tools are deregistered from routing and `call` fails closed.
+    quarantine: Option<Quarantine>,
     /// The live rmcp peer. `None` is impossible for fully-initialized
     /// mounts; the option lets us pull the service out during `unmount`
     /// to call `.cancel().await` (which consumes `self`).
     service: Option<RunningService<RoleClient, ()>>,
+}
+
+/// Details of an active catalog-change quarantine. The pinned (consented)
+/// hash stays in [`Mounted::tools_hash`]; this records what it changed to,
+/// so repeat refreshes of the same changed shape don't re-emit the edge
+/// event and a revert to the pin is recognizable.
+struct Quarantine {
+    new_hash: String,
 }
 
 impl Default for RmcpHost {
@@ -253,6 +271,7 @@ impl RmcpHost {
             Mounted {
                 record,
                 tools_hash,
+                quarantine: None,
                 service: Some(svc),
             },
         );
@@ -269,11 +288,18 @@ impl RmcpHost {
     }
 
     /// Re-fetch `tools/list` for a mounted server and compare against the
-    /// pinned hash. A mismatch emits `BrainEvent::Error` (rug-pull signal)
-    /// and updates the pinned record with the new shape so subsequent
-    /// refreshes are scored against the latest.
+    /// consented hash. A mismatch **quarantines** the server — tools leave
+    /// the routing surfaces and `call` fails closed — until [`reconsent`]
+    /// (re-approve the new shape) or unmount. A catalog that reverts to the
+    /// consented shape lifts the quarantine automatically. `BrainEvent::Error`
+    /// is emitted on both edges.
+    ///
+    /// Returns whether the live catalog currently differs from the consented
+    /// pin (i.e. whether the server is quarantined after this refresh).
+    ///
+    /// [`reconsent`]: Self::reconsent
     pub async fn refresh_tools(&self, server: &str) -> Result<bool, McpHostError> {
-        let (tools, old_hash) = {
+        let tools = {
             let guard = self.mounted.read().await;
             let mounted = guard
                 .get(server)
@@ -281,67 +307,200 @@ impl RmcpHost {
             let svc = mounted.service.as_ref().ok_or_else(|| {
                 McpHostError::Transport(format!("server '{server}' has no live service"))
             })?;
-            let tools_raw = svc
-                .list_all_tools()
-                .await
-                .map_err(|e| McpHostError::Rmcp(format!("tools/list refresh: {e}")))?;
-            let tools: Vec<ToolDescriptor> = tools_raw
-                .into_iter()
-                .map(|t| ToolDescriptor {
-                    server: server.to_string(),
-                    name: t.name.to_string(),
-                    description: t.description.map(|d| d.to_string()),
-                    input_schema: serde_json::Value::Object((*t.input_schema).clone()),
-                })
-                .collect();
-            (tools, mounted.tools_hash.clone())
+            fetch_tools(svc, server).await?
         };
         let new_hash = hash_tools(&tools);
 
-        let changed = new_hash != old_hash;
-        if changed {
-            if let Some(observer) = &self.observer {
-                let _ = observer
-                    .publish(BrainEvent::Error {
-                        id: Uuid::new_v4(),
-                        source: "mcphost".into(),
-                        message: format!(
-                            "tools/list hash changed for server '{server}' (old={old_hash}, new={new_hash})"
-                        ),
-                        ts: Utc::now(),
-                    })
-                    .await;
-            }
+        // Decide the edge under the write lock, then do index/registry and
+        // event work outside it.
+        enum Edge {
+            /// Catalog matches the consented pin; nothing was quarantined.
+            Steady,
+            /// Catalog changed while approved → quarantine entered (or the
+            /// changed shape changed again while already quarantined).
+            Entered { pinned: String },
+            /// Catalog reverted to the consented pin while quarantined.
+            Reverted {
+                consented_tools: Vec<ToolDescriptor>,
+            },
+        }
+        let edge = {
             let mut guard = self.mounted.write().await;
-            if let Some(m) = guard.get_mut(server) {
-                m.record.tools = tools.clone();
-                m.tools_hash = new_hash;
-            }
-            drop(guard);
-            if let Some(index) = &self.capability_index {
-                index.upsert(server, tools.clone());
-            }
-            if let Some(registry) = &self.tool_registry {
-                // Deregister every tool whose source matches this server,
-                // then register the fresh shape. The registry overwrites by
-                // tool_id so renamed tools land cleanly and disappeared
-                // tools are pruned.
-                for existing in registry.list().await {
-                    if let intent::ToolSource::McpServer { server: s } = &existing.source {
-                        if s == server {
-                            let _ = registry.deregister(&existing.tool_id).await;
-                        }
-                    }
+            let mounted = guard
+                .get_mut(server)
+                .ok_or_else(|| McpHostError::NotMounted(server.to_string()))?;
+            if new_hash == mounted.tools_hash {
+                match mounted.quarantine.take() {
+                    Some(_) => Edge::Reverted {
+                        consented_tools: mounted.record.tools.clone(),
+                    },
+                    None => Edge::Steady,
                 }
-                for t in &tools {
-                    let _ = registry
-                        .register(tool_to_intent_descriptor(server, t))
-                        .await;
+            } else {
+                let already_flagged = mounted
+                    .quarantine
+                    .as_ref()
+                    .is_some_and(|q| q.new_hash == new_hash);
+                mounted.quarantine = Some(Quarantine {
+                    new_hash: new_hash.clone(),
+                });
+                if already_flagged {
+                    // Same changed shape as last refresh — stay quarantined,
+                    // no new edge to report.
+                    return Ok(true);
+                }
+                Edge::Entered {
+                    pinned: mounted.tools_hash.clone(),
+                }
+            }
+        };
+
+        match edge {
+            Edge::Steady => Ok(false),
+            Edge::Entered { pinned } => {
+                // Fail closed: pull the server's tools out of every routing
+                // surface so nothing can resolve to them mid-quarantine.
+                if let Some(index) = &self.capability_index {
+                    index.remove(server);
+                }
+                self.deregister_server_tools(server).await;
+                self.emit(format!(
+                    "tools/list catalog changed for server '{server}' \
+                     (approved={pinned}, current={new_hash}); server quarantined — \
+                     its tools are disabled until you re-approve with \
+                     `/mcp-reconsent {server}` or unmount it"
+                ))
+                .await;
+                Ok(true)
+            }
+            Edge::Reverted { consented_tools } => {
+                // The consented contract holds again — restore routing.
+                if let Some(index) = &self.capability_index {
+                    index.upsert(server, consented_tools.clone());
+                }
+                self.deregister_server_tools(server).await;
+                self.register_tools(server, &consented_tools).await;
+                self.emit(format!(
+                    "tools/list catalog for server '{server}' reverted to the \
+                     approved shape (hash={new_hash}); quarantine lifted"
+                ))
+                .await;
+                Ok(false)
+            }
+        }
+    }
+
+    /// Adopt the server's *current* `tools/list` catalog as the consented
+    /// shape: re-pin the hash, lift any active quarantine, and restore the
+    /// tools to the routing surfaces. Returns the number of tools adopted.
+    ///
+    /// Callers gate this behind explicit user approval — it is the consent
+    /// edge, not a convenience refresh.
+    pub async fn reconsent(&self, server: &str) -> Result<usize, McpHostError> {
+        let tools = {
+            let guard = self.mounted.read().await;
+            let mounted = guard
+                .get(server)
+                .ok_or_else(|| McpHostError::NotMounted(server.to_string()))?;
+            let svc = mounted.service.as_ref().ok_or_else(|| {
+                McpHostError::Transport(format!("server '{server}' has no live service"))
+            })?;
+            fetch_tools(svc, server).await?
+        };
+        let new_hash = hash_tools(&tools);
+
+        let was_quarantined = {
+            let mut guard = self.mounted.write().await;
+            let mounted = guard
+                .get_mut(server)
+                .ok_or_else(|| McpHostError::NotMounted(server.to_string()))?;
+            let was = mounted.quarantine.take().is_some();
+            mounted.record.tools = tools.clone();
+            mounted.tools_hash = new_hash.clone();
+            was
+        };
+
+        if let Some(index) = &self.capability_index {
+            index.upsert(server, tools.clone());
+        }
+        self.deregister_server_tools(server).await;
+        self.register_tools(server, &tools).await;
+
+        let suffix = if was_quarantined {
+            "; quarantine lifted"
+        } else {
+            " (no quarantine was active)"
+        };
+        self.emit(format!(
+            "tools/list catalog for server '{server}' re-approved by user \
+             (hash={new_hash}, {} tools){suffix}",
+            tools.len()
+        ))
+        .await;
+        Ok(tools.len())
+    }
+
+    /// Deregister every tool in the shared intent registry whose source is
+    /// this server. The registry overwrites by tool_id, so callers that
+    /// re-register afterwards land renamed tools cleanly and prune
+    /// disappeared ones.
+    async fn deregister_server_tools(&self, server: &str) {
+        if let Some(registry) = &self.tool_registry {
+            for existing in registry.list().await {
+                if let intent::ToolSource::McpServer { server: s } = &existing.source {
+                    if s == server {
+                        let _ = registry.deregister(&existing.tool_id).await;
+                    }
                 }
             }
         }
-        Ok(changed)
     }
+
+    /// Register `tools` into the shared intent registry under this server.
+    async fn register_tools(&self, server: &str, tools: &[ToolDescriptor]) {
+        if let Some(registry) = &self.tool_registry {
+            for t in tools {
+                let _ = registry
+                    .register(tool_to_intent_descriptor(server, t))
+                    .await;
+            }
+        }
+    }
+
+    /// Publish a host event onto the bus, if an observer is wired.
+    async fn emit(&self, message: String) {
+        if let Some(observer) = &self.observer {
+            let _ = observer
+                .publish(BrainEvent::Error {
+                    id: Uuid::new_v4(),
+                    source: "mcphost".into(),
+                    message,
+                    ts: Utc::now(),
+                })
+                .await;
+        }
+    }
+}
+
+/// Fetch and map the server's current `tools/list` into Brain's descriptor
+/// shape. Shared by mount, refresh, and re-consent.
+async fn fetch_tools(
+    svc: &RunningService<RoleClient, ()>,
+    server: &str,
+) -> Result<Vec<ToolDescriptor>, McpHostError> {
+    let tools_raw = svc
+        .list_all_tools()
+        .await
+        .map_err(|e| McpHostError::Rmcp(format!("tools/list refresh: {e}")))?;
+    Ok(tools_raw
+        .into_iter()
+        .map(|t| ToolDescriptor {
+            server: server.to_string(),
+            name: t.name.to_string(),
+            description: t.description.map(|d| d.to_string()),
+            input_schema: serde_json::Value::Object((*t.input_schema).clone()),
+        })
+        .collect())
 }
 
 /// Convert an [`mcphost::types::ToolDescriptor`] (the MCP wire shape) into
@@ -425,6 +584,7 @@ impl MCPHost for RmcpHost {
                 mounted_at: m.record.mounted_at,
                 tool_count: m.record.tools.len(),
                 info: m.record.info.clone(),
+                quarantined: m.quarantine.is_some(),
             })
             .collect()
     }
@@ -449,6 +609,12 @@ impl MCPHost for RmcpHost {
         let mounted = guard
             .get(server)
             .ok_or_else(|| McpHostError::NotMounted(server.to_string()))?;
+        // Fail closed while the catalog differs from what the user approved:
+        // the registry deregistration already hides the tools from routing,
+        // and this guard covers callers holding a direct (server, tool) pair.
+        if mounted.quarantine.is_some() {
+            return Err(McpHostError::Quarantined(server.to_string()));
+        }
         let svc = mounted.service.as_ref().ok_or_else(|| {
             McpHostError::Transport(format!("server '{server}' has no live service"))
         })?;
@@ -485,6 +651,12 @@ impl MCPHost for RmcpHost {
             content,
             elapsed_ms: started.elapsed().as_millis() as u64,
         })
+    }
+
+    async fn reconsent(&self, server: &str) -> Result<usize, McpHostError> {
+        // Inherent method takes precedence over the trait method here, so
+        // this delegates rather than recursing.
+        RmcpHost::reconsent(self, server).await
     }
 }
 

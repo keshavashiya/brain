@@ -84,6 +84,7 @@ impl MCPHost for FailingMcpHost {
                     mounted_at: m.mounted_at,
                     tool_count: m.tools.len(),
                     info: m.info.clone(),
+                    quarantined: false,
                 }]
             })
             .unwrap_or_default()

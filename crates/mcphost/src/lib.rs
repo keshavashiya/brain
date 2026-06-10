@@ -73,6 +73,16 @@ pub trait MCPHost: Send + Sync {
         tool: &str,
         args: serde_json::Value,
     ) -> Result<CallOutcome, McpHostError>;
+
+    /// Re-approve `server`'s *current* tool catalog as the trusted shape,
+    /// lifting a catalog-change quarantine if one is active. Returns the
+    /// number of tools adopted. The default implementation reports the
+    /// host as quarantine-unaware; hosts that pin catalogs override it.
+    async fn reconsent(&self, server: &str) -> Result<usize, McpHostError> {
+        Err(McpHostError::Transport(format!(
+            "this MCP host does not track catalog consent (server '{server}')"
+        )))
+    }
 }
 
 /// A single transport-bound MCP client (one per mounted server).
@@ -148,6 +158,7 @@ impl MCPHost for InMemoryMcpHost {
                 mounted_at: m.mounted_at,
                 tool_count: m.tools.len(),
                 info: m.info.clone(),
+                quarantined: false,
             })
             .collect()
     }

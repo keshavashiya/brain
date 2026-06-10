@@ -105,4 +105,9 @@ pub struct ServerStatus {
     pub mounted_at: DateTime<Utc>,
     pub tool_count: usize,
     pub info: Option<ServerInfo>,
+    /// True when the server's tool catalog changed after mount-time approval
+    /// and the change has not been re-approved: its tools are deregistered
+    /// from routing and `call` fails closed until re-consent (or unmount).
+    #[serde(default)]
+    pub quarantined: bool,
 }

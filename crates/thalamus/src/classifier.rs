@@ -808,6 +808,19 @@ impl IntentClassifier {
                 });
             }
         }
+        if let Some(rest) = trimmed.strip_prefix("/mcp-reconsent") {
+            let name = rest.trim();
+            if !name.is_empty() {
+                return Some(Classification {
+                    intent: Intent::ReconsentMcpServer {
+                        name: name.to_string(),
+                    },
+                    confidence: 1.0,
+                    method: ClassificationMethod::Regex,
+                    extracted_facts: Vec::new(),
+                });
+            }
+        }
 
         // Standing-approval inspection and revocation. The list path is
         // unguarded (read-only) and the revoke path is Tier::Write —

@@ -255,6 +255,12 @@ pub const INTENT_SPECS: &[IntentSpec] = &[
         nl_routable: NlRouting::SlashOnly,
         blurb: "Unmount an MCP server by name (/mcp-unmount).",
     },
+    IntentSpec {
+        key: "reconsent_mcp_server",
+        category: IntentCategory::Lifecycle,
+        nl_routable: NlRouting::SlashOnly,
+        blurb: "Re-approve a quarantined MCP server's changed tool catalog (/mcp-reconsent).",
+    },
     // ── Governance ─ approvals, audit, config mutation, proactivity ────────
     IntentSpec {
         key: "respond_to_approval",

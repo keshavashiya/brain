@@ -8,7 +8,8 @@
 //! [`thalamus::Intent::OpenTerminalSession`],
 //! [`thalamus::Intent::CloseTerminalSession`],
 //! [`thalamus::Intent::MountMcpServer`],
-//! [`thalamus::Intent::UnmountMcpServer`].
+//! [`thalamus::Intent::UnmountMcpServer`],
+//! [`thalamus::Intent::ReconsentMcpServer`].
 
 use uuid::Uuid;
 
@@ -88,6 +89,14 @@ impl LifecycleAuth for SignalProcessor {
                     .with_modifiers(serde_json::json!({ "name": name })),
                 Tier::Write,
             )),
+            // Re-approving a changed catalog re-admits untrusted tool
+            // descriptions into routing — the same consent weight as the
+            // original mount, so the same tier.
+            thalamus::Intent::ReconsentMcpServer { name } => Some((
+                AuthorizationRequest::new("mcp", "reconsent")
+                    .with_modifiers(serde_json::json!({ "name": name })),
+                Tier::External,
+            )),
             _ => None,
         }
     }
@@ -151,6 +160,10 @@ impl LifecycleHandler for SignalProcessor {
             }
             thalamus::Intent::UnmountMcpServer { name } => {
                 self.handle_unmount_mcp_server(ctx.signal_id, name, prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::ReconsentMcpServer { name } => {
+                self.handle_reconsent_mcp_server(ctx.signal_id, name, prepend_nudges)
                     .await
             }
             // Schedule shares transport with the action umbrella —
@@ -460,6 +473,34 @@ impl SignalProcessor {
         let message = match host.unmount(&name).await {
             Ok(()) => format!("Unmounted MCP server '{name}'."),
             Err(e) => format!("Failed to unmount MCP server '{name}': {e}"),
+        };
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    /// Handle `Intent::ReconsentMcpServer`. Adopts the server's current tool
+    /// catalog as the approved shape, lifting a catalog-change quarantine.
+    /// The consent gate has already cleared by the time this runs (External
+    /// tier, same as mount).
+    pub(super) async fn handle_reconsent_mcp_server(
+        &self,
+        signal_id: Uuid,
+        name: String,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
+    ) -> Result<PipelineResult, SignalError> {
+        let Some(host) = self.mcp_host() else {
+            let resp = prepend_nudges(SignalResponse::ok(
+                signal_id,
+                "MCP host not configured on this instance.",
+            ));
+            return Ok(PipelineResult::Complete(resp));
+        };
+        let message = match host.reconsent(&name).await {
+            Ok(count) => format!(
+                "Re-approved MCP server '{name}' — its current catalog of \
+                 {count} tool(s) is now the trusted shape and routing is restored."
+            ),
+            Err(e) => format!("Failed to re-approve MCP server '{name}': {e}"),
         };
         let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
         Ok(PipelineResult::Complete(resp))

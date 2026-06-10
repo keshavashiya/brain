@@ -30,4 +30,11 @@ pub enum McpHostError {
 
     #[error("identity gate denied: {0}")]
     Denied(String),
+
+    #[error(
+        "server '{0}' is quarantined: its tool catalog changed after it was \
+         approved. Review the change, then re-approve with `/mcp-reconsent {0}` \
+         or unmount it"
+    )]
+    Quarantined(String),
 }

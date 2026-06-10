@@ -153,6 +153,9 @@ pub enum Intent {
     },
     /// Unmount a previously-mounted MCP server by name.
     UnmountMcpServer { name: String },
+    /// Re-approve a mounted MCP server's current tool catalog, lifting the
+    /// quarantine applied when the catalog changed after mount-time consent.
+    ReconsentMcpServer { name: String },
 
     // ── Governance ─ approvals, audit, config mutation, proactivity ────────
     /// Respond to a pending approval.
@@ -322,6 +325,7 @@ impl Intent {
             Intent::CloseTerminalSession { .. } => "close_terminal_session",
             Intent::MountMcpServer { .. } => "mount_mcp_server",
             Intent::UnmountMcpServer { .. } => "unmount_mcp_server",
+            Intent::ReconsentMcpServer { .. } => "reconsent_mcp_server",
             // ── Governance ────────────────────────────────────────────────
             Intent::RespondToApproval { .. } => "respond_to_approval",
             Intent::PruneAudit { .. } => "prune_audit",
@@ -420,6 +424,11 @@ impl Intent {
                 Verb::new("mcp", "unmount"),
                 serde_json::json!({ "name": name }),
                 vec!["mcp.unmount".to_string()],
+            ),
+            Intent::ReconsentMcpServer { name } => (
+                Verb::new("mcp", "reconsent"),
+                serde_json::json!({ "name": name }),
+                vec!["mcp.reconsent".to_string()],
             ),
             // Purely conversational / inspection variants do not map to a
             // capability-routed verb. Callers fall back to the typed
