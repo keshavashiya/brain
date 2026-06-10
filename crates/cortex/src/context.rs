@@ -200,6 +200,20 @@ impl UserProfile {
     }
 }
 
+/// The "what time is it" line assembled into every system prompt. Uses the
+/// machine's local clock and UTC offset (`chrono::Local`) — Brain is
+/// local-first, so the host's wall clock *is* the user's time. The weekday
+/// name is included because day-of-week questions and "next Tuesday"-style
+/// phrases are the common case relative offsets alone can't answer.
+fn current_time_line() -> String {
+    let now = chrono::Local::now();
+    format!(
+        "Current date & time: {} (machine-local clock; UTC offset {})",
+        now.format("%A %Y-%m-%d %H:%M"),
+        now.format("%:z"),
+    )
+}
+
 /// Context assembler — builds prompts respecting token budgets.
 pub struct ContextAssembler {
     budget: TokenBudget,
@@ -337,10 +351,14 @@ You are the user's partner in thought. Your goal is to make their digital life f
             _ => self.system_prompt.clone(),
         };
         // Capability manifest: live digest from the chat path, or the
-        // static always-on faculties everywhere else.
+        // static always-on faculties everywhere else. The clock line is
+        // assembled per turn so the model always knows what "now" is —
+        // without it, "what day is it" and relative phrases ("tomorrow",
+        // "in an hour") resolve against the model's training cutoff.
         let prompt_with_caps = format!(
-            "{}\n\n{}",
+            "{}\n\n{}\n\n{}",
             base_prompt,
+            current_time_line(),
             capabilities.unwrap_or(DEFAULT_CAPABILITIES)
         );
         let system_content = if self.user_profile.estimate_tokens() > 0 {
@@ -481,6 +499,26 @@ fn truncate_snapshot(s: &str, cap_chars: usize) -> String {
 mod tests {
     use super::*;
     use crate::llm::Role;
+
+    #[test]
+    fn system_prompt_carries_the_current_clock() {
+        let assembler = ContextAssembler::with_defaults();
+        let messages = assembler.assemble("what day is it?", &[], &[]);
+        let system = &messages[0];
+        assert_eq!(system.role, Role::System);
+        assert!(
+            system.content.contains("Current date & time:"),
+            "system prompt must carry the clock line"
+        );
+        // The line reflects *now*, not a baked-in date: spot-check the year
+        // and that a weekday name made it in (day-of-week questions are the
+        // case offsets alone can't answer).
+        let today = chrono::Local::now();
+        assert!(system
+            .content
+            .contains(&today.format("%Y-%m-%d").to_string()));
+        assert!(system.content.contains(&today.format("%A").to_string()));
+    }
 
     #[test]
     fn test_token_budget_memory_allocation() {
