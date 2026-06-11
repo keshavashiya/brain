@@ -68,6 +68,16 @@ memory:
   namespaces:
     private:
       residency: local_only
+  # Per-agent memory trust. Recall scoring multiplies each memory's score
+  # by the trust weight [0–1] of the agent that wrote it, so a memory
+  # stored by a low-trust agent cannot dominate context assembly no
+  # matter how its content is crafted. Memories from your own input
+  # always weigh 1.0. `default_agent_trust` covers agents without an
+  # entry; per-agent overrides go under `agents`.
+  trust:
+    default_agent_trust: 1.0
+    # agents:
+    #   some-external-agent: 0.4
 
 # ── Encryption ─────────────────────────────────────────────────────────────────
 # Run `brain init --encrypt` to generate a salt and enable at-rest encryption.

@@ -616,6 +616,10 @@ pub struct MemoryConfig {
     /// exists. Namespaces without an entry default to `residency: any`.
     #[serde(default)]
     pub namespaces: std::collections::HashMap<String, crate::residency::NamespaceConfig>,
+    /// Per-agent memory-trust weights (`memory.trust`) applied to recall
+    /// scoring. Defaults to the identity (every weight 1.0).
+    #[serde(default)]
+    pub trust: crate::trust::MemoryTrustConfig,
 }
 
 impl MemoryConfig {

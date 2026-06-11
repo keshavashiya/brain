@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Provenance-weighted recall (`memory.trust`).** Every stored memory already
+  carries the agent that wrote it; recall scoring now multiplies each memory's
+  score by that agent's trust weight (`[0–1]`), so a memory stored by a
+  low-trust agent cannot dominate context assembly for a query no matter how
+  its content or claimed importance is crafted. Memories from your own input
+  always weigh 1.0 and are not configurable. `memory.trust.default_agent_trust`
+  covers agents without an entry (default 1.0 — zero-config ranking is
+  unchanged); per-agent overrides go under `memory.trust.agents.<id>`. The
+  multiplicative form means a trust of 0 removes an agent's memories from
+  ranked recall entirely, and an additive importance/recency boost can never
+  claw the rank back. The degraded BM25-only recall path (no semantic store)
+  enforces the same policy on result ordering. An acceptance test pins the
+  property end-to-end: a keyword-stuffed, importance-0.99 memory from a
+  0.1-trust agent ranks below the user's own memory for the same query — with
+  a control proving the same memory wins when trust is not configured.
+
 - **Grants ledger (`/grants`).** One read-only screen answering "what can
   Brain currently see and do, and on whose authority?": active standing
   approvals (with grantee, verb, grant date, and the `/approval-revoke <id>`

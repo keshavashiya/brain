@@ -162,7 +162,22 @@ impl SignalProcessor {
             .search_bm25(query, top_k, namespace, None)
             .map_err(|e| crate::SignalError::Storage(e.to_string()))?;
         let episodes_used = bm25.len();
-        let memories = Self::bm25_to_memories(bm25);
+        let mut memories = Self::bm25_to_memories(bm25);
+        // The degraded path bypasses the recall engine's trust-weighted
+        // scoring, and the raw BM25 rank semantics don't admit a clean
+        // multiplicative term — so enforce trust on the *ordering*
+        // instead: lower-trust memories sink below all higher-trust
+        // ones, BM25 order preserved within each trust level. With the
+        // default (identity) policy the stable sort is a no-op.
+        let trust = self.config.memory.trust.policy();
+        if !trust.is_noop() {
+            memories.sort_by(|a, b| {
+                trust
+                    .trust_of(b.agent.as_deref())
+                    .partial_cmp(&trust.trust_of(a.agent.as_deref()))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        }
         Ok((memories, 0, episodes_used))
     }
 

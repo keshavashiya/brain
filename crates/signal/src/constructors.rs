@@ -170,14 +170,17 @@ impl SignalProcessor {
 
         // Create recall engine from user config
         let search_cfg = &config.memory.search;
-        let recall_engine = hippocampus::RecallEngine::new(hippocampus::RecallConfig::from_config(
-            search_cfg.rrf_k,
-            search_cfg.pre_fusion_limit,
-            search_cfg.importance_weight,
-            search_cfg.recency_weight,
-            search_cfg.decay_rate,
-            config.memory.semantic.similarity_threshold,
-        ));
+        let recall_engine = hippocampus::RecallEngine::new(
+            hippocampus::RecallConfig::from_config(
+                search_cfg.rrf_k,
+                search_cfg.pre_fusion_limit,
+                search_cfg.importance_weight,
+                search_cfg.recency_weight,
+                search_cfg.decay_rate,
+                config.memory.semantic.similarity_threshold,
+            )
+            .with_agent_trust(config.memory.trust.policy()),
+        );
         let classifier = thalamus::IntentClassifier::new()
             .with_llm_fallback(Arc::new(thalamus::LlmIntentFallback::new(llm.clone())));
 

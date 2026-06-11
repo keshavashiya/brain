@@ -387,6 +387,7 @@ impl Default for BrainConfig {
                     forgetting_threshold: 0.05,
                 },
                 namespaces: Default::default(),
+                trust: Default::default(),
             },
             encryption: EncryptionConfig { enabled: false },
             security: SecurityConfig {
