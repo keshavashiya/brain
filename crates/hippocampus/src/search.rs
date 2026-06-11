@@ -20,6 +20,10 @@ pub struct Memory {
     pub timestamp: String,
     /// Originating agent that stored this memory (if known).
     pub agent: Option<String>,
+    /// Namespace this memory lives in. `None` only for conversions that
+    /// predate threading (treated as the enclosing recall scope by the
+    /// residency filter).
+    pub namespace: Option<String>,
 }
 
 /// Where this memory came from.
@@ -247,6 +251,7 @@ impl RecallEngine {
                     importance,
                     timestamp: fts.timestamp.clone(),
                     agent: fts.agent.clone(),
+                    namespace: Some(fts.namespace.clone()),
                 });
                 continue;
             }
@@ -273,6 +278,7 @@ impl RecallEngine {
                     importance,
                     timestamp: sr.created_at.clone(),
                     agent: sr.fact.agent.clone(),
+                    namespace: Some(sr.fact.namespace.clone()),
                 });
                 continue;
             }
@@ -296,6 +302,7 @@ impl RecallEngine {
                     importance,
                     timestamp,
                     agent: None,
+                    namespace: Some(gc.namespace.clone()),
                 });
             }
         }

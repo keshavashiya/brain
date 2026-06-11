@@ -57,6 +57,9 @@ pub struct FtsResult {
     pub agent: Option<String>,
     /// Importance score from the episodes table.
     pub importance: f64,
+    /// Namespace the episode lives in — recall threads this through to
+    /// the residency filter at prompt assembly.
+    pub namespace: String,
 }
 
 /// Sanitize user input for FTS5 MATCH queries.
@@ -349,7 +352,7 @@ impl EpisodicStore {
         Ok(self.db.with_conn(|conn| {
             // Build WHERE clause dynamically based on optional filters
             let mut sql = String::from(
-                "SELECT e.id, f.content, f.rank, e.timestamp, e.agent, e.importance
+                "SELECT e.id, f.content, f.rank, e.timestamp, e.agent, e.importance, e.namespace
                  FROM episodes_fts f
                  JOIN episodes e ON e.rowid = f.rowid
                  WHERE episodes_fts MATCH ?1",
@@ -385,6 +388,7 @@ impl EpisodicStore {
                         timestamp: row.get(3)?,
                         agent: row.get(4)?,
                         importance: row.get(5)?,
+                        namespace: row.get(6)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;

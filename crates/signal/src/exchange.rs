@@ -66,7 +66,11 @@ impl SignalProcessor {
             .map(|f| format!("{} {} {}", f.subject, f.predicate, f.object))
             .collect();
 
-        let embedding_futures: Vec<_> = texts.iter().map(|t| self.embed_text(t)).collect();
+        let embedding_futures: Vec<_> = facts
+            .iter()
+            .zip(texts.iter())
+            .map(|(f, t)| self.embed_text(t, &f.namespace))
+            .collect();
         let mut embeddings: Vec<Vec<f32>> = join_all(embedding_futures).await;
 
         // Step 2: Insert vectors sequentially (SQLite is single-writer).
@@ -110,7 +114,7 @@ impl SignalProcessor {
         if let Some(semantic) = &self.memory.semantic {
             let fact_text = format!("{subject} {predicate} {object}");
             let importance = self.importance.score(&fact_text);
-            let vector = self.embed_text(&fact_text).await;
+            let vector = self.embed_text(&fact_text, namespace).await;
             let id = semantic
                 .store_fact(
                     namespace,
@@ -166,7 +170,10 @@ impl SignalProcessor {
             .map(|f| format!("{} {} {}", f.subject, f.predicate, f.object))
             .collect();
 
-        let embedding_futures: Vec<_> = texts.iter().map(|t| self.embed_text(t)).collect();
+        let embedding_futures: Vec<_> = texts
+            .iter()
+            .map(|t| self.embed_text(t, namespace))
+            .collect();
         let mut embeddings: Vec<Vec<f32>> = join_all(embedding_futures).await;
 
         // Step 2: Store sequentially (SQLite is single-writer). Move

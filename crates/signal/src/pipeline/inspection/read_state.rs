@@ -25,7 +25,7 @@ impl SignalProcessor {
         if let Some(tx) = progress {
             let _ = tx.try_send("searching…");
         }
-        let query_vector = self.embed_text(&query).await;
+        let query_vector = self.embed_text(&query, &signal.namespace).await;
         let (memories, facts_used, episodes_used) = self
             .do_recall(&query, query_vector, top_k, Some(&signal.namespace))
             .await?;
@@ -53,6 +53,24 @@ impl SignalProcessor {
             });
             return Ok(PipelineResult::Complete(resp));
         }
+
+        // Residency gate — same rule as chat: a remote-bound prompt must
+        // not carry memories from local-only namespaces. (Agent callers
+        // above receive them directly; that path stays on the machine.)
+        let (memories, withheld) = self.withhold_nonresident_memories(memories, &signal.namespace);
+        let (facts_used, episodes_used) = if withheld > 0 {
+            let facts = memories
+                .iter()
+                .filter(|m| m.source == hippocampus::MemorySource::Semantic)
+                .count();
+            let episodes = memories
+                .iter()
+                .filter(|m| m.source == hippocampus::MemorySource::Episodic)
+                .count();
+            (facts, episodes)
+        } else {
+            (facts_used, episodes_used)
+        };
 
         let proc_history: Vec<cortex::llm::Message> = procedure_context
             .iter()
@@ -97,10 +115,40 @@ impl SignalProcessor {
             .unwrap_or(0);
         let episode_count = self.memory.episodic.count().unwrap_or(0);
 
-        let resp = prepend_nudges(SignalResponse::ok(
-            signal_id,
-            format!("Brain status: {semantic_count} facts, {episode_count} episodes"),
-        ));
+        let mut message = format!("Brain status: {semantic_count} facts, {episode_count} episodes");
+        // Residency split — only rendered when a namespace declares a
+        // policy, so zero-config installs keep the one-line status.
+        if !self.config.memory.namespaces.is_empty() {
+            let (mut lo_facts, mut lo_episodes) = (0i64, 0i64);
+            let mut lo_names: Vec<String> = Vec::new();
+            for s in self.list_namespaces() {
+                if self
+                    .config
+                    .memory
+                    .residency_of(&s.namespace)
+                    .is_local_only()
+                {
+                    lo_facts += s.fact_count;
+                    lo_episodes += s.episode_count;
+                    lo_names.push(s.namespace);
+                }
+            }
+            let chain = if self.llm.is_local() {
+                "local (loopback) — local-only memories are available to chat"
+            } else {
+                "remote — local-only memories are withheld from prompts"
+            };
+            message.push_str(&format!(
+                "\nResidency: {lo_facts} facts and {lo_episodes} episodes stay on this machine \
+                 (local-only namespaces: {}). LLM chain: {chain}.",
+                if lo_names.is_empty() {
+                    self.config.memory.local_only_namespaces().join(", ")
+                } else {
+                    lo_names.join(", ")
+                },
+            ));
+        }
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
         Ok(PipelineResult::Complete(resp))
     }
 

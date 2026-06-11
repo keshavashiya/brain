@@ -39,6 +39,19 @@ impl ConversationHandler for SignalProcessor {
     }
 }
 
+/// Recount the per-source split after the residency filter changed the set.
+fn count_sources(memories: &[hippocampus::Memory]) -> (usize, usize) {
+    let facts = memories
+        .iter()
+        .filter(|m| m.source == hippocampus::MemorySource::Semantic)
+        .count();
+    let episodes = memories
+        .iter()
+        .filter(|m| m.source == hippocampus::MemorySource::Episodic)
+        .count();
+    (facts, episodes)
+}
+
 impl SignalProcessor {
     pub(super) async fn handle_chat(
         &self,
@@ -65,7 +78,7 @@ impl SignalProcessor {
         if let Some(tx) = progress {
             let _ = tx.try_send("searching…");
         }
-        let query_vector = self.embed_text(&content).await;
+        let query_vector = self.embed_text(&content, &signal.namespace).await;
         let (memories, facts_used, episodes_used) = self
             .do_recall(&content, query_vector, top_k, Some(&signal.namespace))
             .await?;
@@ -127,6 +140,16 @@ impl SignalProcessor {
             });
             return Ok(PipelineResult::Complete(resp));
         }
+
+        // Residency gate: this prompt may leave the machine, so memories
+        // from local-only namespaces must not ride along. The agent branch
+        // above is exempt — it returns memory to a local caller.
+        let (memories, withheld) = self.withhold_nonresident_memories(memories, &signal.namespace);
+        let (facts_used, episodes_used) = if withheld > 0 {
+            count_sources(&memories)
+        } else {
+            (facts_used, episodes_used)
+        };
 
         let proc_history: Vec<cortex::llm::Message> = procedure_context
             .iter()

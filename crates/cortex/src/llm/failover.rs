@@ -113,6 +113,13 @@ impl LlmProvider for FailoverProvider {
         self.providers.first().map(|p| p.name()).unwrap_or("none")
     }
 
+    /// A failover chain may route any request to any member, so the chain
+    /// is local only when *every* member is — one remote fallback means
+    /// content can leave the machine.
+    fn is_local(&self) -> bool {
+        !self.providers.is_empty() && self.providers.iter().all(|p| p.is_local())
+    }
+
     fn model(&self) -> &str {
         self.providers.first().map(|p| p.model()).unwrap_or("none")
     }
@@ -161,6 +168,7 @@ mod tests {
     struct StubProvider {
         healthy: bool,
         models: Vec<String>,
+        local: bool,
     }
 
     #[async_trait::async_trait]
@@ -191,12 +199,24 @@ mod tests {
                 Err(LlmError::ProviderUnavailable("stub down".into()))
             }
         }
+        fn is_local(&self) -> bool {
+            self.local
+        }
     }
 
     fn stub(healthy: bool, models: &[&str]) -> Box<dyn LlmProvider> {
         Box::new(StubProvider {
             healthy,
             models: models.iter().map(|s| s.to_string()).collect(),
+            local: false,
+        })
+    }
+
+    fn local_stub() -> Box<dyn LlmProvider> {
+        Box::new(StubProvider {
+            healthy: true,
+            models: vec![],
+            local: true,
         })
     }
 
@@ -233,5 +253,17 @@ mod tests {
     async fn list_models_errors_only_when_every_provider_fails() {
         let chain = FailoverProvider::new(vec![stub(false, &[]), stub(false, &[])]);
         assert!(chain.list_models().await.is_err());
+    }
+
+    /// Residency depends on this: a chain is local only when every member
+    /// is, because failover may route any request to any member.
+    #[test]
+    fn chain_is_local_only_when_every_member_is() {
+        assert!(FailoverProvider::new(vec![local_stub(), local_stub()]).is_local());
+        assert!(!FailoverProvider::new(vec![local_stub(), stub(true, &[])]).is_local());
+        assert!(
+            !FailoverProvider::new(vec![]).is_local(),
+            "an empty chain must not pass the residency gate"
+        );
     }
 }

@@ -611,6 +611,46 @@ pub struct MemoryConfig {
     pub semantic: SemanticConfig,
     pub search: SearchConfig,
     pub consolidation: ConsolidationConfig,
+    /// Per-namespace policy (`memory.namespaces.<name>`). An entry also
+    /// governs `name/…` sub-namespaces unless a more specific entry
+    /// exists. Namespaces without an entry default to `residency: any`.
+    #[serde(default)]
+    pub namespaces: std::collections::HashMap<String, crate::residency::NamespaceConfig>,
+}
+
+impl MemoryConfig {
+    /// Resolve the residency policy for a namespace (exact entry, then
+    /// `/`-truncated ancestors — see [`crate::residency::resolve_residency`]).
+    pub fn residency_of(&self, namespace: &str) -> crate::residency::Residency {
+        crate::residency::resolve_residency(namespace, |s| {
+            self.namespaces.get(s).map(|c| c.residency)
+        })
+    }
+
+    /// Compile the per-namespace residency entries into a config-free
+    /// [`crate::residency::ResidencyPolicy`] for subsystems that never
+    /// see `BrainConfig`.
+    pub fn residency_policy(&self) -> crate::residency::ResidencyPolicy {
+        crate::residency::ResidencyPolicy::new(
+            self.namespaces
+                .iter()
+                .map(|(n, c)| (n.clone(), c.residency))
+                .collect(),
+        )
+    }
+
+    /// Names of all namespaces configured `local_only`, for status and
+    /// export surfaces.
+    pub fn local_only_namespaces(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self
+            .namespaces
+            .iter()
+            .filter(|(_, c)| c.residency.is_local_only())
+            .map(|(n, _)| n.as_str())
+            .collect();
+        names.sort_unstable();
+        names
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

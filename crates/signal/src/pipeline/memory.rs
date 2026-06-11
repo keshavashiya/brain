@@ -69,7 +69,7 @@ impl SignalProcessor {
         let namespace = &signal.namespace;
         let agent = signal.agent.as_deref();
         let fact_text = format!("{subject} {predicate} {object}");
-        let vector = self.embed_text(&fact_text).await;
+        let vector = self.embed_text(&fact_text, namespace).await;
 
         let mut facts_stored = 0;
         if let Some(semantic) = &self.memory.semantic {

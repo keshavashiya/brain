@@ -41,6 +41,7 @@ pub struct HippocampusTerminalSink {
     embedder: Option<Arc<Embedder>>,
     vectors: Option<RuVectorStore>,
     embedding_dim: usize,
+    residency: brain::ResidencyPolicy,
 }
 
 impl HippocampusTerminalSink {
@@ -51,11 +52,20 @@ impl HippocampusTerminalSink {
             embedder: None,
             vectors: None,
             embedding_dim: 0,
+            residency: brain::ResidencyPolicy::default(),
         }
     }
 
     pub fn with_namespace(mut self, ns: impl Into<String>) -> Self {
         self.namespace = ns.into();
+        self
+    }
+
+    /// Wire the namespace residency policy: when this sink's namespace is
+    /// `local_only` and the embedder is remote, mirrored nodes get the
+    /// deterministic fallback vector instead of a remote embed.
+    pub fn with_residency(mut self, residency: brain::ResidencyPolicy) -> Self {
+        self.residency = residency;
         self
     }
 
@@ -82,11 +92,18 @@ impl HippocampusTerminalSink {
             return;
         };
         let text = node_text(node);
-        let vector = match embedder.embed(&text).await {
-            Ok(v) => hippocampus::embedding::sanitize_embedding(v, self.embedding_dim, &text),
-            Err(e) => {
-                tracing::warn!(node_id = %node.id, "graph node embed failed, skipping ANN link: {e}");
-                return;
+        // Residency: a local-only namespace never reaches a remote
+        // embedder — the deterministic fallback keeps the ANN link
+        // functional without the egress.
+        let vector = if !embedder.is_local() && self.residency.is_local_only(&node.namespace) {
+            hippocampus::embedding::deterministic_fallback_embedding(&text, self.embedding_dim)
+        } else {
+            match embedder.embed(&text).await {
+                Ok(v) => hippocampus::embedding::sanitize_embedding(v, self.embedding_dim, &text),
+                Err(e) => {
+                    tracing::warn!(node_id = %node.id, "graph node embed failed, skipping ANN link: {e}");
+                    return;
+                }
             }
         };
         if let Err(e) = vectors

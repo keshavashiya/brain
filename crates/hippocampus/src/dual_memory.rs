@@ -93,6 +93,9 @@ pub struct GraphCandidate {
     pub content: String,
     pub weight: f32,
     pub created_at: DateTime<Utc>,
+    /// Namespace of the underlying node — recall threads this through
+    /// to the residency filter at prompt assembly.
+    pub namespace: String,
 }
 
 /// Graph candidate lists for one recall query, ready to fold into RRF.
@@ -200,6 +203,7 @@ impl DualMemoryReader {
                 content: hit.text,
                 weight: hit.weight,
                 created_at: hit.created_at,
+                namespace: hit.namespace,
             });
         }
 
@@ -223,6 +227,7 @@ impl DualMemoryReader {
                                 content: node_content(&node),
                                 weight: node.weight,
                                 created_at: node.created_at,
+                                namespace: node.namespace.clone(),
                             });
                     }
                 }

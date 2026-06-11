@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Namespace data-residency policy.** `memory.namespaces.<name>.residency:
+  local_only | any` (default `any`) declares where a namespace's content may
+  travel, and the policy is enforced at every egress point rather than by
+  convention: recalled memories from `local_only` namespaces are withheld from
+  prompts bound for non-local LLM providers (loopback endpoints count as local;
+  LAN hosts do not, and a failover chain is local only when every member is),
+  their content is never sent to a remote embedder (the deterministic fallback
+  embedding keeps ANN links functional while BM25 carries recall), and
+  `brain export` marks the affected namespaces in the export envelope. An entry
+  also governs its `name/…` sub-namespaces unless a more specific entry
+  overrides it. The default config ships a `private` local-only namespace, and
+  `status` shows the residency split plus whether the active LLM chain is
+  local. A wire-level test proves a `local_only` fact never appears in an
+  outbound request body when only a cloud provider is configured.
+
 ## [0.5.0] — 2026-06-10
 
 ### Added

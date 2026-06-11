@@ -744,6 +744,7 @@ mod tests {
             score: 0.9,
             importance: 0.8,
             timestamp: "2026-01-01".to_string(),
+            namespace: None,
             agent: None,
         }];
 
@@ -774,6 +775,7 @@ mod tests {
                 importance: 0.8,
                 timestamp: "2026-01-01".to_string(),
                 agent: Some("chat-bot".to_string()),
+                namespace: None,
             },
             Memory {
                 id: "2".to_string(),
@@ -783,6 +785,7 @@ mod tests {
                 importance: 0.7,
                 timestamp: "2026-01-02".to_string(),
                 agent: None,
+                namespace: None,
             },
         ];
 

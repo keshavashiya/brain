@@ -52,6 +52,15 @@ impl SignalProcessor {
         self.llm.clone()
     }
 
+    /// Replace the chat LLM chain (builder pattern). Used by tests and
+    /// embedders that construct their own provider chain. Note: the
+    /// intent classifier and importance scorer keep the chain they were
+    /// built with — this swaps the generation path only.
+    pub fn with_llm(mut self, llm: Arc<dyn cortex::LlmProvider>) -> Self {
+        self.llm = llm;
+        self
+    }
+
     /// Attach a notification router (builder pattern).
     pub fn with_notification_router(mut self, router: notification::NotificationRouter) -> Self {
         self.channels.notification_router = Some(router);

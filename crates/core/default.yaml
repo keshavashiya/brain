@@ -59,6 +59,15 @@ memory:
     enabled: true
     interval_hours: 24
     forgetting_threshold: 0.05
+  # Per-namespace data residency. A namespace marked `local_only` never
+  # reaches a non-local provider: its memories are withheld from prompts
+  # bound for remote LLMs, its content is only embedded by a loopback
+  # embedder, and exports mark it. An entry also covers its `name/…`
+  # sub-namespaces. Store into it with e.g. `namespace: private` on any
+  # client, or a transport's `namespace` setting.
+  namespaces:
+    private:
+      residency: local_only
 
 # ── Encryption ─────────────────────────────────────────────────────────────────
 # Run `brain init --encrypt` to generate a salt and enable at-rest encryption.

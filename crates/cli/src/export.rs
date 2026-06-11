@@ -10,6 +10,11 @@ use std::time::Duration;
 struct MemoryExport {
     version: String,
     exported_at: String,
+    /// Namespaces whose residency policy was `local_only` at export
+    /// time. Facts/episodes in them (or their sub-namespaces) have
+    /// never been sent off-machine — handle this file accordingly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    local_only_namespaces: Vec<String>,
     facts: Vec<signal::ExportedFact>,
     episodes: Vec<signal::ExportedEpisode>,
 }
@@ -52,6 +57,12 @@ pub(crate) async fn cmd_export(
     let export = MemoryExport {
         version: resp["version"].as_str().unwrap_or("unknown").to_string(),
         exported_at: resp["exported_at"].as_str().unwrap_or("").to_string(),
+        local_only_namespaces: config
+            .memory
+            .local_only_namespaces()
+            .into_iter()
+            .map(String::from)
+            .collect(),
         facts,
         episodes,
     };

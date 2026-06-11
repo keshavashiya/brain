@@ -87,7 +87,8 @@ pub async fn build_processor(
     // and gain a `vector_id` — this is what lets terminal activity surface
     // through ANN recall, not just FTS. Degraded (no semantic store)
     // installs still mirror nodes; they just skip the ANN link.
-    let mut sink = signal::terminal_graph_mirror::HippocampusTerminalSink::new(graph.clone());
+    let mut sink = signal::terminal_graph_mirror::HippocampusTerminalSink::new(graph.clone())
+        .with_residency(config.memory.residency_policy());
     if let Some(semantic) = processor.semantic() {
         sink = sink.with_embedding(
             processor.embedder(),

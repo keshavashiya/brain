@@ -451,3 +451,21 @@ fn known_context_window_recognises_open_models() {
 fn known_context_window_returns_none_for_unknown() {
     assert_eq!(known_context_window("some-bespoke-tiny-model"), None);
 }
+
+#[test]
+fn provider_locality_follows_endpoint_host() {
+    let local_ollama = OllamaProvider::new("http://localhost:11434", "m", 0.7, 64).unwrap();
+    assert!(local_ollama.is_local());
+
+    // Ollama on a LAN host still takes content off this machine.
+    let lan_ollama = OllamaProvider::new("http://192.168.1.20:11434", "m", 0.7, 64).unwrap();
+    assert!(!lan_ollama.is_local());
+
+    // llama.cpp / LM Studio style loopback OpenAI-compatible server.
+    let local_oai = OpenAiProvider::new("http://127.0.0.1:8080/v1", None, "m", 0.7, None).unwrap();
+    assert!(local_oai.is_local());
+
+    let hosted =
+        OpenAiProvider::new("https://api.openai.com/v1", Some("k"), "m", 0.7, None).unwrap();
+    assert!(!hosted.is_local());
+}

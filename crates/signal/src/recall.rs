@@ -17,8 +17,27 @@ impl SignalProcessor {
     /// is available or if the call fails. Successful embeddings flow through
     /// an LRU cache keyed by text hash so repeated recall/chat queries don't
     /// re-hit the provider.
-    pub(super) async fn embed_text(&self, text: &str) -> Vec<f32> {
+    ///
+    /// `namespace` is the namespace the text belongs to (fact storage) or
+    /// the scope of the recall it serves (queries). When that namespace is
+    /// `local_only` and the embedder is remote, the text never leaves the
+    /// machine: the deterministic fallback vector is used instead — BM25
+    /// still carries recall for those namespaces.
+    pub(super) async fn embed_text(&self, text: &str, namespace: &str) -> Vec<f32> {
         self.metrics.inc_embedding_request();
+        if let Some(embedder) = &self.memory.embedder {
+            if !embedder.is_local() && self.config.memory.residency_of(namespace).is_local_only() {
+                tracing::debug!(
+                    namespace,
+                    "residency: remote embedder skipped for local-only content"
+                );
+                self.metrics.inc_embedding_fallback();
+                return hippocampus::embedding::deterministic_fallback_embedding(
+                    text,
+                    self.memory.embedding_dim,
+                );
+            }
+        }
         let key = embedding_cache_key(text);
         if let Some(cached) = self
             .memory
@@ -84,6 +103,7 @@ impl SignalProcessor {
                 importance: 0.5,
                 timestamp: r.timestamp,
                 agent: r.agent,
+                namespace: Some(r.namespace),
             })
             .collect()
     }
@@ -146,6 +166,43 @@ impl SignalProcessor {
         Ok((memories, 0, episodes_used))
     }
 
+    /// Enforce the namespace data-residency policy on recall results bound
+    /// for the LLM: when the active chain can leave the machine, memories
+    /// from `local_only` namespaces are withheld from the prompt. Items
+    /// without a namespace (legacy conversions) inherit `scope_namespace`
+    /// — the namespace the recall was scoped to — so nothing slips through
+    /// unlabeled. Returns the kept memories and the withheld count.
+    ///
+    /// Agent-caller responses and user-facing renderings are *not* run
+    /// through this filter: they stay on the machine.
+    pub(crate) fn withhold_nonresident_memories(
+        &self,
+        memories: Vec<hippocampus::Memory>,
+        scope_namespace: &str,
+    ) -> (Vec<hippocampus::Memory>, usize) {
+        if self.config.memory.namespaces.is_empty() || self.llm.is_local() {
+            return (memories, 0);
+        }
+        let total = memories.len();
+        let kept: Vec<hippocampus::Memory> = memories
+            .into_iter()
+            .filter(|m| {
+                let ns = m.namespace.as_deref().unwrap_or(scope_namespace);
+                !self.config.memory.residency_of(ns).is_local_only()
+            })
+            .collect();
+        let withheld = total - kept.len();
+        if withheld > 0 {
+            tracing::info!(
+                withheld,
+                scope = scope_namespace,
+                provider = self.llm.name(),
+                "residency: local-only memories withheld from remote-bound prompt"
+            );
+        }
+        (kept, withheld)
+    }
+
     /// Search semantic facts by text query (embed → vector ANN search).
     ///
     /// Returns up to `top_k` facts ranked by similarity. If `namespace` is
@@ -158,7 +215,7 @@ impl SignalProcessor {
         namespace: Option<&str>,
     ) -> Vec<hippocampus::SemanticResult> {
         if let Some(semantic) = &self.memory.semantic {
-            let qv = self.embed_text(query).await;
+            let qv = self.embed_text(query, namespace.unwrap_or("")).await;
             match semantic.search_similar(qv, top_k, namespace, None).await {
                 Ok(results) => results,
                 Err(e) => {

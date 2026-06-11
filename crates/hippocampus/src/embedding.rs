@@ -352,6 +352,10 @@ impl EmbeddingProvider for OpenAIProvider {
 /// across the signal pipeline.
 pub struct Embedder {
     inner: Box<dyn EmbeddingProvider>,
+    /// Whether the backend endpoint is on this machine (loopback).
+    /// Drives the namespace data-residency policy: content from
+    /// `local_only` namespaces is never sent to a remote embedder.
+    is_local: bool,
 }
 
 impl std::fmt::Debug for Embedder {
@@ -363,22 +367,38 @@ impl std::fmt::Debug for Embedder {
 impl Embedder {
     /// Wrap any provider impl. Lets crates outside this module register
     /// custom backends (Voyage, Cohere, in-process test doubles, …).
+    /// Treated as remote for residency purposes — use
+    /// [`with_locality`](Self::with_locality) for in-process backends so
+    /// `local_only` content isn't needlessly downgraded to fallback
+    /// embeddings.
     pub fn new(inner: Box<dyn EmbeddingProvider>) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            is_local: false,
+        }
+    }
+
+    /// Override the locality flag (builder-style).
+    pub fn with_locality(mut self, is_local: bool) -> Self {
+        self.is_local = is_local;
+        self
     }
 
     /// Create an Ollama-backed embedder.
     pub fn for_ollama(base_url: &str, model: &str) -> Result<Self, EmbeddingError> {
         info!(model, "Embedding provider: Ollama");
-        Ok(Self::new(Box::new(OllamaProvider::new(base_url, model)?)))
+        let local = brain::url_is_loopback(base_url);
+        Ok(Self::new(Box::new(OllamaProvider::new(base_url, model)?)).with_locality(local))
     }
 
     /// Create an OpenAI-compatible embedder.
     pub fn for_openai(base_url: &str, model: &str, api_key: &str) -> Result<Self, EmbeddingError> {
         info!(model, base_url, "Embedding provider: OpenAI-compatible");
-        Ok(Self::new(Box::new(OpenAIProvider::new(
-            base_url, model, api_key,
-        )?)))
+        let local = brain::url_is_loopback(base_url);
+        Ok(
+            Self::new(Box::new(OpenAIProvider::new(base_url, model, api_key)?))
+                .with_locality(local),
+        )
     }
 
     /// Create an embedder from Brain config settings.
@@ -411,6 +431,12 @@ impl Embedder {
     /// Provider name for logging.
     pub fn provider_name(&self) -> &str {
         self.inner.provider_name()
+    }
+
+    /// True when embeddings stay on this machine (loopback endpoint or
+    /// an in-process backend that opted in via [`Self::with_locality`]).
+    pub fn is_local(&self) -> bool {
+        self.is_local
     }
 }
 

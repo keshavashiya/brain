@@ -290,6 +290,15 @@ pub trait LlmProvider: Send + Sync {
     async fn fetch_context_window(&self) -> Option<usize> {
         known_context_window(self.model())
     }
+
+    /// True when every request to this provider stays on this machine
+    /// (loopback endpoint). Drives the namespace data-residency policy:
+    /// content from `local_only` namespaces may only travel to local
+    /// providers. Defaults to remote so an unknown provider can never
+    /// silently pass the residency gate.
+    fn is_local(&self) -> bool {
+        false
+    }
 }
 
 // ─── Provider Factory ───────────────────────────────────────────────────────

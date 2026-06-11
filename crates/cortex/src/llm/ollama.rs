@@ -319,6 +319,12 @@ impl LlmProvider for OllamaProvider {
         &self.model
     }
 
+    /// Ollama is only "local" when it actually runs on this machine —
+    /// a LAN-hosted Ollama still takes content off-box.
+    fn is_local(&self) -> bool {
+        brain::url_is_loopback(&self.base_url)
+    }
+
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
         #[derive(Deserialize)]
         struct Tag {

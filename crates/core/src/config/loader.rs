@@ -386,6 +386,7 @@ impl Default for BrainConfig {
                     interval_hours: 24,
                     forgetting_threshold: 0.05,
                 },
+                namespaces: Default::default(),
             },
             encryption: EncryptionConfig { enabled: false },
             security: SecurityConfig {

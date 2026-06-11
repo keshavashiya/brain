@@ -407,6 +407,12 @@ impl LlmProvider for OpenAiProvider {
         &self.model
     }
 
+    /// OpenAI-compatible servers on loopback (llama.cpp, LM Studio,
+    /// LocalAI) count as local; hosted endpoints do not.
+    fn is_local(&self) -> bool {
+        brain::url_is_loopback(&self.base_url)
+    }
+
     async fn list_models(&self) -> Result<Vec<String>, LlmError> {
         #[derive(Deserialize)]
         struct ModelEntry {

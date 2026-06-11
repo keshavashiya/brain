@@ -37,6 +37,7 @@ pub(super) fn build_action_dispatcher(
         semantic: processor.semantic().cloned(),
         embedder,
         embedding_dim,
+        residency: config.memory.residency_policy(),
     });
 
     let action_config = cortex::actions::ActionConfig {

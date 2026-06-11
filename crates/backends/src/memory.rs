@@ -43,6 +43,24 @@ pub struct DefaultMemoryBackend {
     pub semantic: Option<hippocampus::SemanticStore>,
     pub embedder: Arc<tokio::sync::Mutex<Option<hippocampus::Embedder>>>,
     pub embedding_dim: usize,
+    /// Namespace residency policy — content from `local_only`
+    /// namespaces is never sent to a remote embedder (deterministic
+    /// fallback instead).
+    pub residency: brain::ResidencyPolicy,
+}
+
+impl DefaultMemoryBackend {
+    /// True when embedding `namespace` content through the wired
+    /// embedder would take it off the machine in violation of policy.
+    async fn remote_embed_blocked(&self, namespace: &str) -> bool {
+        if self.residency.is_empty() || !self.residency.is_local_only(namespace) {
+            return false;
+        }
+        match self.embedder.lock().await.as_ref() {
+            Some(embedder) => !embedder.is_local(),
+            None => false,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -62,7 +80,9 @@ impl cortex::actions::MemoryBackend for DefaultMemoryBackend {
         };
 
         let content = format!("{subject} {predicate} {object}");
-        let vector = {
+        let vector = if self.remote_embed_blocked(namespace).await {
+            hippocampus::embedding::deterministic_fallback_embedding(&content, self.embedding_dim)
+        } else {
             let mut guard = self.embedder.lock().await;
             if let Some(embedder) = guard.as_mut() {
                 match embedder.embed(&content).await {
@@ -105,7 +125,9 @@ impl cortex::actions::MemoryBackend for DefaultMemoryBackend {
             ));
         };
 
-        let vector = {
+        let vector = if self.remote_embed_blocked(namespace.unwrap_or("")).await {
+            hippocampus::embedding::deterministic_fallback_embedding(query, self.embedding_dim)
+        } else {
             let mut guard = self.embedder.lock().await;
             if let Some(embedder) = guard.as_mut() {
                 match embedder.embed(query).await {

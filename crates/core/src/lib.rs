@@ -11,6 +11,7 @@
 pub mod auth;
 pub mod config;
 pub mod cors;
+pub mod residency;
 pub mod security;
 
 pub use auth::{check_auth, AuthResult};
@@ -18,6 +19,7 @@ pub use config::{
     AccessConfig, AgentEntry, AgentsConfig, ApiKeyConfig, BrainConfig, ClientRateLimitConfig,
     DeliveryConfig, LlmConfig, LogFormat, LogRotation, LoggingConfig, ProviderEntry,
 };
+pub use residency::{url_is_loopback, NamespaceConfig, Residency, ResidencyPolicy};
 pub use security::ActionTier;
 
 /// Standard timeout constants for HTTP clients across Brain OS.
