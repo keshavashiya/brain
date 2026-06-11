@@ -30,6 +30,14 @@ pub struct ApprovalSpec {
     /// on user input).
     #[serde(default)]
     pub grant_key: Option<GrantKey>,
+    /// Path the action touches (if any). Scoped standing grants are
+    /// matched against it, and an `approve … here` response boxes the
+    /// resulting grant to it.
+    #[serde(default)]
+    pub scope_path: Option<String>,
+    /// Namespace the request runs in. Same dual role as `scope_path`.
+    #[serde(default)]
+    pub scope_namespace: Option<String>,
 }
 
 impl ApprovalSpec {
@@ -43,11 +51,22 @@ impl ApprovalSpec {
             preferred_channel: None,
             alternatives: Vec::new(),
             grant_key: None,
+            scope_path: None,
+            scope_namespace: None,
         }
     }
 
     pub fn with_grant_key(mut self, key: GrantKey) -> Self {
         self.grant_key = Some(key);
+        self
+    }
+
+    /// Attach the request's path/namespace context — matched against
+    /// scoped standing grants, and the box an `approve … here` response
+    /// confines its grant to.
+    pub fn with_scope_context(mut self, path: Option<String>, namespace: Option<String>) -> Self {
+        self.scope_path = path;
+        self.scope_namespace = namespace;
         self
     }
 
@@ -76,6 +95,16 @@ impl ApprovalSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ApprovalDecision {
     Approve,
+    /// Approve *and* record a standing approval for the request's grant
+    /// key, so equivalent requests stop prompting — optionally only for
+    /// `ttl`, and optionally boxed to the request's own path/namespace
+    /// context (`approve … for 1h` / `approve … here`). Requires the
+    /// spec to carry a grant key and the engine a standing store;
+    /// otherwise it degrades to a one-time approval with a warning.
+    ApproveWithGrant {
+        ttl: Option<std::time::Duration>,
+        scope_to_request: bool,
+    },
     Reject,
     RejectWithReason(String),
 }
@@ -84,6 +113,19 @@ impl std::fmt::Display for ApprovalDecision {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ApprovalDecision::Approve => write!(f, "approve"),
+            ApprovalDecision::ApproveWithGrant {
+                ttl,
+                scope_to_request,
+            } => {
+                write!(f, "approve+grant")?;
+                if let Some(d) = ttl {
+                    write!(f, " for {}s", d.as_secs())?;
+                }
+                if *scope_to_request {
+                    write!(f, " here")?;
+                }
+                Ok(())
+            }
             ApprovalDecision::Reject => write!(f, "reject"),
             ApprovalDecision::RejectWithReason(r) => write!(f, "reject ({r})"),
         }
@@ -205,9 +247,10 @@ impl SqliteConfirmationEngine {
     }
 
     /// True when the spec carries a `grant_key`, a store is wired, and
-    /// the store reports a matching active grant. Storage errors are
-    /// logged and treated as "not granted" — failing closed is safer
-    /// than auto-approving on a flaky read.
+    /// the store reports a matching active grant for the request's
+    /// scope context — expired grants and scope mismatches re-prompt.
+    /// Storage errors are logged and treated as "not granted" — failing
+    /// closed is safer than auto-approving on a flaky read.
     async fn standing_grants_request(&self, spec: &ApprovalSpec) -> bool {
         let Some(store) = &self.standing else {
             return false;
@@ -215,7 +258,14 @@ impl SqliteConfirmationEngine {
         let Some(key) = &spec.grant_key else {
             return false;
         };
-        match store.is_granted(key).await {
+        match store
+            .is_granted_for(
+                key,
+                spec.scope_path.as_deref(),
+                spec.scope_namespace.as_deref(),
+            )
+            .await
+        {
             Ok(g) => g,
             Err(e) => {
                 tracing::warn!(
@@ -245,10 +295,30 @@ impl SqliteConfirmationEngine {
                     created_at   TEXT NOT NULL,
                     resolved     INTEGER NOT NULL DEFAULT 0,
                     outcome      TEXT,
-                    resolved_at  TEXT
+                    resolved_at  TEXT,
+                    grant_key    TEXT,
+                    scope_path   TEXT,
+                    scope_namespace TEXT
                 );
                 "#,
             )?;
+            // Pre-existing databases predate the last three columns;
+            // introspection-guarded ALTERs keep this idempotent.
+            let mut existing = std::collections::HashSet::new();
+            {
+                let mut stmt = conn.prepare("PRAGMA table_info(approval_requests)")?;
+                let mut rows = stmt.query([])?;
+                while let Some(row) = rows.next()? {
+                    existing.insert(row.get::<_, String>(1)?);
+                }
+            }
+            for col in ["grant_key", "scope_path", "scope_namespace"] {
+                if !existing.contains(col) {
+                    conn.execute_batch(&format!(
+                        "ALTER TABLE approval_requests ADD COLUMN {col} TEXT;"
+                    ))?;
+                }
+            }
             Ok(())
         })?;
         Ok(())
@@ -265,8 +335,8 @@ impl ConfirmationEngine for SqliteConfirmationEngine {
             conn.execute(
                 r#"INSERT INTO approval_requests (
                     nonce, description, tier, timeout_secs, escalation, channel, alternatives,
-                    created_at, resolved
-                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0)"#,
+                    created_at, resolved, grant_key, scope_path, scope_namespace
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?10, ?11)"#,
                 params![
                     spec.nonce,
                     spec.action_description,
@@ -276,6 +346,11 @@ impl ConfirmationEngine for SqliteConfirmationEngine {
                     spec.preferred_channel,
                     serde_json::to_string(&spec.alternatives).unwrap_or_default(),
                     Utc::now().to_rfc3339(),
+                    spec.grant_key
+                        .as_ref()
+                        .and_then(|k| serde_json::to_string(k).ok()),
+                    spec.scope_path,
+                    spec.scope_namespace,
                 ],
             )?;
             Ok(())
@@ -382,7 +457,9 @@ impl ConfirmationEngine for SqliteConfirmationEngine {
 
     async fn respond(&self, nonce: &str, decision: ApprovalDecision) -> Result<(), ConfirmError> {
         let outcome = match decision {
-            ApprovalDecision::Approve => ApprovalOutcome::Approved,
+            ApprovalDecision::Approve | ApprovalDecision::ApproveWithGrant { .. } => {
+                ApprovalOutcome::Approved
+            }
             ApprovalDecision::Reject => ApprovalOutcome::Rejected {
                 reason: "rejected by user".to_string(),
             },
@@ -396,11 +473,19 @@ impl ConfirmationEngine for SqliteConfirmationEngine {
         let outcome_json = serde_json::to_string(&outcome).unwrap_or_default();
         let now = Utc::now().to_rfc3339();
 
-        self.db.with_conn(|conn| {
-            let resolved: bool = conn.query_row(
-                "SELECT resolved FROM approval_requests WHERE nonce = ?",
+        // (grant_key json, scope_path, scope_namespace) — carried out so
+        // an ApproveWithGrant can mint the standing approval below.
+        let row_ctx = self.db.with_conn(|conn| {
+            let (resolved, grant_key, scope_path, scope_namespace): (
+                bool,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ) = conn.query_row(
+                "SELECT resolved, grant_key, scope_path, scope_namespace
+                 FROM approval_requests WHERE nonce = ?",
                 [nonce],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             ).map_err(|_| storage::sqlite::SqliteError::Rusqlite(
                 rusqlite::Error::InvalidColumnName(format!("approval not found: {nonce}"))
             ))?;
@@ -415,7 +500,7 @@ impl ConfirmationEngine for SqliteConfirmationEngine {
                 "UPDATE approval_requests SET resolved = 1, outcome = ?, resolved_at = ? WHERE nonce = ?",
                 params![outcome_json, now, nonce],
             )?;
-            Ok(())
+            Ok((grant_key, scope_path, scope_namespace))
         })
         .map_err(|e| match e {
             storage::sqlite::SqliteError::Rusqlite(rusqlite::Error::InvalidColumnName(msg)) => {
@@ -429,6 +514,70 @@ impl ConfirmationEngine for SqliteConfirmationEngine {
             }
             other => ConfirmError::Storage(other),
         })?;
+
+        // Mint the standing approval an `approve … for <ttl>` / `… here`
+        // asked for. Best-effort *after* the approval itself resolved:
+        // a missing grant key or store degrades to a one-time approval
+        // (logged), never to a lost response.
+        if let ApprovalDecision::ApproveWithGrant {
+            ttl,
+            scope_to_request,
+        } = &decision
+        {
+            let (grant_key_json, scope_path, scope_namespace) = row_ctx;
+            let key = grant_key_json
+                .as_deref()
+                .and_then(|j| serde_json::from_str::<GrantKey>(j).ok());
+            match (&self.standing, key) {
+                (Some(store), Some(key)) => {
+                    let expires_at = ttl
+                        .and_then(|d| chrono::Duration::from_std(d).ok().map(|cd| Utc::now() + cd));
+                    let scope = scope_to_request
+                        .then(|| crate::standing::GrantScope {
+                            path_prefix: scope_path,
+                            namespace: scope_namespace,
+                        })
+                        .filter(|s| !s.is_empty());
+                    if *scope_to_request && scope.is_none() {
+                        tracing::warn!(
+                            nonce = %nonce,
+                            "approve-here requested but the request carries no \
+                             path/namespace context; granting one-time approval only"
+                        );
+                    } else {
+                        match store
+                            .grant_scoped(
+                                &key,
+                                Some("granted from approval prompt"),
+                                expires_at,
+                                scope,
+                            )
+                            .await
+                        {
+                            Ok(id) => tracing::info!(
+                                nonce = %nonce,
+                                grant_id = %id,
+                                "standing approval minted from approval response"
+                            ),
+                            Err(e) => tracing::warn!(
+                                nonce = %nonce,
+                                "standing-approval grant failed; approval was one-time: {e}"
+                            ),
+                        }
+                    }
+                }
+                (None, _) => tracing::warn!(
+                    nonce = %nonce,
+                    "approve-with-grant requested but no standing store is wired; \
+                     approval was one-time"
+                ),
+                (_, None) => tracing::warn!(
+                    nonce = %nonce,
+                    "approve-with-grant requested but the request carries no grant \
+                     key (no principal); approval was one-time"
+                ),
+            }
+        }
 
         tracing::info!(nonce = %nonce, decision = %decision_str, "approval resolved");
         Ok(())
@@ -529,9 +678,10 @@ impl ConfirmationEngine for SqliteConfirmationEngine {
         self.db
             .with_conn(|conn| {
                 let mut stmt = conn.prepare(
-                "SELECT nonce, description, tier, timeout_secs, escalation, channel, alternatives
+                    "SELECT nonce, description, tier, timeout_secs, channel, alternatives,
+                        grant_key, scope_path, scope_namespace
                  FROM approval_requests WHERE resolved = 0 ORDER BY created_at ASC",
-            )?;
+                )?;
                 let mut rows = stmt.query([])?;
 
                 let mut pending = Vec::new();
@@ -554,6 +704,9 @@ impl ConfirmationEngine for SqliteConfirmationEngine {
                     let alternatives_json: String = row.get(5)?;
                     let alternatives: Vec<String> =
                         serde_json::from_str(&alternatives_json).unwrap_or_default();
+                    let grant_key = row
+                        .get::<_, Option<String>>(6)?
+                        .and_then(|j| serde_json::from_str(&j).ok());
 
                     pending.push(ApprovalSpec {
                         action_description: description,
@@ -563,11 +716,9 @@ impl ConfirmationEngine for SqliteConfirmationEngine {
                         escalation: EscalationPolicy::Abort,
                         preferred_channel: channel,
                         alternatives,
-                        // grant_key isn't persisted on approval_requests
-                        // — the bypass decision is made at request-time
-                        // from the standing_approvals table, not
-                        // reconstructed from history.
-                        grant_key: None,
+                        grant_key,
+                        scope_path: row.get(7)?,
+                        scope_namespace: row.get(8)?,
                     });
                 }
                 Ok(pending)
@@ -740,6 +891,145 @@ mod tests {
         assert!(
             matches!(outcome, ApprovalOutcome::TimedOut),
             "missing grant must not bypass — destructive falls through to today's flow"
+        );
+    }
+
+    /// `approve … for <ttl>` end-to-end: the response mints a TTL'd
+    /// standing approval, an equivalent request then bypasses the prompt
+    /// — and once the grant expires, the next request re-prompts (DoD).
+    #[tokio::test]
+    async fn approve_with_ttl_grant_bypasses_until_expiry() {
+        use crate::standing::{GrantKey, SqliteStandingApprovals, StandingApprovalStore};
+        use std::sync::Arc;
+
+        let pool = storage::SqlitePool::open_memory().unwrap();
+        let store = Arc::new(SqliteStandingApprovals::new(pool.clone()));
+        let engine =
+            Arc::new(SqliteConfirmationEngine::new(pool).with_standing_approvals(store.clone()));
+        engine.ensure_tables().unwrap();
+        let key = GrantKey::new("agent-a", "fs", "write");
+
+        // First request prompts; the user answers "approve … for 1h".
+        let spec = ApprovalSpec::new("write file", ActionTier::Destructive)
+            .with_timeout(std::time::Duration::from_secs(5))
+            .with_grant_key(key.clone());
+        let nonce = spec.nonce.clone();
+        let responder = {
+            let engine = engine.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                engine
+                    .respond(
+                        &nonce,
+                        ApprovalDecision::ApproveWithGrant {
+                            ttl: Some(std::time::Duration::from_secs(3600)),
+                            scope_to_request: false,
+                        },
+                    )
+                    .await
+                    .unwrap();
+            })
+        };
+        let outcome = engine.request(spec).await.unwrap();
+        responder.await.unwrap();
+        assert!(matches!(outcome, ApprovalOutcome::Approved));
+        assert!(
+            store.is_granted(&key).await.unwrap(),
+            "the response must have minted a standing approval"
+        );
+
+        // Equivalent request now bypasses the prompt.
+        let spec = ApprovalSpec::new("write file", ActionTier::Destructive)
+            .with_timeout(std::time::Duration::from_millis(300))
+            .with_grant_key(key.clone());
+        let outcome = engine.request(spec).await.unwrap();
+        assert!(
+            matches!(outcome, ApprovalOutcome::Approved),
+            "unexpired TTL grant must bypass"
+        );
+
+        // Force-expire the grant; the next request re-prompts (times out).
+        let grants = store.list_active().await.unwrap();
+        store.revoke(&grants[0].id).await.unwrap();
+        store
+            .grant_scoped(
+                &key,
+                None,
+                Some(Utc::now() - chrono::Duration::seconds(1)),
+                None,
+            )
+            .await
+            .unwrap();
+        let spec = ApprovalSpec::new("write file", ActionTier::Destructive)
+            .with_timeout(std::time::Duration::from_millis(300))
+            .with_grant_key(key);
+        let outcome = engine.request(spec).await.unwrap();
+        assert!(
+            matches!(outcome, ApprovalOutcome::TimedOut),
+            "an expired grant must re-prompt (DoD)"
+        );
+    }
+
+    /// `approve … here` end-to-end: the minted grant is boxed to the
+    /// request's own path context — a request from the same path
+    /// bypasses, a different path re-prompts (DoD).
+    #[tokio::test]
+    async fn approve_here_boxes_grant_to_request_scope() {
+        use crate::standing::{GrantKey, SqliteStandingApprovals};
+        use std::sync::Arc;
+
+        let pool = storage::SqlitePool::open_memory().unwrap();
+        let store = Arc::new(SqliteStandingApprovals::new(pool.clone()));
+        let engine =
+            Arc::new(SqliteConfirmationEngine::new(pool).with_standing_approvals(store.clone()));
+        engine.ensure_tables().unwrap();
+        let key = GrantKey::new("agent-a", "shell", "exec");
+
+        let spec = ApprovalSpec::new("run build", ActionTier::Destructive)
+            .with_timeout(std::time::Duration::from_secs(5))
+            .with_grant_key(key.clone())
+            .with_scope_context(Some("/repo/app".into()), Some("work".into()));
+        let nonce = spec.nonce.clone();
+        let responder = {
+            let engine = engine.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                engine
+                    .respond(
+                        &nonce,
+                        ApprovalDecision::ApproveWithGrant {
+                            ttl: None,
+                            scope_to_request: true,
+                        },
+                    )
+                    .await
+                    .unwrap();
+            })
+        };
+        let outcome = engine.request(spec).await.unwrap();
+        responder.await.unwrap();
+        assert!(matches!(outcome, ApprovalOutcome::Approved));
+
+        // Same scope → bypass.
+        let spec = ApprovalSpec::new("run build", ActionTier::Destructive)
+            .with_timeout(std::time::Duration::from_millis(300))
+            .with_grant_key(key.clone())
+            .with_scope_context(Some("/repo/app/sub".into()), Some("work".into()));
+        let outcome = engine.request(spec).await.unwrap();
+        assert!(
+            matches!(outcome, ApprovalOutcome::Approved),
+            "request inside the granted scope must bypass"
+        );
+
+        // Different path → re-prompt.
+        let spec = ApprovalSpec::new("run build", ActionTier::Destructive)
+            .with_timeout(std::time::Duration::from_millis(300))
+            .with_grant_key(key)
+            .with_scope_context(Some("/other/repo".into()), Some("work".into()));
+        let outcome = engine.request(spec).await.unwrap();
+        assert!(
+            matches!(outcome, ApprovalOutcome::TimedOut),
+            "a scope mismatch must re-prompt (DoD)"
         );
     }
 

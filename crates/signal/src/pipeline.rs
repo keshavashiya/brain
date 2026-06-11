@@ -610,6 +610,15 @@ impl SignalProcessor {
                 &req.verb_action,
             ));
         }
+        // Scope context: matched against scope-boxed standing grants, and
+        // the box an `approve … here` response confines its grant to.
+        let path = req
+            .modifiers
+            .get("path")
+            .or_else(|| req.modifiers.get("cwd"))
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        spec = spec.with_scope_context(path, Some(signal.namespace.clone()));
         let nonce = spec.nonce.clone();
 
         if let Some(observer) = &self.observability.observer {

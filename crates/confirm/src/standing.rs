@@ -52,6 +52,55 @@ impl GrantKey {
     }
 }
 
+/// Scope qualifier boxing a grant to part of the request space. An empty
+/// scope (all fields `None`) is the unscoped grant — it matches every
+/// request for its verb. A scoped grant only matches requests whose
+/// context satisfies *every* set qualifier; a request that carries no
+/// value for a qualified dimension does **not** match (fail closed —
+/// the user boxed the grant, so an unboxable request re-prompts).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GrantScope {
+    /// Path prefix (segment-boundary match: `/a/b` covers `/a/b` and
+    /// `/a/b/...`, not `/a/bc`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path_prefix: Option<String>,
+    /// Namespace, covering its `name/…` sub-namespaces — the same
+    /// hierarchy rule recall and residency use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
+}
+
+impl GrantScope {
+    pub fn is_empty(&self) -> bool {
+        self.path_prefix.is_none() && self.namespace.is_none()
+    }
+
+    /// True when the request context satisfies every set qualifier.
+    pub fn matches(&self, path: Option<&str>, namespace: Option<&str>) -> bool {
+        fn covers(prefix: &str, value: Option<&str>) -> bool {
+            match value {
+                Some(v) => {
+                    v == prefix
+                        || v.strip_prefix(prefix)
+                            .is_some_and(|rest| rest.starts_with('/'))
+                }
+                None => false,
+            }
+        }
+        if let Some(p) = &self.path_prefix {
+            if !covers(p.trim_end_matches('/'), path) {
+                return false;
+            }
+        }
+        if let Some(ns) = &self.namespace {
+            if !covers(ns, namespace) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
 /// One active standing approval row.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StandingApproval {
@@ -61,24 +110,60 @@ pub struct StandingApproval {
     pub verb_action: String,
     pub granted_at: DateTime<Utc>,
     pub note: Option<String>,
+    /// When set, the grant stops matching after this instant (the next
+    /// request re-prompts). Expired rows stay in the table for audit.
+    pub expires_at: Option<DateTime<Utc>>,
+    /// When set, the grant only matches requests inside the scope.
+    pub scope: Option<GrantScope>,
 }
 
 /// Backend for standing approvals.
 #[async_trait]
 pub trait StandingApprovalStore: Send + Sync {
-    /// True iff there is at least one non-revoked grant matching the
-    /// key. Implementations should make this cheap — the engine calls
-    /// it on every confirmation tier ≥ requires_confirmation.
+    /// True iff there is at least one non-revoked, unexpired, **unscoped**
+    /// grant matching the key. Context-free callers cannot satisfy a
+    /// scope qualifier, so scoped grants never match here (fail closed —
+    /// use [`is_granted_for`](Self::is_granted_for) when the request
+    /// context is known). Implementations should make this cheap — the
+    /// engine calls it on every confirmation tier ≥
+    /// requires_confirmation.
     async fn is_granted(&self, key: &GrantKey) -> Result<bool, ConfirmError>;
 
-    /// Record a new grant; returns its id.
-    async fn grant(&self, key: &GrantKey, note: Option<&str>) -> Result<String, ConfirmError>;
+    /// Scope-aware check: true iff a non-revoked, unexpired grant
+    /// matches the key *and* its scope (if any) admits the request's
+    /// path/namespace context. The default delegates to
+    /// [`is_granted`](Self::is_granted), i.e. only unscoped grants
+    /// match — a safe floor for stores that don't model scopes.
+    async fn is_granted_for(
+        &self,
+        key: &GrantKey,
+        _path: Option<&str>,
+        _namespace: Option<&str>,
+    ) -> Result<bool, ConfirmError> {
+        self.is_granted(key).await
+    }
+
+    /// Record a new grant; returns its id. Unscoped and non-expiring —
+    /// delegates to [`grant_scoped`](Self::grant_scoped).
+    async fn grant(&self, key: &GrantKey, note: Option<&str>) -> Result<String, ConfirmError> {
+        self.grant_scoped(key, note, None, None).await
+    }
+
+    /// Record a new grant with an optional expiry instant and scope box;
+    /// returns its id.
+    async fn grant_scoped(
+        &self,
+        key: &GrantKey,
+        note: Option<&str>,
+        expires_at: Option<DateTime<Utc>>,
+        scope: Option<GrantScope>,
+    ) -> Result<String, ConfirmError>;
 
     /// Revoke a specific grant by id. Returns true iff a row was
     /// updated (false when the id is unknown or already revoked).
     async fn revoke(&self, id: &str) -> Result<bool, ConfirmError>;
 
-    /// All non-revoked grants, newest-first.
+    /// All non-revoked, unexpired grants, newest-first.
     async fn list_active(&self) -> Result<Vec<StandingApproval>, ConfirmError>;
 }
 
@@ -89,8 +174,53 @@ pub struct SqliteStandingApprovals {
 
 impl SqliteStandingApprovals {
     pub fn new(db: SqlitePool) -> Self {
-        Self { db }
+        let store = Self { db };
+        if let Err(e) = store.ensure_columns() {
+            tracing::warn!("standing-approvals schema upgrade failed: {e}");
+        }
+        store
     }
+
+    /// Bring the table (created by central migration v21) up to this
+    /// crate's column set. Introspection-guarded `ALTER`s so the upgrade
+    /// is idempotent — this crate owns its column evolution the same way
+    /// audit/ganglia own their tables.
+    fn ensure_columns(&self) -> Result<(), ConfirmError> {
+        Ok(self.db.with_conn(|conn| {
+            let mut existing = std::collections::HashSet::new();
+            {
+                let mut stmt = conn.prepare("PRAGMA table_info(standing_approvals)")?;
+                let mut rows = stmt.query([])?;
+                while let Some(row) = rows.next()? {
+                    existing.insert(row.get::<_, String>(1)?);
+                }
+            }
+            if !existing.contains("expires_at") {
+                conn.execute_batch("ALTER TABLE standing_approvals ADD COLUMN expires_at TEXT;")?;
+            }
+            if !existing.contains("scope_json") {
+                conn.execute_batch("ALTER TABLE standing_approvals ADD COLUMN scope_json TEXT;")?;
+            }
+            Ok(())
+        })?)
+    }
+}
+
+/// Shared row → struct mapping for the full column set.
+fn row_to_approval(row: &rusqlite::Row<'_>) -> rusqlite::Result<StandingApproval> {
+    let granted_at_raw: String = row.get(4)?;
+    let expires_raw: Option<String> = row.get(6)?;
+    let scope_raw: Option<String> = row.get(7)?;
+    Ok(StandingApproval {
+        id: row.get(0)?,
+        agent_id: row.get(1)?,
+        verb_ns: row.get(2)?,
+        verb_action: row.get(3)?,
+        granted_at: parse_ts(&granted_at_raw),
+        note: row.get(5)?,
+        expires_at: expires_raw.as_deref().map(parse_ts),
+        scope: scope_raw.and_then(|s| serde_json::from_str(&s).ok()),
+    })
 }
 
 fn parse_ts(raw: &str) -> DateTime<Utc> {
@@ -109,15 +239,19 @@ fn parse_ts(raw: &str) -> DateTime<Utc> {
 #[async_trait]
 impl StandingApprovalStore for SqliteStandingApprovals {
     async fn is_granted(&self, key: &GrantKey) -> Result<bool, ConfirmError> {
+        // Context-free: only unscoped grants can match (fail closed).
         let agent_id = key.agent_id.clone();
         let verb_ns = key.verb_ns.clone();
         let verb_action = key.verb_action.clone();
+        let now = Utc::now().to_rfc3339();
         let granted = self.db.with_conn(move |conn| {
             let count: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM standing_approvals
                  WHERE agent_id = ?1 AND verb_ns = ?2 AND verb_action = ?3
-                   AND revoked_at IS NULL",
-                params![agent_id, verb_ns, verb_action],
+                   AND revoked_at IS NULL
+                   AND (expires_at IS NULL OR expires_at > ?4)
+                   AND scope_json IS NULL",
+                params![agent_id, verb_ns, verb_action, now],
                 |row| row.get(0),
             )?;
             Ok(count > 0)
@@ -125,18 +259,63 @@ impl StandingApprovalStore for SqliteStandingApprovals {
         Ok(granted)
     }
 
-    async fn grant(&self, key: &GrantKey, note: Option<&str>) -> Result<String, ConfirmError> {
+    async fn is_granted_for(
+        &self,
+        key: &GrantKey,
+        path: Option<&str>,
+        namespace: Option<&str>,
+    ) -> Result<bool, ConfirmError> {
+        let agent_id = key.agent_id.clone();
+        let verb_ns = key.verb_ns.clone();
+        let verb_action = key.verb_action.clone();
+        let now = Utc::now().to_rfc3339();
+        // Fetch active candidates; scope matching happens in Rust so the
+        // matching rules live in exactly one place (GrantScope::matches).
+        let scopes: Vec<Option<String>> = self.db.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT scope_json FROM standing_approvals
+                 WHERE agent_id = ?1 AND verb_ns = ?2 AND verb_action = ?3
+                   AND revoked_at IS NULL
+                   AND (expires_at IS NULL OR expires_at > ?4)",
+            )?;
+            let rows = stmt
+                .query_map(params![agent_id, verb_ns, verb_action, now], |row| {
+                    row.get(0)
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })?;
+        Ok(scopes.iter().any(|raw| match raw {
+            None => true, // unscoped grant matches any context
+            Some(json) => serde_json::from_str::<GrantScope>(json)
+                .map(|scope| scope.matches(path, namespace))
+                .unwrap_or(false), // unparseable scope fails closed
+        }))
+    }
+
+    async fn grant_scoped(
+        &self,
+        key: &GrantKey,
+        note: Option<&str>,
+        expires_at: Option<DateTime<Utc>>,
+        scope: Option<GrantScope>,
+    ) -> Result<String, ConfirmError> {
         let id = Uuid::new_v4().to_string();
         let agent_id = key.agent_id.clone();
         let verb_ns = key.verb_ns.clone();
         let verb_action = key.verb_action.clone();
         let note_owned = note.map(|s| s.to_string());
+        let expires_owned = expires_at.map(|t| t.to_rfc3339());
+        // An empty scope is the unscoped grant — store NULL, not "{}".
+        let scope_owned = scope
+            .filter(|s| !s.is_empty())
+            .and_then(|s| serde_json::to_string(&s).ok());
         let id_for_db = id.clone();
         self.db.with_conn(move |conn| {
             conn.execute(
                 "INSERT INTO standing_approvals
-                    (id, agent_id, verb_ns, verb_action, granted_at, note)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    (id, agent_id, verb_ns, verb_action, granted_at, note, expires_at, scope_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     id_for_db,
                     agent_id,
@@ -144,6 +323,8 @@ impl StandingApprovalStore for SqliteStandingApprovals {
                     verb_action,
                     Utc::now().to_rfc3339(),
                     note_owned,
+                    expires_owned,
+                    scope_owned,
                 ],
             )?;
             Ok(())
@@ -166,25 +347,19 @@ impl StandingApprovalStore for SqliteStandingApprovals {
     }
 
     async fn list_active(&self) -> Result<Vec<StandingApproval>, ConfirmError> {
-        let rows = self.db.with_conn(|conn| {
+        let now = Utc::now().to_rfc3339();
+        let rows = self.db.with_conn(move |conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, agent_id, verb_ns, verb_action, granted_at, note
+                "SELECT id, agent_id, verb_ns, verb_action, granted_at, note, expires_at, scope_json
                  FROM standing_approvals
                  WHERE revoked_at IS NULL
+                   AND (expires_at IS NULL OR expires_at > ?1)
                  ORDER BY granted_at DESC",
             )?;
             let mut out = Vec::new();
-            let mut rows = stmt.query([])?;
+            let mut rows = stmt.query([now])?;
             while let Some(row) = rows.next()? {
-                let granted_at_raw: String = row.get(4)?;
-                out.push(StandingApproval {
-                    id: row.get(0)?,
-                    agent_id: row.get(1)?,
-                    verb_ns: row.get(2)?,
-                    verb_action: row.get(3)?,
-                    granted_at: parse_ts(&granted_at_raw),
-                    note: row.get(5)?,
-                });
+                out.push(row_to_approval(row)?);
             }
             Ok(out)
         })?;
@@ -257,6 +432,156 @@ mod tests {
         let id2 = s.grant(&key, Some("second")).await.unwrap();
         assert_ne!(id1, id2, "re-grant must be a separate row for audit");
         assert!(s.is_granted(&key).await.unwrap());
+    }
+
+    #[test]
+    fn scope_matching_is_segment_boundary_and_fails_closed() {
+        let scope = GrantScope {
+            path_prefix: Some("/repo/app".into()),
+            namespace: None,
+        };
+        assert!(scope.matches(Some("/repo/app"), None));
+        assert!(scope.matches(Some("/repo/app/src/main.rs"), None));
+        assert!(
+            !scope.matches(Some("/repo/app2"), None),
+            "segment, not prefix"
+        );
+        assert!(!scope.matches(Some("/other"), None));
+        assert!(
+            !scope.matches(None, None),
+            "no context cannot satisfy a scope"
+        );
+
+        let ns_scope = GrantScope {
+            path_prefix: None,
+            namespace: Some("work".into()),
+        };
+        assert!(ns_scope.matches(None, Some("work")));
+        assert!(ns_scope.matches(None, Some("work/projects")));
+        assert!(!ns_scope.matches(None, Some("workshop")));
+        assert!(!ns_scope.matches(None, None));
+
+        assert!(
+            GrantScope::default().matches(None, None),
+            "empty scope is unscoped"
+        );
+    }
+
+    /// DoD: an expired grant re-prompts — it stops matching every lookup
+    /// and leaves the active list, while an unexpired TTL grant matches.
+    #[tokio::test]
+    async fn expired_grant_no_longer_matches() {
+        let s = store();
+        let key = GrantKey::new("agent-a", "fs", "write");
+
+        let _live = s
+            .grant_scoped(
+                &key,
+                None,
+                Some(Utc::now() + chrono::Duration::hours(1)),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            s.is_granted(&key).await.unwrap(),
+            "unexpired TTL grant matches"
+        );
+
+        let s2 = store();
+        let _dead = s2
+            .grant_scoped(
+                &key,
+                None,
+                Some(Utc::now() - chrono::Duration::seconds(1)),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            !s2.is_granted(&key).await.unwrap(),
+            "expired grant must not match"
+        );
+        assert!(
+            !s2.is_granted_for(&key, Some("/x"), Some("personal"))
+                .await
+                .unwrap(),
+            "expired grant must not match any context"
+        );
+        assert!(
+            s2.list_active().await.unwrap().is_empty(),
+            "expired grant must leave the active list"
+        );
+    }
+
+    /// DoD: a scope mismatch re-prompts — the grant only matches inside
+    /// its box, and never matches a context-free lookup.
+    #[tokio::test]
+    async fn scoped_grant_matches_only_inside_its_box() {
+        let s = store();
+        let key = GrantKey::new("agent-a", "shell", "exec");
+        s.grant_scoped(
+            &key,
+            None,
+            None,
+            Some(GrantScope {
+                path_prefix: Some("/repo/app".into()),
+                namespace: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert!(s
+            .is_granted_for(&key, Some("/repo/app/scripts"), None)
+            .await
+            .unwrap());
+        assert!(
+            !s.is_granted_for(&key, Some("/elsewhere"), None)
+                .await
+                .unwrap(),
+            "scope mismatch must re-prompt"
+        );
+        assert!(
+            !s.is_granted_for(&key, None, None).await.unwrap(),
+            "a request without path context cannot satisfy a path scope"
+        );
+        assert!(
+            !s.is_granted(&key).await.unwrap(),
+            "context-free is_granted must never match a scoped grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn unscoped_grant_matches_any_context() {
+        let s = store();
+        let key = GrantKey::new("agent-a", "fs", "write");
+        s.grant(&key, None).await.unwrap();
+        assert!(s
+            .is_granted_for(&key, Some("/anywhere"), Some("any"))
+            .await
+            .unwrap());
+        assert!(s.is_granted_for(&key, None, None).await.unwrap());
+        assert!(s.is_granted(&key).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn list_active_carries_expiry_and_scope() {
+        let s = store();
+        let key = GrantKey::new("agent-a", "fs", "write");
+        let exp = Utc::now() + chrono::Duration::hours(2);
+        let scope = GrantScope {
+            path_prefix: Some("/repo".into()),
+            namespace: Some("work".into()),
+        };
+        s.grant_scoped(&key, Some("boxed"), Some(exp), Some(scope.clone()))
+            .await
+            .unwrap();
+        let rows = s.list_active().await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].scope.as_ref(), Some(&scope));
+        let got = rows[0].expires_at.expect("expiry must round-trip");
+        assert!((got - exp).num_seconds().abs() <= 1);
     }
 
     #[tokio::test]

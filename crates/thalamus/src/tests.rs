@@ -981,6 +981,58 @@ async fn approval_list_slash_classifies_to_list_standing_approvals() {
 }
 
 #[tokio::test]
+async fn approve_with_ttl_qualifier_rides_in_decision() {
+    let classifier = IntentClassifier::new();
+    let result = classifier.classify("approve abc-123 for 1h").await;
+    match result.intent {
+        Intent::RespondToApproval { nonce, decision } => {
+            assert_eq!(nonce, "abc-123");
+            assert_eq!(decision, "approve for 1h");
+        }
+        other => panic!("expected RespondToApproval, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn approve_here_without_nonce_is_a_qualifier_not_a_nonce() {
+    let classifier = IntentClassifier::new();
+    let result = classifier.classify("approve here for 2d").await;
+    match result.intent {
+        Intent::RespondToApproval { nonce, decision } => {
+            assert_eq!(nonce, "", "`here` must not be mistaken for a nonce");
+            assert_eq!(decision, "approve here for 2d");
+        }
+        other => panic!("expected RespondToApproval, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn approve_with_nonce_and_here_qualifier() {
+    let classifier = IntentClassifier::new();
+    let result = classifier.classify("approve abc-123 here").await;
+    match result.intent {
+        Intent::RespondToApproval { nonce, decision } => {
+            assert_eq!(nonce, "abc-123");
+            assert_eq!(decision, "approve here");
+        }
+        other => panic!("expected RespondToApproval, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn approve_of_free_form_chat_does_not_match_approval() {
+    let classifier = IntentClassifier::new();
+    let result = classifier
+        .classify("approve of this plan because it works")
+        .await;
+    assert!(
+        !matches!(result.intent, Intent::RespondToApproval { .. }),
+        "free-form text must not classify as an approval response, got {:?}",
+        result.intent
+    );
+}
+
+#[tokio::test]
 async fn memory_approve_slash_carries_agent() {
     let classifier = IntentClassifier::new();
     let result = classifier.classify("/memory-approve agent-x").await;

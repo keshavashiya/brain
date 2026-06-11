@@ -162,13 +162,22 @@ static RESPOND_TO_APPROVAL_RE: LazyLock<Regex> = LazyLock::new(|| {
     // Accept hyphens so UUID-style IDs (both confirm-engine nonces and
     // orchestrator task IDs) match the fast path.
     //
-    // Two shapes:
+    // Shapes:
     //   `approve <id>` / `reject <id>`            — explicit
     //   `approve` / `y` / `yes` / `reject` / `n`  — bare; resolved by the
     //                                               signal handler against
     //                                               `pending_approvals()`
-    Regex::new(r"(?i)^(?P<decision>approve|reject|yes|no|y|n)(?:\s+(?P<nonce>[a-zA-Z0-9-]+))?$")
-        .expect("invariant: RESPOND_TO_APPROVAL_RE must be valid")
+    //   `approve [<id>] for 1h` / `… here`        — also grant a standing
+    //                                               approval: TTL-boxed
+    //                                               and/or scoped to the
+    //                                               request's own context.
+    // The qualifier grammar is deliberately tight (`for <n><unit>`,
+    // `here`, or both) so free-form chat like "approve of this plan"
+    // still falls through to Chat.
+    Regex::new(
+        r"(?i)^(?P<decision>approve|reject|yes|no|y|n)(?:\s+(?P<nonce>[a-zA-Z0-9-]+))?(?:\s+(?P<qualifier>(?:for\s+\d+[mhdwy]|here)(?:\s+(?:for\s+\d+[mhdwy]|here))?))?$",
+    )
+    .expect("invariant: RESPOND_TO_APPROVAL_RE must be valid")
 });
 
 static BUDGET_STATUS_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -631,15 +640,35 @@ impl IntentClassifier {
                     .name("decision")
                     .map(|m| m.as_str().to_lowercase())
                     .unwrap_or_default();
-                let decision = match raw.as_str() {
+                let mut decision = match raw.as_str() {
                     "yes" | "y" => "approve".to_string(),
                     "no" | "n" => "reject".to_string(),
                     other => other.to_string(),
                 };
-                let nonce = captures
+                let mut nonce = captures
                     .name("nonce")
                     .map(|m| m.as_str().to_string())
                     .unwrap_or_default();
+                let mut qualifier = captures
+                    .name("qualifier")
+                    .map(|m| m.as_str().to_lowercase())
+                    .unwrap_or_default();
+                // The nonce group greedily captures a bare `here` (the
+                // regex crate has no lookahead to exclude it) — fold it
+                // back into the qualifier.
+                if nonce == "here" {
+                    qualifier = if qualifier.is_empty() {
+                        "here".to_string()
+                    } else {
+                        format!("here {qualifier}")
+                    };
+                    nonce = String::new();
+                }
+                // Qualifiers ride inside the decision string — the wire
+                // shape (`nonce` + `decision`) is unchanged.
+                if !qualifier.is_empty() {
+                    decision = format!("{decision} {qualifier}");
+                }
                 Intent::RespondToApproval { nonce, decision }
             }
             Intent::ChannelPreferences { .. } => {

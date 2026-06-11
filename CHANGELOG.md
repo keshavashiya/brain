@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **TTL and scope-boxed standing approvals.** A standing approval can now
+  carry an expiry instant and/or a scope box (path prefix and/or namespace,
+  both segment-boundary matched). An expired grant stops matching and the
+  next request re-prompts; a request outside a grant's scope re-prompts; a
+  scoped grant never matches a request that carries no context for the scoped
+  dimension (fail closed). Approval replies grow the matching grammar:
+  `approve <nonce> for 1h` answers the prompt *and* grants the action's verb
+  for an hour, `approve <nonce> here` boxes the grant to the request's own
+  path/namespace context, and the two combine (`approve <nonce> here for 1h`).
+  Minted grants ride the existing rail — visible in `/approval-list` and
+  `/grants` with their expiry and scope rendered, revocable via
+  `/approval-revoke`. Plain `approve` stays a one-time approval, and existing
+  unscoped grants behave exactly as before. The pending-approvals listing now
+  also restores each request's grant key and scope context (previously
+  dropped on restore).
+
 - **Memory-writer quarantine (review-gated writes from unvouched agents).**
   A memory write attributed to an agent the user never vouched for — no
   `memory.trust.agents` entry, no API key bound to its identity, no standing

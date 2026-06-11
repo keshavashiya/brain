@@ -182,18 +182,44 @@ impl SignalProcessor {
             }
         }
 
-        // Per-step approval: resolve via the confirm engine.
+        // Per-step approval: resolve via the confirm engine. An approval
+        // may carry grant qualifiers parsed off the reply text —
+        // `approve … for 1h` (TTL standing grant) and/or `approve … here`
+        // (grant boxed to the request's own path/namespace scope).
+        let (ttl, scope_here) = parse_grant_qualifiers(&decision);
         let message = match &self.safety.confirmation_engine {
             Some(engine) => {
                 let dec = if approved {
-                    confirm::ApprovalDecision::Approve
+                    if ttl.is_some() || scope_here {
+                        confirm::ApprovalDecision::ApproveWithGrant {
+                            ttl,
+                            scope_to_request: scope_here,
+                        }
+                    } else {
+                        confirm::ApprovalDecision::Approve
+                    }
                 } else {
                     confirm::ApprovalDecision::Reject
                 };
                 match engine.respond(&nonce, dec).await {
                     Ok(_) => {
                         if approved {
-                            format!("Approval {nonce} accepted. Execution resumed.")
+                            let mut msg = format!("Approval {nonce} accepted. Execution resumed.");
+                            if ttl.is_some() || scope_here {
+                                let ttl_part = ttl
+                                    .map(|_| " for the requested duration")
+                                    .unwrap_or_default();
+                                let scope_part = if scope_here {
+                                    " within this request's scope"
+                                } else {
+                                    ""
+                                };
+                                msg.push_str(&format!(
+                                    " A standing approval was granted{ttl_part}{scope_part} — \
+                                     see `/approval-list`, revoke with `/approval-revoke <id>`."
+                                ));
+                            }
+                            msg
                         } else {
                             format!("Approval {nonce} rejected. Action cancelled.")
                         }
@@ -360,6 +386,29 @@ impl SignalProcessor {
     }
 }
 
+/// Pull grant qualifiers off an approval reply: `for <n><unit>` sets a
+/// TTL and `here` boxes the grant to the request's own scope. Anything
+/// unparseable is ignored (the reply still approves one-time).
+fn parse_grant_qualifiers(decision: &str) -> (Option<std::time::Duration>, bool) {
+    let lower = decision.to_lowercase();
+    let mut tokens = lower.split_whitespace().peekable();
+    let mut ttl = None;
+    let mut here = false;
+    while let Some(tok) = tokens.next() {
+        match tok {
+            "here" => here = true,
+            "for" => {
+                if let Some(dur) = tokens.peek().and_then(|d| parse_human_duration(d).ok()) {
+                    ttl = dur.to_std().ok();
+                    tokens.next();
+                }
+            }
+            _ => {}
+        }
+    }
+    (ttl, here)
+}
+
 /// Parse a short human duration like `24h`, `7d`, `4w`, `2y` into a
 /// `chrono::Duration`. Used by intents that take a `older_than` field
 /// from the user. Trailing whitespace is tolerated; case-insensitive
@@ -448,6 +497,32 @@ mod duration_parse_tests {
         assert!(parse_human_duration("30").is_err());
         assert!(parse_human_duration("30x").is_err());
         assert!(parse_human_duration("abc").is_err());
+    }
+}
+
+#[cfg(test)]
+mod grant_qualifier_tests {
+    use super::parse_grant_qualifiers;
+
+    #[test]
+    fn plain_approve_carries_no_qualifiers() {
+        assert_eq!(parse_grant_qualifiers("approve"), (None, false));
+        assert_eq!(parse_grant_qualifiers("reject"), (None, false));
+    }
+
+    #[test]
+    fn ttl_and_scope_parse_in_any_order() {
+        let hour = Some(std::time::Duration::from_secs(3600));
+        assert_eq!(parse_grant_qualifiers("approve for 1h"), (hour, false));
+        assert_eq!(parse_grant_qualifiers("approve here"), (None, true));
+        assert_eq!(parse_grant_qualifiers("approve here for 1h"), (hour, true));
+        assert_eq!(parse_grant_qualifiers("approve for 1h here"), (hour, true));
+    }
+
+    #[test]
+    fn malformed_ttl_degrades_to_one_time_approval() {
+        assert_eq!(parse_grant_qualifiers("approve for banana"), (None, false));
+        assert_eq!(parse_grant_qualifiers("approve for"), (None, false));
     }
 }
 

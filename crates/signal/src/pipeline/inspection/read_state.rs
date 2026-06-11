@@ -6,6 +6,28 @@ use crate::SignalProcessor;
 use super::super::dispatch::HandlerContext;
 use super::{episode_within_window, render_budget_window, RECENT_ACTIVITY_WINDOW_DAYS};
 
+/// Render a grant's TTL/scope qualifiers for the listing surfaces
+/// (`/approval-list`, `/grants`). Empty for a plain indefinite grant.
+pub(super) fn render_grant_constraints(g: &confirm::StandingApproval) -> String {
+    let mut parts = Vec::new();
+    if let Some(exp) = g.expires_at {
+        parts.push(format!("expires {}", exp.format("%Y-%m-%d %H:%M UTC")));
+    }
+    if let Some(scope) = &g.scope {
+        if let Some(p) = &scope.path_prefix {
+            parts.push(format!("path `{p}`"));
+        }
+        if let Some(ns) = &scope.namespace {
+            parts.push(format!("namespace `{ns}`"));
+        }
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" [{}]", parts.join(", "))
+    }
+}
+
 impl SignalProcessor {
     pub(super) async fn handle_recall(
         &self,
@@ -324,8 +346,13 @@ impl SignalProcessor {
                         md.push_bullet(
                             0,
                             format!(
-                                "`{}` — {} for `{}.{}`{}",
-                                g.id, g.agent_id, g.verb_ns, g.verb_action, suffix
+                                "`{}` — {} for `{}.{}`{}{}",
+                                g.id,
+                                g.agent_id,
+                                g.verb_ns,
+                                g.verb_action,
+                                render_grant_constraints(&g),
+                                suffix
                             ),
                         );
                     }
@@ -359,7 +386,11 @@ impl SignalProcessor {
                     for p in pending {
                         md.push_bullet(0, format!("`{}` — {}", p.nonce, p.action_description));
                     }
-                    md.push_line("Reply `approve <nonce>` or `reject <nonce>`.");
+                    md.push_line(
+                        "Reply `approve <nonce>` or `reject <nonce>`. Add `for 1h` to also \
+                         grant it for an hour, or `here` to grant it within this request's \
+                         scope (e.g. `approve <nonce> here for 1h`).",
+                    );
                     md.build()
                 }
             }

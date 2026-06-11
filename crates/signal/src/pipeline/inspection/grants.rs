@@ -43,12 +43,13 @@ impl SignalProcessor {
                         md.push_bullet(
                             0,
                             format!(
-                                "`{}` — **{}** may `{}.{}` (granted {}){note}",
+                                "`{}` — **{}** may `{}.{}` (granted {}){}{note}",
                                 g.id,
                                 g.agent_id,
                                 g.verb_ns,
                                 g.verb_action,
                                 g.granted_at.format("%Y-%m-%d"),
+                                super::read_state::render_grant_constraints(g),
                             ),
                         );
                     }
