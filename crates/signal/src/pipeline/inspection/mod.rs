@@ -19,6 +19,7 @@ use super::dispatch::{HandlerContext, InspectionAuth, InspectionHandler, NudgeFn
 use crate::types::*;
 use crate::SignalProcessor;
 
+mod grants;
 mod read_state;
 mod resources;
 
@@ -134,6 +135,9 @@ impl InspectionHandler for SignalProcessor {
                 thalamus::Resource::Capabilities => {
                     self.handle_list_capabilities(ctx.signal_id, prepend_nudges)
                         .await
+                }
+                thalamus::Resource::Grants => {
+                    self.handle_list_grants(ctx.signal_id, prepend_nudges).await
                 }
             },
             thalamus::Intent::TaskStatus { task_id } => {

@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Grants ledger (`/grants`).** One read-only screen answering "what can
+  Brain currently see and do, and on whose authority?": active standing
+  approvals (with grantee, verb, grant date, and the `/approval-revoke <id>`
+  path), mounted MCP servers (tool count, mount date, quarantine state,
+  `/mcp-unmount <name>`), the shell exec allowlist, file-read roots, API keys
+  (name, scopes, and bound agent — never the key material), configured LLM
+  providers with per-endpoint locality plus whether the active chat chain can
+  leave the machine, and any local-only namespaces. Every line carries its
+  provenance — a runtime grant or the config section that declares it. New
+  `list_grants` intent (`Intent::List { resource: Grants }`), routed via the
+  `/grants` slash command.
+
 - **Namespace data-residency policy.** `memory.namespaces.<name>.residency:
   local_only | any` (default `any`) declares where a namespace's content may
   travel, and the policy is enforced at every egress point rather than by

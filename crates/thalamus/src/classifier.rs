@@ -822,6 +822,20 @@ impl IntentClassifier {
             }
         }
 
+        // Unified grants ledger: every standing authority Brain holds,
+        // with provenance and revoke path. Read-only, unguarded.
+        if trimmed == "/grants" {
+            return Some(Classification {
+                intent: Intent::List {
+                    resource: Resource::Grants,
+                    filter: None,
+                },
+                confidence: 1.0,
+                method: ClassificationMethod::Regex,
+                extracted_facts: Vec::new(),
+            });
+        }
+
         // Standing-approval inspection and revocation. The list path is
         // unguarded (read-only) and the revoke path is Tier::Write —
         // both wired in signal::authz.

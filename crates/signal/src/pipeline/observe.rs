@@ -128,6 +128,7 @@ fn intent_variant_name(intent: &thalamus::Intent) -> &'static str {
             thalamus::Resource::TerminalSessions => "ListTerminalSessions",
             thalamus::Resource::McpServers => "ListMcpServers",
             thalamus::Resource::Capabilities => "ListCapabilities",
+            thalamus::Resource::Grants => "ListGrants",
         },
         Cancel { target, .. } => match target {
             thalamus::CancelTarget::Schedule => "CancelSchedule",

@@ -214,6 +214,10 @@ pub enum Resource {
     McpServers,
     /// The live capability manifest (`list_capabilities`).
     Capabilities,
+    /// The unified grants ledger (`list_grants`): every standing authority
+    /// Brain currently holds — runtime grants and config-declared ones —
+    /// each with its provenance and revoke path.
+    Grants,
 }
 
 /// A cancelable single resource instance — the operand of the generic
@@ -297,6 +301,7 @@ impl Intent {
                 Resource::TerminalSessions => "list_terminal_sessions",
                 Resource::McpServers => "list_mcp_servers",
                 Resource::Capabilities => "list_capabilities",
+                Resource::Grants => "list_grants",
             },
             Intent::TaskStatus { .. } => "task_status",
             Intent::QueryAgents { .. } => "query_agents",

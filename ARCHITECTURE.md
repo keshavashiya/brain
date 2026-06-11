@@ -46,7 +46,7 @@ brain/
 │   │
 │   ├── thalamus/       # Intent classification — the primary user-facing surface
 │   │                     Regex fast-path (compiled at startup) + async LLM fallback with timeout
-│   │                     Intent surface (30 enum variants / 41 wire keys — see
+│   │                     Intent surface (30 enum variants / 42 wire keys — see
 │   │                     `crates/thalamus/src/lib.rs` + `taxonomy.rs`; the generic
 │   │                     `List { resource }` / `Cancel { target }` variants expand to one
 │   │                     wire key per Resource / CancelTarget value):
@@ -66,7 +66,7 @@ brain/
 │   │                       channels:  ChannelPreferences, SetChannelPreference
 │   │                       generic:   List { resource: Approvals | StandingApprovals | Schedules |
 │   │                                         Tasks | Channels | TerminalSessions | McpServers |
-│   │                                         Capabilities }
+│   │                                         Capabilities | Grants }
 │   │                                  Cancel { target: Schedule | Task | Signal | StandingApproval }
 │   │                     (New user-facing features add intents here, not CLI subcommands.)
 │   │

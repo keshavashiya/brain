@@ -162,6 +162,12 @@ pub const INTENT_SPECS: &[IntentSpec] = &[
         nl_routable: NlRouting::SlashOnly,
         blurb: "List the live capability manifest (/capabilities, /caps).",
     },
+    IntentSpec {
+        key: "list_grants",
+        category: IntentCategory::Inspection,
+        nl_routable: NlRouting::SlashOnly,
+        blurb: "Unified grants ledger — every standing authority with its provenance and revoke path (/grants).",
+    },
     // ── Memory ─ episodic / semantic mutations ─────────────────────────────
     IntentSpec {
         key: "store_fact",

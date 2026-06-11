@@ -981,6 +981,23 @@ async fn approval_list_slash_classifies_to_list_standing_approvals() {
 }
 
 #[tokio::test]
+async fn grants_slash_classifies_to_list_grants() {
+    let classifier = IntentClassifier::new();
+    let result = classifier.classify("/grants").await;
+    assert!(
+        matches!(
+            result.intent,
+            Intent::List {
+                resource: Resource::Grants,
+                ..
+            }
+        ),
+        "expected List(Grants), got {:?}",
+        result.intent
+    );
+}
+
+#[tokio::test]
 async fn approval_revoke_slash_carries_id() {
     let classifier = IntentClassifier::new();
     let result = classifier.classify("/approval-revoke abc-123").await;
@@ -1136,6 +1153,10 @@ fn every_intent_variant() -> Vec<Intent> {
         },
         Intent::List {
             resource: Resource::Capabilities,
+            filter: None,
+        },
+        Intent::List {
+            resource: Resource::Grants,
             filter: None,
         },
         Intent::TaskStatus {
@@ -1360,7 +1381,7 @@ fn every_category_has_at_least_one_variant() {
 fn every_intent_variant_helper_is_exhaustive() {
     assert_eq!(
         every_intent_variant().len(),
-        40,
+        41,
         "every_intent_variant() must list one example per Intent variant \
          (and per Resource / CancelTarget value); update it (and bump this \
          count) when the enum changes"
@@ -1503,6 +1524,10 @@ mod taxonomy_drift_guards {
             },
             Intent::List {
                 resource: Resource::Capabilities,
+                filter: None,
+            },
+            Intent::List {
+                resource: Resource::Grants,
                 filter: None,
             },
             Intent::TaskStatus { task_id: s() },
