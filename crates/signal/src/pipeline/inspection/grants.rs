@@ -137,6 +137,24 @@ impl SignalProcessor {
             }
         }
 
+        // ── Runtime review queue: quarantined memory writers ───────────
+        // The flip side of the write grants above: writes from agents
+        // nobody vouched for are held here until reviewed.
+        let quarantined = self.quarantined_memory_counts();
+        if !quarantined.is_empty() {
+            md.push_heading(4, "Unreviewed memory writers — quarantined until approved");
+            for q in &quarantined {
+                md.push_bullet(
+                    0,
+                    format!(
+                        "**{}** — {} fact(s) and {} episode(s) held (excluded from recall)",
+                        q.agent, q.facts, q.episodes,
+                    ),
+                );
+            }
+            md.push_line("Approve with `/memory-approve <agent>`.");
+        }
+
         // ── Config grants: LLM providers ───────────────────────────────
         md.push_heading(4, "LLM providers — config `llm.providers`");
         let providers = &self.config.llm.providers;

@@ -231,6 +231,7 @@ impl SemanticStore {
                     "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
                      FROM semantic_facts
                      WHERE superseded_by IS NULL AND (namespace = ?1 OR namespace LIKE ?2)
+                       AND id NOT IN (SELECT row_id FROM memory_quarantine WHERE kind = 'fact')
                      ORDER BY rowid DESC{limit_clause}"
                 );
                 let mut stmt = conn.prepare(&sql)?;
@@ -244,6 +245,7 @@ impl SemanticStore {
                 let sql = format!(
                     "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
                      FROM semantic_facts WHERE superseded_by IS NULL
+                       AND id NOT IN (SELECT row_id FROM memory_quarantine WHERE kind = 'fact')
                      ORDER BY rowid DESC{limit_clause}"
                 );
                 let mut stmt = conn.prepare(&sql)?;

@@ -981,6 +981,16 @@ async fn approval_list_slash_classifies_to_list_standing_approvals() {
 }
 
 #[tokio::test]
+async fn memory_approve_slash_carries_agent() {
+    let classifier = IntentClassifier::new();
+    let result = classifier.classify("/memory-approve agent-x").await;
+    match result.intent {
+        Intent::ApproveMemoryWriter { agent } => assert_eq!(agent, "agent-x"),
+        other => panic!("expected ApproveMemoryWriter, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn grants_slash_classifies_to_list_grants() {
     let classifier = IntentClassifier::new();
     let result = classifier.classify("/grants").await;
@@ -1237,6 +1247,7 @@ fn every_intent_variant() -> Vec<Intent> {
             nonce: "n".into(),
             decision: "approve".into(),
         },
+        Intent::ApproveMemoryWriter { agent: "a".into() },
         // The Governance-category Cancel target.
         Intent::Cancel {
             target: CancelTarget::StandingApproval,
@@ -1381,7 +1392,7 @@ fn every_category_has_at_least_one_variant() {
 fn every_intent_variant_helper_is_exhaustive() {
     assert_eq!(
         every_intent_variant().len(),
-        41,
+        42,
         "every_intent_variant() must list one example per Intent variant \
          (and per Resource / CancelTarget value); update it (and bump this \
          count) when the enum changes"
@@ -1427,6 +1438,7 @@ fn every_intent_variant_has_the_expected_category() {
             | Intent::UnmountMcpServer { .. }
             | Intent::ReconsentMcpServer { .. } => IntentCategory::Lifecycle,
             Intent::RespondToApproval { .. }
+            | Intent::ApproveMemoryWriter { .. }
             | Intent::PruneAudit { .. }
             | Intent::SetChannelPreference { .. }
             | Intent::SetProactivity { .. } => IntentCategory::Governance,
@@ -1599,6 +1611,7 @@ mod taxonomy_drift_guards {
                 nonce: s(),
                 decision: s(),
             },
+            Intent::ApproveMemoryWriter { agent: s() },
             Intent::Cancel {
                 target: CancelTarget::StandingApproval,
                 id: s(),

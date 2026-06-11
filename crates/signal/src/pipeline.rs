@@ -162,7 +162,8 @@ impl SignalProcessor {
 
                 // Store assistant episode for Chat/Recall
                 if let Some(sid) = &session_id {
-                    self.memory
+                    let episode_id = self
+                        .memory
                         .episodic
                         .store_episode(
                             sid,
@@ -173,6 +174,8 @@ impl SignalProcessor {
                             agent.as_deref(),
                         )
                         .map_err(|e| SignalError::Storage(e.to_string()))?;
+                    self.quarantine_episode_if_unattested(&episode_id, agent.as_deref())
+                        .await;
                 }
 
                 let resp = SignalResponse {

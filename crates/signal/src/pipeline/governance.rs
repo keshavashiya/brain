@@ -22,10 +22,19 @@ impl GovernanceAuth for SignalProcessor {
                 AuthorizationRequest::new("approval", "respond"),
                 Tier::Write,
             )),
-            // Granting a standing approval is config-declared at startup, not
-            // slash-driven; only revoke is exposed as a runtime intent. A
-            // standing-approval revoke is the Governance-category Cancel target
-            // (the schedule/task/signal targets route to lifecycle instead).
+            // Approving a memory writer grants a standing memory.write
+            // approval and releases its quarantined memories — the same
+            // consent weight as answering an approval prompt.
+            thalamus::Intent::ApproveMemoryWriter { agent } => Some((
+                AuthorizationRequest::new("approval", "grant")
+                    .with_modifiers(serde_json::json!({ "agent": agent })),
+                Tier::Write,
+            )),
+            // Other standing approvals are config-declared at startup or
+            // granted from confirmation prompts, not slash-driven; only
+            // revoke is exposed as a runtime intent. A standing-approval
+            // revoke is the Governance-category Cancel target (the
+            // schedule/task/signal targets route to lifecycle instead).
             thalamus::Intent::Cancel {
                 target: thalamus::CancelTarget::StandingApproval,
                 id,
@@ -62,6 +71,10 @@ impl GovernanceHandler for SignalProcessor {
         match intent {
             thalamus::Intent::RespondToApproval { nonce, decision } => {
                 self.handle_respond_to_approval(ctx.signal_id, nonce, decision, prepend_nudges)
+                    .await
+            }
+            thalamus::Intent::ApproveMemoryWriter { agent } => {
+                self.handle_approve_memory_writer(ctx.signal_id, agent, prepend_nudges)
                     .await
             }
             thalamus::Intent::Cancel {
@@ -221,6 +234,24 @@ impl SignalProcessor {
                 Err(e) => format!("Failed to revoke `{id}`: {e}"),
             },
             None => "Standing-approval store is not wired.".to_string(),
+        };
+        let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
+        Ok(PipelineResult::Complete(resp))
+    }
+
+    pub(super) async fn handle_approve_memory_writer(
+        &self,
+        signal_id: Uuid,
+        agent: String,
+        prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
+    ) -> Result<PipelineResult, SignalError> {
+        let message = match self.approve_memory_writer(&agent).await {
+            Ok((facts, episodes, grant_id)) => format!(
+                "Approved **{agent}** as a memory writer: released {facts} fact(s) and \
+                 {episodes} episode(s) from quarantine. Future writes land live. \
+                 Revoke with `/approval-revoke {grant_id}`."
+            ),
+            Err(e) => format!("Failed to approve memory writer `{agent}`: {e}"),
         };
         let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
         Ok(PipelineResult::Complete(resp))

@@ -97,6 +97,10 @@ impl Consolidator {
                 "SELECT rowid, id, namespace, content, importance, decay_rate, reinforcement_count,
                         COALESCE(last_accessed, timestamp) as last_access_time
                  FROM episodes
+                 -- Quarantined episodes are frozen pending review: neither
+                 -- pruned (the audit trail) nor promoted to semantic facts
+                 -- (promotion would launder an unreviewed write).
+                 WHERE id NOT IN (SELECT row_id FROM memory_quarantine WHERE kind = 'episode')
                  ORDER BY importance ASC
                  LIMIT ?1",
             )?;

@@ -355,7 +355,8 @@ impl EpisodicStore {
                 "SELECT e.id, f.content, f.rank, e.timestamp, e.agent, e.importance, e.namespace
                  FROM episodes_fts f
                  JOIN episodes e ON e.rowid = f.rowid
-                 WHERE episodes_fts MATCH ?1",
+                 WHERE episodes_fts MATCH ?1
+                   AND e.id NOT IN (SELECT row_id FROM memory_quarantine WHERE kind = 'episode')",
             );
             let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(sanitized)];
 
@@ -393,6 +394,48 @@ impl EpisodicStore {
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(results)
+        })?)
+    }
+
+    /// Quarantine an episode: written by an agent nobody vouched for, it
+    /// is excluded from search, recall, recent-context, and consolidation
+    /// until the writer is approved. The row itself is untouched — the
+    /// content stays auditable and releasable.
+    pub fn quarantine_episode(&self, episode_id: &str, agent: &str) -> Result<(), EpisodicError> {
+        Ok(self.db.with_conn(|conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_quarantine (kind, row_id, agent)
+                 VALUES ('episode', ?1, ?2)",
+                rusqlite::params![episode_id, agent],
+            )?;
+            Ok(())
+        })?)
+    }
+
+    /// Release every quarantined episode written by `agent` (the writer
+    /// was approved). Returns how many were released.
+    pub fn release_quarantined_episodes(&self, agent: &str) -> Result<usize, EpisodicError> {
+        Ok(self.db.with_conn(|conn| {
+            let n = conn.execute(
+                "DELETE FROM memory_quarantine WHERE kind = 'episode' AND agent = ?1",
+                [agent],
+            )?;
+            Ok(n)
+        })?)
+    }
+
+    /// Quarantined episode counts per agent, for the review surfaces
+    /// (`/grants`, the capability digest).
+    pub fn quarantined_episode_counts(&self) -> Result<Vec<(String, i64)>, EpisodicError> {
+        Ok(self.db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT agent, COUNT(*) FROM memory_quarantine
+                 WHERE kind = 'episode' GROUP BY agent ORDER BY agent",
+            )?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
         })?)
     }
 
@@ -444,7 +487,8 @@ impl EpisodicStore {
                     "SELECT id, session_id, role, content, timestamp,
                             namespace, importance, decay_rate, reinforcement_count, last_accessed, agent
                      FROM episodes
-                     WHERE namespace = ?1 OR namespace LIKE ?2
+                     WHERE (namespace = ?1 OR namespace LIKE ?2)
+                       AND id NOT IN (SELECT row_id FROM memory_quarantine WHERE kind = 'episode')
                      ORDER BY timestamp DESC
                      LIMIT ?3",
                 )?;
@@ -480,6 +524,7 @@ impl EpisodicStore {
                     "SELECT id, session_id, role, content, timestamp,
                             namespace, importance, decay_rate, reinforcement_count, last_accessed, agent
                      FROM episodes
+                     WHERE id NOT IN (SELECT row_id FROM memory_quarantine WHERE kind = 'episode')
                      ORDER BY timestamp DESC
                      LIMIT ?1",
                 )?;

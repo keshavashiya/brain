@@ -269,6 +269,12 @@ pub const INTENT_SPECS: &[IntentSpec] = &[
     },
     // ── Governance ─ approvals, audit, config mutation, proactivity ────────
     IntentSpec {
+        key: "approve_memory_writer",
+        category: IntentCategory::Governance,
+        nl_routable: NlRouting::SlashOnly,
+        blurb: "Approve an agent as a memory writer, releasing its quarantined memories (/memory-approve).",
+    },
+    IntentSpec {
         key: "respond_to_approval",
         category: IntentCategory::Governance,
         nl_routable: NlRouting::LlmFallback,

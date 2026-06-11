@@ -822,6 +822,23 @@ impl IntentClassifier {
             }
         }
 
+        // Approve an agent as a memory writer: grants a standing
+        // memory.write approval and releases its quarantined memories.
+        // Governance tier — wired in signal's governance authorizer.
+        if let Some(rest) = trimmed.strip_prefix("/memory-approve") {
+            let agent = rest.trim();
+            if !agent.is_empty() {
+                return Some(Classification {
+                    intent: Intent::ApproveMemoryWriter {
+                        agent: agent.to_string(),
+                    },
+                    confidence: 1.0,
+                    method: ClassificationMethod::Regex,
+                    extracted_facts: Vec::new(),
+                });
+            }
+        }
+
         // Unified grants ledger: every standing authority Brain holds,
         // with provenance and revoke path. Read-only, unguarded.
         if trimmed == "/grants" {

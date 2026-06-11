@@ -25,6 +25,7 @@ mod exchange;
 mod extract;
 mod memory_subsystem;
 mod pipeline;
+mod quarantine;
 mod recall;
 mod render;
 mod secrets;

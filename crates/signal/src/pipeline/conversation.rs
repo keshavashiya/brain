@@ -100,7 +100,8 @@ impl SignalProcessor {
                 .map_err(|e| SignalError::Storage(e.to_string()))?
         };
 
-        self.memory
+        let episode_id = self
+            .memory
             .episodic
             .store_episode(
                 &session_id,
@@ -111,6 +112,8 @@ impl SignalProcessor {
                 signal.agent.as_deref(),
             )
             .map_err(|e| SignalError::Storage(e.to_string()))?;
+        self.quarantine_episode_if_unattested(&episode_id, signal.agent.as_deref())
+            .await;
 
         // Agent callers get structured memory context
         if signal.agent.is_some() {
@@ -350,7 +353,21 @@ impl SignalProcessor {
                 MAX_PROVEN_TOOLS,
             )
             .unwrap_or_default();
-        render_capability_digest(&tools, &agents, &proven)
+        let mut digest = render_capability_digest(&tools, &agents, &proven);
+        // Quarantined-and-waiting must be visible, not a silent hole:
+        // memories from unvouched writers exist but are excluded from
+        // recall until the user reviews them.
+        let quarantined = self.quarantined_memory_counts();
+        if !quarantined.is_empty() {
+            digest.push_str("\nUnreviewed memory (excluded from recall until approved):\n");
+            for q in &quarantined {
+                digest.push_str(&format!(
+                    "- {} fact(s) and {} episode(s) from agent \"{}\" — approve with /memory-approve {}\n",
+                    q.facts, q.episodes, q.agent, q.agent,
+                ));
+            }
+        }
+        digest
     }
 
     /// Concise capability summary lines for the task planner — one line

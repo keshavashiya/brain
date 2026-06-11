@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Memory-writer quarantine (review-gated writes from unvouched agents).**
+  A memory write attributed to an agent the user never vouched for — no
+  `memory.trust.agents` entry, no API key bound to its identity, no standing
+  `memory.write` approval — is stored but held in quarantine: excluded from
+  recall, search, listings, and consolidation (so an unreviewed write can
+  neither reach a prompt nor be laundered into a promoted fact). The
+  quarantine fails closed *visibly*: held counts per agent appear in `/grants`
+  ("N fact(s) and M episode(s) from agent X") and in the assistant's
+  capability digest. `/memory-approve <agent>` reviews a writer: it releases
+  everything the agent has in quarantine and records a standing
+  `memory.write` approval so future writes land live — revocable any time via
+  the existing `/approval-revoke` path, and visible in `/approval-list` and
+  `/grants` like any other grant. User-origin writes and internal sources
+  (reflexes, schedules) are unaffected. Schema migration v25 adds the
+  `memory_quarantine` holding table; quarantined rows are untouched content —
+  auditable and releasable, never silently dropped.
+
 - **Provenance-weighted recall (`memory.trust`).** Every stored memory already
   carries the agent that wrote it; recall scoring now multiplies each memory's
   score by that agent's trust weight (`[0–1]`), so a memory stored by a

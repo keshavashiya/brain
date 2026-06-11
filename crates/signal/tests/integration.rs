@@ -106,6 +106,13 @@ async fn test_store_fact_preserves_agent() {
     let temp_dir = tempfile::tempdir().unwrap();
     let mut config = brain::BrainConfig::default();
     config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
+    // Vouch for the writer so the fact lands live — unvouched agents are
+    // quarantined and excluded from listings (covered in memory_quarantine.rs).
+    config
+        .memory
+        .trust
+        .agents
+        .insert("open-code".to_string(), 1.0);
 
     let processor = SignalProcessor::new(config).await.unwrap();
 

@@ -153,14 +153,23 @@ impl Drop for StreamFinalizer {
         let namespace = self.namespace.clone();
         let agent = self.agent.clone();
         let content = acc.clone();
-        if let Err(e) = self.processor.finalize_streaming(
-            session_id.as_deref().unwrap_or("unknown"),
-            &content,
-            &namespace,
-            agent.as_deref(),
-        ) {
-            tracing::error!("finalize_streaming failed on cancellation: {e}");
-        }
+        let processor = self.processor.clone();
+        // `finalize_streaming` is async (attestation gate); Drop can't
+        // await, so hand the persist off to the runtime. Drop runs on a
+        // tokio worker on every cancellation path that reaches here.
+        tokio::spawn(async move {
+            if let Err(e) = processor
+                .finalize_streaming(
+                    session_id.as_deref().unwrap_or("unknown"),
+                    &content,
+                    &namespace,
+                    agent.as_deref(),
+                )
+                .await
+            {
+                tracing::error!("finalize_streaming failed on cancellation: {e}");
+            }
+        });
     }
 }
 
@@ -393,12 +402,15 @@ pub(crate) async fn handle_streaming_request(
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone();
-                if let Err(e) = processor.finalize_streaming(
-                    session_id.as_deref().unwrap_or("unknown"),
-                    &acc_content,
-                    &namespace,
-                    agent.as_deref(),
-                ) {
+                if let Err(e) = processor
+                    .finalize_streaming(
+                        session_id.as_deref().unwrap_or("unknown"),
+                        &acc_content,
+                        &namespace,
+                        agent.as_deref(),
+                    )
+                    .await
+                {
                     tracing::error!("finalize_streaming failed after successful stream: {e}");
                 }
             }

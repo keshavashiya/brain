@@ -240,7 +240,8 @@ impl SemanticStore {
             .join(",");
         let sql = format!(
             "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, updated_at, agent, superseded_by
-             FROM semantic_facts WHERE id IN ({placeholders})"
+             FROM semantic_facts WHERE id IN ({placeholders})
+               AND id NOT IN (SELECT row_id FROM memory_quarantine WHERE kind = 'fact')"
         );
 
         let pool = &self.db;
@@ -377,6 +378,48 @@ impl SemanticStore {
     }
 
     /// Count total active facts.
+    /// Quarantine a fact: written by an agent nobody vouched for, it is
+    /// excluded from search, recall, and listings until the writer is
+    /// approved. The row itself is untouched — the content stays
+    /// auditable and releasable.
+    pub fn quarantine_fact(&self, fact_id: &str, agent: &str) -> Result<(), SemanticError> {
+        Ok(self.db.with_conn(|conn| {
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_quarantine (kind, row_id, agent)
+                 VALUES ('fact', ?1, ?2)",
+                rusqlite::params![fact_id, agent],
+            )?;
+            Ok(())
+        })?)
+    }
+
+    /// Release every quarantined fact written by `agent` (the writer was
+    /// approved). Returns how many were released.
+    pub fn release_quarantined_facts(&self, agent: &str) -> Result<usize, SemanticError> {
+        Ok(self.db.with_conn(|conn| {
+            let n = conn.execute(
+                "DELETE FROM memory_quarantine WHERE kind = 'fact' AND agent = ?1",
+                [agent],
+            )?;
+            Ok(n)
+        })?)
+    }
+
+    /// Quarantined fact counts per agent, for the review surfaces
+    /// (`/grants`, the capability digest).
+    pub fn quarantined_fact_counts(&self) -> Result<Vec<(String, i64)>, SemanticError> {
+        Ok(self.db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT agent, COUNT(*) FROM memory_quarantine
+                 WHERE kind = 'fact' GROUP BY agent ORDER BY agent",
+            )?;
+            let rows = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(rows)
+        })?)
+    }
+
     pub fn count(&self) -> Result<i64, SemanticError> {
         Ok(self.db.with_conn(|conn| {
             let count: i64 = conn.query_row(

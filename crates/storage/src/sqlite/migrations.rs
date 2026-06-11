@@ -445,6 +445,29 @@ impl SqlitePool {
                 );
             ",
             ),
+            (
+                25,
+                "create_memory_quarantine",
+                "
+                -- Memory-writer quarantine: a write attributed to an agent
+                -- nobody vouched for (no trust entry, no key binding, no
+                -- standing memory.write approval) gets a row here and is
+                -- excluded from recall, search, and consolidation until the
+                -- writer is approved. Approval deletes the agent's rows,
+                -- releasing the memories. A side table (rather than a flag
+                -- column) keeps the hot tables untouched and the membership
+                -- check cheap when the table is empty — the zero-config case.
+                CREATE TABLE IF NOT EXISTS memory_quarantine (
+                    kind       TEXT NOT NULL CHECK(kind IN ('episode', 'fact')),
+                    row_id     TEXT NOT NULL,
+                    agent      TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (kind, row_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_quarantine_agent
+                    ON memory_quarantine(agent);
+            ",
+            ),
         ]
     }
 

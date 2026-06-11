@@ -117,6 +117,7 @@ fn intent_variant_name(intent: &thalamus::Intent) -> &'static str {
         MountMcpServer { .. } => "MountMcpServer",
         UnmountMcpServer { .. } => "UnmountMcpServer",
         ReconsentMcpServer { .. } => "ReconsentMcpServer",
+        ApproveMemoryWriter { .. } => "ApproveMemoryWriter",
         // Generic List/Cancel keep per-resource telemetry names so metric
         // cardinality is unchanged by the variant collapse.
         List { resource, .. } => match resource {

@@ -66,6 +66,10 @@ CREATE INDEX idx_outbox_pending
 CREATE INDEX idx_procedures_trigger
                     ON procedures(trigger_pattern)
 
+-- index: idx_quarantine_agent
+CREATE INDEX idx_quarantine_agent
+                    ON memory_quarantine(agent)
+
 -- index: idx_scheduled_intents_namespace
 CREATE INDEX idx_scheduled_intents_namespace
                     ON scheduled_intents(namespace)
@@ -152,6 +156,15 @@ CREATE VIRTUAL TABLE episodes_fts USING fts5(
                     content,
                     content_rowid='rowid',
                     tokenize='porter unicode61'
+                )
+
+-- table: memory_quarantine
+CREATE TABLE memory_quarantine (
+                    kind       TEXT NOT NULL CHECK(kind IN ('episode', 'fact')),
+                    row_id     TEXT NOT NULL,
+                    agent      TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (kind, row_id)
                 )
 
 -- table: nodes

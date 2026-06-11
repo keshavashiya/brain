@@ -160,6 +160,10 @@ pub enum Intent {
     // ── Governance ─ approvals, audit, config mutation, proactivity ────────
     /// Respond to a pending approval.
     RespondToApproval { nonce: String, decision: String },
+    /// Approve an agent as a memory writer: grants a standing
+    /// `memory.write` approval (revocable via the standing-approval
+    /// revoke path) and releases the agent's quarantined memories.
+    ApproveMemoryWriter { agent: String },
     /// Prune the audit trail.
     PruneAudit { older_than: String },
     /// Pin or unpin a channel preference. Pinned weights bypass the
@@ -333,6 +337,7 @@ impl Intent {
             Intent::ReconsentMcpServer { .. } => "reconsent_mcp_server",
             // ── Governance ────────────────────────────────────────────────
             Intent::RespondToApproval { .. } => "respond_to_approval",
+            Intent::ApproveMemoryWriter { .. } => "approve_memory_writer",
             Intent::PruneAudit { .. } => "prune_audit",
             Intent::SetChannelPreference { .. } => "set_channel_preference",
             Intent::SetProactivity { .. } => "set_proactivity",

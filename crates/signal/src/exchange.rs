@@ -129,6 +129,7 @@ impl SignalProcessor {
                 )
                 .await
                 .map_err(|e| SignalError::Storage(e.to_string()))?;
+            self.quarantine_fact_if_unattested(&id, agent).await;
             Ok(id)
         } else {
             Err(SignalError::Storage(
@@ -182,6 +183,9 @@ impl SignalProcessor {
         let mut stored = Vec::new();
         let mut errors = Vec::new();
 
+        // One attestation check covers the whole batch (same writer).
+        let attested = self.memory_writer_attested(agent).await;
+
         for (i, fact) in facts.iter().enumerate() {
             let importance = self.importance.score(&texts[i]);
             let vector = std::mem::take(&mut embeddings[i]);
@@ -199,7 +203,15 @@ impl SignalProcessor {
                 )
                 .await
             {
-                Ok(id) => stored.push(id),
+                Ok(id) => {
+                    if !attested {
+                        let agent = agent.expect("unattested implies an agent id");
+                        if let Err(e) = semantic.quarantine_fact(&id, agent) {
+                            tracing::warn!(id, agent, "failed to quarantine fact: {e}");
+                        }
+                    }
+                    stored.push(id);
+                }
                 Err(e) => errors.push((texts[i].clone(), SignalError::Storage(e.to_string()))),
             }
         }

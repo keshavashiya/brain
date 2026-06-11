@@ -46,7 +46,7 @@ brain/
 │   │
 │   ├── thalamus/       # Intent classification — the primary user-facing surface
 │   │                     Regex fast-path (compiled at startup) + async LLM fallback with timeout
-│   │                     Intent surface (30 enum variants / 42 wire keys — see
+│   │                     Intent surface (31 enum variants / 43 wire keys — see
 │   │                     `crates/thalamus/src/lib.rs` + `taxonomy.rs`; the generic
 │   │                     `List { resource }` / `Cancel { target }` variants expand to one
 │   │                     wire key per Resource / CancelTarget value):
@@ -56,7 +56,7 @@ brain/
 │   │                       chat:      Chat, SystemStatus, ProactivityStatus, SetProactivity
 │   │                       actions:   WebSearch, ExecuteCommand, SendMessage, Schedule
 │   │                       audit:     QueryAudit, PruneAudit
-│   │                       approvals: RespondToApproval
+│   │                       approvals: RespondToApproval, ApproveMemoryWriter
 │   │                       budget:    BudgetStatus
 │   │                       tasks:     DecomposeTask, TaskStatus
 │   │                       agents:    QueryAgents, DelegateTask
@@ -190,13 +190,14 @@ brain/
 │   │                     breakers wired by intent router.
 │   │
 │   ├── storage/        # Storage abstraction layer
-│   │   ├── sqlite      # SqlitePool: 22 migrations through schema v24, WAL mode,
+│   │   ├── sqlite      # SqlitePool: 23 migrations through schema v25, WAL mode,
 │   │   │                 thread-safe Mutex<Connection>
 │   │   │                 Tables: semantic_facts, episodes, procedures, scheduled_intents,
 │   │   │                 _migrations, FTS5 virtual tables (episodes_fts),
 │   │   │                 dlq_entries (v19), graph nodes/edges (v20),
 │   │   │                 standing_approvals (v21), task_states (v22),
-│   │   │                 nodes_fts graph full-text (v23), capability_fitness (v24).
+│   │   │                 nodes_fts graph full-text (v23), capability_fitness (v24),
+│   │   │                 memory_quarantine (v25).
 │   │   ├── ruvector    # RuVectorStore: wraps ruvector-core (external crate, crates.io)
 │   │   │                 Multi-table interface: facts_vec.db, episodes_vec.db
 │   │   │                 Vector sanitization, deterministic jitter on insert,
@@ -508,7 +509,7 @@ impl SignalProcessor {
 
 ### SQLite
 
-Migration-based schema — 22 migrations through schema v24. WAL mode enabled. Thread safety via `Mutex<Connection>`. Individual crates that own private tables (e.g. `audit`, `confirm`, `ganglia`) provision them via their own `ensure_tables()` rather than through the shared migrations file; the version numbers below refer to the central `crates/storage/src/sqlite/migrations.rs` log only.
+Migration-based schema — 23 migrations through schema v25. WAL mode enabled. Thread safety via `Mutex<Connection>`. Individual crates that own private tables (e.g. `audit`, `confirm`, `ganglia`) provision them via their own `ensure_tables()` rather than through the shared migrations file; the version numbers below refer to the central `crates/storage/src/sqlite/migrations.rs` log only.
 
 <details>
 <summary><strong>Tables</strong></summary>
@@ -531,6 +532,7 @@ Migration-based schema — 22 migrations through schema v24. WAL mode enabled. T
 | `task_states` | TaskOrchestrator state-machine history | **v22** |
 | `nodes_fts` | FTS5 virtual table over graph node content (BM25 recall on the episodic graph) | **v23** |
 | `capability_fitness` | Learned per-tool success/failure mass with forgetting-curve decay | **v24** |
+| `memory_quarantine` | Holding state for memory writes from unvouched agents, pending review | **v25** |
 | `habit_state` | Rate-limit state for proactivity engine | crate-managed (`ganglia::ensure_tables`) |
 | `audit_entries` | Append-only entries with `principal_json` (identity round-trip) | crate-managed (`audit::ensure_tables`) |
 | `_migrations` | Applied migration version log | always present |

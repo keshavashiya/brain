@@ -87,7 +87,10 @@ impl SignalProcessor {
                 )
                 .await
             {
-                Ok(_) => facts_stored = 1,
+                Ok(id) => {
+                    self.quarantine_fact_if_unattested(&id, agent).await;
+                    facts_stored = 1;
+                }
                 Err(e) => tracing::warn!("Failed to store fact in semantic memory: {e}"),
             }
         }
