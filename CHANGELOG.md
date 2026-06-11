@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Sealed (encrypted) exports.** `brain export --encrypt` seals the export
+  in a self-contained passphrase envelope: AES-256-GCM with an Argon2id-derived
+  key and a fresh per-export salt embedded in the file, so a backup is
+  decryptable on any machine with `brain import` and the passphrase — never
+  tied to this install's at-rest key. When encryption at rest is enabled,
+  sealing is the **default**: writing plaintext requires the explicit
+  `--plaintext` flag. `brain import` auto-detects sealed files and prompts for
+  the passphrase (or reads `BRAIN_PASSPHRASE`); sealing a new export prompts
+  twice, since a typo'd passphrase means an unrecoverable backup. Round-trip,
+  wrong-passphrase, and fresh-salt-per-export tests pin the format.
+
 - **TTL and scope-boxed standing approvals.** A standing approval can now
   carry an expiry instant and/or a scope box (path prefix and/or namespace,
   both segment-boundary matched). An expired grant stops matching and the

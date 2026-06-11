@@ -125,13 +125,26 @@ enum Commands {
 
     /// Dump a memory engram — export all facts + episodes to JSON.
     ///
+    /// When encryption at rest is enabled, exports are sealed in a
+    /// passphrase envelope by default (decryptable on any machine via
+    /// `brain import`); pass --plaintext to opt out explicitly.
+    ///
     /// Examples:
     ///   brain export                      # print JSON to stdout
     ///   brain export --output backup.json # write to file
+    ///   brain export --encrypt -o backup.json.enc
     Export {
         /// Output file path (default: stdout)
         #[arg(long, short)]
         output: Option<String>,
+        /// Seal the export in a passphrase envelope (AES-256-GCM,
+        /// Argon2id-derived key, fresh salt embedded in the file)
+        #[cfg(feature = "encryption")]
+        #[arg(long, conflicts_with = "plaintext")]
+        encrypt: bool,
+        /// Write plaintext even though encryption at rest is enabled
+        #[arg(long)]
+        plaintext: bool,
     },
 
     /// Implant a memory engram — import facts + episodes from JSON backup.
@@ -441,7 +454,16 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             host,
         } => serve::cmd_serve(&config, http, ws, grpc, mcp, terminal, host).await?,
         Commands::Mcp => cmd_mcp(&config).await?,
-        Commands::Export { output } => export::cmd_export(&config, output.as_deref()).await?,
+        #[cfg(feature = "encryption")]
+        Commands::Export {
+            output,
+            encrypt,
+            plaintext,
+        } => export::cmd_export(&config, output.as_deref(), encrypt, plaintext).await?,
+        #[cfg(not(feature = "encryption"))]
+        Commands::Export { output, plaintext } => {
+            export::cmd_export(&config, output.as_deref(), false, plaintext).await?
+        }
         Commands::Import { file, dry_run } => export::cmd_import(&config, &file, dry_run).await?,
         Commands::Service { action } => match action {
             service::ServiceAction::Install => service::cmd_service_install().await?,
