@@ -364,6 +364,7 @@ impl Default for BrainConfig {
                 api_key: String::new(),
                 api_key_file: None,
                 providers: Vec::new(),
+                tiers: LlmTiersConfig::default(),
             },
             embedding: EmbeddingConfig {
                 model: "nomic-embed-text".to_string(),

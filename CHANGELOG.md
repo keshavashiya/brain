@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Model tiers and task-aware routing (`llm.tiers`).** The provider pool
+  can now be cut into three task tiers, each an ordered failover chain of
+  `llm.providers[]` names: kernel chores (intent-classification fallback,
+  importance scoring, history compaction, web-search synthesis, background
+  nudge generation) ride `fast`; chat and task decomposition ride `deep`;
+  anything unrouted rides `balanced`. An empty or omitted tier uses the
+  default startup chain, so existing configs behave exactly as before.
+  Resolution fails closed at startup: a tier name that matches no provider
+  entry refuses to boot rather than silently rerouting — so
+  `tiers.fast: ["ollama"]` is an enforceable **local lane**: with a local
+  model on `fast` and a cloud model on `deep`, a classification turn
+  provably never leaves the machine (pinned by a wire-level capture test).
+  Per-tier spend is recorded in the budget ledger under `tier:<name>` keys
+  once a cost budget is wired, so `/budget` breaks usage down by tier — and
+  a tier can be capped outright via `budget.providers."tier:deep"`.
+  `/status` names each tier's chain, model, and locality when tiers are
+  configured.
+
 - **Host self-model (hardware-grounded suggestions).** Brain now probes the
   machine it runs on once at bootstrap — OS/arch, CPU/SoC name, cores, RAM,
   GPU budget (Apple unified-memory working set, discrete VRAM via

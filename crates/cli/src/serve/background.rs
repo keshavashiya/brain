@@ -84,7 +84,9 @@ pub(super) fn spawn_open_loop_detector(
                 resolution_window_hours: ol_cfg.resolution_window_hours,
                 max_reminders: 3,
             },
-            p.llm().clone(),
+            // Background nudge generation is fast-tier work — on a
+            // configured local fast lane it never leaves the machine.
+            p.llm_tier(cortex::llm::TaskTier::Fast),
         );
         let check_interval =
             tokio::time::Duration::from_secs(ol_cfg.check_interval_minutes as u64 * 60);

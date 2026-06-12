@@ -31,7 +31,7 @@ pub enum BudgetGate {
 /// heuristic the context assembler uses (`cortex::context::CHARS_PER_TOKEN`).
 /// Kept as a caller-side mirror so the budget crate stays independent of
 /// cortex; the ratio is duplicated deliberately, not imported.
-fn estimate_input_tokens(messages: &[Message]) -> u64 {
+pub(crate) fn estimate_input_tokens(messages: &[Message]) -> u64 {
     let chars: usize = messages.iter().map(|m| m.content.chars().count()).sum();
     chars.div_ceil(3) as u64
 }

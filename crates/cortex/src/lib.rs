@@ -14,8 +14,8 @@ pub mod llm;
 pub mod presets;
 
 pub use llm::{
-    create_provider, extract_json_from_response, select_provider, LlmError, LlmProvider, Message,
-    OllamaProvider, OpenAiProvider, ProposedToolCall, ProviderConfig, Response, ResponseChunk,
-    Role, ToolDef, Usage,
+    build_tier_chains, create_provider, extract_json_from_response, select_provider, LlmError,
+    LlmProvider, LlmTiers, Message, OllamaProvider, OpenAiProvider, ProposedToolCall,
+    ProviderConfig, Response, ResponseChunk, Role, TaskTier, ToolDef, Usage,
 };
 pub use presets::Preset;

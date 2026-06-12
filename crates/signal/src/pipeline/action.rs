@@ -189,7 +189,9 @@ impl SignalProcessor {
                             cortex::llm::Message::system(WEB_SYNTHESIS_SYSTEM),
                             cortex::llm::Message::user(search_context),
                         ];
-                        match self.llm.generate(&messages).await {
+                        // Fast-tier work: grounded summarization of search
+                        // results, not open-ended generation.
+                        match self.llm_fast.generate(&messages).await {
                             Ok(llm_response) => SignalResponse::ok(signal_id, llm_response.content),
                             Err(_) => SignalResponse::ok(signal_id, result.output),
                         }

@@ -311,7 +311,9 @@ impl SignalProcessor {
             ),
             cortex::llm::Message::user(transcript),
         ];
-        match self.llm.generate(&prompt).await {
+        // Fast-tier work: a compression chore, not a quality-sensitive
+        // generation — and on a configured local fast lane it stays here.
+        match self.llm_fast.generate(&prompt).await {
             Ok(resp) => {
                 let summary: std::sync::Arc<str> = std::sync::Arc::from(resp.content.trim());
                 self.history_summary_cache

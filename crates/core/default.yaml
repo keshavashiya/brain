@@ -31,6 +31,17 @@ llm:
     #   api_key: "sk-or-..."
     #   model: "meta-llama/llama-3.1-8b-instruct:free"
     #   preferred_models: ["meta-llama/llama-3.1-8b-instruct:free"]
+  # Task-tier routing over the providers above. Each tier is an ordered
+  # failover chain of provider names. Kernel chores (classification
+  # fallback, importance, history compaction, web-search synthesis,
+  # background nudges) use `fast`; chat and task decomposition use `deep`;
+  # everything else uses `balanced`. An empty/omitted tier uses the default
+  # chain, so leaving this block out changes nothing. Putting a local
+  # provider in `fast` guarantees those chores never leave this machine
+  # even when chat rides a cloud provider.
+  # tiers:
+  #   fast: ["ollama"]
+  #   deep: ["openrouter", "ollama"]
   # Legacy single-provider fallback — only used when providers list is empty.
   provider: "ollama"
   model: "qwen2.5-coder:7b"

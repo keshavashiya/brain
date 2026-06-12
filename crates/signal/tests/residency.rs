@@ -149,6 +149,23 @@ impl cortex::LlmProvider for CloudSim {
 async fn processor_with_cloud_chain(temp_dir: &tempfile::TempDir, port: u16) -> SignalProcessor {
     let mut config = brain::BrainConfig::default();
     config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
+    // Point the construction-time provider pool at the capture server too:
+    // the intent classifier keeps the chain it was built with (with_llm
+    // below only swaps the generation tiers), and the default-config
+    // entry is live local Ollama on dev machines — whose 0.7-temperature
+    // classification of the chat turns is nondeterministic and can land
+    // on an action intent that errors without a dispatcher. The capture
+    // server's canned non-JSON reply makes the LLM fallback parse-fail
+    // deterministically, so classification always degrades to Chat.
+    config.llm.providers = vec![brain::ProviderEntry {
+        name: "capture".to_string(),
+        kind: "openai_compat".to_string(),
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        api_key: String::new(),
+        api_key_file: None,
+        model: "mock".to_string(),
+        preferred_models: Vec::new(),
+    }];
     config.memory.namespaces.insert(
         "private".to_string(),
         brain::NamespaceConfig {

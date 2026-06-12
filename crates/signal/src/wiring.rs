@@ -27,9 +27,20 @@ impl SignalProcessor {
         self.memory.embedder.clone()
     }
 
-    /// Expose the LLM provider (for adapter use).
+    /// Expose the LLM provider (for adapter use). This is the `deep` tier
+    /// chain — the generation path for chat/streaming/decomposition.
     pub fn llm(&self) -> &Arc<dyn cortex::LlmProvider> {
         &self.llm
+    }
+
+    /// The chain serving a task tier. With `llm.tiers` unset every tier
+    /// resolves to the same default chain.
+    pub fn llm_tier(&self, tier: cortex::llm::TaskTier) -> Arc<dyn cortex::LlmProvider> {
+        match tier {
+            cortex::llm::TaskTier::Fast => self.llm_fast.clone(),
+            cortex::llm::TaskTier::Balanced => self.llm_balanced.clone(),
+            cortex::llm::TaskTier::Deep => self.llm.clone(),
+        }
     }
 
     /// Expose the context assembler (for adapter use).
@@ -52,12 +63,16 @@ impl SignalProcessor {
         self.llm.clone()
     }
 
-    /// Replace the chat LLM chain (builder pattern). Used by tests and
-    /// embedders that construct their own provider chain. Note: the
-    /// intent classifier and importance scorer keep the chain they were
-    /// built with — this swaps the generation path only.
+    /// Replace the LLM chain across all task tiers (builder pattern).
+    /// Used by tests and embedders that construct their own provider
+    /// chain. Note: the intent classifier and importance scorer keep the
+    /// (fast-tier) chain they were built with — this swaps the
+    /// generation-side paths only (chat/deep, compaction and
+    /// web-synthesis/fast, balanced).
     pub fn with_llm(mut self, llm: Arc<dyn cortex::LlmProvider>) -> Self {
-        self.llm = llm;
+        self.llm = llm.clone();
+        self.llm_fast = llm.clone();
+        self.llm_balanced = llm;
         self
     }
 
@@ -130,8 +145,11 @@ impl SignalProcessor {
         self.safety.confirmation_engine.as_ref()
     }
 
-    /// Attach a cost budget (builder pattern).
+    /// Attach a cost budget (builder pattern). Also hands the budget to
+    /// the per-tier usage recorders so spend shows up under `tier:<name>`
+    /// keys in `BudgetStatus`.
     pub fn with_cost_budget(mut self, budget: Arc<dyn budget::CostBudget>) -> Self {
+        let _ = self.tier_budget.set(budget.clone());
         self.safety.cost_budget = Some(budget);
         self
     }

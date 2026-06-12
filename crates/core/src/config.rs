@@ -555,6 +555,42 @@ pub struct LlmConfig {
     /// fields above are used as-is.
     #[serde(default)]
     pub providers: Vec<ProviderEntry>,
+    /// Task-tier routing over the provider pool. Each tier is an ordered
+    /// list of `providers[].name` entries forming that tier's failover
+    /// chain. Kernel chores (intent-classification fallback, importance,
+    /// history compaction, web-search synthesis) ride `fast`; chat and
+    /// task decomposition ride `deep`; everything unrouted rides
+    /// `balanced`. An empty tier uses the default startup chain, so an
+    /// unset `tiers` block changes nothing. Naming a *local* provider in
+    /// `fast` is the residency local lane: kernel chores then provably
+    /// never leave the machine even when chat uses a cloud provider.
+    #[serde(default)]
+    pub tiers: LlmTiersConfig,
+}
+
+/// `llm.tiers` — named provider chains per task tier. See
+/// [`LlmConfig::tiers`]. A name that doesn't match any `providers[]`
+/// entry is a startup error: a typo must never silently reroute a tier
+/// meant to stay local onto the default (possibly remote) chain.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LlmTiersConfig {
+    /// Cheap/latency-sensitive kernel work (classification fallback,
+    /// importance, compaction, web synthesis, background nudges).
+    #[serde(default)]
+    pub fast: Vec<String>,
+    /// Work not explicitly routed to `fast` or `deep`.
+    #[serde(default)]
+    pub balanced: Vec<String>,
+    /// Quality-sensitive generation (chat, task decomposition).
+    #[serde(default)]
+    pub deep: Vec<String>,
+}
+
+impl LlmTiersConfig {
+    /// True when no tier names any provider — the zero-config shape.
+    pub fn is_unset(&self) -> bool {
+        self.fast.is_empty() && self.balanced.is_empty() && self.deep.is_empty()
+    }
 }
 
 /// Default context window when `llm.context_window` is omitted. 8192 is the

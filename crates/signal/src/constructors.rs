@@ -94,11 +94,25 @@ impl SignalProcessor {
                 llm_cfg.api_key = llm_api_key.clone();
             }
         }
-        let llm: Arc<dyn cortex::LlmProvider> = Arc::new(
+        let default_chain: Arc<dyn cortex::LlmProvider> = Arc::new(
             cortex::llm::build_failover_chain(&llm_cfg)
                 .await
                 .map_err(|e| SignalError::Init(format!("Failed to create LLM provider: {e}")))?,
         );
+        // Task-tier routing (`llm.tiers`): kernel chores ride `fast`, chat
+        // and decomposition ride `deep`. Unset tiers alias the default
+        // chain, so zero-config behavior is byte-identical to one chain.
+        // Each chain gets a usage recorder so per-tier spend lands in the
+        // budget ledger under `tier:<name>` once a cost budget is wired.
+        let tiers = cortex::llm::build_tier_chains(&llm_cfg, default_chain)
+            .map_err(|e| SignalError::Init(format!("Failed to resolve llm.tiers: {e}")))?;
+        let tier_budget: crate::tier_budget::BudgetCell = Arc::new(std::sync::OnceLock::new());
+        let wrap = |chain, tier| {
+            crate::tier_budget::TierUsageRecorder::wrap(chain, tier, tier_budget.clone())
+        };
+        let llm_fast = wrap(tiers.fast, cortex::llm::TaskTier::Fast);
+        let llm_balanced = wrap(tiers.balanced, cortex::llm::TaskTier::Balanced);
+        let llm = wrap(tiers.deep, cortex::llm::TaskTier::Deep);
 
         // Create embedder — the embedding transport key still comes from
         // the legacy `llm.provider` field (Issue 40 keeps it #[deprecated]
@@ -181,8 +195,10 @@ impl SignalProcessor {
             )
             .with_agent_trust(config.memory.trust.policy()),
         );
+        // Classifier fallback and importance scoring are fast-tier work:
+        // small prompts, latency-sensitive, quality-tolerant.
         let classifier = thalamus::IntentClassifier::new()
-            .with_llm_fallback(Arc::new(thalamus::LlmIntentFallback::new(llm.clone())));
+            .with_llm_fallback(Arc::new(thalamus::LlmIntentFallback::new(llm_fast.clone())));
 
         let proactivity_enabled = Arc::new(std::sync::atomic::AtomicBool::new(
             config.proactivity.enabled,
@@ -218,7 +234,7 @@ impl SignalProcessor {
         let processor = Self {
             config,
             classifier,
-            importance: amygdala::ImportanceScorer::with_llm(llm.clone()),
+            importance: amygdala::ImportanceScorer::with_llm(llm_fast.clone()),
             memory: crate::memory_subsystem::MemorySubsystem {
                 episodic,
                 semantic,
@@ -232,6 +248,9 @@ impl SignalProcessor {
                 dual_memory_reader: None,
             },
             llm,
+            llm_fast,
+            llm_balanced,
+            tier_budget,
             context_assembler: cortex::context::ContextAssembler::new(
                 cortex::context::TokenBudget::for_context_size(context_window),
             ),

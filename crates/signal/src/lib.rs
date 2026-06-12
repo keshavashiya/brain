@@ -30,6 +30,7 @@ mod recall;
 mod render;
 mod secrets;
 mod streaming;
+mod tier_budget;
 mod wiring;
 
 pub use budget_guard::{check_llm_input, record_llm_usage, BudgetGate};
@@ -54,7 +55,23 @@ pub struct SignalProcessor {
     /// and its query cache, the recall engine, and the dual-memory reader.
     /// See [`memory_subsystem::MemorySubsystem`].
     memory: memory_subsystem::MemorySubsystem,
+    /// The `deep` tier chain — quality-sensitive generation (chat turns,
+    /// streaming, the tool loop). With `llm.tiers` unset all three tier
+    /// fields wrap the same default chain, preserving single-chain
+    /// behavior. Each chain is wrapped in a
+    /// [`tier_budget::TierUsageRecorder`], so completed generations are
+    /// also recorded under `tier:<name>` once a cost budget is wired.
     llm: std::sync::Arc<dyn cortex::LlmProvider>,
+    /// The `fast` tier chain — cheap kernel chores: classifier fallback,
+    /// importance, history compaction, web-search synthesis. Routing a
+    /// local provider here is the residency "local lane": these chores
+    /// then provably never leave the machine.
+    llm_fast: std::sync::Arc<dyn cortex::LlmProvider>,
+    /// The `balanced` tier chain — work not explicitly routed fast/deep.
+    llm_balanced: std::sync::Arc<dyn cortex::LlmProvider>,
+    /// Cost-budget slot shared with the tier recorders. Filled by
+    /// `with_cost_budget`; empty means tier accounting is off.
+    tier_budget: tier_budget::BudgetCell,
     context_assembler: cortex::context::ContextAssembler,
     /// LRU cache of compacted-history summaries. Keyed by a fast hash of the
     /// overflow turns being summarized, so a long chat doesn't re-summarize

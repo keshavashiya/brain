@@ -20,6 +20,9 @@ pub use ollama::OllamaProvider;
 pub use openai::OpenAiProvider;
 
 mod failover;
+mod tiers;
+
+pub use tiers::{build_tier_chains, LlmTiers, TaskTier};
 
 // ─── Errors ─────────────────────────────────────────────────────────────────
 

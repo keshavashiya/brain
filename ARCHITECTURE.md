@@ -95,6 +95,10 @@ brain/
 │   │   │                 errors (4xx auth, InvalidFormat) propagate immediately.
 │   │   │                 build_failover_chain(): probes providers at startup, builds chain
 │   │   │                 with probed winner first and remaining entries as fallbacks.
+│   │   │                 build_tier_chains(): llm.tiers.{fast,balanced,deep} — per-task-tier
+│   │   │                 failover chains over named provider entries (kernel chores ride
+│   │   │                 fast, chat/decompose ride deep); unset tiers alias the default
+│   │   │                 chain; unknown names fail closed at startup.
 │   │   ├── context     # ContextAssembler: token-budgeted prompt builder
 │   │   │                 Budget: system(500) + user_model(300) + history(2000) +
 │   │   │                 response_buffer(400) + memories(remainder of 8192)

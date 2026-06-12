@@ -170,6 +170,25 @@ impl SignalProcessor {
                 },
             ));
         }
+        // Tier routing — only rendered when `llm.tiers` routes anything,
+        // so zero-config installs keep the short status.
+        if !self.config.llm.tiers.is_unset() {
+            let line = |tier: cortex::llm::TaskTier| {
+                let chain = self.llm_tier(tier);
+                format!(
+                    "{tier}={} ({}, {})",
+                    chain.name(),
+                    chain.model(),
+                    if chain.is_local() { "local" } else { "remote" },
+                )
+            };
+            message.push_str(&format!(
+                "\nLLM tiers: {}; {}; {}.",
+                line(cortex::llm::TaskTier::Fast),
+                line(cortex::llm::TaskTier::Balanced),
+                line(cortex::llm::TaskTier::Deep),
+            ));
+        }
         let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
         Ok(PipelineResult::Complete(resp))
     }
