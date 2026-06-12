@@ -165,6 +165,20 @@ pub enum BrainEvent {
         detail: String,
         ts: DateTime<Utc>,
     },
+    /// Emitted by the power probe when the machine crosses between external
+    /// power and battery. Edge-triggered — once per transition, not once per
+    /// probe round. `state`/`previous` are strings so `observe` stays free of
+    /// a `core` dependency, exactly as `ConnectivityChanged` does.
+    PowerStateChanged {
+        id: Uuid,
+        /// New state: `"external" | "battery"`.
+        state: String,
+        /// State before the transition, same vocabulary.
+        previous: String,
+        /// Human-readable cause, e.g. `"battery at 47%"`.
+        detail: String,
+        ts: DateTime<Utc>,
+    },
     /// Emitted by a service-health probe when a monitored endpoint crosses
     /// between reachable and unreachable. Edge-triggered — once per transition,
     /// not once per probe — the same discipline as `ResourcePressure`. `target`
@@ -207,6 +221,7 @@ impl BrainEvent {
             BrainEvent::TerminalSessionClosed { .. } => "terminal_session_closed",
             BrainEvent::TaskStateChange { .. } => "task_state_change",
             BrainEvent::ConnectivityChanged { .. } => "connectivity_changed",
+            BrainEvent::PowerStateChanged { .. } => "power_state_changed",
             BrainEvent::ServiceHealthChanged { .. } => "service_health_changed",
         }
     }
@@ -231,6 +246,7 @@ impl BrainEvent {
             | BrainEvent::TerminalSessionClosed { id, .. }
             | BrainEvent::TaskStateChange { id, .. }
             | BrainEvent::ConnectivityChanged { id, .. }
+            | BrainEvent::PowerStateChanged { id, .. }
             | BrainEvent::ServiceHealthChanged { id, .. } => *id,
         }
     }
@@ -394,6 +410,38 @@ mod tests {
                 assert_eq!(state, "offline");
                 assert_eq!(previous, "online");
                 assert_eq!(detail, "2 of 2 endpoints unreachable");
+            }
+            other => panic!("decoded to the wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_power_state_changed_through_json() {
+        let id = Uuid::new_v4();
+        let original = BrainEvent::PowerStateChanged {
+            id,
+            state: "battery".into(),
+            previous: "external".into(),
+            detail: "battery at 47%".into(),
+            ts: Utc::now(),
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: BrainEvent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.kind(), "power_state_changed");
+        assert_eq!(decoded.id(), id);
+        assert_eq!(decoded.tool_id(), None);
+        match decoded {
+            BrainEvent::PowerStateChanged {
+                state,
+                previous,
+                detail,
+                ..
+            } => {
+                assert_eq!(state, "battery");
+                assert_eq!(previous, "external");
+                assert_eq!(detail, "battery at 47%");
             }
             other => panic!("decoded to the wrong variant: {other:?}"),
         }

@@ -240,6 +240,10 @@ pub struct MonitoringConfig {
     /// state. See [`ConnectivityProbeConfig`].
     #[serde(default)]
     pub connectivity: ConnectivityProbeConfig,
+    /// Power-source probing — the kernel's External/Battery state. See
+    /// [`PowerProbeConfig`].
+    #[serde(default)]
+    pub power: PowerProbeConfig,
 }
 
 /// Connectivity probing: derives the kernel's `Online / Degraded / Offline`
@@ -285,6 +289,48 @@ impl Default for ConnectivityProbeConfig {
             interval_secs: Self::default_interval_secs(),
             timeout_secs: Self::default_timeout_secs(),
             targets: Vec::new(),
+        }
+    }
+}
+
+/// Power-source probing: derives the kernel's `External / Battery` state from
+/// the platform (`pmset` on macOS, `/sys/class/power_supply` on Linux — no
+/// network, no new dependency). On a platform where the source can't be
+/// determined (or a machine with no battery) no probe loop runs and the state
+/// stays `External`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PowerProbeConfig {
+    /// Probe at all. Disabling pins the kernel's view to `External`.
+    #[serde(default = "PowerProbeConfig::default_enabled")]
+    pub enabled: bool,
+    /// Seconds between probe rounds.
+    #[serde(default = "PowerProbeConfig::default_interval_secs")]
+    pub interval_secs: u64,
+    /// Hold heavy background maintenance (memory consolidation, graph
+    /// compaction) while on battery; the loops resume when external power
+    /// returns. Set `false` to run maintenance regardless of power source.
+    #[serde(default = "PowerProbeConfig::default_defer_maintenance")]
+    pub defer_maintenance: bool,
+}
+
+impl PowerProbeConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_interval_secs() -> u64 {
+        60
+    }
+    fn default_defer_maintenance() -> bool {
+        true
+    }
+}
+
+impl Default for PowerProbeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            interval_secs: Self::default_interval_secs(),
+            defer_maintenance: Self::default_defer_maintenance(),
         }
     }
 }

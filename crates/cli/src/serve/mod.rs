@@ -17,6 +17,8 @@
 //!   compactor) + `promote_candidates`
 //! - [`connectivity`] — probe-target derivation + round/fold helpers for
 //!   the kernel's Online/Degraded/Offline view
+//! - [`power`] — platform power-source probe (pmset / sysfs) + the
+//!   on-battery deferral gate the heavy maintenance loops call
 //! - [`dlq`] — DLQ drain task + private batch helper
 //! - [`reflex`] — reactive signal sources (FS / cron / sys)
 //! - [`transports`] — preset transport wiring + channel relays
@@ -26,6 +28,7 @@ mod background;
 mod connectivity;
 mod dlq;
 mod health;
+mod power;
 mod reflex;
 // `pub(crate)` so `brain doctor --deep` can run a one-shot `ResourceProbe`.
 pub(crate) mod resource;
@@ -310,15 +313,21 @@ pub(crate) async fn cmd_serve(
              fire them through the pipeline."
         );
     }
+    // Battery etiquette for the heavy maintenance loops below: only
+    // meaningful when the power probe runs (without it the state is pinned
+    // External and the gate never holds).
+    let defer_on_battery =
+        config.monitoring.power.enabled && config.monitoring.power.defer_maintenance;
     if config.memory.consolidation.enabled {
         background::spawn_consolidator(
             processor.clone(),
             config.memory.consolidation.interval_hours,
             config.memory.consolidation.forgetting_threshold,
+            defer_on_battery,
             &mut set,
         );
     }
-    background::spawn_graph_compactor(processor.clone(), &mut set);
+    background::spawn_graph_compactor(processor.clone(), defer_on_battery, &mut set);
     dlq::spawn_dlq_drain(processor.clone(), &mut set);
 
     // Runtime resource gauges (RSS/CPU/connections/disk). The shared store is
@@ -361,6 +370,13 @@ pub(crate) async fn cmd_serve(
                 &mut set,
             );
         }
+    }
+
+    // Power probe: the writer behind the processor's External/Battery view.
+    // Platform-local (pmset / sysfs, no network); on an unsupported platform
+    // the task exits after one probe and the state stays pinned External.
+    if config.monitoring.power.enabled {
+        background::spawn_power_probe(processor.clone(), config.monitoring.power.clone(), &mut set);
     }
 
     // ── Channel relay adapters ────────────────────────────────────────

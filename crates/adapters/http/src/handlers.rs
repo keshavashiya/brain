@@ -515,6 +515,7 @@ fn brain_event_ts(ev: &observe::BrainEvent) -> chrono::DateTime<chrono::Utc> {
         | TerminalSessionClosed { ts, .. }
         | TaskStateChange { ts, .. }
         | ConnectivityChanged { ts, .. }
+        | PowerStateChanged { ts, .. }
         | ServiceHealthChanged { ts, .. } => *ts,
     }
 }

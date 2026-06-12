@@ -49,6 +49,13 @@ impl SignalProcessor {
         self.connectivity.clone()
     }
 
+    /// The kernel's power-source view. Clone this handle to share it with
+    /// a probe loop — writes through any clone are visible to the pipeline
+    /// and the maintenance loops.
+    pub fn power(&self) -> brain::Power {
+        self.power.clone()
+    }
+
     /// The generation chain for *this* turn. Online (or no probe wired) →
     /// the deep tier, unchanged. Offline → the first tier chain that is
     /// fully local (deep → balanced → fast), so the turn still answers

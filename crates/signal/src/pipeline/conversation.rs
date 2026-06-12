@@ -384,6 +384,21 @@ impl SignalProcessor {
                 );
             }
         }
+        // Same situated grounding for power: on battery the reasoner should
+        // prefer lighter work and not volunteer heavy batch jobs. The
+        // deferral clause tracks the actual config so the digest never
+        // claims behaviour the operator turned off.
+        if self.power.is_battery() {
+            if self.config.monitoring.power.defer_maintenance {
+                digest.push_str(
+                    "\nPower: on battery — heavy background maintenance (memory \
+                     consolidation, graph sweeps) is held until external power returns; \
+                     prefer lighter work over big batch jobs.\n",
+                );
+            } else {
+                digest.push_str("\nPower: on battery.\n");
+            }
+        }
         // Quarantined-and-waiting must be visible, not a silent hole:
         // memories from unvouched writers exist but are excluded from
         // recall until the user reviews them.

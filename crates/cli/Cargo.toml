@@ -77,6 +77,8 @@ resilience = { workspace = true }
 tonic = { version = "0.14", features = ["transport"] }
 
 [dev-dependencies]
+# `test-util` adds paused-clock support for the power-deferral gate test.
+tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite = { workspace = true }
 futures-util = "0.3"
 tonic = { version = "0.14", features = ["transport"] }

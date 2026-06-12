@@ -104,6 +104,13 @@ pub struct SignalProcessor {
     /// Online, so processors without a probe loop (CLI one-shots, tests)
     /// behave exactly as before.
     connectivity: brain::Connectivity,
+    /// The kernel's power-source view (External/Battery). The serve loop's
+    /// power probe writes through a clone of this handle (see
+    /// [`SignalProcessor::power`]); heavy maintenance loops hold while on
+    /// battery and the capability digest grounds the reasoner. Defaults to
+    /// External, so processors without a probe loop behave exactly as
+    /// before.
+    power: brain::Power,
 
     // ── Capability bundles (opt-in via builder) ──────────────────────────
     /// Approval / accounting / sandbox gates. See [`bundles::SafetyBundle`].

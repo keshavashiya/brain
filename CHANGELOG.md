@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Power awareness (`monitoring.power`).** The daemon now knows whether the
+  machine is on external power or battery, read straight from the platform
+  (`pmset` on macOS, `/sys/class/power_supply` on Linux — no network, no new
+  dependency). While on battery, heavy background maintenance — memory
+  consolidation and the 24h graph compactor — holds until external power
+  returns (each hold and resume is logged once; set
+  `monitoring.power.defer_maintenance: false` to opt out), and the capability
+  digest tells the reasoner to prefer lighter work over big batch jobs. Each
+  external↔battery transition publishes a `power_state_changed` event on the
+  bus; macOS Low Power Mode is surfaced in the event detail. Desktops and
+  platforms without a readable power source stay pinned to external power
+  and behave exactly as before.
+
 - **Connectivity as kernel state (`monitoring.connectivity`).** The daemon
   now knows whether it is online, degraded, or offline — and behaves
   accordingly instead of timing out against a dead network. A bounded probe

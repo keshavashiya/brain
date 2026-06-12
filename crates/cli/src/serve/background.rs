@@ -125,9 +125,11 @@ pub(super) fn spawn_consolidator(
     processor: Arc<signal::SignalProcessor>,
     interval_hours: u32,
     prune_threshold: f64,
+    defer_on_battery: bool,
     set: &mut tokio::task::JoinSet<anyhow::Result<()>>,
 ) {
     let p = processor.clone();
+    let power = processor.power();
     set.spawn(async move {
         let consolidator = hippocampus::Consolidator::new(hippocampus::ConsolidationConfig {
             prune_threshold,
@@ -139,6 +141,10 @@ pub(super) fn spawn_consolidator(
         ticker.tick().await;
         loop {
             ticker.tick().await;
+            // Battery etiquette: a due consolidation holds (not skips) until
+            // external power returns, so it still runs — just not on battery.
+            super::power::hold_while_on_battery(&power, defer_on_battery, "memory consolidation")
+                .await;
             match consolidator.consolidate(p.episodic()) {
                 Ok(r) => {
                     let promoted_now =
@@ -175,10 +181,12 @@ pub(super) fn spawn_consolidator(
 /// wrapper is cheap.
 pub(super) fn spawn_graph_compactor(
     processor: Arc<signal::SignalProcessor>,
+    defer_on_battery: bool,
     set: &mut tokio::task::JoinSet<anyhow::Result<()>>,
 ) {
     use hippocampus::Compactor as _;
     let p = processor.clone();
+    let power = processor.power();
     set.spawn(async move {
         let compactor = hippocampus::DefaultCompactor::new(hippocampus::CompactConfig::default());
         let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(24 * 3600));
@@ -187,6 +195,9 @@ pub(super) fn spawn_graph_compactor(
         ticker.tick().await;
         loop {
             ticker.tick().await;
+            // Battery etiquette: a due sweep holds until external power
+            // returns rather than running on battery.
+            super::power::hold_while_on_battery(&power, defer_on_battery, "graph compaction").await;
             let graph = hippocampus::SqliteGraph::new(p.episodic().pool().clone());
             match compactor.compact(&graph).await {
                 Ok(stats) => tracing::info!(
@@ -455,6 +466,68 @@ pub(super) fn spawn_connectivity_probe(
         interval_secs = cfg.interval_secs,
         "Connectivity probe scheduled"
     );
+}
+
+/// Spawn the power probe — the single writer behind the processor's
+/// [`brain::Power`] handle. Each round asks the platform for the power
+/// source (see `power::probe`; `pmset` / sysfs, no network) and folds it
+/// into `External / Battery`. On a *transition* it publishes a
+/// `PowerStateChanged` event — but, unlike the connectivity and service
+/// monitors, no proactive notification: plugging and unplugging a laptop is
+/// routine and user-initiated, not news; the consequences surface in the
+/// maintenance loops' defer/resume log lines and the capability digest.
+/// If the very first probe reports the source undetectable (non-mac/linux
+/// platform, or a desktop with nothing to report), the task exits and the
+/// state stays pinned `External`.
+pub(super) fn spawn_power_probe(
+    processor: Arc<signal::SignalProcessor>,
+    cfg: brain::config::PowerProbeConfig,
+    set: &mut tokio::task::JoinSet<anyhow::Result<()>>,
+) {
+    let handle = processor.power();
+    let p = processor;
+    set.spawn(async move {
+        // Support check: one up-front probe decides whether this platform
+        // can answer at all, so an unsupported host doesn't keep a no-op
+        // loop alive forever.
+        if super::power::probe().await.is_none() {
+            tracing::info!(
+                "Power probe: source undetectable on this platform — state pinned to external"
+            );
+            return Ok(());
+        }
+        let mut ticker =
+            tokio::time::interval(std::time::Duration::from_secs(cfg.interval_secs.max(1)));
+        // No leading-tick skip: a daemon booted on battery should know
+        // within one round, not one interval later.
+        loop {
+            ticker.tick().await;
+            // A transient mid-flight read failure holds the last state
+            // rather than flapping.
+            let Some((state, detail)) = super::power::probe().await else {
+                continue;
+            };
+            // Edge-triggered, same as every other monitor here.
+            if let Some(previous) = handle.set(state) {
+                if state == brain::PowerState::Battery {
+                    tracing::info!(detail = %detail, "Power: now on battery");
+                } else {
+                    tracing::info!(previous = %previous, "Power: external power restored");
+                }
+                if let Some(observer) = p.observer() {
+                    let ev = observe::BrainEvent::PowerStateChanged {
+                        id: uuid::Uuid::new_v4(),
+                        state: state.as_str().to_string(),
+                        previous: previous.as_str().to_string(),
+                        detail: detail.clone(),
+                        ts: chrono::Utc::now(),
+                    };
+                    let _ = observer.publish(ev).await;
+                }
+            }
+        }
+    });
+    tracing::info!(interval_secs = cfg.interval_secs, "Power probe scheduled");
 }
 
 pub(crate) async fn promote_candidates(
