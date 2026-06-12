@@ -49,3 +49,5 @@ docs/*
 .mcp.json
 CLAUDE.md
 .junie
+/openspec
+/.opencode
