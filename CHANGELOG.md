@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Host self-model (hardware-grounded suggestions).** Brain now probes the
+  machine it runs on once at bootstrap — OS/arch, CPU/SoC name, cores, RAM,
+  GPU budget (Apple unified-memory working set, discrete VRAM via
+  `nvidia-smi`, or a CPU-inference RAM share), and the data-dir disk
+  class/free space. Three consumers, one model: the capability digest gains
+  a `Host machine:` line naming the machine class and local-model headroom,
+  so the reasoner sizes suggestions to the hardware in front of it;
+  `brain doctor` prints the hardware summary and warns when a configured
+  loopback model's estimated memory (parsed from its size token, e.g.
+  `:70b`) exceeds what this host can give local inference; `brain init`
+  reports the hardware and recommends the local model size that fits.
+  Every probe is best-effort — unknown stays unknown, and never blocks boot.
+
 - **Sealed (encrypted) exports.** `brain export --encrypt` seals the export
   in a self-contained passphrase envelope: AES-256-GCM with an Argon2id-derived
   key and a fresh per-export salt embedded in the file, so a backup is

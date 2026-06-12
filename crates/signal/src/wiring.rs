@@ -342,6 +342,20 @@ impl SignalProcessor {
         self.product_self_model.as_ref()
     }
 
+    /// Attach the host self-model (builder pattern). When wired, the
+    /// capability digest carries a "Host machine" line (hardware, machine
+    /// class, local-model headroom) so the SOUL sizes its suggestions to the
+    /// machine it actually runs on. Probed once at bootstrap.
+    pub fn with_host_model(mut self, model: Arc<selfmodel::HostModel>) -> Self {
+        self.host_model = Some(model);
+        self
+    }
+
+    /// Expose the configured host self-model, if any.
+    pub fn host_model(&self) -> Option<&Arc<selfmodel::HostModel>> {
+        self.host_model.as_ref()
+    }
+
     /// Attach a Terminal Bridge so `OpenTerminalSession` /
     /// `ListTerminalSessions` / `CloseTerminalSession` intents can drive
     /// real PTY sessions. Without this, the three intents return a

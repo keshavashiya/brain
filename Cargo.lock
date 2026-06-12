@@ -1288,6 +1288,7 @@ name = "brainos-selfmodel"
 version = "0.5.0"
 dependencies = [
  "brainos-core",
+ "sysinfo",
 ]
 
 [[package]]

@@ -228,6 +228,16 @@ pub(crate) async fn cmd_doctor(config: &BrainConfig, deep: bool) -> anyhow::Resu
         );
     }
 
+    // ── host hardware ────────────────────────────────────────────────────
+    // Best-effort probe (never fails the run); the model-fit warnings below
+    // measure configured local models against this budget.
+    let host = selfmodel::HostModel::probe(Some(&data_dir));
+    println!(
+        "  [ok]   host                   {} · class: {}",
+        host.summary_line(),
+        host.machine_class()
+    );
+
     // ── LLM providers ────────────────────────────────────────────────────
     // Check each entry in `providers[]` per its `kind`. Ollama entries get
     // an `/api/tags` probe; openai-compatible entries get a `/models` probe
@@ -259,11 +269,18 @@ pub(crate) async fn cmd_doctor(config: &BrainConfig, deep: bool) -> anyhow::Resu
                 );
             }
         }
+        warn_model_fit(&host, &model, &base);
     } else {
         let mut any_reachable = false;
         for entry in &config.llm.providers {
             if check_provider(entry).await {
                 any_reachable = true;
+            }
+            match classify(entry) {
+                ProviderKind::Ollama { base_url } | ProviderKind::OpenAiCompat { base_url } => {
+                    warn_model_fit(&host, &entry.model, &base_url);
+                }
+                ProviderKind::Unknown => {}
             }
         }
         if !any_reachable {
@@ -382,6 +399,29 @@ pub(crate) async fn cmd_doctor(config: &BrainConfig, deep: bool) -> anyhow::Resu
             "{} check(s) failed — fix above and re-run `brain doctor`",
             failures
         )
+    }
+}
+
+/// Warn when a configured model's estimated memory (parsed from its size
+/// token, e.g. `70b`) exceeds what this host can give local inference
+/// (VRAM / unified-memory budget / RAM share). Only fires for loopback
+/// endpoints — the model runs *here* — and only on a confident mismatch;
+/// a health hint, never a failure.
+fn warn_model_fit(host: &selfmodel::HostModel, model: &str, base_url: &str) {
+    if !brain::url_is_loopback(base_url) {
+        return;
+    }
+    if let Some(fit) = host.model_fit(model) {
+        if fit.exceeds {
+            const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+            println!(
+                "  [warn] model exceeds memory   {} needs ~{:.0} GiB but this host can give \
+                 local inference ~{:.0} GiB — expect heavy swapping or load failure",
+                model,
+                fit.estimated_bytes as f64 / GIB,
+                fit.budget_bytes as f64 / GIB,
+            );
+        }
     }
 }
 

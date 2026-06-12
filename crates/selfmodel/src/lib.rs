@@ -23,6 +23,9 @@
 //! - **Policy facts** — a small curated list of architecture/policy invariants
 //!   that aren't mechanically derivable (e.g. "no native Telegram transport").
 
+pub mod host;
+pub use host::{DiskClass, DiskInfo, GpuInfo, HostModel, ModelFit};
+
 /// One CLI command, derived from the clap definition by the binary crate.
 /// Trusted, structural fields only (name, one-line summary, arg names) — the
 /// same restraint the capability digest applies to external tools.

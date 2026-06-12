@@ -270,5 +270,17 @@ pub async fn build_processor(
     processor = processor.with_product_self_model(Arc::new(self_model));
     tracing::info!("Product self-model wired (commands + signals + config schema + policy)");
 
+    // Host self-model — the situational sibling: OS/arch, cores, RAM, GPU
+    // budget, data-dir disk. Probed once here; the capability digest names
+    // the machine class from it so the SOUL sizes suggestions to the
+    // hardware it actually runs on.
+    let host_model = selfmodel::HostModel::probe(Some(&config.data_dir()));
+    tracing::info!(
+        class = host_model.machine_class(),
+        summary = %host_model.summary_line(),
+        "Host self-model probed"
+    );
+    processor = processor.with_host_model(Arc::new(host_model));
+
     Ok(processor)
 }

@@ -354,6 +354,14 @@ impl SignalProcessor {
             )
             .unwrap_or_default();
         let mut digest = render_capability_digest(&tools, &agents, &proven);
+        // Situated grounding: name the machine (and its class) so the
+        // reasoner sizes suggestions — local model picks, batch work — to
+        // the hardware it actually runs on.
+        if let Some(host) = self.host_model() {
+            digest.push('\n');
+            digest.push_str(&host.digest_line());
+            digest.push('\n');
+        }
         // Quarantined-and-waiting must be visible, not a silent hole:
         // memories from unvouched writers exist but are excluded from
         // recall until the user reviews them.
@@ -803,5 +811,22 @@ mod tests {
         let section = processor.chat_capability_section("hello").await;
         assert!(section.contains("Your Capabilities"));
         assert!(!section.contains("About Brain"));
+    }
+
+    #[tokio::test]
+    async fn digest_names_machine_class_when_host_model_wired() {
+        let host = Arc::new(selfmodel::HostModel::probe(None));
+        let expected_class = host.machine_class();
+        let processor = make_processor().await.with_host_model(host);
+        let digest = processor.capability_digest().await;
+        assert!(digest.contains("Host machine:"), "{digest}");
+        assert!(
+            digest.contains(&format!("machine class: {expected_class}")),
+            "digest must name the machine class: {digest}"
+        );
+
+        // Unwired processors keep the digest host-free (back-compat).
+        let bare = make_processor().await.capability_digest().await;
+        assert!(!bare.contains("Host machine:"));
     }
 }

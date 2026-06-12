@@ -255,6 +255,7 @@ impl SignalProcessor {
             identity_store: None,
             client_rate_limits: None,
             product_self_model: None,
+            host_model: None,
         };
 
         // Warm up the LLM model in the background to avoid first-call timeout

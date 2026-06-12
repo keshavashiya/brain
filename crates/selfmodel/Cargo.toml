@@ -12,6 +12,9 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+# Boot-time host probe (RAM/cores/disk class). GPU detection shells out to
+# platform tools (sysctl / nvidia-smi) — no extra dependency for that.
+sysinfo = { workspace = true }
 
 # Dev-only edge (allowed cycle: `core` depends on `selfmodel`, never the
 # reverse at build time): the config-schema grounding tests assert against the

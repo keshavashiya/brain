@@ -110,6 +110,11 @@ pub struct SignalProcessor {
     /// at bootstrap; `None` leaves the prompt unchanged (back-compat for
     /// non-chat/test processors).
     product_self_model: Option<std::sync::Arc<selfmodel::ProductSelfModel>>,
+    /// Brain's grounded knowledge of the host machine (OS/arch, cores, RAM,
+    /// GPU budget, disk) — the situational sibling of the product self-model.
+    /// Probed once at bootstrap; the capability digest names the machine
+    /// class from it. `None` leaves the digest unchanged (back-compat).
+    host_model: Option<std::sync::Arc<selfmodel::HostModel>>,
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────

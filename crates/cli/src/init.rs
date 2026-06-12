@@ -34,6 +34,18 @@ pub(crate) async fn cmd_init(
         println!("  Region:             {}", data_dir.join(sub).display());
     }
 
+    // Hardware-aware model recommendation: probe the host once and say what
+    // local model size actually fits, so the first config edit is informed.
+    let host = selfmodel::HostModel::probe(Some(&data_dir));
+    println!("  Hardware:           {}", host.summary_line());
+    if let Some(rec) = host.local_model_recommendation() {
+        println!(
+            "                      class: {} — local models {} recommended",
+            host.machine_class(),
+            rec
+        );
+    }
+
     // Probe Ollama and only warn about the embedding model when it's
     // actually missing.
     check_ollama_models(config).await;
