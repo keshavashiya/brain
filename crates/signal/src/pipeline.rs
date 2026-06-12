@@ -120,7 +120,9 @@ impl SignalProcessor {
                 agent,
                 ..
             } => {
-                let provider_name = self.llm.name().to_string();
+                // Budget accounting keys by the chain that will actually
+                // serve this turn (offline turns ride a local tier).
+                let provider_name = self.active_llm().name().to_string();
                 let gate = crate::budget_guard::check_llm_input(
                     self.cost_budget(),
                     &provider_name,

@@ -236,6 +236,57 @@ pub struct MonitoringConfig {
     /// entry; an empty list (the default) spawns none.
     #[serde(default)]
     pub services: Vec<ServiceCheck>,
+    /// Network-connectivity probing — the kernel's Online/Degraded/Offline
+    /// state. See [`ConnectivityProbeConfig`].
+    #[serde(default)]
+    pub connectivity: ConnectivityProbeConfig,
+}
+
+/// Connectivity probing: derives the kernel's `Online / Degraded / Offline`
+/// state by reaching the **already-configured remote endpoints** (remote LLM
+/// providers) — never a third-party beacon, so enabling this adds no new
+/// egress destination. With nothing remote configured (fully-local install)
+/// no probe loop is spawned and the state stays `Online`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectivityProbeConfig {
+    /// Probe at all. Disabling pins the kernel's view to `Online`.
+    #[serde(default = "ConnectivityProbeConfig::default_enabled")]
+    pub enabled: bool,
+    /// Seconds between probe rounds.
+    #[serde(default = "ConnectivityProbeConfig::default_interval_secs")]
+    pub interval_secs: u64,
+    /// Per-target TCP-connect timeout in seconds.
+    #[serde(default = "ConnectivityProbeConfig::default_timeout_secs")]
+    pub timeout_secs: u64,
+    /// Explicit `host:port` probe targets. Empty (the default) derives the
+    /// target set from the configured remote (non-loopback) LLM provider
+    /// endpoints, keeping probe egress inside what the user already opted
+    /// into reaching.
+    #[serde(default)]
+    pub targets: Vec<String>,
+}
+
+impl ConnectivityProbeConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_interval_secs() -> u64 {
+        60
+    }
+    fn default_timeout_secs() -> u64 {
+        5
+    }
+}
+
+impl Default for ConnectivityProbeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            interval_secs: Self::default_interval_secs(),
+            timeout_secs: Self::default_timeout_secs(),
+            targets: Vec::new(),
+        }
+    }
 }
 
 /// Probe protocol for a [`ServiceCheck`].

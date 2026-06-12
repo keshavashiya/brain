@@ -44,17 +44,21 @@ impl SignalProcessor {
         signal_id: uuid::Uuid,
         mut messages: Vec<Message>,
     ) -> Result<Response, SignalError> {
+        // Captured once per turn: offline turns ride the first local tier
+        // chain instead of timing out against a dead remote (see
+        // `SignalProcessor::active_llm`).
+        let llm = self.active_llm();
         let tools = self.advertised_tools(&messages).await;
         if tools.is_empty() {
             // No manifest / no tools → unchanged plain-text behaviour.
-            return Ok(self.llm.generate(&messages).await?);
+            return Ok(llm.generate(&messages).await?);
         }
 
         let mut total_usage: Option<Usage> = None;
         let mut last = Response::default();
 
         for round in 0..MAX_TOOL_ROUNDS {
-            let resp = self.llm.generate_with_tools(&messages, &tools).await?;
+            let resp = llm.generate_with_tools(&messages, &tools).await?;
             accumulate_usage(&mut total_usage, resp.usage.as_ref());
 
             // Plain text answer, or we've exhausted our round budget — done.
@@ -177,7 +181,10 @@ impl SignalProcessor {
         let Some(router) = self.intent_router() else {
             return "Capability router not configured; tool call skipped.".to_string();
         };
-        let token = proposed_call_to_token(call, self.llm.model());
+        // Provenance metadata names the chain that actually proposed the
+        // call (offline turns ride a local tier).
+        let llm = self.active_llm();
+        let token = proposed_call_to_token(call, llm.model());
         let intent = thalamus::Intent::ToolCall(Box::new(token.clone()));
 
         // Same tier-based consent gate every other capability invocation uses.

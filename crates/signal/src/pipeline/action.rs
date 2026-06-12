@@ -173,6 +173,20 @@ impl SignalProcessor {
         intent: &thalamus::Intent,
         prepend_nudges: &(impl Fn(SignalResponse) -> SignalResponse + ?Sized),
     ) -> Result<PipelineResult, SignalError> {
+        // Honest offline degradation: a web search against a dead network
+        // would only time out and surface a vague backend error. Say what
+        // is actually wrong and what still works instead.
+        if matches!(intent, thalamus::Intent::WebSearch { .. }) && self.connectivity().is_offline()
+        {
+            let resp = prepend_nudges(SignalResponse::ok(
+                signal_id,
+                "I'm offline right now, so web search is unavailable. I can still \
+                 answer from the local model and stored memory — ask away, or retry \
+                 the search once the network is back."
+                    .to_string(),
+            ));
+            return Ok(PipelineResult::Complete(resp));
+        }
         let router = thalamus::SignalRouter::new();
         let resp = match (
             router.intent_to_action(intent),

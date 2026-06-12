@@ -43,6 +43,33 @@ impl SignalProcessor {
         }
     }
 
+    /// The kernel's network view. Clone this handle to share it with a
+    /// probe loop — writes through any clone are visible to the pipeline.
+    pub fn connectivity(&self) -> brain::Connectivity {
+        self.connectivity.clone()
+    }
+
+    /// The generation chain for *this* turn. Online (or no probe wired) →
+    /// the deep tier, unchanged. Offline → the first tier chain that is
+    /// fully local (deep → balanced → fast), so the turn still answers
+    /// from a local model instead of timing out against a dead remote.
+    /// Offline with no local chain configured returns the deep chain
+    /// unchanged — it fails honestly at call time rather than silently
+    /// degrading to nothing.
+    pub fn active_llm(&self) -> Arc<dyn cortex::LlmProvider> {
+        if self.connectivity.is_offline() {
+            for chain in [&self.llm, &self.llm_balanced, &self.llm_fast] {
+                if chain.is_local() {
+                    return chain.clone();
+                }
+            }
+            tracing::warn!(
+                "offline with no local model tier configured — remote generation will fail"
+            );
+        }
+        self.llm.clone()
+    }
+
     /// Expose the context assembler (for adapter use).
     pub fn context_assembler(&self) -> &cortex::context::ContextAssembler {
         &self.context_assembler

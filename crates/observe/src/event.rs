@@ -150,6 +150,21 @@ pub enum BrainEvent {
         to: String,
         ts: DateTime<Utc>,
     },
+    /// Emitted by the connectivity probe when the kernel's network view
+    /// crosses between `online`, `degraded`, and `offline`. Edge-triggered —
+    /// once per transition, not once per probe round. `state`/`previous` are
+    /// strings so `observe` stays free of a `core` dependency, exactly as
+    /// `BreakerStateChange` keeps it free of `resilience`.
+    ConnectivityChanged {
+        id: Uuid,
+        /// New state: `"online" | "degraded" | "offline"`.
+        state: String,
+        /// State before the transition, same vocabulary.
+        previous: String,
+        /// Human-readable cause, e.g. `"2 of 3 endpoints unreachable"`.
+        detail: String,
+        ts: DateTime<Utc>,
+    },
     /// Emitted by a service-health probe when a monitored endpoint crosses
     /// between reachable and unreachable. Edge-triggered — once per transition,
     /// not once per probe — the same discipline as `ResourcePressure`. `target`
@@ -191,6 +206,7 @@ impl BrainEvent {
             BrainEvent::TerminalSessionOpened { .. } => "terminal_session_opened",
             BrainEvent::TerminalSessionClosed { .. } => "terminal_session_closed",
             BrainEvent::TaskStateChange { .. } => "task_state_change",
+            BrainEvent::ConnectivityChanged { .. } => "connectivity_changed",
             BrainEvent::ServiceHealthChanged { .. } => "service_health_changed",
         }
     }
@@ -214,6 +230,7 @@ impl BrainEvent {
             | BrainEvent::TerminalSessionOpened { id, .. }
             | BrainEvent::TerminalSessionClosed { id, .. }
             | BrainEvent::TaskStateChange { id, .. }
+            | BrainEvent::ConnectivityChanged { id, .. }
             | BrainEvent::ServiceHealthChanged { id, .. } => *id,
         }
     }
@@ -345,6 +362,38 @@ mod tests {
                 assert_eq!(value, 2304.0);
                 assert_eq!(threshold, 2048.0);
                 assert_eq!(severity, "warn");
+            }
+            other => panic!("decoded to the wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_connectivity_changed_through_json() {
+        let id = Uuid::new_v4();
+        let original = BrainEvent::ConnectivityChanged {
+            id,
+            state: "offline".into(),
+            previous: "online".into(),
+            detail: "2 of 2 endpoints unreachable".into(),
+            ts: Utc::now(),
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: BrainEvent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.kind(), "connectivity_changed");
+        assert_eq!(decoded.id(), id);
+        assert_eq!(decoded.tool_id(), None);
+        match decoded {
+            BrainEvent::ConnectivityChanged {
+                state,
+                previous,
+                detail,
+                ..
+            } => {
+                assert_eq!(state, "offline");
+                assert_eq!(previous, "online");
+                assert_eq!(detail, "2 of 2 endpoints unreachable");
             }
             other => panic!("decoded to the wrong variant: {other:?}"),
         }

@@ -378,6 +378,85 @@ pub(super) fn spawn_service_monitor(
     tracing::info!(service = %name, "Service health monitor scheduled");
 }
 
+/// Spawn the connectivity probe — the single writer behind the processor's
+/// [`brain::Connectivity`] handle. Each round TCP-connects the derived target
+/// set (see `connectivity::probe_targets`; already-configured remote provider
+/// endpoints only, so no new egress) and folds the tally into
+/// `Online / Degraded / Offline`. On a *transition* it publishes a
+/// `ConnectivityChanged` event and delivers a proactive notification — the
+/// same two surfaces and edge discipline as the resource sampler and the
+/// service monitors. The caller skips spawning entirely when probing is
+/// disabled or the target set is empty, which pins the state to `Online`.
+pub(super) fn spawn_connectivity_probe(
+    processor: Arc<signal::SignalProcessor>,
+    cfg: brain::config::ConnectivityProbeConfig,
+    targets: Vec<String>,
+    set: &mut tokio::task::JoinSet<anyhow::Result<()>>,
+) {
+    let handle = processor.connectivity();
+    let p = processor;
+    let target_count = targets.len();
+    set.spawn(async move {
+        let timeout = std::time::Duration::from_secs(cfg.timeout_secs.max(1));
+        let mut ticker =
+            tokio::time::interval(std::time::Duration::from_secs(cfg.interval_secs.max(1)));
+        // No leading-tick skip: a daemon that boots offline should know it
+        // within one probe round, not one interval later.
+        loop {
+            ticker.tick().await;
+            let reachable = super::connectivity::probe_round(&targets, timeout).await;
+            let state = super::connectivity::state_for(reachable, target_count);
+            // Edge-triggered: `set` reports the previous state only on a
+            // transition, so neither the bus nor the user is spammed while
+            // the network holds one state.
+            let Some(previous) = handle.set(state) else {
+                continue;
+            };
+            let detail = super::connectivity::detail_for(reachable, target_count);
+            if state == brain::ConnectivityState::Online {
+                tracing::info!(previous = %previous, "Connectivity restored");
+            } else {
+                tracing::warn!(
+                    previous = %previous,
+                    state = %state,
+                    detail = %detail,
+                    "Connectivity changed"
+                );
+            }
+            if let Some(observer) = p.observer() {
+                let ev = observe::BrainEvent::ConnectivityChanged {
+                    id: uuid::Uuid::new_v4(),
+                    state: state.as_str().to_string(),
+                    previous: previous.as_str().to_string(),
+                    detail: detail.clone(),
+                    ts: chrono::Utc::now(),
+                };
+                let _ = observer.publish(ev).await;
+            }
+            if let Some(router) = p.notification_router() {
+                // Operational health alert — delivered regardless of the
+                // proactivity toggle, priority 2, matching the resource and
+                // service-health paths. An offline transition still reaches
+                // local sinks (CLI tail / terminal) even though outbound
+                // channels are down.
+                router
+                    .deliver(signal::notification::ProactiveNotification {
+                        content: super::connectivity::advisory(state, &detail),
+                        triggered_by: "connectivity".to_string(),
+                        priority: 2,
+                        agent: None,
+                    })
+                    .await;
+            }
+        }
+    });
+    tracing::info!(
+        targets = target_count,
+        interval_secs = cfg.interval_secs,
+        "Connectivity probe scheduled"
+    );
+}
+
 pub(crate) async fn promote_candidates(
     processor: &signal::SignalProcessor,
     candidates: &[hippocampus::PromotionCandidate],

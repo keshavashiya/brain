@@ -261,6 +261,7 @@ impl SignalProcessor {
             fitness,
             metrics: Arc::new(metrics::SubsystemMetrics::new()),
             proactivity_enabled,
+            connectivity: brain::Connectivity::default(),
 
             // Opt-in bundles — all builder-wired
             safety: crate::bundles::SafetyBundle::default(),

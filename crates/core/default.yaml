@@ -284,6 +284,19 @@ monitoring:
   #   target: "127.0.0.1:5432"
   #   interval_secs: 30
 
+  # Network-connectivity probing — the kernel's online/degraded/offline view.
+  # Targets default to the already-configured remote (non-loopback) LLM
+  # provider endpoints, so probing never adds a new egress destination; a
+  # fully-local install has nothing to probe and stays online. While offline,
+  # chat rides the first fully-local model tier and web search degrades with
+  # an honest explanation instead of timing out.
+  connectivity:
+    enabled: true
+    interval_secs: 60                # seconds between probe rounds
+    timeout_secs: 5                  # per-target TCP-connect timeout
+    targets: []                      # explicit host:port overrides; empty = derive from llm.providers
+
+
 # ── Channel Relays ─────────────────────────────────────────────────────────────
 # Bidirectional WebSocket gateways. Unlike webhooks these are long-lived
 # connections — approval responses from any relay are correlated automatically.

@@ -96,6 +96,14 @@ pub struct SignalProcessor {
     /// spawned and a runtime flip to `true` cannot resurrect them —
     /// that's the v1.0 work.
     proactivity_enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The kernel's network view (Online/Degraded/Offline). The serve
+    /// loop's connectivity probe writes through a clone of this handle
+    /// (see [`SignalProcessor::connectivity`]); the pipeline reads it per
+    /// turn to route offline generation onto a local tier, degrade web
+    /// search honestly, and stamp the capability digest. Defaults to
+    /// Online, so processors without a probe loop (CLI one-shots, tests)
+    /// behave exactly as before.
+    connectivity: brain::Connectivity,
 
     // ── Capability bundles (opt-in via builder) ──────────────────────────
     /// Approval / accounting / sandbox gates. See [`bundles::SafetyBundle`].

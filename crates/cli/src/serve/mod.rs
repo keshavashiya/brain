@@ -15,12 +15,15 @@
 //! - [`background`] — long-running maintenance loops (proactivity,
 //!   open-loop detector, scheduled-intent poller, consolidator, graph
 //!   compactor) + `promote_candidates`
+//! - [`connectivity`] — probe-target derivation + round/fold helpers for
+//!   the kernel's Online/Degraded/Offline view
 //! - [`dlq`] — DLQ drain task + private batch helper
 //! - [`reflex`] — reactive signal sources (FS / cron / sys)
 //! - [`transports`] — preset transport wiring + channel relays
 
 mod adapters;
 mod background;
+mod connectivity;
 mod dlq;
 mod health;
 mod reflex;
@@ -337,6 +340,27 @@ pub(crate) async fn cmd_serve(
     // up↔down transition through the same router as resource-pressure.
     for svc in &config.monitoring.services {
         background::spawn_service_monitor(processor.clone(), svc.clone(), &mut set);
+    }
+
+    // Connectivity probe: the writer behind the processor's Online/Degraded/
+    // Offline view. Targets are the already-configured remote provider
+    // endpoints (or the explicit override) — never a third-party beacon, so
+    // probing adds no egress destination. Nothing remote configured (fully
+    // local install) or probing disabled → no loop, state stays Online.
+    if config.monitoring.connectivity.enabled {
+        let targets = connectivity::probe_targets(config);
+        if targets.is_empty() {
+            tracing::info!(
+                "Connectivity probe: no remote endpoints configured — state pinned to online"
+            );
+        } else {
+            background::spawn_connectivity_probe(
+                processor.clone(),
+                config.monitoring.connectivity.clone(),
+                targets,
+                &mut set,
+            );
+        }
     }
 
     // ── Channel relay adapters ────────────────────────────────────────

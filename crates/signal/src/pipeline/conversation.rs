@@ -364,6 +364,26 @@ impl SignalProcessor {
             digest.push_str(&host.digest_line());
             digest.push('\n');
         }
+        // Situated grounding: when the network view is anything but Online,
+        // say so — the reasoner must not promise web search or remote tools
+        // it cannot reach, and offline turns are already riding a local tier.
+        match self.connectivity.state() {
+            brain::ConnectivityState::Online => {}
+            brain::ConnectivityState::Degraded => {
+                digest.push_str(
+                    "\nConnectivity: degraded — some network endpoints are unreachable; \
+                     remote tools and web search may fail.\n",
+                );
+            }
+            brain::ConnectivityState::Offline => {
+                digest.push_str(
+                    "\nConnectivity: OFFLINE — the network is unreachable. Web search, \
+                     remote tools, and outbound messages will not work right now; answer \
+                     from the local model and stored memory, and say plainly that you are \
+                     offline when a request needs the network.\n",
+                );
+            }
+        }
         // Quarantined-and-waiting must be visible, not a silent hole:
         // memories from unvouched writers exist but are excluded from
         // recall until the user reviews them.

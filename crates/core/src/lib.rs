@@ -10,6 +10,7 @@
 
 pub mod auth;
 pub mod config;
+pub mod connectivity;
 pub mod cors;
 pub mod residency;
 pub mod security;
@@ -20,6 +21,7 @@ pub use config::{
     AccessConfig, AgentEntry, AgentsConfig, ApiKeyConfig, BrainConfig, ClientRateLimitConfig,
     DeliveryConfig, LlmConfig, LogFormat, LogRotation, LoggingConfig, ProviderEntry,
 };
+pub use connectivity::{Connectivity, ConnectivityState};
 pub use residency::{url_is_loopback, NamespaceConfig, Residency, ResidencyPolicy};
 pub use security::ActionTier;
 pub use trust::{AgentTrustPolicy, MemoryTrustConfig};

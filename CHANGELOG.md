@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Connectivity as kernel state (`monitoring.connectivity`).** The daemon
+  now knows whether it is online, degraded, or offline — and behaves
+  accordingly instead of timing out against a dead network. A bounded probe
+  loop TCP-connects the **already-configured remote LLM provider endpoints**
+  (never a third-party beacon, so probing adds no new egress destination;
+  explicit `targets` can override) and folds the tally into a shared
+  `Online / Degraded / Offline` view. While offline, chat and the tool loop
+  ride the first fully-local model tier (deep → balanced → fast), web search
+  short-circuits with an honest explanation of what still works, and the
+  capability digest tells the reasoner not to promise the network. Each
+  transition is edge-triggered: one `connectivity_changed` event on the bus
+  plus one proactive notification, the same discipline as the resource and
+  service-health monitors. A fully-local install has nothing remote to probe
+  and stays pinned online; disabling the probe does the same.
+
 - **Model tiers and task-aware routing (`llm.tiers`).** The provider pool
   can now be cut into three task tiers, each an ordered failover chain of
   `llm.providers[]` names: kernel chores (intent-classification fallback,
