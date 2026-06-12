@@ -13,6 +13,7 @@
 pub mod approval;
 pub mod authz;
 pub mod notification;
+pub mod observation_graph_mirror;
 pub mod reflex_runner;
 pub mod terminal_graph_mirror;
 pub mod types;
@@ -23,6 +24,7 @@ mod bundles;
 mod constructors;
 mod exchange;
 mod extract;
+mod graph_embed;
 mod memory_subsystem;
 mod pipeline;
 mod quarantine;

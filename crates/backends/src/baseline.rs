@@ -305,6 +305,38 @@ pub fn diff(
     from: Option<u32>,
     to: Option<u32>,
 ) -> Result<String> {
+    diff_with_summary(config, inventory, from, to).map(|(rendered, _)| rendered)
+}
+
+/// Structured view of a non-empty drift, alongside the rendered text. This is
+/// what the daemon publishes as a `BrainEvent::BaselineDrift` so the
+/// observation mirror can land drift in the episodic graph.
+#[derive(Debug, Clone)]
+pub struct DriftSummary {
+    /// Comparison base label, e.g. `"baseline v3 (2026-06-12 09:14)"`.
+    pub from: String,
+    /// Comparison target label, e.g. `"current live state"`.
+    pub to: String,
+    pub added: usize,
+    pub removed: usize,
+    pub changed: usize,
+    /// Affected fact keys (changed + added + removed), capped to keep
+    /// downstream events compact.
+    pub keys: Vec<String>,
+}
+
+/// Cap on `DriftSummary::keys` — enough to identify what moved without
+/// turning the event into a second copy of the diff.
+const DRIFT_SUMMARY_MAX_KEYS: usize = 16;
+
+/// [`diff`], additionally returning a [`DriftSummary`] when drift was found
+/// (`None` when every fact matches).
+pub fn diff_with_summary(
+    config: &BrainConfig,
+    inventory: &[CapabilitySummary],
+    from: Option<u32>,
+    to: Option<u32>,
+) -> Result<(String, Option<DriftSummary>)> {
     let dir = baseline_dir(config);
     let stored = list_baselines(&dir);
     if stored.is_empty() {
@@ -345,7 +377,8 @@ pub fn diff(
 
     let drift = Drift::between(&base.facts, &target_facts);
     out.push_str(&drift.render());
-    Ok(out)
+    let summary = (!drift.is_empty()).then(|| drift.summary(from_label, target_label));
+    Ok((out, summary))
 }
 
 /// The set difference between two fact maps.
@@ -383,6 +416,25 @@ impl Drift {
 
     fn is_empty(&self) -> bool {
         self.added.is_empty() && self.removed.is_empty() && self.changed.is_empty()
+    }
+
+    fn summary(&self, from: String, to: String) -> DriftSummary {
+        let keys: Vec<String> = self
+            .changed
+            .iter()
+            .map(|(k, _, _)| k.clone())
+            .chain(self.added.iter().map(|(k, _)| k.clone()))
+            .chain(self.removed.iter().map(|(k, _)| k.clone()))
+            .take(DRIFT_SUMMARY_MAX_KEYS)
+            .collect();
+        DriftSummary {
+            from,
+            to,
+            added: self.added.len(),
+            removed: self.removed.len(),
+            changed: self.changed.len(),
+            keys,
+        }
     }
 
     fn render(&self) -> String {
@@ -512,11 +564,25 @@ fn short_time(rfc3339: &str) -> String {
 pub struct BaselineProvider {
     config: BrainConfig,
     inventory: Vec<CapabilitySummary>,
+    observer: Option<std::sync::Arc<dyn observe::Observer>>,
 }
 
 impl BaselineProvider {
     pub fn new(config: BrainConfig, inventory: Vec<CapabilitySummary>) -> Self {
-        Self { config, inventory }
+        Self {
+            config,
+            inventory,
+            observer: None,
+        }
+    }
+
+    /// Wire the observability bus. With an observer attached, every diff
+    /// that finds drift publishes a `BrainEvent::BaselineDrift` — this is
+    /// what lets drift reach the Live tab and the observation graph mirror
+    /// instead of existing only in the rendered reply.
+    pub fn with_observer(mut self, observer: std::sync::Arc<dyn observe::Observer>) -> Self {
+        self.observer = Some(observer);
+        self
     }
 }
 
@@ -531,7 +597,22 @@ impl cortex::actions::BaselineBackend for BaselineProvider {
         from: Option<u32>,
         to: Option<u32>,
     ) -> Result<String, cortex::actions::ActionError> {
-        diff(&self.config, &self.inventory, from, to).map_err(to_action_err)
+        let (rendered, summary) =
+            diff_with_summary(&self.config, &self.inventory, from, to).map_err(to_action_err)?;
+        if let (Some(observer), Some(s)) = (&self.observer, summary) {
+            let ev = observe::BrainEvent::BaselineDrift {
+                id: uuid::Uuid::new_v4(),
+                from: s.from,
+                to: s.to,
+                added: s.added as u64,
+                removed: s.removed as u64,
+                changed: s.changed as u64,
+                keys: s.keys,
+                ts: chrono::Utc::now(),
+            };
+            let _ = observer.publish(ev).await;
+        }
+        Ok(rendered)
     }
 
     async fn list(&self) -> Result<String, cortex::actions::ActionError> {

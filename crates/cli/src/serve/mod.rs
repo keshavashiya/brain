@@ -330,6 +330,15 @@ pub(crate) async fn cmd_serve(
     background::spawn_graph_compactor(processor.clone(), defer_on_battery, &mut set);
     dlq::spawn_dlq_drain(processor.clone(), &mut set);
 
+    // Observation → graph mirror. Spawned before the monitor loops below so
+    // its bus subscription exists by the time their first events publish —
+    // a broadcast receiver only sees events sent after it subscribed.
+    background::spawn_observation_mirror(
+        processor.clone(),
+        config.memory.residency_policy(),
+        &mut set,
+    );
+
     // Runtime resource gauges (RSS/CPU/connections/disk). The shared store is
     // updated by the sampler each tick; later surfaces (doctor/status/tail and
     // the pressure-event emitter) read from it.

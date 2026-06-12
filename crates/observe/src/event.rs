@@ -197,6 +197,29 @@ pub enum BrainEvent {
         detail: String,
         ts: DateTime<Utc>,
     },
+    /// Emitted by the baseline backend when a `baseline.diff` run detects
+    /// drift (a no-drift diff emits nothing). Labels are the same
+    /// human-readable strings the rendered diff uses, so `observe` stays free
+    /// of a `backends` dependency, exactly as `BreakerStateChange` keeps it
+    /// free of `resilience`.
+    BaselineDrift {
+        id: Uuid,
+        /// Comparison base, e.g. `"baseline v3 (2026-06-12 09:14)"`.
+        from: String,
+        /// Comparison target, e.g. `"current live state"` or another
+        /// stored baseline label.
+        to: String,
+        /// Count of facts present in `to` but not `from`.
+        added: u64,
+        /// Count of facts present in `from` but not `to`.
+        removed: u64,
+        /// Count of facts whose value differs between the two.
+        changed: u64,
+        /// The affected fact keys, capped by the emitter to keep the
+        /// event compact.
+        keys: Vec<String>,
+        ts: DateTime<Utc>,
+    },
 }
 
 impl BrainEvent {
@@ -223,6 +246,7 @@ impl BrainEvent {
             BrainEvent::ConnectivityChanged { .. } => "connectivity_changed",
             BrainEvent::PowerStateChanged { .. } => "power_state_changed",
             BrainEvent::ServiceHealthChanged { .. } => "service_health_changed",
+            BrainEvent::BaselineDrift { .. } => "baseline_drift",
         }
     }
 
@@ -247,7 +271,8 @@ impl BrainEvent {
             | BrainEvent::TaskStateChange { id, .. }
             | BrainEvent::ConnectivityChanged { id, .. }
             | BrainEvent::PowerStateChanged { id, .. }
-            | BrainEvent::ServiceHealthChanged { id, .. } => *id,
+            | BrainEvent::ServiceHealthChanged { id, .. }
+            | BrainEvent::BaselineDrift { id, .. } => *id,
         }
     }
 
@@ -442,6 +467,41 @@ mod tests {
                 assert_eq!(state, "battery");
                 assert_eq!(previous, "external");
                 assert_eq!(detail, "battery at 47%");
+            }
+            other => panic!("decoded to the wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_baseline_drift_through_json() {
+        let id = Uuid::new_v4();
+        let original = BrainEvent::BaselineDrift {
+            id,
+            from: "baseline v3 (2026-06-12 09:14)".into(),
+            to: "current live state".into(),
+            added: 2,
+            removed: 0,
+            changed: 1,
+            keys: vec!["llm.model".into(), "adapter.http".into()],
+            ts: Utc::now(),
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: BrainEvent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.kind(), "baseline_drift");
+        assert_eq!(decoded.id(), id);
+        assert_eq!(decoded.tool_id(), None);
+        match decoded {
+            BrainEvent::BaselineDrift {
+                added,
+                removed,
+                changed,
+                keys,
+                ..
+            } => {
+                assert_eq!((added, removed, changed), (2, 0, 1));
+                assert_eq!(keys.len(), 2);
             }
             other => panic!("decoded to the wrong variant: {other:?}"),
         }

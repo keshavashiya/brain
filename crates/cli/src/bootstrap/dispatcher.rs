@@ -203,10 +203,17 @@ pub(super) fn build_action_dispatcher(
     // Always wired: local snapshot capture + drift detection. The capability
     // inventory is injected from the live native descriptors so the backend
     // core stays a pure function of its inputs (no reach-back into the binary).
-    dispatcher = dispatcher.with_baseline_backend(Arc::new(BaselineProvider::new(
+    // With the bus attached, a diff that finds drift publishes a
+    // `BaselineDrift` event so the observation mirror can land it in the
+    // episodic graph alongside pressure and service-health observations.
+    let mut baseline = BaselineProvider::new(
         config.clone(),
         crate::capabilities::capability_inventory(config),
-    )));
+    );
+    if let Some(observer) = processor.observer() {
+        baseline = baseline.with_observer(observer.clone());
+    }
+    dispatcher = dispatcher.with_baseline_backend(Arc::new(baseline));
 
     Ok(dispatcher)
 }

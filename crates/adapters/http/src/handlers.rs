@@ -516,7 +516,8 @@ fn brain_event_ts(ev: &observe::BrainEvent) -> chrono::DateTime<chrono::Utc> {
         | TaskStateChange { ts, .. }
         | ConnectivityChanged { ts, .. }
         | PowerStateChanged { ts, .. }
-        | ServiceHealthChanged { ts, .. } => *ts,
+        | ServiceHealthChanged { ts, .. }
+        | BaselineDrift { ts, .. } => *ts,
     }
 }
 

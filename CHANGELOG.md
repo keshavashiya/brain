@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Observations land in memory (observation → graph mirror).** Operational
+  events used to die on the event bus: resource-pressure crossings, service
+  up/down transitions, reflex firings, connectivity and power changes were
+  visible live but unanswerable afterwards. The daemon now mirrors each of
+  them into the episodic graph as an `observation` node with a human-phrased
+  summary, so recall can answer "what changed around the time X broke" —
+  a pressure event is findable by content, and a service outage chains to
+  its recovery (and to anything else in the same signal flow) through
+  `transition` and `correlated` edges. Baseline drift joins the bus too:
+  a `baseline.diff` dispatched through the daemon that finds drift now
+  publishes a `baseline_drift` event (counts plus affected keys), which the
+  mirror records like every other observation. Nodes ride the same
+  embedding/residency rails as the terminal mirror, and the graph
+  compactor's decay keeps the observation log from growing without bound.
+
 - **Power awareness (`monitoring.power`).** The daemon now knows whether the
   machine is on external power or battery, read straight from the platform
   (`pmset` on macOS, `/sys/class/power_supply` on Linux — no network, no new

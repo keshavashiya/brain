@@ -24,9 +24,7 @@ use identity::Principal;
 use storage::RuVectorStore;
 use terminal::{MirrorError, TerminalGraphHandles, TerminalGraphSink};
 
-/// RuVector collection holding graph-node embeddings. Each entry's id is
-/// the node id, so recall can hydrate ANN hits back through the graph.
-const GRAPH_VEC: &str = "graph_vec";
+use crate::graph_embed::NodeEmbedder;
 
 /// `TerminalGraphSink` impl backed by an [`EpisodicGraph`].
 ///
@@ -38,10 +36,7 @@ const GRAPH_VEC: &str = "graph_vec";
 pub struct HippocampusTerminalSink {
     graph: Arc<dyn EpisodicGraph>,
     namespace: String,
-    embedder: Option<Arc<Embedder>>,
-    vectors: Option<RuVectorStore>,
-    embedding_dim: usize,
-    residency: brain::ResidencyPolicy,
+    embedder: NodeEmbedder,
 }
 
 impl HippocampusTerminalSink {
@@ -49,10 +44,7 @@ impl HippocampusTerminalSink {
         Self {
             graph,
             namespace: "personal".to_string(),
-            embedder: None,
-            vectors: None,
-            embedding_dim: 0,
-            residency: brain::ResidencyPolicy::default(),
+            embedder: NodeEmbedder::default(),
         }
     }
 
@@ -65,7 +57,7 @@ impl HippocampusTerminalSink {
     /// `local_only` and the embedder is remote, mirrored nodes get the
     /// deterministic fallback vector instead of a remote embed.
     pub fn with_residency(mut self, residency: brain::ResidencyPolicy) -> Self {
-        self.residency = residency;
+        self.embedder.set_residency(residency);
         self
     }
 
@@ -78,70 +70,9 @@ impl HippocampusTerminalSink {
         vectors: RuVectorStore,
         embedding_dim: usize,
     ) -> Self {
-        self.embedder = embedder;
-        self.vectors = Some(vectors);
-        self.embedding_dim = embedding_dim;
+        self.embedder
+            .set_embedding(embedder, vectors, embedding_dim);
         self
-    }
-
-    /// Best-effort embed of `node` into `graph_vec`, setting `node.vector_id`
-    /// on success. No-op (leaves `vector_id` as-is) when the embedder or
-    /// vector store is unwired, or on any embed/store error.
-    async fn embed_and_link(&self, node: &mut Node) {
-        let (Some(embedder), Some(vectors)) = (&self.embedder, &self.vectors) else {
-            return;
-        };
-        let text = node_text(node);
-        // Residency: a local-only namespace never reaches a remote
-        // embedder — the deterministic fallback keeps the ANN link
-        // functional without the egress.
-        let vector = if !embedder.is_local() && self.residency.is_local_only(&node.namespace) {
-            hippocampus::embedding::deterministic_fallback_embedding(&text, self.embedding_dim)
-        } else {
-            match embedder.embed(&text).await {
-                Ok(v) => hippocampus::embedding::sanitize_embedding(v, self.embedding_dim, &text),
-                Err(e) => {
-                    tracing::warn!(node_id = %node.id, "graph node embed failed, skipping ANN link: {e}");
-                    return;
-                }
-            }
-        };
-        if let Err(e) = vectors
-            .add_vectors(
-                GRAPH_VEC,
-                vec![node.id.clone()],
-                vec![text],
-                vec![vector],
-                vec![node.created_at.to_rfc3339()],
-                "graph",
-            )
-            .await
-        {
-            tracing::warn!(node_id = %node.id, "graph_vec insert failed, skipping ANN link: {e}");
-            return;
-        }
-        node.vector_id = Some(node.id.clone());
-    }
-}
-
-/// Flatten a node into a compact text projection for embedding: the node
-/// kind followed by every scalar value in its JSON body, space-joined.
-/// Keeps the embedded text close to how a user would phrase a recall
-/// query ("terminal.open ripgrep …") rather than raw JSON punctuation.
-fn node_text(node: &Node) -> String {
-    let mut parts = vec![node.kind.as_str().to_string()];
-    collect_scalars(&node.body, &mut parts);
-    parts.join(" ")
-}
-
-fn collect_scalars(v: &serde_json::Value, out: &mut Vec<String>) {
-    match v {
-        serde_json::Value::String(s) => out.push(s.clone()),
-        serde_json::Value::Number(n) => out.push(n.to_string()),
-        serde_json::Value::Bool(b) => out.push(b.to_string()),
-        serde_json::Value::Array(a) => a.iter().for_each(|e| collect_scalars(e, out)),
-        serde_json::Value::Object(o) => o.values().for_each(|e| collect_scalars(e, out)),
-        serde_json::Value::Null => {}
     }
 }
 
@@ -188,8 +119,8 @@ impl TerminalGraphSink for HippocampusTerminalSink {
             self.namespace.clone(),
             None,
         );
-        self.embed_and_link(&mut tool_call).await;
-        self.embed_and_link(&mut open_event).await;
+        self.embedder.embed_and_link(&mut tool_call).await;
+        self.embedder.embed_and_link(&mut open_event).await;
         self.graph
             .add_node(&tool_call)
             .map_err(|e| MirrorError::Backend(e.to_string()))?;
@@ -227,7 +158,7 @@ impl TerminalGraphSink for HippocampusTerminalSink {
             self.namespace.clone(),
             None,
         );
-        self.embed_and_link(&mut close_event).await;
+        self.embedder.embed_and_link(&mut close_event).await;
         self.graph
             .add_node(&close_event)
             .map_err(|e| MirrorError::Backend(e.to_string()))?;
@@ -245,6 +176,7 @@ impl TerminalGraphSink for HippocampusTerminalSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph_embed::GRAPH_VEC;
     use hippocampus::{EmbeddingError, EmbeddingProvider, SqliteGraph};
     use storage::SqlitePool;
 
@@ -306,20 +238,5 @@ mod tests {
             .unwrap()
             .expect("tool_call node");
         assert!(node.vector_id.is_none());
-    }
-
-    #[test]
-    fn node_text_flattens_scalars_with_kind() {
-        let n = Node::new(
-            NodeKind::new("tool_call"),
-            serde_json::json!({"verb": "terminal.open", "program": "rg", "args": ["-n", "foo"]}),
-            "personal",
-            None,
-        );
-        let text = node_text(&n);
-        assert!(text.starts_with("tool_call"));
-        for term in ["terminal.open", "rg", "-n", "foo"] {
-            assert!(text.contains(term), "missing {term} in {text}");
-        }
     }
 }

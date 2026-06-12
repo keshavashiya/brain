@@ -121,6 +121,62 @@ pub(super) fn spawn_open_loop_detector(
     );
 }
 
+/// Observation → graph mirror: subscribes to the observability bus and lands
+/// every operational observation (resource pressure, service up/down, reflex
+/// firings, connectivity/power transitions, baseline drift) in the episodic
+/// graph via [`signal::observation_graph_mirror::ObservationGraphMirror`].
+/// This is the loop that gives monitoring a memory — without it those events
+/// die on the bus and "what changed around the time X broke" is unanswerable.
+///
+/// Must be spawned *before* the monitor loops start publishing: a broadcast
+/// subscriber only sees events sent after it subscribed, and the subscription
+/// happens in the synchronous part of this helper.
+pub(super) fn spawn_observation_mirror(
+    processor: Arc<signal::SignalProcessor>,
+    residency: brain::ResidencyPolicy,
+    set: &mut tokio::task::JoinSet<anyhow::Result<()>>,
+) {
+    let Some(observer) = processor.observer() else {
+        tracing::warn!("Observation mirror: no observability bus wired — observations will not reach the graph");
+        return;
+    };
+    let mut rx = observer.subscribe();
+    let graph: Arc<dyn hippocampus::EpisodicGraph> = Arc::new(hippocampus::SqliteGraph::new(
+        processor.episodic().pool().clone(),
+    ));
+    // Same embedding wiring as the terminal mirror: with a semantic store
+    // present, mirrored nodes join ANN recall via `graph_vec`; degraded
+    // installs still mirror, FTS-only.
+    let mut mirror = signal::observation_graph_mirror::ObservationGraphMirror::new(graph)
+        .with_residency(residency);
+    if let Some(semantic) = processor.semantic() {
+        mirror = mirror.with_embedding(
+            processor.embedder(),
+            semantic.vector_store(),
+            processor.embedding_dim(),
+        );
+    }
+    set.spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(ev) => match mirror.mirror(&ev).await {
+                    Ok(Some(node_id)) => {
+                        tracing::debug!(kind = ev.kind(), node_id = %node_id, "Observation mirrored to graph");
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(kind = ev.kind(), "Observation mirror write failed: {e}"),
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::warn!(missed, "Observation mirror lagged behind the bus — skipped events were not mirrored");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+        Ok(())
+    });
+    tracing::info!("Observation graph mirror scheduled (bus → episodic graph)");
+}
+
 pub(super) fn spawn_consolidator(
     processor: Arc<signal::SignalProcessor>,
     interval_hours: u32,
