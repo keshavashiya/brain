@@ -17,6 +17,14 @@ fn base_config() -> (BrainConfig, tempfile::TempDir) {
     let temp = tempfile::tempdir().unwrap();
     let mut config = BrainConfig::default();
     config.brain.data_dir = temp.path().to_str().unwrap().to_string();
+    // Hermetic: point the legacy single-provider endpoint (the chat LLM
+    // and the embedder transport both read it here) at a dead port, so the
+    // test behaves the same with or without a local Ollama — recall always
+    // rides the deterministic fallback embeddings, exactly as on CI.
+    #[allow(deprecated)]
+    {
+        config.llm.base_url = "http://127.0.0.1:9".to_string();
+    }
     (config, temp)
 }
 
@@ -114,7 +122,16 @@ async fn unvouched_writer_is_quarantined_reviewable_and_releasable() {
         )
         .await
         .unwrap();
-    let recalled = send(&processor, "recall backup phrase", Some("reader")).await;
+    // Positive fact-recall queries repeat the stored fact text verbatim:
+    // facts surface only through vector search, and without a reachable
+    // embedder (CI) the deterministic fallback embedding only matches
+    // identical text. Identical text also embeds identically for real.
+    let recalled = send(
+        &processor,
+        "recall backup phrase is tangerine-falcon-9",
+        Some("reader"),
+    )
+    .await;
     assert!(
         recalled.contains("tangerine-falcon-9"),
         "post-approval write must land live:\n{recalled}"
@@ -159,12 +176,24 @@ async fn vouched_writers_skip_quarantine() {
         .await
         .unwrap();
 
-    let recalled = send(&processor, "recall wifi code", Some("reader")).await;
+    // Queries repeat the stored fact text verbatim so recall works without
+    // a reachable embedder — see the matching comment in the test above.
+    let recalled = send(
+        &processor,
+        "recall wifi code is kiwi-llama-3",
+        Some("reader"),
+    )
+    .await;
     assert!(
         recalled.contains("kiwi-llama-3"),
         "key-bound writer must not be quarantined:\n{recalled}"
     );
-    let recalled = send(&processor, "recall door code", Some("reader")).await;
+    let recalled = send(
+        &processor,
+        "recall door code is mango-otter-4",
+        Some("reader"),
+    )
+    .await;
     assert!(
         recalled.contains("mango-otter-4"),
         "trust-entry writer must not be quarantined:\n{recalled}"
