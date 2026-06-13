@@ -648,7 +648,7 @@ const CLASSIFIER_PROMPT_RULES: &str = r#"Rules:
 - list_approvals is for showing pending confirmations: "what am I waiting to approve", "show pending approvals".
 - respond_to_approval is for approving or rejecting a nonce: "approve 1234", "reject 5678".
 - budget_status is for checking usage: "how much have I spent", "what's my token budget".
-- schedule is for new future tasks: "remind me in 5 minutes to...", "schedule a search every day for...".
+- schedule is for new future tasks: "remind me in 5 minutes to...", "schedule a search every day for...". The word "remind" alone does NOT make it a schedule: "remind me what the risky part was", "remind me where I put the key", "remind me who said that" are RECALL questions about past facts/conversation and must be chat (answered from memory + history), never schedule. Only treat it as schedule when it asks to be reminded TO DO something in the future, typically with a time ("remind me to call mom at 5pm").
 - list_schedules/cancel_schedule are for managing background schedules: "what's scheduled", "cancel schedule 123".
 - list_tasks/task_status/cancel_task are for managing complex multi-step tasks from decompose_task: "what tasks are running", "status of task 42", "cancel task 10".
 - cancel_signal aborts an in-flight Signal by its UUID — distinct from cancel_task: "cancel signal e4b8…". The signal_id payload field carries the UUID.

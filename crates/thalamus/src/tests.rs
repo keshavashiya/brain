@@ -447,6 +447,52 @@ async fn test_classify_schedule_regex_fallback() {
 }
 
 #[tokio::test]
+async fn test_remind_me_what_is_recall_not_schedule() {
+    let classifier = IntentClassifier::new();
+    // The reported misroute: a recall question opening a scheduling gate
+    // because "remind" greedily matched SCHEDULE_RE.
+    for input in [
+        "Remind me what I said was the risky part",
+        "remind me where I put the staging key",
+        "remind me who owns that service",
+        "Remind me when's that review",
+    ] {
+        let result = classifier.classify(input).await;
+        assert!(
+            matches!(result.intent, Intent::Chat { .. }),
+            "Expected Chat (recall) for {input:?}, got {:?}",
+            result.intent
+        );
+        // It must be the deterministic regex guard that caught it, not the
+        // bare fallback — proves SCHEDULE_RE didn't claim it first.
+        assert_eq!(
+            result.method,
+            ClassificationMethod::Regex,
+            "Expected the regex guard to route {input:?}, got {:?}",
+            result.method
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_remind_me_to_still_schedules() {
+    let classifier = IntentClassifier::new();
+    // The guard must not swallow genuine reminders.
+    for input in [
+        "Remind me to call mom",
+        "remind me in 5 minutes to check the build",
+        "remind me to deploy at 5pm",
+    ] {
+        let result = classifier.classify(input).await;
+        assert!(
+            matches!(result.intent, Intent::Schedule { .. }),
+            "Expected Schedule for {input:?}, got {:?}",
+            result.intent
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_classify_status_slash_command() {
     let classifier = IntentClassifier::new();
     let result = classifier.classify("/status").await;

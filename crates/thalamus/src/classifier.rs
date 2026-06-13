@@ -190,6 +190,17 @@ static SCHEDULE_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("invariant: SCHEDULE_RE must be valid")
 });
 
+/// "remind me what/where/who/which … was" is a question about stored facts or
+/// the conversation — not a request to create a future reminder. `SCHEDULE_RE`
+/// greedily claims any "remind me …" and the regex crate has no lookahead to
+/// exclude the interrogative tail, so this guard catches the recall phrasings
+/// before the schedule pattern can route them to a scheduling gate. (Real
+/// reminders read "remind me [in TIME] to <action>".)
+static REMIND_RECALL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^remind me\s+(?:what|where|who|whom|whose|which|when|why|how|whether|if)\b")
+        .expect("invariant: REMIND_RECALL_RE must be valid")
+});
+
 static LIST_SCHEDULES_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(?:what'?s scheduled|list schedules|show schedules)\??$")
         .expect("invariant: LIST_SCHEDULES_RE must be valid")
@@ -559,6 +570,22 @@ impl IntentClassifier {
     pub fn classify_regex(&self, input: &str) -> Option<Classification> {
         for (pattern, base_intent) in &self.patterns {
             if let Some(captures) = pattern.regex.captures(input) {
+                // "remind me what the risky part was" is recall, not a new
+                // reminder — route it to Chat so the reasoner answers from
+                // memory + session history instead of opening a scheduling
+                // gate. (See REMIND_RECALL_RE.)
+                if matches!(base_intent, Intent::Schedule { .. })
+                    && REMIND_RECALL_RE.is_match(input)
+                {
+                    return Some(Classification {
+                        intent: Intent::Chat {
+                            content: input.to_string(),
+                        },
+                        confidence: 0.9,
+                        method: ClassificationMethod::Regex,
+                        extracted_facts: Vec::new(),
+                    });
+                }
                 let intent = self.extract_intent(base_intent, &captures, &pattern.extractors);
                 return Some(Classification {
                     intent,
