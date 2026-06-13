@@ -19,7 +19,7 @@
 
 use chrono::Utc;
 
-use cortex::llm::{Message, ProposedToolCall, Response, ToolDef, Usage};
+use cortex::llm::{Message, ProposedToolCall, Response, Role, ToolDef, Usage};
 use intent::QueryEmbedder;
 
 use crate::types::*;
@@ -54,6 +54,11 @@ impl SignalProcessor {
             // No manifest / no tools → unchanged plain-text behaviour.
             return Ok(llm.generate(&messages).await?);
         }
+
+        // Nudge the model to actually *use* the tools. The default local 7b
+        // tends to punt ("run curl yourself") or fabricate an outcome rather
+        // than emit a call, especially buried under the large SOUL prompt.
+        inject_tool_use_directive(&mut messages, &tools);
 
         let mut total_usage: Option<Usage> = None;
         let mut last = Response::default();
@@ -217,6 +222,45 @@ impl SignalProcessor {
 /// description fencing in [`advertised_tools`](SignalProcessor::advertised_tools).
 fn fence_tool_outcome(verb: &intent::Verb, outcome: &str) -> String {
     intent::sanitization::render_tool_output_for_prompt(&verb.namespace, &verb.action, outcome)
+}
+
+/// Inject a concise, high-salience tool-use directive as a system turn placed
+/// immediately before the user's message (recency matters for small models).
+///
+/// Two failure modes this counters on the default local 7b: *punting* ("run
+/// curl yourself") and *fabricating* an outcome instead of emitting a call.
+/// It lists the actually-advertised tools so the model is reminded what's on
+/// offer, and — when `memory.store` is advertised — locally overrides the
+/// SOUL prompt's "you have no write path" stance (`MEMORY WRITES`), which is
+/// correct for ordinary turns but would otherwise suppress the one turn where
+/// the model genuinely *can* persist a fact.
+fn inject_tool_use_directive(messages: &mut Vec<Message>, tools: &[ToolDef]) {
+    let names = tools
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut directive = format!(
+        "TOOLS AVAILABLE THIS TURN: {names}.\n\
+         When the user's request can be served by one of these tools, CALL the tool rather than \
+         answering from guesswork. Do not tell the user to run a command themselves, and never \
+         state or guess the outcome of an action a tool would perform — whether a host is \
+         reachable, what a fetched page or file contains, the result of a command — unless you \
+         actually called the tool this turn and are using its returned result. If none of these \
+         tools fits the request, just answer normally."
+    );
+    if tools.iter().any(|t| t.name == "memory.store") {
+        directive.push_str(
+            "\nThis turn you DO have a write path: when the user states a durable fact worth \
+             keeping, call memory.store to persist it — and treat a save as done only once that \
+             call has returned successfully.",
+        );
+    }
+    let directive = Message::system(directive);
+    match messages.iter().rposition(|m| matches!(m.role, Role::User)) {
+        Some(pos) => messages.insert(pos, directive),
+        None => messages.push(directive),
+    }
 }
 
 /// Whether a tool can be executed through the chat tool-loop, so the
@@ -818,5 +862,42 @@ mod tests {
             response_text(&SignalResponse::error(id, "boom")),
             "boom".to_string()
         );
+    }
+
+    fn tool_def(name: &str) -> ToolDef {
+        ToolDef {
+            name: name.to_string(),
+            description: String::new(),
+            parameters: serde_json::json!({"type": "object"}),
+        }
+    }
+
+    #[test]
+    fn tool_use_directive_sits_just_before_the_user_turn() {
+        let mut messages = vec![
+            Message::system("SOUL"),
+            Message::user("is github.com reachable?"),
+        ];
+        inject_tool_use_directive(&mut messages, &[tool_def("net.check")]);
+
+        // Inserted directive immediately precedes the user turn (recency).
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[2].role, Role::User);
+        assert_eq!(messages[1].role, Role::System);
+        assert!(messages[1].content.contains("CALL the tool"));
+        assert!(messages[1].content.contains("net.check"));
+        // The SOUL system prompt is untouched and still first.
+        assert_eq!(messages[0].content, "SOUL");
+    }
+
+    #[test]
+    fn tool_use_directive_grants_a_write_path_only_when_memory_store_is_offered() {
+        let mut with_store = vec![Message::user("remember my key is ABC")];
+        inject_tool_use_directive(&mut with_store, &[tool_def("memory.store")]);
+        assert!(with_store[0].content.contains("memory.store to persist"));
+
+        let mut without_store = vec![Message::user("is the host up?")];
+        inject_tool_use_directive(&mut without_store, &[tool_def("net.check")]);
+        assert!(!without_store[0].content.contains("write path"));
     }
 }
