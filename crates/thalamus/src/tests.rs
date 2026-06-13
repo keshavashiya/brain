@@ -152,6 +152,76 @@ async fn explicit_store_strips_imperative_wrapper() {
     }
 }
 
+#[tokio::test]
+async fn explicit_store_strips_politeness_wrapper() {
+    let classifier = IntentClassifier::new();
+    // The reported non-determinism: "Please remember X" missed the
+    // deterministic explicit path (it matched on "remember", not "please")
+    // and fell through to the LLM lottery. These must now route to StoreFact
+    // deterministically (method = Regex), with the wrapper peeled off.
+    for (input, want_object) in [
+        (
+            "Please remember: VORTEX key rotates on the 15th",
+            "VORTEX key rotates on the 15th",
+        ),
+        (
+            "please remember that I prefer dark mode",
+            "I prefer dark mode",
+        ),
+        (
+            "pls note the staging DB is read-only",
+            "the staging DB is read-only",
+        ),
+        (
+            "please kindly remember the API key rotates monthly",
+            "the API key rotates monthly",
+        ),
+    ] {
+        let result = classifier.classify(input).await;
+        assert_eq!(
+            result.method,
+            ClassificationMethod::Regex,
+            "{input:?} should hit the deterministic explicit path"
+        );
+        match result.intent {
+            Intent::StoreFact { object, .. } => {
+                assert_eq!(object, want_object, "{input:?} kept the wrapper")
+            }
+            other => panic!("{input:?}: expected StoreFact, got {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn polite_recall_question_is_not_store() {
+    let classifier = IntentClassifier::new();
+    // Mood-changing wrappers ("can you …") are NOT stripped, so an
+    // interrogative stays a question and never becomes a store.
+    let result = classifier.classify("can you remember my birthday?").await;
+    assert!(
+        !matches!(result.intent, Intent::StoreFact { .. }),
+        "'can you remember…?' should not be StoreFact, got {:?}",
+        result.intent
+    );
+}
+
+#[test]
+fn strip_request_prefix_unwraps_stacked_politeness() {
+    use crate::classifier::strip_request_prefix;
+    assert_eq!(strip_request_prefix("please remember X"), "remember X");
+    assert_eq!(
+        strip_request_prefix("Please kindly note Y"),
+        "note Y" // case-insensitive + stacked
+    );
+    // No wrapper — untouched.
+    assert_eq!(strip_request_prefix("remember Z"), "remember Z");
+    // "can you" is intentionally not a wrapper.
+    assert_eq!(
+        strip_request_prefix("can you remember W"),
+        "can you remember W"
+    );
+}
+
 #[test]
 fn normalize_command_strips_filler_and_wrappers() {
     use crate::classifier::normalize_command;

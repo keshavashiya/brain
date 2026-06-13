@@ -1112,7 +1112,13 @@ impl IntentClassifier {
     }
 
     fn classify_explicit(&self, input: &str) -> Option<Classification> {
-        let trimmed = input.trim();
+        // Peel a leading politeness / request wrapper ("please", "can you",
+        // "could you please", …) so explicit memory directives reach the
+        // deterministic path regardless of phrasing. Without this, only a bare
+        // "remember X" matched here; "please remember X" / "can you note that
+        // X" fell through to the non-deterministic LLM classifier — the same
+        // sentence landing on StoreFact one run and chat-extraction the next.
+        let trimmed = strip_request_prefix(input.trim());
         let lower = trimmed.to_lowercase();
 
         let forget_prefixes = ["forget ", "delete ", "remove "];
@@ -1183,6 +1189,33 @@ impl IntentClassifier {
 
         None
     }
+}
+
+/// Leading politeness markers stripped before matching explicit memory
+/// directives, so "please remember X" reduces to "remember X". Deliberately
+/// limited to *mood-preserving* adverbials: "can you"/"could you" are excluded
+/// because they'd turn a recall question ("can you remember my birthday?")
+/// into a store. The loop reapplies them so "please kindly remember …" fully
+/// unwraps. ASCII, matched case-insensitively.
+const REQUEST_PREFIXES: &[&str] = &["please ", "pls ", "kindly "];
+
+/// Strip any stacked leading [`REQUEST_PREFIXES`] from `input`, returning the
+/// bare directive. Byte-safe: prefixes are ASCII and compared with
+/// `eq_ignore_ascii_case`, so the returned slice is always a valid `&str`.
+pub(crate) fn strip_request_prefix(input: &str) -> &str {
+    let mut s = input.trim_start();
+    'outer: loop {
+        for prefix in REQUEST_PREFIXES {
+            let bytes = s.as_bytes();
+            let pb = prefix.as_bytes();
+            if bytes.len() >= pb.len() && bytes[..pb.len()].eq_ignore_ascii_case(pb) {
+                s = s[pb.len()..].trim_start();
+                continue 'outer;
+            }
+        }
+        break;
+    }
+    s
 }
 
 /// Lower-case + trim a user-typed category token. Plural and unknown
