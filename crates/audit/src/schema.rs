@@ -413,10 +413,13 @@ impl AuditTrail for SqliteAuditTrail {
                     sql.push_str(" AND outcome = ?");
                     param_values.push(outcome.to_string());
                 }
+                // SQLite clause order is fixed: ORDER BY must precede LIMIT.
+                // (Emitting LIMIT first yields `LIMIT n ORDER BY …`, a syntax
+                // error that fails every limited audit query.)
+                sql.push_str(" ORDER BY timestamp DESC");
                 if let Some(limit) = spec.limit {
                     sql.push_str(&format!(" LIMIT {limit}"));
                 }
-                sql.push_str(" ORDER BY timestamp DESC");
 
                 let mut stmt = conn.prepare(&sql)?;
                 let param_refs: Vec<&dyn rusqlite::types::ToSql> = param_values
@@ -554,6 +557,33 @@ mod tests {
         let results = trail.query(AuditQuerySpec::default()).await.unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, id);
+    }
+
+    /// Regression: a query carrying a `limit` must produce valid SQL. The
+    /// clause order has to be `… ORDER BY … LIMIT n`; emitting `LIMIT n ORDER
+    /// BY …` is a SQLite syntax error that previously failed every limited
+    /// audit query (e.g. the `query_audit` chat intent's default limit of 10).
+    #[tokio::test]
+    async fn test_query_with_limit_is_valid_sql() {
+        let trail = test_trail();
+        for i in 0..3 {
+            let entry = AuditEntry::new(
+                format!("request {i}"),
+                "decision",
+                "action",
+                ActionTier::Read,
+            );
+            trail.record(entry).await.unwrap();
+        }
+        let spec = AuditQuerySpec {
+            limit: Some(2),
+            ..Default::default()
+        };
+        let results = trail
+            .query(spec)
+            .await
+            .expect("limited audit query must not be a SQL syntax error");
+        assert_eq!(results.len(), 2, "limit should cap the row count");
     }
 
     #[tokio::test]
