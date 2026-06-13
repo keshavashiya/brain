@@ -401,3 +401,174 @@ async fn find_facts_matching_keys_on_topic_not_whole_sentence() {
     assert_eq!(coffee.len(), 1);
     assert_eq!(coffee[0].object, "black coffee");
 }
+
+#[test]
+fn normalize_predicate_canonicalises_formatting() {
+    assert_eq!(
+        normalize_predicate("Server Address Is"),
+        "server_address_is"
+    );
+    assert_eq!(normalize_predicate("server-at"), "server_at");
+    assert_eq!(normalize_predicate("  role__is  "), "role_is");
+    assert_eq!(normalize_predicate("name_is"), "name_is"); // already canonical
+    assert_eq!(normalize_predicate("uses device!!"), "uses_device");
+}
+
+#[tokio::test]
+async fn synonym_predicate_for_same_value_collapses() {
+    let (store, _dir) = test_store().await;
+
+    // Same concrete value (an IP) filed under two predicate words across
+    // sessions — the data-quality dup the finding flagged. Distinct dummy
+    // vectors so the *vector* path can't be what collapses them.
+    store
+        .store_fact(
+            "personal",
+            "personal",
+            "user",
+            "server_at",
+            "10.4.2.19",
+            1.0,
+            None,
+            dummy_vector(0.1),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .store_fact(
+            "personal",
+            "personal",
+            "user",
+            "server_address_is",
+            "10.4.2.19",
+            1.0,
+            None,
+            dummy_vector(0.9),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // One active fact remains, under the latest predicate.
+    assert_eq!(store.count().unwrap(), 1);
+    let active = store.list_all().unwrap();
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].predicate, "server_address_is");
+    assert_eq!(active[0].object, "10.4.2.19");
+}
+
+#[tokio::test]
+async fn predicate_formatting_variant_is_normalised_and_deduped() {
+    let (store, _dir) = test_store().await;
+
+    let first = store
+        .store_fact(
+            "personal",
+            "personal",
+            "user",
+            "server_address_is",
+            "10.4.2.19",
+            1.0,
+            None,
+            dummy_vector(0.1),
+            None,
+        )
+        .await
+        .unwrap();
+    // A cosmetic variant of the same predicate is an exact restatement.
+    let second = store
+        .store_fact(
+            "personal",
+            "personal",
+            "user",
+            "Server Address Is",
+            "10.4.2.19",
+            1.0,
+            None,
+            dummy_vector(0.9),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(first, second, "restatement should return the existing id");
+    assert_eq!(store.count().unwrap(), 1);
+}
+
+#[tokio::test]
+async fn same_value_generic_object_is_not_collapsed() {
+    let (store, _dir) = test_store().await;
+
+    // "coffee" is a generic concept (not value-like), so two predicates over
+    // it are kept — collapsing "likes"/"dislikes coffee" would lose meaning.
+    store
+        .store_fact(
+            "personal",
+            "personal",
+            "user",
+            "likes",
+            "coffee",
+            1.0,
+            None,
+            dummy_vector(0.1),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .store_fact(
+            "personal",
+            "personal",
+            "user",
+            "dislikes",
+            "coffee",
+            1.0,
+            None,
+            dummy_vector(0.9),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(store.count().unwrap(), 2);
+}
+
+#[tokio::test]
+async fn multi_valued_predicate_keeps_distinct_values() {
+    let (store, _dir) = test_store().await;
+
+    // Same (subject, predicate), different concrete-ish values: the
+    // deterministic path must NOT clobber multi-valued attributes. With
+    // orthogonal vectors the fuzzy path won't either.
+    store
+        .store_fact(
+            "personal",
+            "personal",
+            "user",
+            "skill_is",
+            "Rust",
+            1.0,
+            None,
+            dummy_vector(0.1),
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .store_fact(
+            "personal",
+            "personal",
+            "user",
+            "skill_is",
+            "Python",
+            1.0,
+            None,
+            dummy_vector(0.9),
+            None,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(store.count().unwrap(), 2);
+}

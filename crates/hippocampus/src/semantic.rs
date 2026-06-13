@@ -52,6 +52,40 @@ pub struct SemanticResult {
     pub created_at: String,
 }
 
+/// Canonicalise a predicate to lower `snake_case` so formatting variants
+/// ("Server Address Is", "server-address-is", "server__address__is") all
+/// collapse to one key. Unicode letters/digits are kept (lower-cased); every
+/// other run of characters becomes a single `_`, and leading/trailing `_` are
+/// dropped. This is the first line of defence against the model filing the same
+/// relation under cosmetically different predicates.
+pub fn normalize_predicate(predicate: &str) -> String {
+    let mut out = String::with_capacity(predicate.len());
+    let mut pending_separator = false;
+    for ch in predicate.trim().chars() {
+        if ch.is_alphanumeric() {
+            if pending_separator && !out.is_empty() {
+                out.push('_');
+            }
+            pending_separator = false;
+            out.extend(ch.to_lowercase());
+        } else {
+            pending_separator = true;
+        }
+    }
+    out
+}
+
+/// True when an object reads as a concrete value (IP, version, path, model
+/// number, date, phone) rather than a generic concept. Used to gate
+/// cross-predicate dedup: two predicates pointing at the *same concrete value*
+/// ("server_at"/"server_address_is" → `10.4.2.19`) are almost certainly the
+/// same fact, whereas the same generic word under two predicates
+/// ("likes coffee" / "dislikes coffee", "born_in Paris" / "lives_in Paris")
+/// can mean genuinely different things and must be left alone.
+fn object_is_value_like(object: &str) -> bool {
+    object.chars().any(|c| c.is_ascii_digit()) || object.contains(['.', ':', '/'])
+}
+
 /// Semantic memory store — dual-writes to SQLite + RuVector.
 ///
 /// SQLite stores the structured fact data (subject-predicate-object),
@@ -100,11 +134,71 @@ impl SemanticStore {
         vector: Vec<f32>,
         agent: Option<&str>,
     ) -> Result<String, SemanticError> {
+        // Canonicalise the predicate up front so formatting variants don't
+        // masquerade as distinct facts (and so the dedup keys below are stable).
+        let subject = subject.trim();
+        let predicate_norm = normalize_predicate(predicate);
+        let predicate = predicate_norm.as_str();
+        let object = object.trim();
         let content = format!("{subject} {predicate} {object}");
         let now = chrono::Utc::now().to_rfc3339();
 
         let _guard = self.write_lock.lock().await;
 
+        // ── Deterministic dedup (embedder-independent) ──────────────────────
+        // The vector path below only collapses *near-identical embeddings*,
+        // which the deterministic fallback embedder doesn't produce and which
+        // shift whenever the model picks a different predicate word for the same
+        // fact ("server_at" vs "server_address_is"). Catch the high-confidence
+        // duplicates up front by exact structured comparison over the subject's
+        // own active facts.
+        let existing = self.active_facts_for_subject(namespace, subject)?;
+        let mut supersede: Vec<String> = Vec::new();
+        for (id, cand_predicate, cand_object) in &existing {
+            let same_object = cand_object.eq_ignore_ascii_case(object);
+            if cand_predicate == predicate {
+                // Exact restatement of an existing (subject, predicate, object)
+                // is a no-op. A *changed* object under the same predicate is
+                // left to the vector path's supersession, so multi-valued
+                // predicates (skills, likes, projects) aren't clobbered here.
+                if same_object {
+                    return Ok(id.clone());
+                }
+            } else if same_object && object_is_value_like(object) {
+                // Same concrete value under a different predicate → the model
+                // re-filed one fact under a synonym predicate. Collapse it.
+                supersede.push(id.clone());
+            }
+        }
+        if !supersede.is_empty() {
+            let id = self
+                .do_store_fact(
+                    namespace,
+                    category,
+                    subject,
+                    predicate,
+                    object,
+                    confidence,
+                    source_episode_id,
+                    vector,
+                    agent,
+                    &content,
+                    &now,
+                )
+                .await?;
+            self.db.with_conn(|conn| {
+                for old in &supersede {
+                    conn.execute(
+                        "UPDATE semantic_facts SET superseded_by = ?1 WHERE id = ?2",
+                        rusqlite::params![id, old],
+                    )?;
+                }
+                Ok(())
+            })?;
+            return Ok(id);
+        }
+
+        // ── Fuzzy near-dup via vector similarity ────────────────────────────
         let similar = self
             .search_similar(vector.clone(), 1, Some(namespace), agent)
             .await?;
@@ -208,6 +302,41 @@ impl SemanticStore {
         }
 
         Ok(id)
+    }
+
+    /// Active (non-superseded, non-quarantined) facts about `subject` in
+    /// `namespace`, as `(id, predicate, decrypted_object)` triples — the
+    /// minimal shape the deterministic dedup in [`Self::store_fact`] needs.
+    /// Bounded by the number of facts about a single subject. Objects that
+    /// fail to decrypt (wrong key / corruption) are skipped, exactly as the
+    /// recall queries do.
+    fn active_facts_for_subject(
+        &self,
+        namespace: &str,
+        subject: &str,
+    ) -> Result<Vec<(String, String, String)>, SemanticError> {
+        let pool = &self.db;
+        Ok(self.db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, predicate, object FROM semantic_facts
+                 WHERE namespace = ?1 AND subject = ?2 AND superseded_by IS NULL
+                   AND id NOT IN (SELECT row_id FROM memory_quarantine WHERE kind = 'fact')",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![namespace, subject], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            let mut out = Vec::new();
+            for (id, predicate, raw_object) in rows.flatten() {
+                if let Some(object) = pool.try_decrypt_content(&raw_object) {
+                    out.push((id, predicate, object));
+                }
+            }
+            Ok(out)
+        })?)
     }
 
     /// Search for similar facts by vector, optionally scoped to a namespace.
