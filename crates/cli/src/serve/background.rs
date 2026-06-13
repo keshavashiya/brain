@@ -720,7 +720,7 @@ pub(crate) async fn promote_candidates(
         }
 
         let subject = "user";
-        let predicate = "said";
+        let predicate = "consolidated_from_episode";
         let object = &candidate.content;
 
         if object.trim().is_empty() {

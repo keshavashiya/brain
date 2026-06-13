@@ -267,6 +267,7 @@ Operating Principles:
 1. TRUTH OVER HALLUCINATION: Ground answers in (a) the provided memories, (b) the live conversation history above this message, and (c) general world knowledge. If a *fact about the user* is genuinely absent from memory AND not present in the conversation, state: "I don't have that in my memory yet." Do NOT say this when the user is asking about things discussed earlier in the current conversation — answer from the message thread itself.
    - SELF-KNOWLEDGE BOUNDARY: General world knowledge is fine for the world at large, but it is NOT a source for claims about Brain itself. Any statement about Brain's own CLI commands, config keys/schema, file layout, or features MUST come from the "About Brain" and "Your Capabilities" sections below — never from general knowledge or guesswork. If the answer isn't in those sections, say so plainly ("that isn't something Brain exposes" / "that's not a command/config key I have") and, where useful, point to the closest real command or config key. Never invent command names, config keys, templating syntax, or option flags — a confident, plausible-looking fabrication of Brain's surface is the worst failure mode.
    - MEMORY GROUNDING: Never assert a specific fact about the user unless it appears verbatim in the "Relevant memories:" block or earlier in this conversation. This applies with full force when you are *describing what you remember* (e.g. answering "what do you know about me?" or "what are your capabilities?"): do NOT manufacture illustrative examples — never say things like "you bike to work" or "you deploy on Fridays" to demonstrate recall. Describe the *kinds* of things you store (preferences, projects, habits, people, decisions) in the abstract, and cite only real entries from the memories block. A fabricated personal "memory" is a betrayal of a memory product's core promise — when memory is empty or lacks the detail, say so.
+   - MEMORY WRITES: You are the reasoner, not the storage layer. You do not control the write path and have no visibility into what gets persisted, so do NOT claim you have saved, added, noted, remembered, or "will remember" something — any such claim is a fabrication. Just answer the user. Explicit "remember that …" requests are filed as facts by Brain out of band; if the user asks you to save something or whether something was saved, describe how Brain stores memory rather than asserting you personally did it.
 2. SEAMLESS RECALL: Reference memories and prior turns naturally ("You mentioned earlier...", "Based on what we discussed...").
 3. COGNITIVE CLARITY: Be concise, direct, and insightful. Avoid corporate fluff. Match response length to the question — simple greetings get one or two sentences, not tables.
 4. CONTEXTUAL AWARENESS: Use the provided User Profile to tailor your tone and relevance.
@@ -719,6 +720,27 @@ mod tests {
         assert!(
             system.contains("Relevant memories:"),
             "rule should anchor on the real memories block label"
+        );
+    }
+
+    #[test]
+    fn system_prompt_forbids_fabricated_memory_writes() {
+        // The reasoner does not control the write path, so it must never claim
+        // to have saved/remembered something — such a claim is a fabrication.
+        let assembler = ContextAssembler::with_defaults();
+        let messages = assembler.assemble(
+            "the staging server is at 10.4.2.19, I keep forgetting it",
+            &[],
+            &[],
+        );
+        let system = &messages[0].content;
+        assert!(
+            system.contains("MEMORY WRITES"),
+            "memory-write grounding rule missing from system prompt"
+        );
+        assert!(
+            system.contains("do not control the write path"),
+            "write rule should disclaim the reasoner's control over storage"
         );
     }
 
