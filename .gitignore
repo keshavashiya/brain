@@ -51,3 +51,6 @@ CLAUDE.md
 .junie
 /openspec
 /.opencode
+
+# QA harness transcripts
+/qa
