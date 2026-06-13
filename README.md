@@ -1,6 +1,7 @@
 # Brain OS 🧠
 
 [![Crates.io](https://img.shields.io/crates/v/brainos.svg)](https://crates.io/crates/brainos)
+[![Docs](https://img.shields.io/badge/docs-brain-blue)](https://keshavashiya.github.io/brain)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **Stop giving your AI amnesia.**
@@ -10,6 +11,8 @@ Brain OS is a biologically-inspired, central cognitive engine written in pure Ru
 It routes intents through a Thalamus, scores importance via an Amygdala, and stores everything in a unified Hippocampus (FTS5 + HNSW Vector Search). Whether you connect via HTTP, WebSocket, gRPC, or MCP, your AI tools now share one localized, ever-growing memory that runs 24/7 on your machine.
 
 *Your data never leaves your hardware. Your AI never forgets.*
+
+👉 **[Full documentation](https://keshavashiya.github.io/brain)** — architecture, API reference, operations guide, and more.
 
 ---
 

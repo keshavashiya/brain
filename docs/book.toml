@@ -1,0 +1,15 @@
+[book]
+title = "Brain OS"
+authors = ["Keshav Ashiya"]
+description = "A biologically-inspired, central cognitive engine written in pure Rust"
+language = "en"
+
+[output.html]
+default-theme = "ayu"
+preferred-dark-theme = "ayu"
+edit-url-template = "https://github.com/keshavashiya/brain/edit/main/{path}"
+git-repository-url = "https://github.com/keshavashiya/brain"
+site-url = "/brain/"
+
+[output.html.search]
+limit-results = 30

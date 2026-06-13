@@ -1,0 +1,55 @@
+name: Docs
+
+# Builds the mdBook documentation and deploys to GitHub Pages.
+# Runs on pushes to main and on PRs (preview-only, no deploy).
+
+on:
+  push:
+    branches: [main]
+    paths: ['docs/**']
+  pull_request:
+    branches: [main]
+    paths: ['docs/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdBook
+        run: |
+          curl -sSL https://github.com/rust-lang/mdBook/releases/latest/download/mdBook-x86_64-unknown-linux-gnu.tar.gz \
+            | tar xz -C /usr/local/bin mdbook
+
+      - name: Build book
+        run: mdbook build docs
+        env:
+          MDBOOK_OUTPUT__HTML__SITE_URL: /brain/
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/book
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

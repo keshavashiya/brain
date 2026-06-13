@@ -43,8 +43,8 @@ logs/
 .worktrees/
 
 # Development references (not for version control)
+_design/
 progress.md
-docs/*
 .claude*
 .mcp.json
 CLAUDE.md
@@ -54,3 +54,4 @@ CLAUDE.md
 
 # QA harness transcripts
 /qa
+docs/book/
