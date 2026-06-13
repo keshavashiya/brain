@@ -364,11 +364,32 @@ impl SignalProcessor {
             digest.push_str(&host.digest_line());
             digest.push('\n');
         }
+        // Situated grounding: name the model actually serving THIS turn. The
+        // reasoner kept telling users "I don't have that — which model am I?"
+        // while the daemon plainly knew. active_llm() already reflects the
+        // offline→local-tier switch, so the line stays truthful when the
+        // network drops and the turn rides a local model instead.
+        let active = self.active_llm();
+        let locality = if active.is_local() {
+            "local, runs on this machine"
+        } else {
+            "remote"
+        };
+        digest.push_str(&format!(
+            "\nActive model: {}/{} ({locality}) — the model generating this reply right now.\n",
+            active.name(),
+            active.model(),
+        ));
         // Situated grounding: when the network view is anything but Online,
         // say so — the reasoner must not promise web search or remote tools
         // it cannot reach, and offline turns are already riding a local tier.
         match self.connectivity.state() {
-            brain::ConnectivityState::Online => {}
+            brain::ConnectivityState::Online => {
+                // State it positively too: "are you online?" was unanswerable
+                // when this arm stayed silent — the reasoner could only infer
+                // online-ness indirectly. One short line closes that.
+                digest.push_str("\nConnectivity: online.\n");
+            }
             brain::ConnectivityState::Degraded => {
                 digest.push_str(
                     "\nConnectivity: degraded — some network endpoints are unreachable; \
@@ -900,6 +921,33 @@ mod tests {
         // Unwired processors keep the digest host-free (back-compat).
         let bare = make_processor().await.capability_digest().await;
         assert!(!bare.contains("Host machine:"));
+    }
+
+    /// The reasoner was blind to its own serving model — asked "which model
+    /// are you?" it told the user to supply the answer the daemon already had.
+    /// The digest the SOUL reads must name the active provider/model so that
+    /// self-knowledge question is answerable. Asserts against the processor's
+    /// own `active_llm()` so the test holds regardless of the wired provider.
+    #[tokio::test]
+    async fn digest_names_the_active_serving_model() {
+        let processor = make_processor().await;
+        let active = processor.active_llm();
+        let digest = processor.capability_digest().await;
+        assert!(digest.contains("Active model:"), "{digest}");
+        assert!(
+            digest.contains(active.name()),
+            "digest must name the active provider: {digest}"
+        );
+        assert!(
+            digest.contains(active.model()),
+            "digest must name the active model: {digest}"
+        );
+        // Connectivity defaults to Online; "are you online?" must be answerable
+        // from the digest, not just inferable from the model's locality.
+        assert!(
+            digest.contains("Connectivity: online"),
+            "online connectivity must be stated positively: {digest}"
+        );
     }
 
     #[test]
