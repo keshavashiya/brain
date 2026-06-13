@@ -230,17 +230,21 @@ fn fence_tool_outcome(verb: &intent::Verb, outcome: &str) -> String {
 /// Two failure modes this counters on the default local 7b: *punting* ("run
 /// curl yourself") and *fabricating* an outcome instead of emitting a call.
 /// It lists the actually-advertised tools so the model is reminded what's on
-/// offer, and — when `memory.store` is advertised — locally overrides the
-/// SOUL prompt's "you have no write path" stance (`MEMORY WRITES`), which is
-/// correct for ordinary turns but would otherwise suppress the one turn where
-/// the model genuinely *can* persist a fact.
+/// offer.
+///
+/// It deliberately says nothing special about `memory.store`: write authority
+/// is no longer granted or denied by prose here. The SOUL `MEMORY WRITES` rule
+/// grounds save-claims on actual evidence (a "Saved this turn" block or a
+/// successful `memory.store` result), and the live capability digest advertises
+/// `memory.store` when available — so there is one truth source, not a per-turn
+/// override fighting the system prompt.
 fn inject_tool_use_directive(messages: &mut Vec<Message>, tools: &[ToolDef]) {
     let names = tools
         .iter()
         .map(|t| t.name.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    let mut directive = format!(
+    let directive = format!(
         "TOOLS AVAILABLE THIS TURN: {names}.\n\
          When the user's request can be served by one of these tools, CALL the tool rather than \
          answering from guesswork. Do not tell the user to run a command themselves, and never \
@@ -249,13 +253,6 @@ fn inject_tool_use_directive(messages: &mut Vec<Message>, tools: &[ToolDef]) {
          actually called the tool this turn and are using its returned result. If none of these \
          tools fits the request, just answer normally."
     );
-    if tools.iter().any(|t| t.name == "memory.store") {
-        directive.push_str(
-            "\nThis turn you DO have a write path: when the user states a durable fact worth \
-             keeping, call memory.store to persist it — and treat a save as done only once that \
-             call has returned successfully.",
-        );
-    }
     let directive = Message::system(directive);
     match messages.iter().rposition(|m| matches!(m.role, Role::User)) {
         Some(pos) => messages.insert(pos, directive),
@@ -891,13 +888,19 @@ mod tests {
     }
 
     #[test]
-    fn tool_use_directive_grants_a_write_path_only_when_memory_store_is_offered() {
+    fn tool_use_directive_does_not_special_case_memory_store() {
+        // Write authority is no longer granted by prose here — it lives in the
+        // SOUL MEMORY WRITES rule + the capability digest. The directive must
+        // not re-introduce the per-turn override that contradicted them.
         let mut with_store = vec![Message::user("remember my key is ABC")];
         inject_tool_use_directive(&mut with_store, &[tool_def("memory.store")]);
-        assert!(with_store[0].content.contains("memory.store to persist"));
-
-        let mut without_store = vec![Message::user("is the host up?")];
-        inject_tool_use_directive(&mut without_store, &[tool_def("net.check")]);
-        assert!(!without_store[0].content.contains("write path"));
+        let directive = &with_store[0].content;
+        assert!(
+            !directive.contains("write path") && !directive.contains("DO have"),
+            "directive must not re-grant a write path: {directive}"
+        );
+        // memory.store is still listed and covered by the generic call-the-tool rule.
+        assert!(directive.contains("memory.store"));
+        assert!(directive.contains("CALL the tool"));
     }
 }

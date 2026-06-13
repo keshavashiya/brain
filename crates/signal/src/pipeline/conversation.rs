@@ -52,6 +52,25 @@ fn count_sources(memories: &[hippocampus::Memory]) -> (usize, usize) {
     (facts, episodes)
 }
 
+/// Render the write-side grounding block appended to the chat capability
+/// section. Lists the facts the pipeline actually persisted this turn so the
+/// reasoner can truthfully confirm a save — the write-side analogue of the
+/// "Relevant memories:" recall block, cited by the SOUL `MEMORY WRITES` rule.
+/// Returns an empty string when nothing was written (the common case), so a
+/// no-write turn leaves the reasoner with nothing to claim.
+fn render_saved_this_turn(writes: &[crate::exchange::FactToStore]) -> String {
+    if writes.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "\n\nSaved this turn (persisted to memory just now — you MAY confirm these were saved):\n",
+    );
+    for f in writes {
+        out.push_str(&format!("- {} {} {}\n", f.subject, f.predicate, f.object));
+    }
+    out
+}
+
 impl SignalProcessor {
     pub(super) async fn handle_chat(
         &self,
@@ -66,6 +85,7 @@ impl SignalProcessor {
             conversation_history,
             procedure_context,
             progress,
+            writes_this_turn,
         } = ctx;
         // Scale the number of memory recall candidates with the available
         // memory budget so large-window models surface more relevant context
@@ -201,7 +221,12 @@ impl SignalProcessor {
         // so the reasoner describes its real catalog and product surface
         // instead of a hardcoded or fabricated one. Read-only awareness —
         // execution stays gated downstream.
-        let capability_digest = self.chat_capability_section(&content).await;
+        let mut capability_digest = self.chat_capability_section(&content).await;
+        // Write-side grounding: surface what the pipeline actually persisted
+        // this turn so the reasoner can truthfully confirm a save (and only
+        // then), instead of fabricating one. The MEMORY WRITES operating
+        // principle in the SOUL prompt cites this exact block.
+        capability_digest.push_str(&render_saved_this_turn(writes_this_turn));
 
         let messages = self.context_assembler.assemble_full(
             &content,
@@ -681,8 +706,9 @@ fn role_label(role: &cortex::llm::Role) -> &'static str {
 mod tests {
     use super::{
         capability_lines, history_summary_key, render_capability_digest, render_capped_list,
-        render_health_block,
+        render_health_block, render_saved_this_turn,
     };
+    use crate::exchange::FactToStore;
     use intent::{BackendId, ToolAnnotations, ToolDescriptor, ToolSource, Verb};
 
     fn tool(tool_id: &str, source: ToolSource, action: &str) -> ToolDescriptor {
@@ -701,6 +727,34 @@ mod tests {
             usage: intent::ToolUsage::default(),
             embedding: None,
         }
+    }
+
+    #[test]
+    fn saved_this_turn_block_is_empty_when_nothing_was_written() {
+        // The common case: no extraction → no block → the reasoner has no
+        // evidence to claim a save (MEMORY WRITES then makes it offer instead).
+        assert!(render_saved_this_turn(&[]).is_empty());
+    }
+
+    #[test]
+    fn saved_this_turn_block_lists_persisted_triples() {
+        let writes = vec![
+            FactToStore {
+                subject: "user".into(),
+                predicate: "likes".into(),
+                object: "pizza".into(),
+            },
+            FactToStore {
+                subject: "user".into(),
+                predicate: "works_at".into(),
+                object: "Acme Corp".into(),
+            },
+        ];
+        let block = render_saved_this_turn(&writes);
+        // Labelled exactly as the SOUL MEMORY WRITES rule cites it.
+        assert!(block.contains("Saved this turn"));
+        assert!(block.contains("user likes pizza"));
+        assert!(block.contains("user works_at Acme Corp"));
     }
 
     #[test]

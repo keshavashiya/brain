@@ -215,7 +215,7 @@ impl SignalProcessor {
 
         let pending_notifications = self.drain_pending_notifications();
         let importance = self.importance.score(&signal.content);
-        let classification = self
+        let (classification, writes_this_turn) = self
             .classify_and_store_facts(signal, conversation_history)
             .await;
         let procedure_context = self.match_procedures(&signal.content);
@@ -273,6 +273,7 @@ impl SignalProcessor {
             conversation_history,
             procedure_context: &procedure_context,
             progress: progress.as_ref(),
+            writes_this_turn: &writes_this_turn,
         };
         let intent = classification.intent;
 
@@ -340,11 +341,16 @@ impl SignalProcessor {
     /// the classifier extracted on the side. When `history` is supplied,
     /// the LLM fallback uses it to disambiguate follow-up replies from
     /// new biographical claims.
+    ///
+    /// Returns the classification plus the facts that were *actually
+    /// persisted* this turn (a subset of the extracted facts — any that
+    /// failed to store are excluded so a downstream "Saved this turn"
+    /// grounding block never over-claims).
     async fn classify_and_store_facts(
         &self,
         signal: &Signal,
         history: Option<&[cortex::llm::Message]>,
-    ) -> thalamus::Classification {
+    ) -> (thalamus::Classification, Vec<crate::exchange::FactToStore>) {
         let history = history.unwrap_or(&[]);
         // Feed the live capability manifest into the classifier so it shares
         // the same view of available tools the SOUL and external clients see.
@@ -382,6 +388,7 @@ impl SignalProcessor {
             let _ = observer.publish(ev).await;
         }
 
+        let mut persisted = Vec::new();
         if !classification.extracted_facts.is_empty() {
             let facts_to_store: Vec<_> = classification
                 .extracted_facts
@@ -405,12 +412,23 @@ impl SignalProcessor {
             for id in &stored {
                 tracing::info!("Extracted fact stored: {id}");
             }
-            for (text, e) in errors {
+            // Keep only the facts that actually landed: exclude any whose
+            // triple appears in the error list. The grounding block built
+            // from `persisted` must reflect storage truth, not intent.
+            let errored: std::collections::HashSet<String> =
+                errors.iter().map(|(text, _)| text.clone()).collect();
+            for (text, e) in &errors {
                 tracing::warn!("Failed to store extracted fact ({text}): {e}");
             }
+            persisted = facts_to_store
+                .into_iter()
+                .filter(|f| {
+                    !errored.contains(&format!("{} {} {}", f.subject, f.predicate, f.object))
+                })
+                .collect();
         }
 
-        classification
+        (classification, persisted)
     }
 
     /// Match user content against stored procedures and surface the

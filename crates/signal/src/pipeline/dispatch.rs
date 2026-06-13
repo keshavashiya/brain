@@ -37,6 +37,12 @@ pub(crate) struct HandlerContext<'a> {
     pub conversation_history: Option<&'a [cortex::llm::Message]>,
     pub procedure_context: &'a [String],
     pub progress: Option<&'a tokio::sync::mpsc::Sender<&'static str>>,
+    /// Facts the classifier extracted and persisted *this turn*, before any
+    /// handler ran. The chat handler renders these into a "Saved this turn"
+    /// grounding block so the reasoner can truthfully confirm a save instead
+    /// of guessing — the write-side analogue of the "Relevant memories:"
+    /// recall block. Empty for every turn that wrote nothing.
+    pub writes_this_turn: &'a [crate::exchange::FactToStore],
 }
 
 /// Closure type the pipeline uses to prepend queued nudges to a final
