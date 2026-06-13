@@ -403,6 +403,17 @@ impl SignalProcessor {
         let tier_of =
             |t: &intent::ToolDescriptor| t.usage.tier.clone().unwrap_or_else(|| "?".to_string());
 
+        // Live runtime health (verified/degraded/breaker-open), stamped by the
+        // serve loop's manifest-health sweep. Empty before the first sweep / on
+        // processors without one, in which case every tool reads as verified
+        // and no health line is emitted.
+        let health = self.manifest_health().snapshot();
+        let health_line = |t: &intent::ToolDescriptor| -> Option<String> {
+            let h = health.get(&t.tool_id)?;
+            h.reason()
+                .map(|r| format!("      health: {} — {}", h.as_str(), r))
+        };
+
         let mut buf = format!(
             "Capability manifest — {} tool(s), {} agent(s):\n",
             tools.len(),
@@ -419,6 +430,9 @@ impl SignalProcessor {
                     tier_of(t),
                     t.description
                 );
+                if let Some(line) = health_line(t) {
+                    let _ = writeln!(buf, "{line}");
+                }
                 if let Some(when) = &t.usage.when_to_use {
                     let _ = writeln!(buf, "      when: {when}");
                 }
@@ -432,6 +446,9 @@ impl SignalProcessor {
                 // bytes / ANSI before it touches the output.
                 let desc = intent::sanitization::sanitize_description_body(&t.description);
                 let _ = writeln!(buf, "  {} [{}] — {}", t.tool_id, tier_of(t), desc);
+                if let Some(line) = health_line(t) {
+                    let _ = writeln!(buf, "{line}");
+                }
             }
         }
 

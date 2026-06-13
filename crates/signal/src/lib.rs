@@ -150,6 +150,13 @@ pub struct SignalProcessor {
     /// Probed once at bootstrap; the capability digest names the machine
     /// class from it. `None` leaves the digest unchanged (back-compat).
     host_model: Option<std::sync::Arc<selfmodel::HostModel>>,
+    /// The kernel's live per-capability health (verified/degraded/breaker-open).
+    /// The serve loop's manifest-health sweep writes through a clone of this
+    /// handle (see [`SignalProcessor::manifest_health`]); the capability digest
+    /// and `tools/list` read it to annotate tools that won't work right now.
+    /// Defaults empty → every capability reads as healthy, so processors
+    /// without a sweep loop behave exactly as before.
+    manifest_health: brain::ManifestHealth,
     /// Residency-aware embedder for semantic capability retrieval. When
     /// set, the chat tool-loop advertiser embeds the user's turn text and adds
     /// a cosine term over each tool's embedding to the keyword/fitness ranking.

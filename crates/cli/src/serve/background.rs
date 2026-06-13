@@ -586,6 +586,112 @@ pub(super) fn spawn_power_probe(
     tracing::info!(interval_secs = cfg.interval_secs, "Power probe scheduled");
 }
 
+/// Spawn the manifest-health sweep — the single writer behind the processor's
+/// [`brain::ManifestHealth`] handle. Each round probes the subsystems
+/// registered capabilities depend on (the embedding model once per round, the
+/// kernel's connectivity view, and each tool's circuit breaker) and stamps
+/// every tool's runtime health. On a *transition* it logs and publishes a
+/// `CapabilityHealthChanged` event so the same bus the digest/SSE read sees the
+/// edge. Skips cleanly (no loop) when no tool registry is wired.
+pub(super) fn spawn_manifest_health_sweep(
+    processor: Arc<signal::SignalProcessor>,
+    cfg: brain::config::ManifestHealthConfig,
+    set: &mut tokio::task::JoinSet<anyhow::Result<()>>,
+) {
+    use intent::BreakerCheck;
+    use std::collections::HashMap;
+
+    let handle = processor.manifest_health();
+    let p = processor;
+    set.spawn(async move {
+        let Some(registry) = p.tool_registry().cloned() else {
+            tracing::info!("Manifest-health sweep: no tool registry wired — not scheduled");
+            return Ok(());
+        };
+        let mut ticker =
+            tokio::time::interval(std::time::Duration::from_secs(cfg.interval_secs.max(1)));
+        // No leading-tick skip: the first sweep should stamp health within one
+        // round of boot, not one interval later.
+        loop {
+            ticker.tick().await;
+            let tools = registry.list().await;
+            if tools.is_empty() {
+                continue;
+            }
+            // Probe the embedding model once for the whole round. A configured
+            // embedder that won't answer (e.g. Ollama stopped) flips
+            // embedding-dependent capabilities to degraded; *no* embedder
+            // configured is a deliberate config choice (the deterministic
+            // fallback), not an outage, so it reads as reachable.
+            let embedder_ok = match p.embedder() {
+                Some(embedder) => probe_embedder(&embedder).await,
+                None => true,
+            };
+            let connectivity = p.connectivity().state();
+
+            let mut next = HashMap::with_capacity(tools.len());
+            for t in &tools {
+                let breaker_open = match p.breaker_registry() {
+                    Some(reg) => reg.is_open(&t.tool_id).await,
+                    None => false,
+                };
+                let dependency = super::manifest_health::capability_dependency(t);
+                let health = super::manifest_health::health_for(
+                    dependency,
+                    embedder_ok,
+                    connectivity,
+                    breaker_open,
+                );
+                next.insert(t.tool_id.clone(), health);
+            }
+
+            for transition in handle.replace(next) {
+                let detail = transition.current.reason().unwrap_or_default();
+                if transition.current.is_healthy() {
+                    tracing::info!(tool = %transition.tool_id, "Capability recovered");
+                } else {
+                    tracing::warn!(
+                        tool = %transition.tool_id,
+                        state = transition.current.as_str(),
+                        detail = %detail,
+                        "Capability health degraded",
+                    );
+                }
+                if let Some(observer) = p.observer() {
+                    let ev = observe::BrainEvent::CapabilityHealthChanged {
+                        id: uuid::Uuid::new_v4(),
+                        tool: transition.tool_id.clone(),
+                        state: transition.current.as_str().to_string(),
+                        previous: transition
+                            .previous
+                            .as_ref()
+                            .map(|h| h.as_str().to_string())
+                            .unwrap_or_default(),
+                        detail,
+                        ts: chrono::Utc::now(),
+                    };
+                    let _ = observer.publish(ev).await;
+                }
+            }
+        }
+    });
+    tracing::info!(
+        interval_secs = cfg.interval_secs,
+        "Manifest-health sweep scheduled"
+    );
+}
+
+/// One embedding round-trip with a short timeout — the same probe `brain
+/// doctor --deep` runs, used here to decide whether embedding-dependent
+/// capabilities are reachable this round. A timeout or error reads as down.
+async fn probe_embedder(embedder: &hippocampus::Embedder) -> bool {
+    let probe = embedder.embed("brain manifest-health probe");
+    matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), probe).await,
+        Ok(Ok(_))
+    )
+}
+
 pub(crate) async fn promote_candidates(
     processor: &signal::SignalProcessor,
     candidates: &[hippocampus::PromotionCandidate],

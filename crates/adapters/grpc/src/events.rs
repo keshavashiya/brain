@@ -50,6 +50,7 @@ pub(crate) fn brain_event_ts(ev: &observe::BrainEvent) -> chrono::DateTime<chron
         | ConnectivityChanged { ts, .. }
         | PowerStateChanged { ts, .. }
         | ServiceHealthChanged { ts, .. }
+        | CapabilityHealthChanged { ts, .. }
         | BaselineDrift { ts, .. } => *ts,
     }
 }

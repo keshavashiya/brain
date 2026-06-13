@@ -399,6 +399,10 @@ impl SignalProcessor {
                 digest.push_str("\nPower: on battery.\n");
             }
         }
+        // Live capability health: name the capabilities that won't work right
+        // now (embedding model down, breaker open, …) so the reasoner doesn't
+        // promise a dead faculty. Empty before the first sweep / without one.
+        digest.push_str(&render_health_block(&self.manifest_health().snapshot()));
         // Quarantined-and-waiting must be visible, not a silent hole:
         // memories from unvouched writers exist but are excluded from
         // recall until the user reviews them.
@@ -485,6 +489,36 @@ const MAX_TOOLS_PER_SERVER: usize = 15;
 const MAX_AGENTS: usize = 20;
 /// Cap on proven tools listed in the learned "Proven here" digest line.
 const MAX_PROVEN_TOOLS: usize = 8;
+
+/// Render the "Degraded capabilities" digest block from the live manifest
+/// health map. Lists every capability that isn't [`Verified`], sorted by
+/// `tool_id` for stable output, each with its kind + reason. Empty string when
+/// everything is healthy (or no sweep has run yet) — the digest then carries no
+/// health block at all, so a healthy deployment reads exactly as before.
+///
+/// [`Verified`]: brain::CapabilityHealth::Verified
+fn render_health_block(
+    health: &std::collections::HashMap<String, brain::CapabilityHealth>,
+) -> String {
+    let mut unhealthy: Vec<(&String, &brain::CapabilityHealth)> =
+        health.iter().filter(|(_, h)| !h.is_healthy()).collect();
+    if unhealthy.is_empty() {
+        return String::new();
+    }
+    unhealthy.sort_by(|a, b| a.0.cmp(b.0));
+    let mut out = String::from(
+        "\nDegraded capabilities (not working right now — don't promise these; \
+         say plainly they're unavailable if asked):\n",
+    );
+    for (tool_id, h) in unhealthy {
+        out.push_str(&format!(
+            "- {tool_id}: {} ({})\n",
+            h.reason().unwrap_or_default(),
+            h.as_str(),
+        ));
+    }
+    out
+}
 
 /// Render the live capability section injected into the SOUL prompt
 /// Starts from the always-on cognitive faculties
@@ -626,6 +660,7 @@ fn role_label(role: &cortex::llm::Role) -> &'static str {
 mod tests {
     use super::{
         capability_lines, history_summary_key, render_capability_digest, render_capped_list,
+        render_health_block,
     };
     use intent::{BackendId, ToolAnnotations, ToolDescriptor, ToolSource, Verb};
 
@@ -865,5 +900,79 @@ mod tests {
         // Unwired processors keep the digest host-free (back-compat).
         let bare = make_processor().await.capability_digest().await;
         assert!(!bare.contains("Host machine:"));
+    }
+
+    #[test]
+    fn health_block_empty_when_all_verified() {
+        use std::collections::HashMap;
+        let mut h = HashMap::new();
+        h.insert(
+            "memory.store".to_string(),
+            brain::CapabilityHealth::Verified,
+        );
+        assert_eq!(render_health_block(&h), "");
+        // No sweep yet → empty map → no block.
+        assert_eq!(render_health_block(&HashMap::new()), "");
+    }
+
+    #[test]
+    fn health_block_lists_degraded_sorted_with_reason() {
+        use std::collections::HashMap;
+        let mut h = HashMap::new();
+        h.insert(
+            "web.search".to_string(),
+            brain::CapabilityHealth::BreakerOpen,
+        );
+        h.insert(
+            "memory.store".to_string(),
+            brain::CapabilityHealth::Degraded {
+                reason: "local embedding model unreachable".to_string(),
+            },
+        );
+        h.insert("net.http".to_string(), brain::CapabilityHealth::Verified);
+        let block = render_health_block(&h);
+        assert!(block.contains("Degraded capabilities"), "{block}");
+        // Sorted by tool_id: memory.store before web.search; net.http (healthy) absent.
+        let mem = block.find("memory.store").expect("memory.store listed");
+        let web = block.find("web.search").expect("web.search listed");
+        assert!(mem < web, "entries sorted by tool_id: {block}");
+        assert!(!block.contains("net.http"), "healthy tool omitted: {block}");
+        assert!(
+            block.contains("local embedding model unreachable"),
+            "{block}"
+        );
+        assert!(block.contains("breaker-open"), "{block}");
+    }
+
+    /// DoD (M4): once the sweep stamps an embedding-dependent capability
+    /// degraded, the capability digest the SOUL reads names it. Drives the same
+    /// `ManifestHealth` handle the sweep writes — proving the writer→reader
+    /// wiring, not just the renderer.
+    #[tokio::test]
+    async fn digest_surfaces_degraded_capability_from_manifest_health() {
+        let processor = make_processor().await;
+        // Healthy by default: no block.
+        assert!(!processor
+            .capability_digest()
+            .await
+            .contains("Degraded capabilities"));
+
+        // Simulate one sweep finding the embedder down.
+        let mut next = std::collections::HashMap::new();
+        next.insert(
+            "memory.store".to_string(),
+            brain::CapabilityHealth::Degraded {
+                reason: "local embedding model unreachable".to_string(),
+            },
+        );
+        processor.manifest_health().replace(next);
+
+        let digest = processor.capability_digest().await;
+        assert!(digest.contains("Degraded capabilities"), "{digest}");
+        assert!(digest.contains("memory.store"), "{digest}");
+        assert!(
+            digest.contains("local embedding model unreachable"),
+            "{digest}"
+        );
     }
 }

@@ -57,6 +57,13 @@ impl SignalProcessor {
         self.power.clone()
     }
 
+    /// The kernel's live per-capability health. Clone this handle to share it
+    /// with the manifest-health sweep (the writer); the pipeline reads it to
+    /// annotate degraded/breaker-open capabilities in the digest + `tools/list`.
+    pub fn manifest_health(&self) -> brain::ManifestHealth {
+        self.manifest_health.clone()
+    }
+
     /// The generation chain for *this* turn. Online (or no probe wired) →
     /// the deep tier, unchanged. Offline → the first tier chain that is
     /// fully local (deep → balanced → fast), so the turn still answers

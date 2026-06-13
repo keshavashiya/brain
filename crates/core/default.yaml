@@ -307,6 +307,16 @@ monitoring:
     interval_secs: 60                # seconds between probe rounds
     defer_maintenance: true          # hold consolidation/sweeps while on battery
 
+  # Live manifest health — a periodic sweep that stamps each registered
+  # capability verified/degraded/breaker-open by probing what it depends on
+  # (the embedding model, network connectivity, per-tool circuit breakers).
+  # The capability digest and tools/list annotate unhealthy tools so the
+  # reasoner never promises a faculty that is dead right now. Disabled, every
+  # capability reads as healthy.
+  manifest_health:
+    enabled: true
+    interval_secs: 120               # seconds between sweeps
+
 
 # ── Channel Relays ─────────────────────────────────────────────────────────────
 # Bidirectional WebSocket gateways. Unlike webhooks these are long-lived

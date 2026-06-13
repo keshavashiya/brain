@@ -197,6 +197,26 @@ pub enum BrainEvent {
         detail: String,
         ts: DateTime<Utc>,
     },
+    /// Emitted by the manifest-health sweep when a capability's runtime health
+    /// crosses (e.g. verified→degraded when the embedding model goes down, or
+    /// →breaker-open). Edge-triggered — once per transition, not once per
+    /// sweep. `state`/`previous` are the health-kind strings
+    /// (`"verified" | "degraded" | "breaker-open" | "precondition-failed"`) so
+    /// `observe` stays free of a `core` dependency, exactly as
+    /// `ConnectivityChanged` does.
+    CapabilityHealthChanged {
+        id: Uuid,
+        /// The affected capability's `tool_id` (e.g. `"memory.store"`).
+        tool: String,
+        /// New health kind.
+        state: String,
+        /// Health kind before the transition; empty when there was no prior
+        /// reading (first sweep / newly registered).
+        previous: String,
+        /// Human-readable reason for the new state, empty on recovery.
+        detail: String,
+        ts: DateTime<Utc>,
+    },
     /// Emitted by the baseline backend when a `baseline.diff` run detects
     /// drift (a no-drift diff emits nothing). Labels are the same
     /// human-readable strings the rendered diff uses, so `observe` stays free
@@ -246,6 +266,7 @@ impl BrainEvent {
             BrainEvent::ConnectivityChanged { .. } => "connectivity_changed",
             BrainEvent::PowerStateChanged { .. } => "power_state_changed",
             BrainEvent::ServiceHealthChanged { .. } => "service_health_changed",
+            BrainEvent::CapabilityHealthChanged { .. } => "capability_health_changed",
             BrainEvent::BaselineDrift { .. } => "baseline_drift",
         }
     }
@@ -272,6 +293,7 @@ impl BrainEvent {
             | BrainEvent::ConnectivityChanged { id, .. }
             | BrainEvent::PowerStateChanged { id, .. }
             | BrainEvent::ServiceHealthChanged { id, .. }
+            | BrainEvent::CapabilityHealthChanged { id, .. }
             | BrainEvent::BaselineDrift { id, .. } => *id,
         }
     }
@@ -282,6 +304,7 @@ impl BrainEvent {
             BrainEvent::ToolCallStarted { tool_id, .. }
             | BrainEvent::ToolCallFinished { tool_id, .. }
             | BrainEvent::BreakerStateChange { tool_id, .. } => Some(tool_id.as_str()),
+            BrainEvent::CapabilityHealthChanged { tool, .. } => Some(tool.as_str()),
             _ => None,
         }
     }

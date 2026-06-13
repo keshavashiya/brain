@@ -28,6 +28,7 @@ mod background;
 mod connectivity;
 mod dlq;
 mod health;
+mod manifest_health;
 mod power;
 mod reflex;
 // `pub(crate)` so `brain doctor --deep` can run a one-shot `ResourceProbe`.
@@ -386,6 +387,18 @@ pub(crate) async fn cmd_serve(
     // the task exits after one probe and the state stays pinned External.
     if config.monitoring.power.enabled {
         background::spawn_power_probe(processor.clone(), config.monitoring.power.clone(), &mut set);
+    }
+
+    // Manifest-health sweep: the writer behind the processor's per-capability
+    // health view. Probes the embedding model + connectivity + breakers each
+    // round and stamps every registered tool verified/degraded/breaker-open;
+    // the capability digest and `tools/list` annotate the unhealthy ones.
+    if config.monitoring.manifest_health.enabled {
+        background::spawn_manifest_health_sweep(
+            processor.clone(),
+            config.monitoring.manifest_health.clone(),
+            &mut set,
+        );
     }
 
     // ── Channel relay adapters ────────────────────────────────────────

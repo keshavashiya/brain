@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Live manifest health (`monitoring.manifest_health`).** A capability used to
+  look available even when the thing it depends on was down. The daemon now
+  sweeps the manifest on an interval, probing the embedding model, network
+  connectivity, and each tool's circuit breaker, and stamps every capability
+  `verified` / `degraded` / `breaker-open`. Degraded capabilities are called
+  out in the capability digest the assistant reads (so it stops promising a
+  faculty that won't work right now) and annotated per-tool in the capability
+  listing. Stop the local embedding model and memory writes show as degraded
+  within one sweep; restart it and they recover. On by default; healthy
+  deployments look exactly as before.
+
+- **Semantic capability retrieval.** Tool routing and the chat tool advertiser
+  used to match purely on keywords, so a request like "grab that webpage" could
+  miss a tool whose description shared no words with it. Capabilities are now
+  embedded at registration and ranked by a hybrid of semantic similarity and
+  keyword overlap, so a paraphrase still finds the right tool. Falls back to
+  the previous keyword-only ranking when no embedding model is configured.
+
 - **Observations land in memory (observation → graph mirror).** Operational
   events used to die on the event bus: resource-pressure crossings, service
   up/down transitions, reflex firings, connectivity and power changes were

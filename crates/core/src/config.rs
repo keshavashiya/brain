@@ -244,6 +244,45 @@ pub struct MonitoringConfig {
     /// [`PowerProbeConfig`].
     #[serde(default)]
     pub power: PowerProbeConfig,
+    /// Live manifest-health sweep — stamps each registered capability
+    /// verified/degraded/breaker-open by probing the subsystems it depends on.
+    /// See [`ManifestHealthConfig`].
+    #[serde(default)]
+    pub manifest_health: ManifestHealthConfig,
+}
+
+/// Manifest-health sweep: periodically probes the subsystems registered
+/// capabilities depend on (the embedding model, network connectivity, per-tool
+/// circuit breakers) and stamps each capability's runtime health. Readers (the
+/// capability digest, `tools/list`) annotate degraded/breaker-open tools so the
+/// reasoner never promises a faculty that is currently dead. Disabled, or with
+/// no sweep loop, every capability reads as healthy (unchanged behaviour).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestHealthConfig {
+    /// Sweep at all. Disabling leaves every capability reading as healthy.
+    #[serde(default = "ManifestHealthConfig::default_enabled")]
+    pub enabled: bool,
+    /// Seconds between sweeps.
+    #[serde(default = "ManifestHealthConfig::default_interval_secs")]
+    pub interval_secs: u64,
+}
+
+impl ManifestHealthConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_interval_secs() -> u64 {
+        120
+    }
+}
+
+impl Default for ManifestHealthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            interval_secs: Self::default_interval_secs(),
+        }
+    }
 }
 
 /// Connectivity probing: derives the kernel's `Online / Degraded / Offline`

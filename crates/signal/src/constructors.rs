@@ -263,6 +263,7 @@ impl SignalProcessor {
             proactivity_enabled,
             connectivity: brain::Connectivity::default(),
             power: brain::Power::default(),
+            manifest_health: brain::ManifestHealth::default(),
 
             // Opt-in bundles — all builder-wired
             safety: crate::bundles::SafetyBundle::default(),
