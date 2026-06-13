@@ -188,6 +188,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   local. A wire-level test proves a `local_only` fact never appears in an
   outbound request body when only a cloud provider is configured.
 
+### Fixed
+
+- **Reachability questions no longer misfire a web fetch.** Asking "is
+  github.com reachable?" used to be classified as a web search and routed to
+  the HTTP fetch capability (`net.http`) instead of the network-reachability
+  diagnostic (`net.check`). The classifier now distinguishes *retrieving a
+  page's contents* from *testing whether a host responds* and keeps the latter
+  conversational, where the `net.check`/`trace`/`cert` diagnostics live. The
+  chat tool advertiser and its ranker were also only ever shown each tool's
+  one-line summary, hiding the authored "use this when… / not when…" guidance
+  that tells sibling tools apart; that guidance is now both ranked on and shown
+  to the model, so a "reachable?" query surfaces and selects `net.check` rather
+  than the look-alike fetch tool.
+
 ## [0.5.0] — 2026-06-10
 
 ### Added

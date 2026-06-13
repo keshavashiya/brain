@@ -144,7 +144,7 @@ impl SignalProcessor {
                 description: intent::sanitization::render_tool_description_for_prompt(
                     &t.verb.namespace,
                     &t.verb.action,
-                    &t.description,
+                    &advertised_description_body(&t),
                 ),
                 parameters: t.input_schema,
             })
@@ -338,6 +338,31 @@ fn score_top_k(
     tools
 }
 
+/// Compose the description the model sees for an advertised tool: the verb
+/// summary plus the authored `when_to_use` / `when_not_to` guidance.
+///
+/// Those `usage` fields are explicitly *reasoner-facing* (see
+/// `backends::capabilities::usage`) and are where sibling verbs are
+/// disambiguated — e.g. `net.check` says "For fetching a page's contents — use
+/// net.http" and `net.http` says the inverse. But the picker only ever saw the
+/// bare one-line summary, so "is github.com reachable?" (reachability →
+/// `net.check`) misrouted to `net.http` because both summaries read like
+/// "make a network call". Folding the guidance in lets the model tell them
+/// apart. Tools with no authored usage (most MCP tools) render exactly as
+/// before — just the summary.
+fn advertised_description_body(t: &intent::ToolDescriptor) -> String {
+    let mut body = t.description.clone();
+    if let Some(when) = t.usage.when_to_use.as_deref().filter(|s| !s.is_empty()) {
+        body.push_str("\nUse when: ");
+        body.push_str(when);
+    }
+    if let Some(not) = t.usage.when_not_to.as_deref().filter(|s| !s.is_empty()) {
+        body.push_str("\nNot this one when: ");
+        body.push_str(not);
+    }
+    body
+}
+
 fn tokenize(text: &str) -> Vec<String> {
     text.split(|c: char| !c.is_alphanumeric())
         .filter(|t| !t.is_empty())
@@ -349,7 +374,18 @@ fn score_tool(tool: &intent::ToolDescriptor, terms: &[String]) -> usize {
     if terms.is_empty() {
         return 0;
     }
-    let haystack = format!("{} {}", tool.verb.dotted(), tool.description).to_lowercase();
+    // Score against the same text the model is shown — the summary *plus* the
+    // authored when_to_use / when_not_to guidance — not just the bare summary.
+    // The guidance carries the disambiguating vocabulary: a "reachable" query
+    // matches net.check's "whether a host/endpoint is reachable" guidance even
+    // though it doesn't substring-match the summary word "reachability", so the
+    // right tool actually makes the advertised slice instead of being dropped.
+    let haystack = format!(
+        "{} {}",
+        tool.verb.dotted(),
+        advertised_description_body(tool)
+    )
+    .to_lowercase();
     terms
         .iter()
         .filter(|t| haystack.contains(t.as_str()))
@@ -465,6 +501,59 @@ mod tests {
     /// Empty fitness map: keyword-only ranking, the pre-L1 behaviour.
     fn no_bonus() -> std::collections::HashMap<String, f32> {
         std::collections::HashMap::new()
+    }
+
+    #[test]
+    fn advertised_description_folds_in_usage_guidance() {
+        // The authored when_to_use / when_not_to is what disambiguates sibling
+        // verbs; it must reach the model that picks the tool. (Regression for
+        // the net.check-vs-net.http "is X reachable?" misroute.)
+        let mut check = td("net", "check", "Check reachability of a host.");
+        check.usage.when_to_use =
+            Some("The user asks whether a host/endpoint is reachable.".to_string());
+        check.usage.when_not_to =
+            Some("For fetching a page's contents — use net.http.".to_string());
+        let body = advertised_description_body(&check);
+        assert!(
+            body.contains("Check reachability of a host."),
+            "keeps summary"
+        );
+        assert!(body.contains("Use when: The user asks whether a host"));
+        assert!(body.contains("Not this one when: For fetching a page's contents"));
+
+        // No authored usage (typical MCP tool) → just the summary, unchanged.
+        let bare = td("github", "create_issue", "Open a GitHub issue.");
+        assert_eq!(advertised_description_body(&bare), "Open a GitHub issue.");
+    }
+
+    #[test]
+    fn usage_guidance_lets_net_check_outrank_net_http_for_reachability() {
+        // "is X reachable" must surface net.check over net.http. The summaries
+        // alone don't help — "reachable" doesn't substring-match net.check's
+        // summary word "reachability" — but the authored when_to_use does. With
+        // the ranker reading the guidance, net.check wins. (Regression for the
+        // net.check-vs-net.http misroute that fed a fabricated "ping" answer.)
+        let mut check = td("net", "check", "Check reachability of a host.");
+        check.usage.when_to_use =
+            Some("The user asks whether a host/endpoint is reachable.".to_string());
+        let mut http = td("net", "http", "Perform an outbound HTTP request.");
+        http.usage.when_to_use = Some(
+            "The answer needs fresh external info, or the user references a URL to read."
+                .to_string(),
+        );
+
+        let hits = score_top_k(
+            vec![http, check],
+            "is github.com reachable",
+            2,
+            &no_bonus(),
+            None,
+        );
+        assert_eq!(
+            hits[0].verb.dotted(),
+            "net.check",
+            "reachability query must rank net.check first",
+        );
     }
 
     #[test]

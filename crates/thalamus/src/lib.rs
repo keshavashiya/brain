@@ -667,6 +667,7 @@ const CLASSIFIER_PROMPT_RULES: &str = r#"Rules:
 - delegate_task is for explicit single-shot delegation to a named agent: "delegate to claude-code: refactor X", "ask codex: explain Y", "@aider: fix the bug". Set `agent` to the lowercase agent id and `prompt` to the task body. Do NOT use this for multi-step plans — those go to decompose_task and the orchestrator picks an agent itself.
 - Conversational statements ("I've done X", "I completed X", "I like X") are chat but ALSO extract any personal facts (see below).
 - Prefer web_search for explicit search requests about internet/google/latest/current external info.
+- web_search retrieves information or a page's CONTENTS from the internet. A request to TEST connectivity or reachability — "is github.com reachable", "can you reach api.example.com", "is the site up/down", "check/ping/trace the route to X", "when does the cert for X expire" — is NOT web_search: it is chat, where Brain runs a network-diagnostic capability (net.check/trace/cert). Only choose web_search when the user wants the page's contents or an answer found online, not merely whether a host responds.
 - For web_search, set 'query' to the exact optimal search terms, stripping conversational fluff.
 - Use system_status only for explicit status checks like "/status".
 - Use chat when uncertain or for general conversation.

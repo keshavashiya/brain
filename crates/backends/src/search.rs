@@ -22,7 +22,7 @@ pub fn capabilities(config: &brain::BrainConfig) -> Vec<intent::ToolDescriptor> 
         read_only(),
         usage(
             "The answer needs fresh, external, or post-training-cutoff information, or the user references a URL to read.",
-            "The answer is in memory, the conversation, or general knowledge.",
+            "The answer is in memory, the conversation, or general knowledge; for plain host reachability or a connectivity diagnosis (rather than reading a page) use net.check.",
             &["actions.web_search.enabled = true", "Network egress is permitted."],
             "network call (latency + possible API quota)",
             "\"What's the latest release of ripgrep?\"",

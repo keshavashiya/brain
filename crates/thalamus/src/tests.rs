@@ -722,6 +722,17 @@ fn test_classifier_prompt_mentions_query_agents() {
     assert!(super::CLASSIFIER_SYSTEM_PROMPT.contains("what agents do you have"));
 }
 
+/// Reachability/connectivity-diagnostic phrasing must be steered away from
+/// web_search (→ net.http) and toward chat, where the net.check/trace/cert
+/// capabilities live. Guards the disambiguation rule that fixes the
+/// "is github.com reachable" → net.http misroute.
+#[test]
+fn test_classifier_prompt_separates_reachability_from_web_search() {
+    let prompt: &str = &super::CLASSIFIER_SYSTEM_PROMPT;
+    assert!(prompt.contains("reachable"));
+    assert!(prompt.contains("net.check"));
+}
+
 #[tokio::test]
 async fn test_approve_with_uuid_matches_fast_path() {
     let classifier = IntentClassifier::new();
