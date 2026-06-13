@@ -382,17 +382,68 @@ impl SemanticStore {
         Ok(deleted)
     }
 
-    /// Find facts whose subject, predicate, or object contains the query string.
+    /// Find facts matching a Forget target description.
     ///
-    /// Used by the Forget intent to find facts matching a target description.
+    /// Used by the Forget intent. The classifier often hands us the whole user
+    /// sentence ("Actually forget what I said about my temporary access token")
+    /// rather than a distilled topic, so a single `LIKE %<sentence>%` matched
+    /// nothing and the forget silently no-op'd. Instead we reduce the target to
+    /// its significant content tokens (`temporary`, `access`, `token`) and match
+    /// any fact whose subject/predicate/object contains one of them — keying on
+    /// the topic, not the filler. A target with no significant tokens (e.g. a
+    /// single short word) falls back to the original whole-string substring.
     pub fn find_facts_matching(
         &self,
         query: &str,
         namespace: Option<&str>,
     ) -> Result<Vec<Fact>, SemanticError> {
         let pool = &self.db;
-        let escaped = query.replace('%', r"\%").replace('_', r"\_");
-        let pattern = format!("%{escaped}%");
+        let tokens = significant_forget_tokens(query);
+        // Each entry is an escaped `%…%` LIKE pattern. With significant tokens we
+        // match ANY of them; with none we fall back to the whole query.
+        let patterns: Vec<String> = if tokens.is_empty() {
+            let escaped = query.replace('%', r"\%").replace('_', r"\_");
+            vec![format!("%{escaped}%")]
+        } else {
+            tokens.iter().map(|t| format!("%{t}%")).collect()
+        };
+        // ?1..?N are the content patterns; each is tested against all three
+        // columns. The namespace params (if any) follow at ?N+1, ?N+2.
+        let content_clause = (1..=patterns.len())
+            .map(|i| {
+                format!(
+                    "(subject LIKE ?{i} ESCAPE '\\' OR predicate LIKE ?{i} ESCAPE '\\' OR object LIKE ?{i} ESCAPE '\\')"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" OR ");
+
+        let mut params: Vec<String> = patterns.clone();
+        let sql = if let Some(ns) = namespace {
+            let n1 = patterns.len() + 1;
+            let n2 = patterns.len() + 2;
+            params.push(ns.to_string());
+            params.push(format!("{ns}/%"));
+            format!(
+                "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
+                 FROM semantic_facts
+                 WHERE superseded_by IS NULL
+                   AND (namespace = ?{n1} OR namespace LIKE ?{n2})
+                   AND ({content_clause})
+                 ORDER BY rowid DESC
+                 LIMIT 50"
+            )
+        } else {
+            format!(
+                "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
+                 FROM semantic_facts
+                 WHERE superseded_by IS NULL
+                   AND ({content_clause})
+                 ORDER BY rowid DESC
+                 LIMIT 50"
+            )
+        };
+
         Ok(self.db.with_conn(|conn| {
             let row_to_raw_fact = |row: &rusqlite::Row<'_>| -> rusqlite::Result<(Fact, String)> {
                 let raw_object: String = row.get(5)?;
@@ -411,43 +462,77 @@ impl SemanticStore {
                     raw_object,
                 ))
             };
-
             let decrypt_filter = |r: rusqlite::Result<(Fact, String)>| -> Option<Fact> {
                 let (mut fact, raw) = r.ok()?;
                 fact.object = pool.try_decrypt_content(&raw)?;
                 Some(fact)
             };
 
-            let facts: Vec<Fact> = if let Some(ns) = namespace {
-                let mut stmt = conn.prepare(
-                    "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
-                     FROM semantic_facts
-                     WHERE superseded_by IS NULL
-                       AND (namespace = ?2 OR namespace LIKE ?3)
-                       AND (subject LIKE ?1 ESCAPE '\\' OR predicate LIKE ?1 ESCAPE '\\' OR object LIKE ?1 ESCAPE '\\')
-                     ORDER BY rowid DESC
-                     LIMIT 50",
-                )?;
-                let prefix = format!("{ns}/%");
-                let rows =
-                    stmt.query_map(rusqlite::params![&pattern, ns, &prefix], row_to_raw_fact)?;
-                rows.filter_map(decrypt_filter).collect()
-            } else {
-                let mut stmt = conn.prepare(
-                    "SELECT id, namespace, category, subject, predicate, object, confidence, source_episode_id, agent
-                     FROM semantic_facts
-                     WHERE superseded_by IS NULL
-                       AND (subject LIKE ?1 ESCAPE '\\' OR predicate LIKE ?1 ESCAPE '\\' OR object LIKE ?1 ESCAPE '\\')
-                     ORDER BY rowid DESC
-                     LIMIT 50",
-                )?;
-                let rows = stmt.query_map([&pattern], row_to_raw_fact)?;
-                rows.filter_map(decrypt_filter).collect()
-            };
-
-            Ok(facts)
+            let mut stmt = conn.prepare(&sql)?;
+            let param_refs: Vec<&dyn rusqlite::ToSql> =
+                params.iter().map(|p| p as &dyn rusqlite::ToSql).collect();
+            let rows = stmt.query_map(param_refs.as_slice(), row_to_raw_fact)?;
+            Ok(rows.filter_map(decrypt_filter).collect())
         })?)
     }
+}
+
+/// Reduce a Forget target phrase to the significant content tokens used to
+/// match stored facts. Drops the filler that natural phrasing wraps around the
+/// topic ("forget what I said about my X" → `x`), plus tokens of two chars or
+/// fewer, so the match keys on the subject rather than the whole sentence.
+/// Returns empty when nothing significant remains (caller falls back to a
+/// whole-string substring match).
+fn significant_forget_tokens(query: &str) -> Vec<String> {
+    const STOP: &[&str] = &[
+        "actually",
+        "forget",
+        "what",
+        "said",
+        "about",
+        "the",
+        "that",
+        "please",
+        "you",
+        "mentioned",
+        "told",
+        "remember",
+        "remembered",
+        "stored",
+        "regarding",
+        "concerning",
+        "info",
+        "information",
+        "anything",
+        "everything",
+        "was",
+        "were",
+        "it",
+        "this",
+        "these",
+        "those",
+        "and",
+        "delete",
+        "remove",
+        "erase",
+        "drop",
+        "longer",
+        "want",
+        "need",
+        "keep",
+        "our",
+        "know",
+        "knew",
+        "for",
+        "with",
+        "your",
+        "all",
+    ];
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .map(|t| t.to_lowercase())
+        .filter(|t| t.len() > 2 && !STOP.contains(&t.as_str()))
+        .collect()
 }
 
 /// Statistics for a single namespace.

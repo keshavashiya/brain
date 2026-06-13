@@ -101,6 +101,53 @@ async fn test_forget_is_namespace_scoped() {
     assert_eq!(work.len(), 0, "work namespace fact should be deleted");
 }
 
+/// Forget regression (full pipeline): a natural, verbose forget request — the
+/// kind real phrasing produces, where the target is a whole sentence rather
+/// than a distilled topic — must still delete the matching fact. Previously the
+/// whole-sentence target matched nothing and the forget silently no-op'd,
+/// leaving e.g. a secret the user explicitly asked to drop still stored.
+#[tokio::test]
+async fn test_forget_verbose_sentence_deletes_matching_fact() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let mut config = brain::BrainConfig::default();
+    config.brain.data_dir = temp_dir.path().to_str().unwrap().to_string();
+    let processor = SignalProcessor::new(config).await.unwrap();
+
+    processor
+        .store_fact_direct(
+            "work",
+            "test",
+            "user",
+            "access_token_is",
+            "TEMPTOKEN-9981",
+            None,
+        )
+        .await
+        .unwrap();
+    // An unrelated fact in the same namespace that must survive.
+    processor
+        .store_fact_direct("work", "test", "user", "likes", "black coffee", None)
+        .await
+        .unwrap();
+
+    let mut forget_signal = Signal::new(
+        SignalSource::Cli,
+        "cli",
+        "user",
+        "forget what I told you about my temporary access token",
+    );
+    forget_signal.namespace = "work".to_string();
+    let _ = processor.process(forget_signal).await.unwrap();
+
+    let remaining = processor.list_facts(Some("work"));
+    assert_eq!(
+        remaining.len(),
+        1,
+        "the access-token fact should be gone, the coffee fact should remain"
+    );
+    assert_eq!(remaining[0].predicate, "likes");
+}
+
 #[tokio::test]
 async fn test_store_fact_preserves_agent() {
     let temp_dir = tempfile::tempdir().unwrap();

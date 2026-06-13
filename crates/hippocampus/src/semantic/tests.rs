@@ -346,3 +346,58 @@ async fn test_list_namespaces() {
     let work_ns = namespaces.iter().find(|n| n.namespace == "work").unwrap();
     assert_eq!(work_ns.fact_count, 1);
 }
+
+// Forget regression: the classifier hands find_facts_matching the whole user
+// sentence, not a distilled topic. Token-keyed matching must still locate the
+// stored fact so the Forget intent actually deletes it (privacy). The old
+// whole-string `LIKE %<sentence>%` matched nothing and the forget no-op'd.
+#[tokio::test]
+async fn find_facts_matching_keys_on_topic_not_whole_sentence() {
+    let (store, _dir) = test_store().await;
+    store
+        .store_fact(
+            "personal",
+            "personal",
+            "user",
+            "access_token_is",
+            "TEMPTOKEN-9981",
+            1.0,
+            None,
+            dummy_vector(0.2),
+            None,
+        )
+        .await
+        .unwrap();
+    // An unrelated fact that must NOT match the token target.
+    store
+        .store_fact(
+            "personal",
+            "personal",
+            "user",
+            "likes",
+            "black coffee",
+            1.0,
+            None,
+            dummy_vector(0.4),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let hits = store
+        .find_facts_matching(
+            "Actually forget what I said about my temporary access token.",
+            Some("personal"),
+        )
+        .unwrap();
+
+    assert_eq!(hits.len(), 1, "should match exactly the access-token fact");
+    assert_eq!(hits[0].predicate, "access_token_is");
+
+    // Back-compat: a bare single-word target still matches via substring.
+    let coffee = store
+        .find_facts_matching("coffee", Some("personal"))
+        .unwrap();
+    assert_eq!(coffee.len(), 1);
+    assert_eq!(coffee[0].object, "black coffee");
+}
