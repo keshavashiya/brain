@@ -58,6 +58,12 @@ pub struct RmcpHost {
     vault: Option<Arc<dyn CredentialVault>>,
     capability_index: Option<Arc<dyn ToolCapabilityIndex>>,
     tool_registry: Option<Arc<dyn intent::ToolRegistry>>,
+    /// Semantic capability retrieval: when set, each server tool's
+    /// descriptor is embedded at mount before it registers into the shared
+    /// intent registry, so the router / chat advertiser rank MCP tools by
+    /// cosine alongside native ones. Unset → MCP tools register unembedded
+    /// (lexical-only ranking, unchanged behaviour).
+    descriptor_embedder: Option<Arc<dyn intent::DescriptorEmbedder>>,
 }
 
 struct Mounted {
@@ -98,6 +104,7 @@ impl RmcpHost {
             vault: None,
             capability_index: None,
             tool_registry: None,
+            descriptor_embedder: None,
         }
     }
 
@@ -137,6 +144,37 @@ impl RmcpHost {
     pub fn with_tool_registry(mut self, registry: Arc<dyn intent::ToolRegistry>) -> Self {
         self.tool_registry = Some(registry);
         self
+    }
+
+    /// Wire a [`intent::DescriptorEmbedder`] so each mounted server's tools are
+    /// embedded before they register into the shared intent registry — letting
+    /// the router / chat advertiser rank MCP tools semantically alongside
+    /// native ones. Best-effort: a failed embed registers the descriptor
+    /// unembedded.
+    pub fn with_descriptor_embedder(
+        mut self,
+        embedder: Arc<dyn intent::DescriptorEmbedder>,
+    ) -> Self {
+        self.descriptor_embedder = Some(embedder);
+        self
+    }
+
+    /// Build the intent descriptor for an MCP tool, embedding it when an
+    /// embedder is wired. The one place mount/refresh registration funnels
+    /// through, so every MCP descriptor reaching the registry is embedded
+    /// consistently.
+    async fn intent_descriptor_for(
+        &self,
+        server: &str,
+        t: &ToolDescriptor,
+    ) -> intent::ToolDescriptor {
+        let mut descriptor = tool_to_intent_descriptor(server, t);
+        if let Some(embedder) = &self.descriptor_embedder {
+            descriptor.embedding = embedder
+                .embed_descriptor(&descriptor.embedding_text())
+                .await;
+        }
+        descriptor
     }
 
     async fn mount_stdio(&self, name: String, cfg: ServerConfig) -> Result<(), McpHostError> {
@@ -281,7 +319,9 @@ impl RmcpHost {
         }
         if let Some(registry) = &self.tool_registry {
             for t in &tools {
-                let _ = registry.register(tool_to_intent_descriptor(&name, t)).await;
+                let _ = registry
+                    .register(self.intent_descriptor_for(&name, t).await)
+                    .await;
             }
         }
         Ok(())
@@ -461,7 +501,7 @@ impl RmcpHost {
         if let Some(registry) = &self.tool_registry {
             for t in tools {
                 let _ = registry
-                    .register(tool_to_intent_descriptor(server, t))
+                    .register(self.intent_descriptor_for(server, t).await)
                     .await;
             }
         }

@@ -114,9 +114,18 @@ pub fn capability_inventory(config: &brain::BrainConfig) -> Vec<backends::Capabi
 pub async fn register_native_capabilities(
     registry: &Arc<dyn ToolRegistry>,
     config: &brain::BrainConfig,
+    embedder: Option<&signal::capability_embed::CapabilityEmbedder>,
 ) {
-    let descriptors = native_descriptors(config);
+    let mut descriptors = native_descriptors(config);
+    // Semantic capability retrieval: stamp each descriptor's embedding
+    // from its text projection before registration, so the router / tool-loop
+    // / index can score by cosine. Best-effort — a degraded install with no
+    // embedder leaves `embedding` unset and ranking stays lexical-only.
+    if let Some(embedder) = embedder {
+        embedder.embed_descriptors(&mut descriptors).await;
+    }
     let count = descriptors.len();
+    let embedded = descriptors.iter().filter(|d| d.embedding.is_some()).count();
     for d in descriptors {
         let id = d.tool_id.clone();
         if let Err(e) = registry.register(d).await {
@@ -125,6 +134,7 @@ pub async fn register_native_capabilities(
     }
     tracing::info!(
         count,
+        embedded,
         "Native capabilities registered into the tool registry"
     );
 }

@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::capability_embed;
 use crate::notification;
 use crate::SignalProcessor;
 
@@ -406,6 +407,24 @@ impl SignalProcessor {
     /// Expose the configured host self-model, if any.
     pub fn host_model(&self) -> Option<&Arc<selfmodel::HostModel>> {
         self.host_model.as_ref()
+    }
+
+    /// Attach the residency-aware capability embedder so the chat tool-loop
+    /// advertiser ranks tools semantically. The same instance is wired
+    /// into the [`intent::DefaultIntentRouter`] at the composition root, so
+    /// the router and advertiser score against identically-embedded
+    /// descriptors. Unset → lexical-only ranking.
+    pub fn with_capability_embedder(
+        mut self,
+        embedder: capability_embed::CapabilityEmbedder,
+    ) -> Self {
+        self.capability_embedder = Some(embedder);
+        self
+    }
+
+    /// Expose the configured capability embedder, if any.
+    pub(crate) fn capability_embedder(&self) -> Option<&capability_embed::CapabilityEmbedder> {
+        self.capability_embedder.as_ref()
     }
 
     /// Attach a Terminal Bridge so `OpenTerminalSession` /

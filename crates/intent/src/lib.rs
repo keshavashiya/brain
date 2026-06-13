@@ -87,6 +87,20 @@ impl IntentToken {
             namespace,
         }
     }
+
+    /// The original free-text the token was derived from, when known. Carried
+    /// in [`Provenance`] (always for `User`, best-effort for `Llm`/`Reflex`).
+    /// The router embeds this for the semantic term — a structured token has no
+    /// surface form of its own, so without it the cosine term drops out and
+    /// scoring is lexical-only.
+    pub fn surface_text(&self) -> Option<&str> {
+        match &self.provenance {
+            Provenance::User { raw_input, .. } => Some(raw_input.as_str()),
+            Provenance::Llm { raw_input, .. } | Provenance::Reflex { raw_input, .. } => {
+                raw_input.as_deref()
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -277,6 +291,29 @@ pub struct ToolDescriptor {
     pub embedding: Option<Vec<f32>>,
 }
 
+impl ToolDescriptor {
+    /// The text projection embedded for semantic capability retrieval. Folds
+    /// the dotted verb, description, capability tags, and the human-facing
+    /// usage hints (`when_to_use`, `example`) — the same surface a user
+    /// paraphrases against — into one string. Pure, so the embedding step can
+    /// live at the wiring layer (which owns the concrete embedder) while the
+    /// schema crate stays dependency-free. Mirrors `graph_embed::node_text`.
+    pub fn embedding_text(&self) -> String {
+        let mut parts = vec![self.verb.dotted(), self.description.clone()];
+        if !self.capabilities.is_empty() {
+            parts.push(self.capabilities.join(" "));
+        }
+        if let Some(w) = &self.usage.when_to_use {
+            parts.push(w.clone());
+        }
+        if let Some(e) = &self.usage.example {
+            parts.push(e.clone());
+        }
+        parts.retain(|p| !p.trim().is_empty());
+        parts.join(" — ")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolRoute {
@@ -342,6 +379,33 @@ pub trait BreakerCheck: Send + Sync {
     async fn is_open(&self, tool_id: &str) -> bool;
 }
 
+/// Embeds a free-text query for semantic capability matching. The router holds
+/// one optionally (via [`DefaultIntentRouter::with_embedder`]) so the schema
+/// crate stays free of any concrete embedder — the same independence
+/// [`BreakerCheck`] buys against the resilience layer. Returns `None` on any
+/// failure so the router falls back to lexical-only scoring; implementations
+/// must never panic.
+///
+/// `namespace` is the token's namespace: implementations must honour data
+/// residency — a `local_only` namespace must never reach a remote embedder
+/// (use the deterministic fallback, as the graph embed path does).
+#[async_trait]
+pub trait QueryEmbedder: Send + Sync {
+    async fn embed_query(&self, text: &str, namespace: &str) -> Option<Vec<f32>>;
+}
+
+/// Embeds a tool descriptor's [`embedding_text`](ToolDescriptor::embedding_text)
+/// at registration so the router / advertiser can rank it by cosine. The
+/// MCP host holds one optionally so server tools embed on mount, the same way
+/// native descriptors embed at boot. Unlike [`QueryEmbedder`] there is no
+/// namespace / residency gate — a tool description is catalog metadata, not
+/// namespaced user data. Returns `None` on any failure so the descriptor
+/// registers unembedded and scoring falls back to lexical-only for it.
+#[async_trait]
+pub trait DescriptorEmbedder: Send + Sync {
+    async fn embed_descriptor(&self, text: &str) -> Option<Vec<f32>>;
+}
+
 // ─── Default implementations ────────────────────────────────────────────────
 
 /// Default [`IntentRouter`] that scores registered tools against a token and
@@ -361,6 +425,7 @@ pub trait BreakerCheck: Send + Sync {
 pub struct DefaultIntentRouter {
     registry: Arc<dyn ToolRegistry>,
     breakers: Option<Arc<dyn BreakerCheck>>,
+    embedder: Option<Arc<dyn QueryEmbedder>>,
 }
 
 impl DefaultIntentRouter {
@@ -368,6 +433,7 @@ impl DefaultIntentRouter {
         Self {
             registry,
             breakers: None,
+            embedder: None,
         }
     }
 
@@ -378,9 +444,34 @@ impl DefaultIntentRouter {
         self
     }
 
-    /// Score a single candidate against the token. Public so callers /
-    /// tests can probe the ranking without invoking `resolve`.
+    /// Wire a [`QueryEmbedder`] so `resolve` adds a semantic cosine term over
+    /// the token's [`surface_text`](IntentToken::surface_text) against each
+    /// tool's `embedding`. Without one — or when the token has no surface form,
+    /// the embedder fails, or a tool has no embedding — scoring is lexical-only
+    /// and byte-identical to before this slice.
+    pub fn with_embedder(mut self, embedder: Arc<dyn QueryEmbedder>) -> Self {
+        self.embedder = Some(embedder);
+        self
+    }
+
+    /// Lexical score of a candidate against the token (verb + capability
+    /// overlap). Public so callers / tests can probe the ranking without
+    /// invoking `resolve`. Equivalent to [`score_hybrid`](Self::score_hybrid)
+    /// with no query embedding.
     pub fn score(tok: &IntentToken, tool: &ToolDescriptor) -> f32 {
+        Self::score_hybrid(tok, tool, None)
+    }
+
+    /// Score a candidate, folding in a semantic cosine term when both a
+    /// `query_embedding` and the tool's `embedding` are present. The cosine
+    /// (`[0, 1]`) is weighted by [`ROUTER_SEMANTIC_WEIGHT`] and added on top of
+    /// the lexical signals — it can resolve a verb the lexical signals leave
+    /// ambiguous but never overrides an exact verb match.
+    pub fn score_hybrid(
+        tok: &IntentToken,
+        tool: &ToolDescriptor,
+        query_embedding: Option<&[f32]>,
+    ) -> f32 {
         let mut score = 0.0_f32;
         if tok.verb == tool.verb {
             score += 2.0;
@@ -391,6 +482,9 @@ impl DefaultIntentRouter {
             score += 0.5;
         }
         score += jaccard(&tok.required_capabilities, &tool.capabilities) * 1.5;
+        if let (Some(q), Some(t)) = (query_embedding, tool.embedding.as_deref()) {
+            score += cosine_similarity(q, t) * ROUTER_SEMANTIC_WEIGHT;
+        }
         score
     }
 }
@@ -399,6 +493,15 @@ impl DefaultIntentRouter {
 impl IntentRouter for DefaultIntentRouter {
     async fn resolve(&self, tok: &IntentToken) -> Result<ToolRoute, IntentError> {
         let tools = self.registry.list().await;
+        // Embed the token's surface form once (not per-candidate). Drops out to
+        // lexical-only scoring when no embedder is wired, the token has no
+        // surface text, or the embed fails.
+        let query_embedding: Option<Vec<f32>> = match (&self.embedder, tok.surface_text()) {
+            (Some(embedder), Some(text)) if !text.trim().is_empty() => {
+                embedder.embed_query(text, &tok.namespace).await
+            }
+            _ => None,
+        };
         let mut best: Option<(ToolDescriptor, f32)> = None;
         for t in tools {
             if let Some(breakers) = &self.breakers {
@@ -406,7 +509,7 @@ impl IntentRouter for DefaultIntentRouter {
                     continue;
                 }
             }
-            let s = Self::score(tok, &t);
+            let s = Self::score_hybrid(tok, &t, query_embedding.as_deref());
             match best {
                 None if s > 0.0 => best = Some((t, s)),
                 Some((_, b)) if s > b => best = Some((t, s)),
@@ -440,6 +543,38 @@ fn route_for(tool: &ToolDescriptor) -> ToolRoute {
         ToolSource::Terminal => ToolRoute::Terminal { session_hint: None },
     }
 }
+
+/// Cosine similarity between two embedding vectors, clamped to `[0, 1]`.
+///
+/// Returns `0.0` when either vector is empty, dimensions disagree, or either
+/// magnitude is zero — i.e. the semantic term silently drops out rather than
+/// poisoning the score. Negative cosines (semantically opposed directions)
+/// are floored to `0.0`: an unrelated tool should contribute nothing, never a
+/// penalty that could reorder the keyword/verb signal beneath it.
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.is_empty() || a.len() != b.len() {
+        return 0.0;
+    }
+    let mut dot = 0.0_f32;
+    let mut na = 0.0_f32;
+    let mut nb = 0.0_f32;
+    for (x, y) in a.iter().zip(b.iter()) {
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if na == 0.0 || nb == 0.0 {
+        return 0.0;
+    }
+    (dot / (na.sqrt() * nb.sqrt())).clamp(0.0, 1.0)
+}
+
+/// Weight applied to the cosine term in [`DefaultIntentRouter::score`]. Sized
+/// to a namespace-only match (`+1.0`) at unit cosine and to a full Jaccard
+/// overlap (`× 1.5`) just above it, so a strong semantic match can resolve a
+/// verb the lexical signals leave ambiguous without overriding an exact verb
+/// hit (`+2.0`).
+const ROUTER_SEMANTIC_WEIGHT: f32 = 1.5;
 
 fn jaccard(a: &[String], b: &[String]) -> f32 {
     if a.is_empty() && b.is_empty() {

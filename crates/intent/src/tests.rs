@@ -496,6 +496,114 @@ fn router_score_components() {
     assert!((s - 3.5).abs() < 1e-6, "exact-match score was {s}");
 }
 
+#[test]
+fn cosine_similarity_basics() {
+    // Identical direction → 1.0.
+    assert!((cosine_similarity(&[1.0, 0.0], &[2.0, 0.0]) - 1.0).abs() < 1e-6);
+    // Orthogonal → 0.0.
+    assert!(cosine_similarity(&[1.0, 0.0], &[0.0, 1.0]).abs() < 1e-6);
+    // Opposed → floored to 0.0 (never a penalty).
+    assert!(cosine_similarity(&[1.0, 0.0], &[-1.0, 0.0]).abs() < 1e-6);
+    // Degenerate inputs drop out to 0.0.
+    assert_eq!(cosine_similarity(&[], &[]), 0.0);
+    assert_eq!(cosine_similarity(&[1.0], &[1.0, 0.0]), 0.0);
+    assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 1.0]), 0.0);
+}
+
+#[test]
+fn score_hybrid_without_embedding_is_lexical_only() {
+    let tok = sample_user_token("fs", "read", &["fs.read"]);
+    let mut tool = descriptor_with("t", ToolSource::Terminal, "fs", "read", &["fs.read"]);
+    // No query embedding → identical to lexical `score`.
+    assert_eq!(
+        DefaultIntentRouter::score_hybrid(&tok, &tool, None),
+        DefaultIntentRouter::score(&tok, &tool),
+    );
+    // Tool has an embedding but the query doesn't → still lexical-only.
+    tool.embedding = Some(vec![1.0, 0.0]);
+    assert_eq!(
+        DefaultIntentRouter::score_hybrid(&tok, &tool, None),
+        DefaultIntentRouter::score(&tok, &tool),
+    );
+    // Query embedding present but tool has none → lexical-only.
+    let mut bare = tool.clone();
+    bare.embedding = None;
+    assert_eq!(
+        DefaultIntentRouter::score_hybrid(&tok, &bare, Some(&[1.0, 0.0])),
+        DefaultIntentRouter::score(&tok, &bare),
+    );
+}
+
+#[test]
+fn score_hybrid_adds_weighted_cosine_when_both_present() {
+    let tok = sample_user_token("fs", "read", &[]);
+    let mut tool = descriptor_with("t", ToolSource::Terminal, "fs", "read", &[]);
+    tool.embedding = Some(vec![1.0, 0.0]);
+    let lexical = DefaultIntentRouter::score(&tok, &tool);
+    // Unit cosine → lexical + ROUTER_SEMANTIC_WEIGHT (1.5).
+    let s = DefaultIntentRouter::score_hybrid(&tok, &tool, Some(&[1.0, 0.0]));
+    assert!((s - (lexical + 1.5)).abs() < 1e-6, "hybrid score was {s}");
+}
+
+/// Test embedder: returns a fixed vector for one phrase, orthogonal otherwise.
+struct StubEmbedder;
+
+#[async_trait::async_trait]
+impl QueryEmbedder for StubEmbedder {
+    async fn embed_query(&self, text: &str, _namespace: &str) -> Option<Vec<f32>> {
+        if text.contains("grab that webpage") {
+            Some(vec![1.0, 0.0])
+        } else {
+            Some(vec![0.0, 1.0])
+        }
+    }
+}
+
+#[tokio::test]
+async fn router_semantic_term_resolves_lexically_ambiguous_verb() {
+    // Two tools in the same namespace, neither an exact verb match for the
+    // token — lexical scoring ties them. The semantic embedding breaks the tie.
+    let registry = Arc::new(InMemoryToolRegistry::new());
+    let mut http = descriptor_with(
+        "net.http",
+        ToolSource::NativeBackend {
+            backend: BackendId::new("net"),
+        },
+        "net",
+        "http",
+        &[],
+    );
+    http.embedding = Some(vec![1.0, 0.0]); // aligned with "grab that webpage"
+    let mut ping = descriptor_with(
+        "net.ping",
+        ToolSource::NativeBackend {
+            backend: BackendId::new("net"),
+        },
+        "net",
+        "ping",
+        &[],
+    );
+    ping.embedding = Some(vec![0.0, 1.0]); // orthogonal
+    registry.register(http).await.unwrap();
+    registry.register(ping).await.unwrap();
+
+    let router = DefaultIntentRouter::new(registry as Arc<dyn ToolRegistry>)
+        .with_embedder(Arc::new(StubEmbedder));
+    // Token verb is `net.fetch` (namespace-only match against both), surface
+    // text "grab that webpage" — zero lexical overlap with either tool's verb.
+    let mut tok = sample_user_token("net", "fetch", &[]);
+    tok.provenance = Provenance::User {
+        raw_input: "grab that webpage".into(),
+        ui_origin: None,
+        ts: fixed_ts(),
+    };
+    let route = router.resolve(&tok).await.unwrap();
+    match route {
+        ToolRoute::NativeBackend { backend } => assert_eq!(backend.as_str(), "net"),
+        other => panic!("expected NativeBackend(net), got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn in_memory_registry_list_returns_all() {
     let reg = InMemoryToolRegistry::new();

@@ -175,14 +175,34 @@ pub async fn build_processor(
     let tool_registry: Arc<dyn intent::ToolRegistry> =
         Arc::new(intent::InMemoryToolRegistry::new());
     let breaker_check: Arc<dyn intent::BreakerCheck> = breakers.clone();
-    let intent_router: Arc<dyn intent::IntentRouter> = Arc::new(
-        intent::DefaultIntentRouter::new(tool_registry.clone()).with_breakers(breaker_check),
-    );
+    // Semantic capability retrieval: when an embedder is present, the
+    // router scores a cosine term over the token's surface text against each
+    // tool's embedding. Residency-aware (local-only namespaces never reach a
+    // remote embedder); the same embedder stamps descriptor embeddings at
+    // registration below. Absent (degraded install) → lexical-only routing.
+    let capability_embedder = processor.embedder().map(|e| {
+        signal::capability_embed::CapabilityEmbedder::new(
+            e,
+            processor.embedding_dim(),
+            config.memory.residency_policy(),
+        )
+    });
+    let mut router =
+        intent::DefaultIntentRouter::new(tool_registry.clone()).with_breakers(breaker_check);
+    if let Some(embedder) = &capability_embedder {
+        router = router.with_embedder(Arc::new(embedder.clone()));
+    }
+    let intent_router: Arc<dyn intent::IntentRouter> = Arc::new(router);
     let mcp_capability_index: Arc<dyn mcphost::ToolCapabilityIndex> =
         Arc::new(mcphost::InMemoryToolCapabilityIndex::new());
     processor = processor
         .with_tool_registry(tool_registry.clone())
         .with_intent_router(intent_router);
+    // The same embedder feeds the chat tool-loop advertiser's semantic ranking,
+    // so router and advertiser score against identically-embedded descriptors.
+    if let Some(embedder) = &capability_embedder {
+        processor = processor.with_capability_embedder(embedder.clone());
+    }
     tracing::info!("Capability kernel wired (registry + DefaultIntentRouter + breakers)");
 
     // Seed the registry with the kernel's *native* capabilities (action
@@ -190,7 +210,12 @@ pub async fn build_processor(
     // populates describes the built-in tools, not just mounted servers.
     // This is what the SOUL capability digest and external `tools/list`
     // read. Awareness only — execution stays gated.
-    crate::capabilities::register_native_capabilities(&tool_registry, config).await;
+    crate::capabilities::register_native_capabilities(
+        &tool_registry,
+        config,
+        capability_embedder.as_ref(),
+    )
+    .await;
 
     // MCP host — always wired so `Intent::MountMcpServer` /
     // `ListMcpServers` / `UnmountMcpServer` and the `mcp:{server}:{tool}`
@@ -206,12 +231,16 @@ pub async fn build_processor(
     // `ResilientMcpHost` so every `call` records breaker outcomes and
     // `Open` tools fail fast at the host boundary as well — keeps the
     // breaker state honest even when callers bypass the router.
-    let rmcp_inner: Arc<dyn mcphost::MCPHost> = Arc::new(
-        mcphost::RmcpHost::new()
-            .with_observer(observer.clone())
-            .with_tool_registry(tool_registry)
-            .with_capability_index(mcp_capability_index),
-    );
+    let mut rmcp_host = mcphost::RmcpHost::new()
+        .with_observer(observer.clone())
+        .with_tool_registry(tool_registry)
+        .with_capability_index(mcp_capability_index);
+    // embed MCP tool descriptors on mount through the same embedder the
+    // native path uses, so server tools rank semantically alongside native ones.
+    if let Some(embedder) = &capability_embedder {
+        rmcp_host = rmcp_host.with_descriptor_embedder(Arc::new(embedder.clone()));
+    }
+    let rmcp_inner: Arc<dyn mcphost::MCPHost> = Arc::new(rmcp_host);
     // Persistent dead-letter queue — exhausted MCP retries land here
     // so the serve loop's drain task (cli::serve::spawn_dlq_drain) can
     // replay them later. The same `Arc` is threaded through the

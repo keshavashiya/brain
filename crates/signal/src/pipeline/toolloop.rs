@@ -20,6 +20,7 @@
 use chrono::Utc;
 
 use cortex::llm::{Message, ProposedToolCall, Response, ToolDef, Usage};
+use intent::QueryEmbedder;
 
 use crate::types::*;
 use crate::SignalProcessor;
@@ -48,7 +49,7 @@ impl SignalProcessor {
         // chain instead of timing out against a dead remote (see
         // `SignalProcessor::active_llm`).
         let llm = self.active_llm();
-        let tools = self.advertised_tools(&messages).await;
+        let tools = self.advertised_tools(&messages, &signal.namespace).await;
         if tools.is_empty() {
             // No manifest / no tools → unchanged plain-text behaviour.
             return Ok(llm.generate(&messages).await?);
@@ -94,7 +95,7 @@ impl SignalProcessor {
     /// Each description is routed through
     /// [`intent::sanitization::render_tool_description_for_prompt`] before it
     /// reaches a provider — an MCP server's description is untrusted text.
-    async fn advertised_tools(&self, messages: &[Message]) -> Vec<ToolDef> {
+    async fn advertised_tools(&self, messages: &[Message], namespace: &str) -> Vec<ToolDef> {
         let Some(registry) = self.tool_registry() else {
             return Vec::new();
         };
@@ -121,7 +122,21 @@ impl SignalProcessor {
         // a stronger keyword match). Empty when learning is off / nothing
         // proven yet, in which case ranking is byte-identical to keyword-only.
         let bonuses = self.fitness_bonuses(&manifest);
-        let ranked = score_top_k(manifest, &query, TOOL_ADVERTISE_K, &bonuses);
+        // Semantic capability retrieval: embed the turn's query once and
+        // add a cosine term over each tool's embedding. Residency-aware (a
+        // local-only namespace never reaches a remote embedder). Absent
+        // embedder / empty query → `None` → ranking stays keyword + fitness.
+        let query_embedding = match (self.capability_embedder(), query.trim().is_empty()) {
+            (Some(embedder), false) => embedder.embed_query(&query, namespace).await,
+            _ => None,
+        };
+        let ranked = score_top_k(
+            manifest,
+            &query,
+            TOOL_ADVERTISE_K,
+            &bonuses,
+            query_embedding.as_deref(),
+        );
         ranked
             .into_iter()
             .map(|t| ToolDef {
@@ -273,29 +288,45 @@ fn accumulate_usage(total: &mut Option<Usage>, round: Option<&Usage>) {
     acc.total_tokens += round.total_tokens;
 }
 
-/// Rank `tools` by keyword overlap with `query` (plus a bounded learned
-/// fitness bonus) and keep the best `k`.
+/// Weight of the semantic cosine term in the tool-loop advertiser's composite
+/// score. Sized so a strong semantic match (cosine ~0.7+) is worth more than a
+/// single keyword term — making semantic similarity a first-class retrieval
+/// signal, not just a tie-break — so a paraphrase with zero lexical overlap
+/// still surfaces the right tool. The learned fitness bonus stays strictly
+/// `< 1.0`, so it only ever breaks ties among otherwise equally-relevant tools.
+const SEMANTIC_WEIGHT: f32 = 2.0;
+
+/// Rank `tools` by relevance to `query` and keep the best `k`.
 ///
-/// Case-insensitive alphanumeric term overlap over each tool's dotted verb and
-/// description — no model/embedding dependency — gives an integer score; the
-/// per-tool `bonuses` value (`[0, 0.99]`) is added on top. Because the bonus is
-/// strictly below `1.0`, it can only reorder tools with **equal** keyword
-/// overlap (a true tie-break) and never lifts a tool past one that matched an
-/// extra query term. Sorted by composite score then verb for stability;
-/// zero-score tools fill remaining slots up to `k`, so a query that matches
-/// nothing still advertises *some* tools rather than none.
+/// Composite score per tool:
+/// - **keyword overlap** — case-insensitive alphanumeric term overlap over the
+///   dotted verb and description (an integer count);
+/// - **semantic cosine** — when `query_embedding` is `Some` and the tool has an
+///   `embedding`, `cosine × SEMANTIC_WEIGHT` is added; absent on either
+///   side it contributes nothing and ranking is keyword + fitness only;
+/// - **learned fitness** — the per-tool `bonuses` value (`[0, 0.99]`), strictly
+///   below `1.0`, so it only breaks ties among otherwise equally-relevant tools.
+///
+/// Sorted by composite score then verb for stability; zero-score tools fill
+/// remaining slots up to `k`, so a query that matches nothing still advertises
+/// *some* tools rather than none.
 fn score_top_k(
     mut tools: Vec<intent::ToolDescriptor>,
     query: &str,
     k: usize,
     bonuses: &std::collections::HashMap<String, f32>,
+    query_embedding: Option<&[f32]>,
 ) -> Vec<intent::ToolDescriptor> {
     if k == 0 {
         return Vec::new();
     }
     let terms = tokenize(query);
     let composite = |t: &intent::ToolDescriptor| -> f32 {
-        score_tool(t, &terms) as f32 + bonuses.get(&t.tool_id).copied().unwrap_or(0.0)
+        let mut s = score_tool(t, &terms) as f32 + bonuses.get(&t.tool_id).copied().unwrap_or(0.0);
+        if let (Some(q), Some(e)) = (query_embedding, t.embedding.as_deref()) {
+            s += intent::cosine_similarity(q, e) * SEMANTIC_WEIGHT;
+        }
+        s
     };
     tools.sort_by(|a, b| {
         composite(b)
@@ -443,7 +474,7 @@ mod tests {
             td("web", "search", "Search the web for a query"),
             td("git", "commit", "Record changes to the repository"),
         ];
-        let hits = score_top_k(tools, "search the web", 2, &no_bonus());
+        let hits = score_top_k(tools, "search the web", 2, &no_bonus(), None);
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].verb.dotted(), "web.search");
     }
@@ -455,8 +486,11 @@ mod tests {
             td("fs", "write", "write"),
             td("fs", "list", "list"),
         ];
-        assert_eq!(score_top_k(tools.clone(), "file", 2, &no_bonus()).len(), 2);
-        assert!(score_top_k(tools, "file", 0, &no_bonus()).is_empty());
+        assert_eq!(
+            score_top_k(tools.clone(), "file", 2, &no_bonus(), None).len(),
+            2
+        );
+        assert!(score_top_k(tools, "file", 0, &no_bonus(), None).is_empty());
     }
 
     #[test]
@@ -466,7 +500,7 @@ mod tests {
             td("fs", "read", "y"),
             td("web", "search", "z"),
         ];
-        let hits = score_top_k(tools, "zzz_no_match", 2, &no_bonus());
+        let hits = score_top_k(tools, "zzz_no_match", 2, &no_bonus(), None);
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].verb.dotted(), "fs.read");
         assert_eq!(hits[1].verb.dotted(), "git.commit");
@@ -483,7 +517,7 @@ mod tests {
         ];
         let mut bonuses = std::collections::HashMap::new();
         bonuses.insert("fs.write".to_string(), 0.5);
-        let hits = score_top_k(tools, "file", 2, &bonuses);
+        let hits = score_top_k(tools, "file", 2, &bonuses, None);
         assert_eq!(
             hits[0].verb.dotted(),
             "fs.write",
@@ -503,11 +537,91 @@ mod tests {
         ];
         let mut bonuses = std::collections::HashMap::new();
         bonuses.insert("fs.read".to_string(), 0.99);
-        let hits = score_top_k(tools, "search the web", 2, &bonuses);
+        let hits = score_top_k(tools, "search the web", 2, &bonuses, None);
         assert_eq!(
             hits[0].verb.dotted(),
             "web.search",
             "keyword relevance stays primary"
+        );
+    }
+
+    /// A descriptor carrying a unit embedding pointing at axis `axis` of a
+    /// 3-dimensional space — lets a test assert cosine-driven ordering without
+    /// any lexical overlap.
+    fn td_emb(ns: &str, action: &str, description: &str, axis: usize) -> intent::ToolDescriptor {
+        let mut d = td(ns, action, description);
+        let mut v = vec![0.0_f32; 3];
+        v[axis] = 1.0;
+        d.embedding = Some(v);
+        d
+    }
+
+    #[test]
+    fn semantic_ranking_surfaces_zero_lexical_overlap_match() {
+        // DoD: a paraphrase with zero lexical overlap still ranks the
+        // right tool first. The query embedding aligns with net.http's axis;
+        // none of the three tool descriptions share a term with the query.
+        let tools = vec![
+            td_emb("net", "http", "Fetch a URL over HTTP", 0),
+            td_emb("clock", "now", "Report the current time", 1),
+            td_emb("math", "eval", "Evaluate an arithmetic expression", 2),
+        ];
+        let query = "grab that webpage";
+        // Sanity: the query shares no keyword with any tool's verb/description.
+        let terms = tokenize(query);
+        assert!(
+            tools.iter().all(|t| score_tool(t, &terms) == 0),
+            "test query must have zero lexical overlap"
+        );
+        let query_embedding = vec![1.0_f32, 0.0, 0.0]; // aligned with net.http
+        let hits = score_top_k(tools, query, 3, &no_bonus(), Some(&query_embedding));
+        assert_eq!(
+            hits[0].verb.dotted(),
+            "net.http",
+            "semantic match wins with zero lexical overlap"
+        );
+    }
+
+    #[test]
+    fn semantic_term_is_inert_without_query_embedding() {
+        // Control: the same embedded tools, but no query embedding → ranking is
+        // byte-identical to keyword-only (verb-sorted fill on a no-match query).
+        let tools = vec![
+            td_emb("net", "http", "Fetch a URL over HTTP", 0),
+            td_emb("clock", "now", "Report the current time", 1),
+            td_emb("math", "eval", "Evaluate an arithmetic expression", 2),
+        ];
+        let hits = score_top_k(tools, "grab that webpage", 3, &no_bonus(), None);
+        // No keyword match anywhere → verb-sorted fill: clock.now, math.eval, net.http.
+        assert_eq!(hits[0].verb.dotted(), "clock.now");
+        assert_eq!(hits[1].verb.dotted(), "math.eval");
+        assert_eq!(hits[2].verb.dotted(), "net.http");
+    }
+
+    #[test]
+    fn strong_keyword_match_still_outranks_perfect_semantic_match() {
+        // Semantic augments lexical, it doesn't erase it. A unit cosine is
+        // worth SEMANTIC_WEIGHT (2.0) keyword terms, so a match with *three*
+        // keyword terms (3.0) outranks a perfect-cosine tool with zero lexical
+        // overlap (2.0). This pins the calibration boundary.
+        let tools = vec![
+            // Three query terms ("search", "the", "web"), embedding orthogonal.
+            td_emb("web", "search", "search the web", 1),
+            // Embedding aligned with the query, but zero keyword overlap.
+            td_emb("net", "http", "Fetch a URL", 0),
+        ];
+        let query_embedding = vec![1.0_f32, 0.0, 0.0]; // aligned with net.http
+        let hits = score_top_k(
+            tools,
+            "search the web",
+            2,
+            &no_bonus(),
+            Some(&query_embedding),
+        );
+        assert_eq!(
+            hits[0].verb.dotted(),
+            "web.search",
+            "a strong keyword match outranks a pure semantic one"
         );
     }
 

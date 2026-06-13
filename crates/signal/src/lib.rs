@@ -12,6 +12,7 @@
 
 pub mod approval;
 pub mod authz;
+pub mod capability_embed;
 pub mod notification;
 pub mod observation_graph_mirror;
 pub mod reflex_runner;
@@ -149,6 +150,13 @@ pub struct SignalProcessor {
     /// Probed once at bootstrap; the capability digest names the machine
     /// class from it. `None` leaves the digest unchanged (back-compat).
     host_model: Option<std::sync::Arc<selfmodel::HostModel>>,
+    /// Residency-aware embedder for semantic capability retrieval. When
+    /// set, the chat tool-loop advertiser embeds the user's turn text and adds
+    /// a cosine term over each tool's embedding to the keyword/fitness ranking.
+    /// The same instance is wired into the [`intent::DefaultIntentRouter`].
+    /// `None` (no embedder / degraded install) → lexical-only ranking,
+    /// byte-identical to before this slice.
+    capability_embedder: Option<capability_embed::CapabilityEmbedder>,
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
