@@ -59,6 +59,31 @@ pub async fn detect_running_daemon(config: &brain::BrainConfig) -> Option<String
     }
 }
 
+/// Probe the daemon's health endpoint up to `attempts` times, returning the
+/// base URL on the first success.
+///
+/// `/health` is a trivial, stateless handler, so a failed probe against a
+/// daemon whose process is alive almost always means the HTTP listener hasn't
+/// finished binding yet (the window right after `brain start`/restart, where
+/// connections are *refused* and fail fast). Retrying rides out that bind
+/// window so a transient race isn't misreported as a down/zombie daemon.
+/// Callers that already know the daemon should be down should use the
+/// single-shot [`detect_running_daemon`] to stay fast.
+pub async fn probe_daemon_with_retries(
+    config: &brain::BrainConfig,
+    attempts: u32,
+) -> Option<String> {
+    for attempt in 0..attempts {
+        if let Some(url) = detect_running_daemon(config).await {
+            return Some(url);
+        }
+        if attempt + 1 < attempts {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        }
+    }
+    None
+}
+
 /// Require a running Brain daemon, returning its base URL or a clear error.
 ///
 /// Retries a few times to handle the case where the daemon is still booting.
@@ -174,4 +199,91 @@ pub async fn proxy_mcp_stdio(mcp_url: &str, config: &brain::BrainConfig) -> anyh
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// A config whose HTTP adapter points at `port` on loopback.
+    fn config_for(port: u16) -> brain::BrainConfig {
+        let mut config = brain::BrainConfig::default();
+        config.adapters.http.host = "127.0.0.1".to_string();
+        config.adapters.http.port = port;
+        config
+    }
+
+    /// Accept one connection on `listener`, read the request, and reply with a
+    /// minimal HTTP/1.1 200 — enough for reqwest to see `/health` succeed.
+    async fn serve_one_health(listener: TcpListener) {
+        if let Ok((mut sock, _)) = listener.accept().await {
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await;
+            let body = br#"{"status":"ok","version":"test"}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.write_all(body).await;
+            let _ = sock.flush().await;
+        }
+    }
+
+    /// Bind a loopback listener on an OS-assigned port and return both.
+    async fn bound_listener() -> (TcpListener, u16) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        (listener, port)
+    }
+
+    #[tokio::test]
+    async fn probe_succeeds_against_live_health() {
+        let (listener, port) = bound_listener().await;
+        tokio::spawn(serve_one_health(listener));
+        let config = config_for(port);
+
+        let url = probe_daemon_with_retries(&config, 4).await;
+        assert_eq!(url, Some(format!("http://127.0.0.1:{port}")));
+    }
+
+    #[tokio::test]
+    async fn probe_returns_none_when_port_is_closed() {
+        // Reserve a port, then drop the listener so nothing is bound there:
+        // connections are refused and every attempt fails fast.
+        let (listener, port) = bound_listener().await;
+        drop(listener);
+        let config = config_for(port);
+
+        assert!(probe_daemon_with_retries(&config, 4).await.is_none());
+    }
+
+    /// The core fix: a daemon still binding its listener fails the first
+    /// (single-shot) probe but is caught by the retrying probe — so status no
+    /// longer misreports a soon-to-be-serving daemon as a zombie / stale PID.
+    #[tokio::test]
+    async fn retrying_probe_rides_out_a_delayed_bind() {
+        let (reservation, port) = bound_listener().await;
+        let config = config_for(port);
+
+        // At t0 nothing is serving — the single-shot probe must fail.
+        drop(reservation);
+        assert!(
+            detect_running_daemon(&config).await.is_none(),
+            "single-shot probe should miss a not-yet-bound listener"
+        );
+
+        // Bind + serve `/health` shortly after, within the retry window.
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+            if let Ok(listener) = TcpListener::bind(format!("127.0.0.1:{port}")).await {
+                serve_one_health(listener).await;
+            }
+        });
+
+        let url = probe_daemon_with_retries(&config, 6).await;
+        assert_eq!(url, Some(format!("http://127.0.0.1:{port}")));
+    }
 }

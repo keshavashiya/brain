@@ -17,5 +17,7 @@ mod safety;
 #[cfg(test)]
 mod tests;
 
-pub use client::{detect_running_daemon, proxy_mcp_stdio, require_daemon};
+pub use client::{
+    detect_running_daemon, probe_daemon_with_retries, proxy_mcp_stdio, require_daemon,
+};
 pub use processor::build_processor;

@@ -12,16 +12,30 @@ pub(crate) async fn show_status(config: &brain::BrainConfig) -> anyhow::Result<(
     println!("  Memory:       {}", config.data_dir().display());
 
     // Daemon state via HTTP health probe — the single source of truth.
-    let daemon_running = bootstrap::detect_running_daemon(config).await;
-    match (daemon_running.as_ref(), read_pid(config)) {
+    //
+    // When a process is alive under the PID file but the first probe fails,
+    // retry before passing judgement: a daemon that's still binding its HTTP
+    // listener (the window right after `brain start`/restart) refuses
+    // connections for a moment, and a single-shot probe would misreport the
+    // soon-to-be-serving daemon as a "zombie" or "stale PID file" — the
+    // contradiction where State said "asleep" while ports were live and Cortex
+    // responsive. If no process is alive we keep the single fast probe so
+    // status stays snappy when the daemon is genuinely down.
+    let pid = read_pid(config);
+    let process_alive = pid.is_some_and(is_process_running);
+    let daemon_running = if process_alive {
+        bootstrap::probe_daemon_with_retries(config, 4).await
+    } else {
+        bootstrap::detect_running_daemon(config).await
+    };
+    match (daemon_running.as_ref(), pid) {
         (Some(_), _) => {
-            let pid = read_pid(config)
-                .map(|p| format!(" (PID {p})"))
-                .unwrap_or_default();
-            println!("  State:        awake{}", pid);
+            let pid_label = pid.map(|p| format!(" (PID {p})")).unwrap_or_default();
+            println!("  State:        awake{}", pid_label);
         }
-        (None, Some(pid)) if is_process_running(pid) => {
-            // Process running but HTTP not responding — zombie state
+        (None, Some(pid)) if process_alive => {
+            // Process running but HTTP still not responding after retries —
+            // a genuine zombie (hung listener), not a transient bind race.
             println!("  State:        zombie (PID {pid}, not responding)");
         }
         (None, Some(_)) => {
