@@ -3,13 +3,13 @@
 ## Requirements
 
 - [Ollama](https://ollama.com) (or any OpenAI-compatible API)
-- Rust 1.82+ (only for building from source)
+- Rust 1.91+ (only for building from source)
 - Docker (optional — for SearXNG web search backend)
 
 ## From crates.io (recommended)
 
 ```bash
-cargo install brainos          # requires Rust 1.82+
+cargo install brainos          # requires Rust 1.91+
 brain init                     # creates ~/.brain/ with config, database, vector index
 ollama pull qwen2.5-coder:7b
 ollama pull nomic-embed-text

@@ -1,6 +1,6 @@
 # Intent Taxonomy
 
-Brain exposes 28 intent variants covering all user-facing actions. Intents are classified by the Thalamus using a regex fast-path with LLM fallback.
+Brain exposes 31 intent variants covering all user-facing actions. Intents are classified by the Thalamus using a regex fast-path with LLM fallback.
 
 ## Intent Categories
 

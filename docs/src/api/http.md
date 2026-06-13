@@ -79,7 +79,7 @@ GET /metrics     # Prometheus-formatted metrics
 | Adapter | Port | Host |
 |---------|------|------|
 | HTTP | 19789 | 127.0.0.1 |
-| WebSocket | 19790 | 0.0.0.0 |
+| WebSocket | 19790 | 127.0.0.1 |
 | MCP HTTP | 19791 | 127.0.0.1 |
-| gRPC | 19792 | 0.0.0.0 |
+| gRPC | 19792 | 127.0.0.1 |
 | Terminal | 19793 | 127.0.0.1 |

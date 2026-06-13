@@ -12,7 +12,7 @@ All capabilities are registered in a single `ToolRegistry`. Three producers feed
 
 Every capability has:
 - **ID** — unique identifier
-- **Safety tier** — Read / Write / Destructive / External
+- **Safety tier** — Read / Write / Execute / Destructive / External
 - **Preconditions** — what must be true for it to work
 - **When-to-use** — guidance for the LLM
 - **Embedding** — semantic descriptor for hybrid retrieval

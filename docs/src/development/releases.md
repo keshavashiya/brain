@@ -2,7 +2,7 @@
 
 ## Versioning
 
-Brain follows semantic versioning. The workspace version is locked across all 33 crates.
+Brain follows semantic versioning. The workspace version is locked across all 29 crates.
 
 ## Release pipeline
 

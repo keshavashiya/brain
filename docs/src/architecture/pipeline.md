@@ -11,7 +11,7 @@ Input → Intent Classification → Authorization → Importance Scoring
 
 1. **Signal Ingestion** — signals arrive via any adapter (HTTP, WS, gRPC, MCP, CLI) as a typed `Signal` carrying content, namespace, principal, and metadata.
 
-2. **Intent Classification** — the `Thalamus` classifies each signal into one of 28 intent variants using a regex fast-path with async LLM fallback and timeout.
+2. **Intent Classification** — the `Thalamus` classifies each signal into one of 31 intent variants using a regex fast-path with async LLM fallback and timeout.
 
 3. **Authorization** — the `IdentityStore` enforces tier-based authorization on every signal. The pipeline gate runs after classification, checking the principal's rights against the required tier.
 

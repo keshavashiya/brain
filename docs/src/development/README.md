@@ -1,6 +1,6 @@
 # Contributing
 
-We welcome contributions! The project is organized as a Rust workspace with 33 crates.
+We welcome contributions! The project is organized as a Rust workspace with 29 crates.
 
 ## Getting started
 
