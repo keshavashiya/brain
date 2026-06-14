@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Host timezone detected at `brain init`.** The generated config shipped
+  `proactivity.quiet_hours.timezone: "UTC"`, so on a fresh install proactive
+  nudges and quiet-hours were computed against the wrong wall clock for
+  everyone outside UTC — silently. `brain init` now reads the host zone from
+  `/etc/localtime` (macOS and Linux), validates it as a real IANA zone, and
+  bakes it into the written config (e.g. `Asia/Kolkata`), printing what it
+  detected. Falls back to `UTC` untouched when the host zone can't be read.
+
+- **Startup warning for write-only scheduling.** `actions.scheduling` (the
+  write axis) and `reflex.cron` (the fire axis) are independent, so enabling
+  the former without the latter persisted scheduled intents that never fired —
+  a silent black hole. `brain doctor` already flagged this; the startup config
+  validation now warns about it too, so a user who only ever runs `brain start`
+  hears about it as well.
+
+- **Complete configuration reference.** Every `default.yaml` knob was validated
+  against its consumption site in code (all wired; nothing declared-only), and
+  the docs now mirror the full surface — including the `confirm` (standing
+  approvals) and `identity` (principals) sections that previously existed only
+  in code. `default.yaml` gained commented `confirm`/`identity` stubs so the
+  generated config matches what Brain actually reads, plus a reading-guide
+  header and `[advanced]` tags so the handful of high-value knobs stand out
+  from the well-tuned internals.
+
 - **Live manifest health (`monitoring.manifest_health`).** A capability used to
   look available even when the thing it depends on was down. The daemon now
   sweeps the manifest on an interval, probing the embedding model, network
