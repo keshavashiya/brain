@@ -330,6 +330,19 @@ impl BrainConfig {
             warnings.push("actions.resilience.circuit_breaker_threshold is 0; circuit breaker will never trip.".to_string());
         }
 
+        // `actions.scheduling` is the *write* axis (create/persist scheduled
+        // intents); `reflex.cron` is the *fire* axis. Enabling the former
+        // without the latter persists intents that never fire — a silent
+        // black hole. `brain doctor` flags this too, but a user who only ever
+        // runs `brain start` would otherwise never hear about it.
+        if self.actions.scheduling.enabled && !self.reflex.cron.enabled {
+            warnings.push(
+                "actions.scheduling is enabled but reflex.cron is disabled — scheduled \
+                 intents will persist but never fire. Set reflex.cron.enabled = true."
+                    .to_string(),
+            );
+        }
+
         Ok(warnings)
     }
 }

@@ -18,6 +18,15 @@ pub(crate) async fn cmd_init(
     let generated_key = match BrainConfig::write_default_config(force)? {
         Some((path, key)) => {
             println!("  Genome (config):    {} (written)", path.display());
+            // The embedded default ships `quiet_hours.timezone: "UTC"`, which is
+            // wrong for almost everyone. Detect the host zone and bake it in so
+            // proactive quiet-hours line up with the wall clock out of the box.
+            match apply_detected_timezone(&path) {
+                Some(tz) => println!("  Timezone:           {tz} (detected)"),
+                None => println!(
+                    "  Timezone:           UTC (could not detect host zone — edit if wrong)"
+                ),
+            }
             Some(key)
         }
         None => {
@@ -101,4 +110,35 @@ pub(crate) async fn cmd_init(
     );
 
     Ok(())
+}
+
+/// Patch the freshly-written config's `quiet_hours.timezone` from the default
+/// `"UTC"` to the host's IANA zone, when we can detect one. Returns the zone we
+/// wrote, or `None` if detection failed or the file couldn't be patched (in
+/// which case the safe `"UTC"` default is left untouched).
+fn apply_detected_timezone(config_path: &std::path::Path) -> Option<String> {
+    let tz = detect_system_timezone()?;
+    let yaml = std::fs::read_to_string(config_path).ok()?;
+    // Single occurrence in the embedded default; replace just the value and
+    // leave the trailing comment in place.
+    let patched = yaml.replacen("timezone: \"UTC\"", &format!("timezone: \"{tz}\""), 1);
+    if patched == yaml {
+        return None;
+    }
+    std::fs::write(config_path, patched).ok()?;
+    Some(tz)
+}
+
+/// Best-effort host IANA timezone via the `/etc/localtime` symlink (the
+/// portable trick on macOS and Linux). The target looks like
+/// `…/zoneinfo/Asia/Kolkata`; we take everything after `zoneinfo/` and accept
+/// it only if it parses as a real `chrono_tz::Tz`, so we never write garbage.
+fn detect_system_timezone() -> Option<String> {
+    let target = std::fs::read_link("/etc/localtime").ok()?;
+    let target = target.to_str()?;
+    let zone = target.rsplit_once("/zoneinfo/").map(|(_, z)| z)?;
+    if zone.is_empty() || zone == "UTC" {
+        return None;
+    }
+    zone.parse::<chrono_tz::Tz>().ok().map(|_| zone.to_string())
 }

@@ -755,6 +755,7 @@ dependencies = [
  "brainos-vault",
  "brainos-wsadapter",
  "chrono",
+ "chrono-tz",
  "clap",
  "criterion",
  "crossterm 0.28.1",

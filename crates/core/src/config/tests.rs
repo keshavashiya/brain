@@ -90,6 +90,38 @@ fn validate_warns_when_legacy_provider_overlaps_providers_array() {
     );
 }
 
+/// `validate()` warns when the scheduling write-axis is on but the cron
+/// fire-axis is off — otherwise scheduled intents persist and silently never
+/// fire. `brain doctor` flags this too; this guards the startup-path warning.
+#[test]
+fn validate_warns_scheduling_without_cron() {
+    let mut config = BrainConfig::default();
+    config.brain.data_dir = std::env::temp_dir()
+        .join("brain-sched-no-cron-test")
+        .to_string_lossy()
+        .to_string();
+    config.actions.scheduling.enabled = true;
+    config.reflex.cron.enabled = false;
+
+    let warnings = config.validate().expect("validate must succeed");
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("actions.scheduling is enabled but reflex.cron is disabled")),
+        "expected scheduling/cron mismatch warning, got: {warnings:?}"
+    );
+
+    // And stays silent once the fire-axis is also on.
+    config.reflex.cron.enabled = true;
+    let warnings = config.validate().expect("validate must succeed");
+    assert!(
+        !warnings
+            .iter()
+            .any(|w| w.contains("reflex.cron is disabled")),
+        "warning should clear when cron enabled, got: {warnings:?}"
+    );
+}
+
 /// Issue 40: `validate()` is silent when only the new `providers[]`
 /// shape is configured (legacy field empty) — the warning fires
 /// purely on overlap, not on the legacy shape itself.
