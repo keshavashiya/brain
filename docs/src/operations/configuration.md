@@ -279,7 +279,7 @@ reflex:
   fs: []                           # filesystem watchers, one entry per path set
   # fs:
   #   - name: project-watch
-  #     paths: ["~/Developer/workspace/brain"]
+  #     paths: ["~/notes", "~/projects"]
   #     recursive: true
   #     debounce_ms: 200
 
@@ -293,10 +293,20 @@ reflex:
     enabled: false                 # edge-triggered system state
     poll_interval_seconds: 30
     rules: []
+    # Kinds (all edge-triggered — they fire on a transition, not a level):
+    #   battery_below (needs `threshold`), on_ac_changed — platform power source
+    #     (pmset on macOS, /sys on Linux).
+    #   network_changed — the kernel's online/offline view; needs
+    #     `monitoring.connectivity` enabled with targets, else it never flips.
+    #   lock_changed — systemd-logind (`LockedHint`) on Linux, CoreGraphics
+    #     (`CGSSessionScreenIsLocked`) on macOS; inert where no GUI session is
+    #     reachable (headless / ssh).
     # rules:
     #   - kind: battery_below
     #     threshold: 20
+    #   - kind: on_ac_changed
     #   - kind: network_changed
+    #   - kind: lock_changed
 ```
 
 ---
@@ -505,7 +515,7 @@ A random key is generated on `brain init` and printed once to stdout.
 ```yaml
 access:
   api_keys: []
-  # - key: "brain_sk_..."
+  # - key: "brk_..."                  # `brain init` generates one in this format
   #   name: "laptop"
   #   permissions: ["read", "write"]   # read | write | export | admin
   #   agent_id: "my-laptop"            # binds the key to an identity principal
@@ -574,7 +584,7 @@ Internal defaults — safe to leave unchanged.
 
 ```yaml
 brain:
-  version: "0.4.0"
+  version: "0.5.0"
   data_dir: "~/.brain"
 
 storage:

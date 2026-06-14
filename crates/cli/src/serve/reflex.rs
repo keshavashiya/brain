@@ -109,10 +109,12 @@ pub(super) async fn wire_reflex_sources(
         }
     }
 
-    // SysState — uses a `NoopSampler` until per-platform sampler
-    // implementations are wired. The reflex still spawns when
-    // `enabled = true` so config can be validated end-to-end and
-    // rule transitions surface as soon as a real sampler lands.
+    // SysState — backed by `sys_sampler::SysSampler`, which composes real
+    // kernel signals: `battery_below` / `on_ac_changed` from the power probe
+    // (pmset/sysfs), `network_changed` from the shared connectivity handle, and
+    // `lock_changed` from systemd-logind (Linux) / CoreGraphics (macOS). Any
+    // dimension the platform can't report stays `None`, so its rule never fires
+    // spuriously.
     if cfg.sys.enabled && !cfg.sys.rules.is_empty() {
         let rules: Vec<reflex::SysStateRule> = cfg
             .sys
@@ -133,7 +135,9 @@ pub(super) async fn wire_reflex_sources(
             cfg.sys.poll_interval_seconds,
         ))
         .with_rules(rules);
-        let sampler: Arc<dyn reflex::SysStateSampler> = Arc::new(reflex::NoopSampler);
+        let sampler: Arc<dyn reflex::SysStateSampler> = Arc::new(
+            super::sys_sampler::SysSampler::new(processor.connectivity()),
+        );
         let source: Arc<dyn ReflexSource> =
             Arc::new(reflex::SysStateReflex::new("sys", sampler, sys_cfg));
         match signal::reflex_runner::spawn_reflex("sys", source, processor.clone(), move |ev| {
@@ -142,7 +146,7 @@ pub(super) async fn wire_reflex_sources(
         .await
         {
             Ok(handle) => {
-                tracing::info!("SysState reflex spawned (using NoopSampler)");
+                tracing::info!("SysState reflex spawned (battery + AC + network + lock)");
                 set.spawn(async move {
                     let _ = handle.await;
                     Ok(())

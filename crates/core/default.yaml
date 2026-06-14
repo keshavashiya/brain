@@ -229,7 +229,7 @@ reflex:
   # Example:
   # fs:
   #   - name: project-watch
-  #     paths: ["~/Developer/workspace/brain"]
+  #     paths: ["~/notes", "~/projects"]
   #     recursive: true
   #     debounce_ms: 200
   cron:
@@ -241,11 +241,17 @@ reflex:
     enabled: false                    # edge-triggered system state
     poll_interval_seconds: 30
     rules: []
-    # Example rules (uncomment to enable):
+    # Example rules (uncomment to enable). Kinds:
+    #   battery_below (needs `threshold`) · on_ac_changed → power probe (pmset/sysfs)
+    #   network_changed → shared connectivity view (needs monitoring.connectivity on)
+    #   lock_changed    → systemd-logind (Linux) / CoreGraphics (macOS); inert
+    #                      where no GUI session is reachable (headless / ssh)
     # rules:
     #   - kind: battery_below
     #     threshold: 20
+    #   - kind: on_ac_changed
     #   - kind: network_changed
+    #   - kind: lock_changed
 
 # ── Logging ────────────────────────────────────────────────────────────────────
 # [advanced] Diagnostics. Touch only when chasing a problem.
@@ -433,7 +439,7 @@ confirm:
 
 # ── Internal defaults (safe to leave unchanged) ────────────────────────────────
 brain:
-  version: "0.4.0"
+  version: "0.5.0"
   data_dir: "~/.brain"
 
 storage:

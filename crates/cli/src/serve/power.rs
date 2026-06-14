@@ -36,6 +36,26 @@ pub(crate) async fn probe() -> Option<(PowerState, String)> {
     }
 }
 
+/// Battery + AC view for the sys-state reflex. Shares the same platform
+/// reads as [`probe`], but surfaces the raw battery percentage — which
+/// `probe`'s human detail string drops on external power — so the
+/// `BatteryBelow` rule can see the level. `None` percent means no battery
+/// or an unreadable one; `None` overall means the platform can't say.
+pub(crate) async fn probe_battery() -> Option<(PowerState, Option<u8>)> {
+    #[cfg(target_os = "macos")]
+    {
+        battery_view_from_pmset(&run_pmset(&["-g", "batt"]).await?)
+    }
+    #[cfg(target_os = "linux")]
+    {
+        battery_view_from_supplies(&read_supplies())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
+}
+
 #[cfg(target_os = "macos")]
 async fn probe_macos() -> Option<(PowerState, String)> {
     let batt = run_pmset(&["-g", "batt"]).await?;
@@ -82,6 +102,16 @@ fn parse_pmset_batt(out: &str) -> Option<(PowerState, String)> {
     Some((state, detail))
 }
 
+/// Battery state + raw percentage from `pmset -g batt`, for the sys-state
+/// reflex. Reuses [`parse_pmset_batt`] for the source and [`percent_token`]
+/// for the level (present on both AC and battery output).
+#[cfg(target_os = "macos")]
+fn battery_view_from_pmset(out: &str) -> Option<(PowerState, Option<u8>)> {
+    let (state, _) = parse_pmset_batt(out)?;
+    let pct = percent_token(out).and_then(|s| s.parse::<u8>().ok());
+    Some((state, pct))
+}
+
 /// Whether `pmset -g` reports Low Power Mode active (`lowpowermode  1`).
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn pmset_low_power(out: &str) -> bool {
@@ -103,8 +133,19 @@ fn percent_token(out: &str) -> Option<&str> {
 
 #[cfg(target_os = "linux")]
 fn probe_linux() -> Option<(PowerState, String)> {
+    fold_supplies(&read_supplies())
+}
+
+/// Read every `/sys/class/power_supply/<entry>` into the fields the folds
+/// care about. Empty vec when the tree is missing (desktop / container) —
+/// the folds then report "undetectable".
+#[cfg(target_os = "linux")]
+fn read_supplies() -> Vec<Supply> {
     let mut supplies = Vec::new();
-    for entry in std::fs::read_dir("/sys/class/power_supply").ok()?.flatten() {
+    let Ok(dir) = std::fs::read_dir("/sys/class/power_supply") else {
+        return supplies;
+    };
+    for entry in dir.flatten() {
         let path = entry.path();
         let read = |name: &str| {
             std::fs::read_to_string(path.join(name))
@@ -118,7 +159,20 @@ fn probe_linux() -> Option<(PowerState, String)> {
             capacity: read("capacity"),
         });
     }
-    fold_supplies(&supplies)
+    supplies
+}
+
+/// Battery state + raw capacity from sysfs, for the sys-state reflex.
+/// Reuses [`fold_supplies`] for the source and the battery entry's
+/// `capacity` for the level.
+#[cfg(target_os = "linux")]
+fn battery_view_from_supplies(supplies: &[Supply]) -> Option<(PowerState, Option<u8>)> {
+    let (state, _) = fold_supplies(supplies)?;
+    let pct = supplies
+        .iter()
+        .find(|s| s.kind == "Battery")
+        .and_then(|b| b.capacity.parse::<u8>().ok());
+    Some((state, pct))
 }
 
 /// One `/sys/class/power_supply/<entry>`, reduced to the fields the fold
@@ -200,6 +254,28 @@ mod tests {
         assert_eq!(parse_pmset_batt("no battery information available"), None);
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn battery_view_reads_percent_on_both_sources() {
+        let batt = "Now drawing from 'Battery Power'\n -InternalBattery-0 (id=12345)\t47%; \
+                    discharging; 3:42 remaining present: true\n";
+        assert_eq!(
+            battery_view_from_pmset(batt),
+            Some((PowerState::Battery, Some(47)))
+        );
+        // Percentage is present on AC output too, unlike the human detail string.
+        let ac = "Now drawing from 'AC Power'\n -InternalBattery-0 (id=12345)\t100%; \
+                  charged; 0:00 remaining present: true\n";
+        assert_eq!(
+            battery_view_from_pmset(ac),
+            Some((PowerState::External, Some(100)))
+        );
+        assert_eq!(
+            battery_view_from_pmset("no battery information available"),
+            None
+        );
+    }
+
     #[test]
     fn detects_low_power_mode_line() {
         assert!(pmset_low_power(
@@ -258,6 +334,28 @@ mod tests {
         // Desktop with a PSU entry the kernel reports as offline mains and
         // no battery: nothing to defer on either way.
         assert_eq!(fold_supplies(&[supply("Mains", "0", "", "")]), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn battery_view_from_supplies_surfaces_capacity_on_both_sources() {
+        let on_batt = [
+            supply("Mains", "0", "", ""),
+            supply("Battery", "", "Discharging", "47"),
+        ];
+        assert_eq!(
+            battery_view_from_supplies(&on_batt),
+            Some((PowerState::Battery, Some(47)))
+        );
+        // On AC the battery level still surfaces (External + capacity).
+        let on_ac = [
+            supply("Mains", "1", "", ""),
+            supply("Battery", "", "Charging", "88"),
+        ];
+        assert_eq!(
+            battery_view_from_supplies(&on_ac),
+            Some((PowerState::External, Some(88)))
+        );
     }
 
     #[tokio::test]

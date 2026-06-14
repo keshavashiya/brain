@@ -33,6 +33,7 @@ mod power;
 mod reflex;
 // `pub(crate)` so `brain doctor --deep` can run a one-shot `ResourceProbe`.
 pub(crate) mod resource;
+mod sys_sampler;
 mod transports;
 
 use std::sync::Arc;
