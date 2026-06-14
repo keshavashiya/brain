@@ -235,6 +235,28 @@ impl BrainConfig {
             );
         }
 
+        // Tier provider names must resolve to a `providers[]` entry. An
+        // unmatched name fails closed at daemon startup (a tier meant to stay
+        // local must never silently reroute onto the default chain), so reject
+        // it here too rather than green-lighting a config that won't boot.
+        if !self.llm.providers.is_empty() {
+            for (tier, names) in [
+                ("fast", &self.llm.tiers.fast),
+                ("balanced", &self.llm.tiers.balanced),
+                ("deep", &self.llm.tiers.deep),
+            ] {
+                for name in names {
+                    if !self.llm.providers.iter().any(|p| &p.name == name) {
+                        return Err(format!(
+                            "llm.tiers.{tier} references unknown provider '{name}'; \
+                             it must match an `llm.providers[].name` entry \
+                             (this fails closed at daemon startup)."
+                        ));
+                    }
+                }
+            }
+        }
+
         if self.memory.consolidation.enabled && self.memory.consolidation.interval_hours == 0 {
             warnings.push("Consolidation interval_hours is 0 — consolidation will run immediately on every daemon wake-up, which may impact performance.".to_string());
         }

@@ -153,6 +153,43 @@ fn validate_silent_when_legacy_provider_empty() {
     );
 }
 
+/// A tier naming a provider absent from `providers[]` is a hard startup
+/// failure (a tier meant to stay local must never silently reroute onto the
+/// default chain). `validate()` must reject it too, not green-light a config
+/// that won't boot — and stay clean once the name resolves.
+#[test]
+fn validate_rejects_unknown_tier_provider() {
+    let mut config = BrainConfig::default();
+    config.brain.data_dir = std::env::temp_dir()
+        .join("brain-unknown-tier-test")
+        .to_string_lossy()
+        .to_string();
+    config.llm.providers.push(ProviderEntry {
+        name: "ollama".into(),
+        kind: "ollama".into(),
+        base_url: "http://localhost:11434".into(),
+        api_key: String::new(),
+        model: "qwen2.5-coder:7b".into(),
+        api_key_file: None,
+        preferred_models: Vec::new(),
+    });
+
+    config.llm.tiers.deep = vec!["does-not-exist".into(), "ollama".into()];
+    let err = config
+        .validate()
+        .expect_err("unknown tier provider must fail validation");
+    assert!(
+        err.contains("llm.tiers.deep") && err.contains("does-not-exist"),
+        "expected unknown-provider error, got: {err}"
+    );
+
+    // Resolves once the name matches a providers[] entry.
+    config.llm.tiers.deep = vec!["ollama".into()];
+    config
+        .validate()
+        .expect("validate must succeed when tier names resolve");
+}
+
 /// Issue 36 regression: the four `proactivity` fields the audit
 /// flagged (enabled / max_per_day / quiet_hours.{start,end}) must
 /// stay in sync between `BrainConfig::default()` and the embedded

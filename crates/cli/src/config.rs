@@ -107,7 +107,6 @@ fn cmd_show(config: &brain::BrainConfig, defaults: bool) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
 
     #[test]
     fn validate_default_config_succeeds() {
@@ -138,22 +137,20 @@ mod tests {
 
     #[test]
     fn validate_accepts_default_yaml_file() {
-        let mut tmp = tempfile::NamedTempFile::new().expect("create tempfile");
-        tmp.write_all(brain::BrainConfig::default_config_content().as_bytes())
-            .expect("write default config");
-        // default_config_content() ships `api_keys: []`, which makes
-        // validate() fail (no API key configured). Write_default_config
-        // injects a generated key — we mimic that here for the test.
-        let with_key = brain::BrainConfig::default_config_content()
-            .replace(
-                "api_keys: []",
-                "api_keys:\n    - key: \"brk_test_validate_yaml\"\n      name: \"test\"\n      permissions: [read, write]",
-            );
-        let mut tmp2 = tempfile::NamedTempFile::new().expect("create tempfile");
-        tmp2.write_all(with_key.as_bytes()).expect("write");
-
-        let config = brain::BrainConfig::default();
-        cmd_validate(&config, Some(tmp2.path())).expect("should validate");
+        // default_config_content() ships `api_keys: []`, which makes validate()
+        // fail (no API key configured). write_default_config injects a
+        // generated key — we mimic that here.
+        let with_key = brain::BrainConfig::default_config_content().replace(
+            "api_keys: []",
+            "api_keys:\n    - key: \"brk_test_validate_yaml\"\n      name: \"test\"\n      permissions: [read, write]",
+        );
+        // Validate the parsed default directly rather than via cmd_validate /
+        // load_from: the latter layers the *developer's* ~/.brain/config.yaml
+        // (Layer 2), which would contaminate the result (e.g. their tiers over
+        // these providers). Here we assert the shipped default is self-valid.
+        let config: brain::BrainConfig =
+            serde_yaml::from_str(&with_key).expect("default config must parse");
+        config.validate().expect("default config must validate");
     }
 
     #[test]

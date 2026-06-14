@@ -73,9 +73,11 @@ pub(crate) async fn cmd_init(
                 config_path.display()
             )
         })?;
+        // Scope the flip to the `encryption:` block. `enabled: false` appears
+        // in several sections, so match the section header too.
         let patched = yaml.replace(
-            "enabled: false               # Run `brain init --encrypt` to generate a salt and enable",
-            "enabled: true                # Activated by `brain init --encrypt`",
+            "encryption:\n  enabled: false",
+            "encryption:\n  enabled: true                  # Activated by `brain init --encrypt`",
         );
         if patched == yaml {
             anyhow::bail!(

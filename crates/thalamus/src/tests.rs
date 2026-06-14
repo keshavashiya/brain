@@ -370,12 +370,12 @@ async fn classify_with_history_passes_recent_turns_to_fallback() {
         Message::user("Hold on…"),
     ];
     let _ = classifier
-        .classify_with_history("username : keshavashiya", &history)
+        .classify_with_history("username : alice", &history)
         .await;
     let seen = recording.seen.lock().unwrap();
     assert_eq!(seen.len(), 1, "fallback should be invoked exactly once");
     let (input, hist) = &seen[0];
-    assert_eq!(input, "username : keshavashiya");
+    assert_eq!(input, "username : alice");
     assert_eq!(hist.len(), 2, "history should be forwarded verbatim");
     assert_eq!(hist[0].content, "What's your username?");
 }

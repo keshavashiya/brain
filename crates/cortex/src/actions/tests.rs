@@ -515,7 +515,7 @@ fn strip_urls_leaves_query_text_intact() {
 #[test]
 fn url_hostname_handles_typical_inputs() {
     assert_eq!(
-        super::url_hostname("https://github.com/keshavashiya"),
+        super::url_hostname("https://github.com/octocat"),
         Some("github.com".to_string())
     );
     assert_eq!(
@@ -531,22 +531,20 @@ async fn web_search_fetches_user_provided_urls_alongside_search() {
         .with_url_fetch_backend(Arc::new(MockUrlFetcher));
     let result = dispatcher
         .dispatch(&Action::WebSearch {
-            query: "look up keshavashiya https://github.com/keshavashiya \
-                    https://app.daily.dev/keshavashiya"
+            query: "look up octocat https://github.com/octocat \
+                    https://example.com/profile"
                 .to_string(),
         })
         .await;
     assert!(result.success);
     // The cleaned query (without URLs) is what reaches the search engine.
-    assert!(result.output.contains("look up keshavashiya"));
+    assert!(result.output.contains("look up octocat"));
     // Linked-source bodies must show up so the answering LLM can cite them.
     assert!(result.output.contains("Linked sources"));
+    assert!(result.output.contains("body-of-https://github.com/octocat"));
     assert!(result
         .output
-        .contains("body-of-https://github.com/keshavashiya"));
-    assert!(result
-        .output
-        .contains("body-of-https://app.daily.dev/keshavashiya"));
+        .contains("body-of-https://example.com/profile"));
 }
 
 #[tokio::test]
@@ -569,7 +567,7 @@ async fn web_search_falls_back_to_hostname_when_query_is_only_urls() {
         .with_url_fetch_backend(Arc::new(MockUrlFetcher));
     let _ = dispatcher
         .dispatch(&Action::WebSearch {
-            query: "https://github.com/keshavashiya".to_string(),
+            query: "https://github.com/octocat".to_string(),
         })
         .await;
     assert_eq!(
