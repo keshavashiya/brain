@@ -145,7 +145,7 @@ rpassword = "7"
 
 # Terminal UI
 crossterm = "0.28"
-termimad = "0.31"
+termimad = "0.34"
 
 # LRU cache
 lru = "0.16"
