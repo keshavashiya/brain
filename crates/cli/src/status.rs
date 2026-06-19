@@ -70,6 +70,12 @@ pub(crate) async fn show_status(config: &brain::BrainConfig) -> anyhow::Result<(
         .map(|p| (p.model().to_string(), p.name().to_string()))
         .unwrap_or((legacy_model, legacy_provider));
     println!("  Cortex LLM:   {} ({})", display_model, display_kind);
+    // Reasoning tiers: when `llm.tiers` is configured, chat/decompose run on
+    // the `deep` chain and classification/chores on `fast` — so the single
+    // "Cortex LLM" line above (the default/legacy provider) is *not* what
+    // actually answers a chat turn. Spell out each tier's chain so the user
+    // isn't misled into thinking the local default serves chat.
+    print_reasoning_tiers(config);
     println!(
         "  Sensory:      {} ({}d)",
         config.embedding.model, config.embedding.dimensions
@@ -267,5 +273,42 @@ fn print_vital_count(label: &str, count: Option<u64>, ceiling: u64) {
             let mark = if n >= ceiling { "  ⚠" } else { "" };
             println!("    {label:<10}: {n} / {ceiling}{mark}");
         }
+    }
+}
+
+/// Print the configured `llm.tiers` chains (provider:model per hop), or
+/// nothing when no tier is set (zero-config installs route every task
+/// through the single default chain already shown on the "Cortex LLM"
+/// line). `deep` and `fast` are annotated with what they serve so the
+/// chat/classify split is legible.
+fn print_reasoning_tiers(config: &brain::BrainConfig) {
+    let tiers = &config.llm.tiers;
+    if tiers.fast.is_empty() && tiers.balanced.is_empty() && tiers.deep.is_empty() {
+        return;
+    }
+    let chain_label = |chain: &[String]| -> String {
+        chain
+            .iter()
+            .map(|name| {
+                config
+                    .llm
+                    .providers
+                    .iter()
+                    .find(|p| &p.name == name)
+                    .map(|p| format!("{name}:{}", p.model))
+                    .unwrap_or_else(|| name.clone())
+            })
+            .collect::<Vec<_>>()
+            .join(" → ")
+    };
+    println!("  Reasoning tiers:");
+    if !tiers.deep.is_empty() {
+        println!("    deep (chat)     : {}", chain_label(&tiers.deep));
+    }
+    if !tiers.balanced.is_empty() {
+        println!("    balanced        : {}", chain_label(&tiers.balanced));
+    }
+    if !tiers.fast.is_empty() {
+        println!("    fast (classify) : {}", chain_label(&tiers.fast));
     }
 }
