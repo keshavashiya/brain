@@ -366,13 +366,20 @@ pub fn create_provider(config: &ProviderConfig) -> Result<Box<dyn LlmProvider>, 
                 config.provider
             )));
         };
-        return Ok(Box::new(OpenAiProvider::new(
-            base_url,
-            config.api_key.as_deref(),
-            &config.model,
-            config.temperature,
-            Some(config.max_tokens),
-        )?));
+        return Ok(Box::new(
+            OpenAiProvider::new(
+                base_url,
+                config.api_key.as_deref(),
+                &config.model,
+                config.temperature,
+                Some(config.max_tokens),
+            )?
+            // Stamp the configured preset (`openrouter`, `groq`, …) so the
+            // provider self-reports the real gateway instead of a hardcoded
+            // `openai`. The digest's "Active model: {name}/{model}" line and
+            // budget-ledger keys both read this.
+            .with_name(&config.provider),
+        ));
     }
 
     tracing::warn!(

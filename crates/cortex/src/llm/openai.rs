@@ -120,6 +120,10 @@ struct OpenAiUsage {
 /// OpenAI-compatible provider (works with OpenAI, OpenRouter, etc.)
 pub struct OpenAiProvider {
     client: reqwest::Client,
+    /// The configured provider label (preset name like `openrouter`, `groq`,
+    /// or `openai_compat`). Surfaced by [`name`] so self-reporting ("which
+    /// model am I?") names the actual gateway, not a hardcoded `openai`.
+    name: String,
     base_url: String,
     api_key: Option<String>,
     model: String,
@@ -138,12 +142,23 @@ impl OpenAiProvider {
         let client = build_http_client(brain::timeouts::LLM_GENERATE)?;
         Ok(Self {
             client,
+            name: "openai".to_string(),
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.map(|s| s.to_string()),
             model: model.to_string(),
             temperature,
             max_tokens,
         })
+    }
+
+    /// Override the provider label reported by [`name`]. Used by
+    /// `create_provider` to stamp the configured preset (`openrouter`,
+    /// `groq`, …) so situated self-reporting names the real gateway.
+    pub fn with_name(mut self, name: &str) -> Self {
+        if !name.trim().is_empty() {
+            self.name = name.trim().to_string();
+        }
+        self
     }
 
     pub fn openai(api_key: &str, model: &str) -> Result<Self, LlmError> {
@@ -157,13 +172,14 @@ impl OpenAiProvider {
     }
 
     pub fn openrouter(api_key: &str, model: &str) -> Result<Self, LlmError> {
-        Self::new(
+        Ok(Self::new(
             "https://openrouter.ai/api/v1",
             Some(api_key),
             model,
             0.7,
             Some(4096),
-        )
+        )?
+        .with_name("openrouter"))
     }
 
     fn convert_messages(messages: &[Message]) -> Vec<OpenAiMessage> {
@@ -400,7 +416,7 @@ impl LlmProvider for OpenAiProvider {
     }
 
     fn name(&self) -> &str {
-        "openai"
+        &self.name
     }
 
     fn model(&self) -> &str {

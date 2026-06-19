@@ -23,7 +23,7 @@ fn test_openai_provider_creation() {
 #[test]
 fn test_openrouter_provider_creation() {
     let provider = OpenAiProvider::openrouter("test-key", "anthropic/claude-3-opus").unwrap();
-    assert_eq!(provider.name(), "openai");
+    assert_eq!(provider.name(), "openrouter");
 }
 
 #[test]
