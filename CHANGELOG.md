@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Dependency bumps.** `termimad` 0.31 → 0.34 (terminal markdown rendering)
+  and `tower-http` 0.5 → 0.6 (HTTP middleware; also dedupes the lockfile to a
+  single version). No API changes required; behaviour is unaffected.
+
 ### Added
 
 - **Host timezone detected at `brain init`.** The generated config shipped

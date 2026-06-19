@@ -150,14 +150,14 @@ rpassword = "7"
 
 # Terminal UI
 crossterm = "0.28"
-termimad = "0.31"
+termimad = "0.34"
 
 # LRU cache
 lru = "0.16"
 
 # HTTP server
 axum = { version = "0.7", features = ["json"] }
-tower-http = { version = "0.5", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors"] }
 async-stream = "0.3"
 futures-core = "0.3"
 
