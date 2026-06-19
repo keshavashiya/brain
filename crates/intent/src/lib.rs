@@ -546,28 +546,10 @@ fn route_for(tool: &ToolDescriptor) -> ToolRoute {
 
 /// Cosine similarity between two embedding vectors, clamped to `[0, 1]`.
 ///
-/// Returns `0.0` when either vector is empty, dimensions disagree, or either
-/// magnitude is zero — i.e. the semantic term silently drops out rather than
-/// poisoning the score. Negative cosines (semantically opposed directions)
-/// are floored to `0.0`: an unrelated tool should contribute nothing, never a
-/// penalty that could reorder the keyword/verb signal beneath it.
-pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.is_empty() || a.len() != b.len() {
-        return 0.0;
-    }
-    let mut dot = 0.0_f32;
-    let mut na = 0.0_f32;
-    let mut nb = 0.0_f32;
-    for (x, y) in a.iter().zip(b.iter()) {
-        dot += x * y;
-        na += x * x;
-        nb += y * y;
-    }
-    if na == 0.0 || nb == 0.0 {
-        return 0.0;
-    }
-    (dot / (na.sqrt() * nb.sqrt())).clamp(0.0, 1.0)
-}
+/// Re-exported from [`synapse`] so the router and the docs-retrieval assistant
+/// rank by the exact same primitive. See [`synapse::cosine_similarity`] for the
+/// drop-out and negative-flooring semantics.
+pub use synapse::cosine_similarity;
 
 /// Weight applied to the cosine term in [`DefaultIntentRouter::score`]. Sized
 /// to a namespace-only match (`+1.0`) at unit cosine and to a full Jaccard
@@ -576,20 +558,8 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
 /// hit (`+2.0`).
 const ROUTER_SEMANTIC_WEIGHT: f32 = 1.5;
 
-fn jaccard(a: &[String], b: &[String]) -> f32 {
-    if a.is_empty() && b.is_empty() {
-        return 0.0;
-    }
-    let set_a: std::collections::HashSet<&str> = a.iter().map(String::as_str).collect();
-    let set_b: std::collections::HashSet<&str> = b.iter().map(String::as_str).collect();
-    let intersection = set_a.intersection(&set_b).count() as f32;
-    let union = set_a.union(&set_b).count() as f32;
-    if union == 0.0 {
-        0.0
-    } else {
-        intersection / union
-    }
-}
+// Set-overlap of capability lists is shared with the docs-retrieval assistant.
+use synapse::jaccard;
 
 // ─── In-memory tool registry ────────────────────────────────────────────────
 

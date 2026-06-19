@@ -30,11 +30,16 @@ members = [
     "crates/adapters/terminal",
     "crates/mcphost",
     "crates/intent",
+    "crates/synapse",
     "crates/reflex",
     "crates/resilience",
     "crates/metrics",
     "crates/selfmodel",
 ]
+
+# Website artifact, not an engine crate: it has its own workspace + wasm target
+# and must never be pulled into a `--workspace` build or published.
+exclude = ["docs/assistant"]
 
 [workspace.lints.rust]
 unused_must_use = "deny"
@@ -188,6 +193,7 @@ identity = { package = "brainos-identity", path = "crates/identity", version = "
 terminal = { package = "brainos-terminal", path = "crates/adapters/terminal", version = "0.5.0" }
 mcphost = { package = "brainos-mcphost", path = "crates/mcphost", version = "0.5.0" }
 intent = { package = "brainos-intent", path = "crates/intent", version = "0.5.0" }
+synapse = { package = "brainos-synapse", path = "crates/synapse", version = "0.5.0" }
 reflex = { package = "brainos-reflex", path = "crates/reflex", version = "0.5.0" }
 resilience = { package = "brainos-resilience", path = "crates/resilience", version = "0.5.0" }
 metrics = { package = "brainos-metrics", path = "crates/metrics", version = "0.5.0" }

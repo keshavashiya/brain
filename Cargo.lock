@@ -1123,6 +1123,7 @@ name = "brainos-intent"
 version = "0.5.0"
 dependencies = [
  "async-trait",
+ "brainos-synapse",
  "chrono",
  "criterion",
  "proptest",
@@ -1364,6 +1365,10 @@ dependencies = [
  "tracing",
  "uuid",
 ]
+
+[[package]]
+name = "brainos-synapse"
+version = "0.5.0"
 
 [[package]]
 name = "brainos-terminal"

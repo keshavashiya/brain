@@ -1,0 +1,24 @@
+# Standalone (non-workspace) crate: the docs assistant's retrieval engine,
+# compiled to wasm32 for the browser. Kept out of the Brain workspace so it
+# never ships to crates.io — it is a website artifact, not part of the engine.
+# It still depends on the engine's real `synapse` similarity crate by path, so
+# the ranking that runs in the browser is the same code the router runs.
+[package]
+name = "brain-docs-assistant"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "In-browser retrieval engine for the Brain OS docs assistant (WASM)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+synapse = { path = "../../crates/synapse", package = "brainos-synapse" }
+wasm-bindgen = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+serde_json = "1"
+
+# Own workspace root so it detaches from the Brain workspace above it.
+[workspace]

@@ -1,0 +1,20 @@
+[package]
+name = "brainos-synapse"
+description = "Similarity primitives (cosine + lexical overlap) shared by Brain OS routing and retrieval"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+# Intentionally dependency-free: this is a leaf of pure similarity math so it
+# compiles unchanged to `wasm32-unknown-unknown` for the docs assistant while
+# remaining the single source of truth for the routing layer.
+[dependencies]
+
+[lints]
+workspace = true

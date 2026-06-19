@@ -10,6 +10,11 @@ preferred-dark-theme = "ayu"
 edit-url-template = "https://github.com/keshavashiya/brain/edit/main/{path}"
 git-repository-url = "https://github.com/keshavashiya/brain"
 site-url = "/brain/"
+# "Ask Brain" docs assistant — floating retrieval widget. Ranking runs as the
+# engine's own `synapse` code compiled to WASM (src/assistant/pkg), query
+# embedding via transformers.js. Build steps in docs/README (indexer + wasm-pack).
+additional-css = ["assets/assistant.css"]
+additional-js = ["assets/assistant.js"]
 
 [output.html.search]
 limit-results = 30

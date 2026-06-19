@@ -1,0 +1,12 @@
+{
+  "name": "brain-docs-indexer",
+  "private": true,
+  "type": "module",
+  "description": "Build-time indexer: embeds the Brain OS docs with the same sentence model the in-browser assistant uses at query time.",
+  "scripts": {
+    "index": "node index.mjs"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.0.0"
+  }
+}

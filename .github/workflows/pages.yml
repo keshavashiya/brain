@@ -27,6 +27,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ── Docs assistant: retrieval engine (WASM) + search index ──────────────
+      # Both must be built before `mdbook build` so the generated assets in
+      # docs/src/assistant/ get copied into the book output.
+      - name: Install wasm target
+        run: rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build retrieval engine (WASM)
+        run: wasm-pack build docs/assistant --target web --out-dir ../src/assistant/pkg --release
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache embedding model
+        uses: actions/cache@v4
+        with:
+          path: docs/tools/.cache
+          key: hf-minilm-${{ hashFiles('docs/tools/index.mjs') }}
+
+      - name: Build search index
+        working-directory: docs/tools
+        run: |
+          npm ci
+          node index.mjs
+
       - name: Install mdBook
         run: cargo install mdbook --locked
 
