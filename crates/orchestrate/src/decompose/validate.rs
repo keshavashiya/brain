@@ -55,6 +55,26 @@ pub(super) fn apply_sequential_fallback(raw_steps: &mut [RawStep]) {
     }
 }
 
+/// Guarantee the dependency edges can only form a DAG. `depends_on`
+/// indices are 0-based positions into the plan, and the decomposer emits
+/// steps in intended execution order — so a legitimate dependency always
+/// points to an *earlier* step. Any index that is self-referential
+/// (`dep == i`), points forward (`dep > i`), or is out of range can only
+/// introduce a cycle (which `TaskGraph::from_steps` rejects wholesale with
+/// "Cycle detected in task graph", failing the entire plan) or a dangling
+/// edge. We drop those edges and dedup the rest, turning a malformed plan
+/// into a runnable one; [`apply_sequential_fallback`] then re-links any
+/// step this leaves dependency-less. Runs *before* the fallback for that
+/// reason.
+pub(super) fn sanitize_dependencies(raw_steps: &mut [RawStep]) {
+    for (i, step) in raw_steps.iter_mut().enumerate() {
+        let mut seen = HashSet::new();
+        // `dep < i` subsumes the out-of-range check (i < len) and rejects
+        // both self and forward references; `seen.insert` dedups.
+        step.depends_on.retain(|&dep| dep < i && seen.insert(dep));
+    }
+}
+
 /// Reject steps the executor can't possibly run, at plan time, so the
 /// user sees the failure before approving rather than five seconds into
 /// execution. Checks, per `action_type`:

@@ -164,6 +164,7 @@ impl LlmDecomposer {
         }
 
         validate::validate_steps(&raw_steps, &context)?;
+        validate::sanitize_dependencies(&mut raw_steps);
         validate::apply_sequential_fallback(&mut raw_steps);
         Ok(validate::finalize(raw_steps))
     }
@@ -238,6 +239,7 @@ impl TaskDecomposer for LlmDecomposer {
         // the main decompose flow so a bad LLM response can't create a
         // worse plan than the one we just failed on.
         validate::validate_steps(&raw_steps, &context)?;
+        validate::sanitize_dependencies(&mut raw_steps);
         validate::apply_sequential_fallback(&mut raw_steps);
         Ok(validate::finalize(raw_steps))
     }
@@ -537,6 +539,73 @@ mod tests {
             matches!(err, DecompositionError::Parse(_)),
             "expected parse-time rejection of pipeline, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn cyclic_depends_on_is_repaired_into_a_runnable_dag() {
+        // Regression: the LLM emitted mutually-dependent steps (0↔1) plus
+        // a self-loop, which `TaskGraph::from_steps` rejected wholesale
+        // with "Cycle detected in task graph" — the user saw a raw error
+        // for a textbook multi-step request. The sanitize pass keeps only
+        // backward edges, so the graph is always a DAG.
+        use cortex::llm::{LlmError, LlmProvider, Message, Response, ResponseChunk};
+        use futures::Stream;
+        use std::pin::Pin;
+
+        struct CyclicLlm;
+        #[async_trait]
+        impl LlmProvider for CyclicLlm {
+            async fn generate(&self, _messages: &[Message]) -> Result<Response, LlmError> {
+                Ok(Response::text(
+                    r#"[
+                        {"description": "design schema", "action_type": "plan", "depends_on": [1]},
+                        {"description": "write code", "action_type": "implement", "spec": "build it", "depends_on": [0, 2]},
+                        {"description": "add tests", "action_type": "test", "command": "cargo test", "depends_on": [2]}
+                    ]"#,
+                    None,
+                ))
+            }
+            async fn generate_stream(
+                &self,
+                _messages: &[Message],
+            ) -> Result<Pin<Box<dyn Stream<Item = Result<ResponseChunk, LlmError>> + Send>>, LlmError>
+            {
+                unreachable!("mock provider: the decomposer never streams")
+            }
+            async fn health_check(&self) -> bool {
+                true
+            }
+            fn name(&self) -> &str {
+                "test"
+            }
+            fn model(&self) -> &str {
+                "test-model"
+            }
+            async fn list_models(&self) -> Result<Vec<String>, LlmError> {
+                Ok(vec!["test-model".into()])
+            }
+        }
+
+        let llm = std::sync::Arc::new(CyclicLlm);
+        let decomposer = LlmDecomposer::new(llm);
+        let steps = decomposer
+            .decompose(
+                "design the schema, write the code, add tests",
+                DecompositionContext::default(),
+            )
+            .await
+            .expect("cyclic plan should be repaired, not rejected");
+
+        // The forward (0→1), self (2→2), and forward-again edges are gone;
+        // only the backward edge (1→0) survives, and the sequential
+        // fallback re-links the test step that was left dependency-less.
+        assert_eq!(steps.len(), 3);
+        assert!(steps[0].depends_on.is_empty());
+        assert_eq!(steps[1].depends_on, vec![steps[0].id.clone()]);
+        assert_eq!(steps[2].depends_on, vec![steps[1].id.clone()]);
+
+        // The whole point: the graph builder now accepts it.
+        crate::graph::TaskGraph::from_steps(steps).expect("repaired plan must be a valid DAG");
     }
 
     #[tokio::test]
