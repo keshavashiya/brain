@@ -552,7 +552,7 @@ mod tests {
         FieldExtractors, HttpMethod, PresetKind, SendSpec, VerifierSpec, WebhookInboundSpec,
     };
     use ed25519_dalek::{Signer, SigningKey};
-    use rand::RngCore;
+    use rand::Rng;
     use reqwest::header::{HeaderName, HeaderValue};
 
     fn make_preset(verifier: Option<VerifierSpec>, ack: Option<&str>) -> PresetDefinition {
@@ -673,7 +673,7 @@ mod tests {
     #[tokio::test]
     async fn ed25519_handshake_short_circuits() {
         let mut seed = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut seed);
+        rand::rng().fill_bytes(&mut seed);
         let signing = SigningKey::from_bytes(&seed);
         let verify: VerifyingKey = signing.verifying_key();
         let pub_hex = hex::encode(verify.to_bytes());
@@ -719,7 +719,7 @@ mod tests {
     #[tokio::test]
     async fn ed25519_bad_signature_rejected() {
         let mut seed = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut seed);
+        rand::rng().fill_bytes(&mut seed);
         let signing = SigningKey::from_bytes(&seed);
         let pub_hex = hex::encode(signing.verifying_key().to_bytes());
 
@@ -834,7 +834,7 @@ mod tests {
     #[tokio::test]
     async fn ed25519_rejects_stale_timestamp() {
         let mut seed = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut seed);
+        rand::rng().fill_bytes(&mut seed);
         let signing = SigningKey::from_bytes(&seed);
         let pub_hex = hex::encode(signing.verifying_key().to_bytes());
 

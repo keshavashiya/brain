@@ -19,8 +19,12 @@ use aes_gcm::{Aes256Gcm, Key, Nonce};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
 use chrono::Utc;
-use rand::rngs::OsRng;
-use rand::RngCore;
+// OsRng comes from aes-gcm's re-exported rand_core (0.6) rather than the
+// top-level `rand` crate: argon2/password-hash and aes-gcm all bound their
+// RNG arguments on rand_core 0.6, so a 0.10-era `rand::rngs::OsRng` would not
+// satisfy `SaltString::generate`. Mirrors the storage crate's approach.
+use aes_gcm::aead::rand_core::RngCore;
+use aes_gcm::aead::OsRng;
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use zeroize::Zeroizing;

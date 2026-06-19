@@ -9,7 +9,6 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
-use rand::Rng;
 use tracing::debug;
 
 /// Tuning knobs for [`retry`].
@@ -140,7 +139,7 @@ pub fn compute_delay(config: &RetryConfig, attempt: u32) -> Duration {
     // Full-jitter scheme (Marc Brooker / AWS): uniform over [0, delay]
     // when jitter_factor == 1.0; partial otherwise.
     let max_jitter_ms = (bounded_ms_u64 as f64 * jitter as f64) as u64;
-    let drawn = rand::thread_rng().gen_range(0..=max_jitter_ms);
+    let drawn = rand::random_range(0..=max_jitter_ms);
     let deterministic_floor = bounded_ms_u64.saturating_sub(max_jitter_ms);
     Duration::from_millis(deterministic_floor + drawn)
 }

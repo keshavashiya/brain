@@ -13,6 +13,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   and `tower-http` 0.5 → 0.6 (HTTP middleware; also dedupes the lockfile to a
   single version). No API changes required; behaviour is unaffected.
 
+- **`rand` 0.8 → 0.10.** Migrated the 0.9+ API: `thread_rng().gen_range(..)`
+  → `rand::random_range(..)` in the retry jitter, and `thread_rng().fill_bytes`
+  → `rng().fill_bytes` in channel tests. The vault now sources `OsRng` from
+  `aes-gcm`'s re-exported `rand_core` (0.6) instead of the top-level `rand`
+  crate — argon2/password-hash/aes-gcm all bind their RNG arguments on
+  rand_core 0.6, which a 0.10-era `OsRng` no longer satisfies — and dropped its
+  direct `rand` dependency. Crypto behaviour (salt/nonce generation, key
+  derivation) is unchanged.
+
 ### Added
 
 - **Host timezone detected at `brain init`.** The generated config shipped
