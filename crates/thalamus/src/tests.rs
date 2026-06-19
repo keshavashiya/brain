@@ -563,6 +563,110 @@ async fn test_remind_me_to_still_schedules() {
 }
 
 #[tokio::test]
+async fn test_setup_phrasing_schedules() {
+    // Regression: "set up a daily reminder …" matched no scheduling regex,
+    // fell through to the LLM/Chat fallback, and the conversational SOUL
+    // denied it could schedule at all. These must route to Schedule
+    // deterministically (regex), so the capability is reached regardless
+    // of what the chat model believes about itself.
+    let classifier = IntentClassifier::new();
+    for input in [
+        "Set up a daily reminder at 9am to review my open pull requests",
+        "set a daily reminder to water the plants",
+        "create a reminder to call the dentist tomorrow",
+        "add a recurring task to back up the database every night",
+        "set up a weekly schedule to clean the logs",
+    ] {
+        let result = classifier.classify(input).await;
+        assert!(
+            matches!(result.intent, Intent::Schedule { .. }),
+            "Expected Schedule for {input:?}, got {:?}",
+            result.intent
+        );
+        assert_eq!(
+            result.method,
+            ClassificationMethod::Regex,
+            "Expected the deterministic regex to route {input:?}, got {:?}",
+            result.method
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_setup_phrasing_without_schedule_noun_is_not_schedule() {
+    // The setup-verb branch must not swallow ordinary "set up / create /
+    // add a <thing>" requests that have nothing to do with scheduling.
+    let classifier = IntentClassifier::new();
+    for input in [
+        "set up the dev environment",
+        "create a new feature branch",
+        "add a unit test for the parser",
+    ] {
+        let result = classifier.classify_regex(input);
+        assert!(
+            !matches!(
+                result,
+                Some(Classification {
+                    intent: Intent::Schedule { .. },
+                    ..
+                })
+            ),
+            "{input:?} must not route to Schedule, got {result:?}",
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_reachability_routes_to_chat_not_web_search() {
+    // Regression: "is github.com reachable" matched no web route, fell to
+    // the fast-tier classifier, and was tagged web_search → net.http (an
+    // external fetch behind a consent gate) instead of the read-only
+    // net.check probe. These must route to Chat (the tool-loop then runs
+    // net.check) deterministically via the regex, not the LLM.
+    let classifier = IntentClassifier::new();
+    for input in [
+        "Can you check whether github.com is reachable right now?",
+        "is api.example.com:443 reachable",
+        "can you reach api.github.com",
+        "ping github.com",
+        "is github.com up",
+        "is the server down",
+    ] {
+        let result = classifier.classify(input).await;
+        assert!(
+            matches!(result.intent, Intent::Chat { .. }),
+            "Expected Chat for {input:?}, got {:?}",
+            result.intent
+        );
+        assert_eq!(
+            result.method,
+            ClassificationMethod::Regex,
+            "Expected the deterministic regex to route {input:?}, got {:?}",
+            result.method
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_explicit_web_search_still_wins_over_reachability_guard() {
+    // The reachability guard runs only after the pattern loop, so an
+    // explicit "search …" / "fetch <url>" request still routes to
+    // WebSearch even if it happens to contain a reachability word.
+    let classifier = IntentClassifier::new();
+    let result = classifier.classify_regex("search for reachable goals frameworks");
+    assert!(
+        matches!(
+            result,
+            Some(Classification {
+                intent: Intent::WebSearch { .. },
+                ..
+            })
+        ),
+        "explicit search must win over the reachability guard, got {result:?}",
+    );
+}
+
+#[tokio::test]
 async fn test_classify_status_slash_command() {
     let classifier = IntentClassifier::new();
     let result = classifier.classify("/status").await;

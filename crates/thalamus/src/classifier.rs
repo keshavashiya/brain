@@ -186,8 +186,22 @@ static BUDGET_STATUS_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 static SCHEDULE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(?:remind me|schedule|set reminder)\s+(?:to\s+)?(.+?)$")
-        .expect("invariant: SCHEDULE_RE must be valid")
+    // Three lead-in families, all routing to a scheduling gate with the
+    // tail captured as the description:
+    //   1. "remind me [in 5m] to <action>"
+    //   2. a setup verb (set / set up / create / add / make) + optional
+    //      article + up to two adjectives + a scheduling noun
+    //      (reminder / schedule / recurring task / cron job) — this is the
+    //      phrasing the SOUL used to *deny* it could do ("set up a daily
+    //      reminder at 9am to review my PRs"), falling through to Chat
+    //      where the model answered "I have no scheduling system".
+    //   3. a bare "schedule <thing>".
+    // The REMIND_RECALL_RE guard in `classify_regex` still peels off the
+    // "remind me what…" recall questions before this can claim them.
+    Regex::new(
+        r"(?i)^(?:remind me|(?:set(?: up)?|create|add|make)\s+(?:a|an|the|some)?\s*(?:[a-z]+\s+){0,2}?(?:reminders?|schedules?|recurring\s+(?:task|reminder|job)s?|cron(?:\s+jobs?)?)|schedule)\b[\s,:-]*(?:to\s+)?(.+?)$",
+    )
+    .expect("invariant: SCHEDULE_RE must be valid")
 });
 
 /// "remind me what/where/who/which … was" is a question about stored facts or
@@ -199,6 +213,30 @@ static SCHEDULE_RE: LazyLock<Regex> = LazyLock::new(|| {
 static REMIND_RECALL_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^remind me\s+(?:what|where|who|whom|whose|which|when|why|how|whether|if)\b")
         .expect("invariant: REMIND_RECALL_RE must be valid")
+});
+
+/// Reachability / connectivity questions are network *diagnostics*
+/// (net.check / trace / cert), not web_search. They match none of the
+/// deterministic patterns, so they fell to the fast-tier classifier, which
+/// unreliably tagged "is github.com reachable" as `web_search` → `net.http`
+/// — an external fetch behind a consent gate — instead of the read-only
+/// `net.check` probe. (Prompt-only guidance can't bind a 7B model.) This
+/// catches the high-precision reachability phrasings and routes them to
+/// Chat, where the tool-loop runs the diagnostic. The classifier never
+/// emits `Intent::ToolCall` from free text by design, so Chat (not a
+/// direct net.check ToolCall) is the right target. Consulted *after* the
+/// pattern loop, so explicit `search …` / `fetch <url>` web routes still win.
+static REACHABILITY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?ix)
+        \b(?:
+            (?:un)?reachable
+          | (?:reach|ping)\s+[a-z0-9][a-z0-9.\-]*(?::\d+)?
+          | is\s+(?:the\s+)?(?:site|server|host|endpoint|service|connection|[a-z0-9\-]+(?:\.[a-z0-9\-]+)+)\s+(?:up|down|online|offline)\b
+        )\b
+        ",
+    )
+    .expect("invariant: REACHABILITY_RE must be valid")
 });
 
 static LIST_SCHEDULES_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -594,6 +632,22 @@ impl IntentClassifier {
                     extracted_facts: Vec::new(),
                 });
             }
+        }
+
+        // Reachability/connectivity questions that matched no explicit web
+        // route ("is github.com reachable", "ping api.example.com") are
+        // network diagnostics, not web_search. Route them to Chat so the
+        // tool-loop runs net.check, rather than letting the fast-tier
+        // classifier guess web_search → net.http. (See REACHABILITY_RE.)
+        if REACHABILITY_RE.is_match(input) {
+            return Some(Classification {
+                intent: Intent::Chat {
+                    content: input.to_string(),
+                },
+                confidence: 0.9,
+                method: ClassificationMethod::Regex,
+                extracted_facts: Vec::new(),
+            });
         }
 
         None
