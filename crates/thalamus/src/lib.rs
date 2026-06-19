@@ -635,44 +635,13 @@ fn store_fact_or_chat(
 const CLASSIFIER_PROMPT_HEADER: &str =
     "You classify user input into exactly one intent for Brain OS.";
 
-/// Everything from the `Rules:` line onward — hand-written disambiguation
-/// prose, the fact-extraction contract, and the JSON output shape. The list
-/// of valid intents that precedes this block is generated from
-/// [`taxonomy::INTENT_SPECS`] (its `LlmFallback` keys), so adding a
-/// natural-language-routable verb to the table surfaces it to the classifier
-/// automatically — no second edit here, and `prompt_lists_exactly_the_llm_fallback_keys`
-/// keeps the two in lockstep.
-const CLASSIFIER_PROMPT_RULES: &str = r#"Rules:
-- query_audit is for checking past actions: "what did I run today", "show my audit entries", "what did I approve yesterday".
-- prune_audit is for deleting old audit entries: "prune audit logs older than 30 days".
-- list_approvals is for showing pending confirmations: "what am I waiting to approve", "show pending approvals".
-- respond_to_approval is for approving or rejecting a nonce: "approve 1234", "reject 5678".
-- budget_status is for checking usage: "how much have I spent", "what's my token budget".
-- schedule is for new future tasks: "remind me in 5 minutes to...", "schedule a search every day for...". The word "remind" alone does NOT make it a schedule: "remind me what the risky part was", "remind me where I put the key", "remind me who said that" are RECALL questions about past facts/conversation and must be chat (answered from memory + history), never schedule. Only treat it as schedule when it asks to be reminded TO DO something in the future, typically with a time ("remind me to call mom at 5pm").
-- list_schedules/cancel_schedule are for managing background schedules: "what's scheduled", "cancel schedule 123".
-- list_tasks/task_status/cancel_task are for managing complex multi-step tasks from decompose_task: "what tasks are running", "status of task 42", "cancel task 10".
-- cancel_signal aborts an in-flight Signal by its UUID — distinct from cancel_task: "cancel signal e4b8…". The signal_id payload field carries the UUID.
-- set_proactivity/proactivity_status are for managing nudges/habit engine: "pause nudges for 2h", "disable proactivity", "check proactivity status".
-- memory_summary is for broad "dump everything you know about me" requests: "summarise my memory", "what do you know", "what have you stored", "show me my memories", "tell me what you remember about me". No query parameter needed.
-- recall is for specific memory queries that name a concrete topic: "what do you know about my project", "what did we discuss about Rust", "what do you remember about my goals". The query MUST identify a topic.
-- Conversational meta-questions about the current chat ("what did we discuss?", "what did I just say?", "summarize our conversation", "what did we talk about earlier today") are chat — the assistant answers from the live conversation history, not from memory lookup.
-- Questions that are NOT about stored memories (general knowledge, opinions, how-to questions) are chat.
-- Questions should NEVER be execute_command.
-- store_fact is ONLY for explicit memory requests that state a distilled fact: "remember that I use Postgres", "note that the deploy script is in ops/". Set subject/predicate/object to the distilled triple — never copy the user's whole sentence into object. NEVER use "said" as predicate — if you cannot extract a clean predicate/object pair from the request, classify as chat instead.
-- A COMPOUND request that asks you to DO something and also remember/save it ("access the terminal and share the result to memory", "run the build and remember the output") is chat, NOT store_fact. The assistant performs the action and stores a distilled result itself — do not file the raw request as a fact. If you cannot extract a clean fact triple from a would-be store, classify as chat.
-- execute_command is ONLY for explicit requests like "run ls", "execute cargo build". The command field must be a real shell command (ls, git, cargo, etc.).
-- decompose_task is for multi-step requests that need planning and execution: "build a CSV export feature", "set up CI/CD pipeline", "refactor the auth module and add tests", "deploy to production". The request must involve multiple steps or coordination. Simple single-step requests are NOT decompose_task.
-- A user message that names a local path (e.g. "summarise /Users/me/notes", "what's in ~/downloads/x", "read this file: /tmp/foo.txt") is chat — Brain reads the path as attached context and responds conversationally. Do NOT route these to decompose_task or any inspect-style intent; they go through the normal chat flow.
-- query_agents is for asking which specialist agents are available or why a named agent is unavailable: "what agents do you have", "which agents can code rust", "why aren't you using aider".
-- delegate_task is for explicit single-shot delegation to a named agent: "delegate to claude-code: refactor X", "ask codex: explain Y", "@aider: fix the bug". Set `agent` to the lowercase agent id and `prompt` to the task body. Do NOT use this for multi-step plans — those go to decompose_task and the orchestrator picks an agent itself.
-- Conversational statements ("I've done X", "I completed X", "I like X") are chat but ALSO extract any personal facts (see below).
-- Prefer web_search for explicit search requests about internet/google/latest/current external info.
-- web_search retrieves information or a page's CONTENTS from the internet. A request to TEST connectivity or reachability — "is github.com reachable", "can you reach api.example.com", "is the site up/down", "check/ping/trace the route to X", "when does the cert for X expire" — is NOT web_search: it is chat, where Brain runs a network-diagnostic capability (net.check/trace/cert). Only choose web_search when the user wants the page's contents or an answer found online, not merely whether a host responds.
-- For web_search, set 'query' to the exact optimal search terms, stripping conversational fluff.
-- Use system_status only for explicit status checks like "/status".
-- Use chat when uncertain or for general conversation.
-
-FACT EXTRACTION: Regardless of intent, if the input contains personal facts about the user (name, role, company, projects, skills, interests, goals, location, preferences, habits), extract them into the "facts" array. Each fact is {"subject": "user", "predicate": "<snake_case_verb>", "object": "<value>"}.
+/// The genuinely cross-cutting tail of the classifier prompt — the
+/// fact-extraction contract and the JSON output shape. This is *not*
+/// per-intent (it applies regardless of the classified intent), so unlike the
+/// former hand-written `Rules:` prose it stays fixed here; the per-intent rules
+/// are generated from [`taxonomy::INTENT_SPECS`]'s [`taxonomy::IntentUsage`]
+/// (see [`build_classifier_system_prompt`]).
+const FACT_EXTRACTION_TAIL: &str = r#"FACT EXTRACTION: Regardless of intent, if the input contains personal facts about the user (name, role, company, projects, skills, interests, goals, location, preferences, habits), extract them into the "facts" array. Each fact is {"subject": "user", "predicate": "<snake_case_verb>", "object": "<value>"}.
 Predicates: name_is, role_is, works_at, works_on, title_is, interested_in, lives_in, skill_is, goal_is, preference_is, likes, etc.
 Only extract a fact when the user is making a clear self-statement in natural language ("my name is X", "I work at Y", "I'm a Z developer"). Do NOT extract facts from:
 - Short parameter-shaped messages (`username : foo`, `email = bar`, `5 minutes`, `yes`, `no`) — these are almost always follow-up parameters to a previous turn. Classify the intent as `chat` and return facts: [].
@@ -684,19 +653,30 @@ If no facts qualify, set facts to [].
 Return only JSON with keys: intent, subject, predicate, object, query, filter, since, limit, older_than, status, nonce, decision, window, id, task_id, enabled, until, target, command, args, description, cron, channel, recipient, content, facts.
 Missing keys must be null. facts must be [] if none."#;
 
-/// Assemble the classifier system prompt, generating the `Valid intents:` line
-/// from [`taxonomy::INTENT_SPECS`] so the natural-language vocabulary can never
-/// silently drift from the `Intent` enum. The keys are emitted in table order
-/// (grouped by category), which is the canonical SSOT ordering.
+/// Assemble the classifier system prompt entirely from
+/// [`taxonomy::INTENT_SPECS`]: the `Valid intents:` line and the per-intent
+/// `Rules:` block are both generated from the `LlmFallback` rows (their keys
+/// and authored [`taxonomy::IntentUsage`]), so the natural-language vocabulary
+/// and its disambiguation can never silently drift from the `Intent` enum.
+/// Only the cross-cutting [`FACT_EXTRACTION_TAIL`] is fixed. The keys/rules are
+/// emitted in table order (grouped by category), the canonical SSOT ordering.
 fn build_classifier_system_prompt() -> String {
-    let valid_intents = taxonomy::INTENT_SPECS
+    let llm_specs: Vec<&taxonomy::IntentSpec> = taxonomy::INTENT_SPECS
         .iter()
         .filter(|s| s.nl_routable == taxonomy::NlRouting::LlmFallback)
+        .collect();
+    let valid_intents = llm_specs
+        .iter()
         .map(|s| s.key)
         .collect::<Vec<_>>()
         .join(", ");
+    let rules = llm_specs
+        .iter()
+        .map(|s| s.render_prompt_rule())
+        .collect::<Vec<_>>()
+        .join("\n");
     format!(
-        "{CLASSIFIER_PROMPT_HEADER}\nValid intents: {valid_intents}.\n{CLASSIFIER_PROMPT_RULES}"
+        "{CLASSIFIER_PROMPT_HEADER}\nValid intents: {valid_intents}.\nRules:\n{rules}\n\n{FACT_EXTRACTION_TAIL}"
     )
 }
 

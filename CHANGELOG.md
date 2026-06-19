@@ -212,6 +212,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   local. A wire-level test proves a `local_only` fact never appears in an
   outbound request body when only a cloud provider is configured.
 
+- **In-browser docs assistant ("Ask Brain").** The documentation site gained a
+  serverless assistant that answers questions by retrieving the most relevant
+  doc sections *verbatim* — it never generates prose, so it can only surface
+  what the docs already say, and no question leaves the browser. Section ranking
+  runs Brain's own similarity code (the new `synapse` crate, shared with the
+  capability router) compiled to WebAssembly; the question is embedded in the
+  browser with the same sentence model used to build the index. Results de-dupe
+  to one section per page and the marketing landing page is excluded so concrete
+  how-to sections rank first. Built and published by the Pages workflow — nothing
+  is hosted.
+
+### Changed
+
+- **Intent disambiguation is authored data, not hand-fitted regexes.** The
+  classifier's look-alike guards ("remind me what…" is recall, not a new
+  reminder; "is X reachable" is a network diagnostic, not a web search) moved
+  out of bespoke `LazyLock<Regex>` branches and hand-written classifier-prompt
+  prose into `counter`/`examples` rows on `taxonomy::INTENT_SPECS`. The live
+  classifier consults the data, the LLM prompt's per-intent rules are generated
+  from it, and drift-guard tests prove each authored row is self-consistent, so
+  adding a disambiguation is now a table edit with a test rather than new code.
+  Routing behaviour is preserved, with schedule phrasing generalised to match
+  any words between a setup verb and a scheduling noun (so "set up a daily
+  reminder at 9am to review my PRs" schedules instead of falling through to chat).
+
 ### Fixed
 
 - **Reachability questions no longer misfire a web fetch.** Asking "is

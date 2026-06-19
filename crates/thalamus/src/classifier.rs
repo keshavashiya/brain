@@ -133,6 +133,12 @@ static DELEGATE_TASK_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// The whole message is captured as the query because the WebSearch
 /// backend's `extract_urls()` will harvest the URL itself and fetch it
 /// in parallel with the search.
+///
+/// Retained (not retired with the phrasing-only guards) because it is
+/// *extraction-bearing* — it captures the query payload deterministically.
+/// The "web_search also retrieves a page's contents" guidance it embodies
+/// lives as data in the `web_search` row's `when_to_use`; this pattern is the
+/// deterministic structured surface that actually extracts it.
 static URL_FETCH_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?ix)
@@ -190,54 +196,37 @@ static SCHEDULE_RE: LazyLock<Regex> = LazyLock::new(|| {
     // tail captured as the description:
     //   1. "remind me [in 5m] to <action>"
     //   2. a setup verb (set / set up / create / add / make) + optional
-    //      article + up to two adjectives + a scheduling noun
-    //      (reminder / schedule / recurring task / cron job) — this is the
-    //      phrasing the SOUL used to *deny* it could do ("set up a daily
-    //      reminder at 9am to review my PRs"), falling through to Chat
-    //      where the model answered "I have no scheduling system".
+    //      article + any run of words + a scheduling noun (reminder /
+    //      schedule / recurring task / cron job) — this is the phrasing the
+    //      SOUL used to *deny* it could do ("set up a daily reminder at 9am
+    //      to review my PRs"), falling through to Chat where the model
+    //      answered "I have no scheduling system". The intervening words are
+    //      matched with a lazy `(?:[a-z]+\s+)*?` rather than the former
+    //      magic-numbered "up to two adjectives" `{0,2}` hack — the
+    //      scheduling NOUN, not an adjective count, is what gates the match,
+    //      so "set up the dev environment" (no noun) still falls through.
     //   3. a bare "schedule <thing>".
-    // The REMIND_RECALL_RE guard in `classify_regex` still peels off the
+    // This regex is retained (not retired with REACHABILITY_RE /
+    // REMIND_RECALL_RE) because it is *extraction-bearing*: it captures the
+    // schedule description deterministically. Pure phrasing-disambiguation
+    // moved to data; a structured surface that extracts a payload stays a
+    // pattern, the same way slash / store-forget / id-bearing forms do. The
+    // schedule `counter` data in `taxonomy` (consulted via
+    // `counter_suppresses` in `classify_regex`) still peels off the
     // "remind me what…" recall questions before this can claim them.
     Regex::new(
-        r"(?i)^(?:remind me|(?:set(?: up)?|create|add|make)\s+(?:a|an|the|some)?\s*(?:[a-z]+\s+){0,2}?(?:reminders?|schedules?|recurring\s+(?:task|reminder|job)s?|cron(?:\s+jobs?)?)|schedule)\b[\s,:-]*(?:to\s+)?(.+?)$",
+        r"(?i)^(?:remind me|(?:set(?: up)?|create|add|make)\s+(?:a|an|the|some)?\s*(?:[a-z]+\s+)*?(?:reminders?|schedules?|recurring\s+(?:task|reminder|job)s?|cron(?:\s+jobs?)?)|schedule)\b[\s,:-]*(?:to\s+)?(.+?)$",
     )
     .expect("invariant: SCHEDULE_RE must be valid")
 });
 
-/// "remind me what/where/who/which … was" is a question about stored facts or
-/// the conversation — not a request to create a future reminder. `SCHEDULE_RE`
-/// greedily claims any "remind me …" and the regex crate has no lookahead to
-/// exclude the interrogative tail, so this guard catches the recall phrasings
-/// before the schedule pattern can route them to a scheduling gate. (Real
-/// reminders read "remind me [in TIME] to <action>".)
-static REMIND_RECALL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^remind me\s+(?:what|where|who|whom|whose|which|when|why|how|whether|if)\b")
-        .expect("invariant: REMIND_RECALL_RE must be valid")
-});
-
-/// Reachability / connectivity questions are network *diagnostics*
-/// (net.check / trace / cert), not web_search. They match none of the
-/// deterministic patterns, so they fell to the fast-tier classifier, which
-/// unreliably tagged "is github.com reachable" as `web_search` → `net.http`
-/// — an external fetch behind a consent gate — instead of the read-only
-/// `net.check` probe. (Prompt-only guidance can't bind a 7B model.) This
-/// catches the high-precision reachability phrasings and routes them to
-/// Chat, where the tool-loop runs the diagnostic. The classifier never
-/// emits `Intent::ToolCall` from free text by design, so Chat (not a
-/// direct net.check ToolCall) is the right target. Consulted *after* the
-/// pattern loop, so explicit `search …` / `fetch <url>` web routes still win.
-static REACHABILITY_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"(?ix)
-        \b(?:
-            (?:un)?reachable
-          | (?:reach|ping)\s+[a-z0-9][a-z0-9.\-]*(?::\d+)?
-          | is\s+(?:the\s+)?(?:site|server|host|endpoint|service|connection|[a-z0-9\-]+(?:\.[a-z0-9\-]+)+)\s+(?:up|down|online|offline)\b
-        )\b
-        ",
-    )
-    .expect("invariant: REACHABILITY_RE must be valid")
-});
+// The phrasing-disambiguation that used to live in `REMIND_RECALL_RE`
+// ("remind me what/where/… is recall, not a schedule") and `REACHABILITY_RE`
+// ("is X reachable / ping / up / down is a net diagnostic, not web_search")
+// is now authored *data*: the `counter` phrasings on the `schedule` and
+// `web_search` rows of `taxonomy::INTENT_SPECS`. `classify_regex` consults
+// them via `taxonomy::counter_suppresses`, so adding a new disambiguation is a
+// table edit with a drift-guard test, not a new `LazyLock<Regex>` + branch.
 
 static LIST_SCHEDULES_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)^(?:what'?s scheduled|list schedules|show schedules)\??$")
@@ -611,9 +600,9 @@ impl IntentClassifier {
                 // "remind me what the risky part was" is recall, not a new
                 // reminder — route it to Chat so the reasoner answers from
                 // memory + session history instead of opening a scheduling
-                // gate. (See REMIND_RECALL_RE.)
+                // gate. (Driven by the `schedule` row's `counter` data.)
                 if matches!(base_intent, Intent::Schedule { .. })
-                    && REMIND_RECALL_RE.is_match(input)
+                    && crate::taxonomy::counter_suppresses(input, "schedule")
                 {
                     return Some(Classification {
                         intent: Intent::Chat {
@@ -638,8 +627,10 @@ impl IntentClassifier {
         // route ("is github.com reachable", "ping api.example.com") are
         // network diagnostics, not web_search. Route them to Chat so the
         // tool-loop runs net.check, rather than letting the fast-tier
-        // classifier guess web_search → net.http. (See REACHABILITY_RE.)
-        if REACHABILITY_RE.is_match(input) {
+        // classifier guess web_search → net.http. (Driven by the `web_search`
+        // row's `counter` data; consulted after the pattern loop so explicit
+        // `search …` / `fetch <url>` web routes still win.)
+        if crate::taxonomy::counter_suppresses(input, "web_search") {
             return Some(Classification {
                 intent: Intent::Chat {
                     content: input.to_string(),

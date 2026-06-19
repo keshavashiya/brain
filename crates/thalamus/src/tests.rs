@@ -1772,7 +1772,9 @@ fn intent_category_serde_wire_form_is_stable() {
 
 mod taxonomy_drift_guards {
     use super::*;
-    use crate::taxonomy::{spec_for_key, NlRouting, INTENT_SPECS};
+    use crate::taxonomy::{
+        counter_suppresses, score_intent, spec_for_key, NlRouting, INTENT_SPECS,
+    };
 
     /// One representative value of every `Intent` variant. Hand-maintained,
     /// paired with the compiler-exhaustive [`Intent::key`]: adding a variant
@@ -2049,10 +2051,11 @@ mod taxonomy_drift_guards {
         );
     }
 
-    /// The generated prompt must stay well-formed: the fixed header and the
-    /// hand-written rules/JSON contract survive assembly, and there is exactly
-    /// one generated `Valid intents:` line between them. Guards against
-    /// `build_classifier_system_prompt` dropping or duplicating a section.
+    /// The generated prompt must stay well-formed: the fixed header, the
+    /// generated `Rules:` block, and the fixed fact-extraction/JSON-contract
+    /// tail all survive assembly, and there is exactly one generated `Valid
+    /// intents:` line. Guards against `build_classifier_system_prompt`
+    /// dropping or duplicating a section.
     #[test]
     fn generated_prompt_is_well_formed() {
         let prompt: &str = &super::CLASSIFIER_SYSTEM_PROMPT;
@@ -2062,8 +2065,12 @@ mod taxonomy_drift_guards {
             "prompt must begin with the fixed header",
         );
         assert!(
-            prompt.contains(super::CLASSIFIER_PROMPT_RULES),
-            "prompt must embed the hand-written rules/JSON-contract block",
+            prompt.contains("\nRules:\n"),
+            "prompt must contain the generated Rules: block",
+        );
+        assert!(
+            prompt.contains(super::FACT_EXTRACTION_TAIL),
+            "prompt must embed the fixed fact-extraction / JSON-contract tail",
         );
         assert_eq!(
             prompt
@@ -2073,5 +2080,127 @@ mod taxonomy_drift_guards {
             1,
             "prompt must have exactly one generated 'Valid intents:' line",
         );
+    }
+
+    /// Guard 5 — counter integrity (the structural fix). For every spec that
+    /// carries `counter` phrasings, each counter phrasing must score *below
+    /// zero* against its own spec — i.e. the authored negative can't be a
+    /// phrasing the same intent would also win on. This is what turns a
+    /// misroute into a failing table test instead of a production surprise +
+    /// a new regex: you cannot land a `counter` that the intent's own
+    /// `examples` would re-claim.
+    #[test]
+    fn counter_phrasings_score_below_their_own_intent() {
+        for spec in INTENT_SPECS {
+            for c in spec.usage.counter {
+                let s = score_intent(c, spec);
+                assert!(
+                    s < 0.0,
+                    "counter {c:?} on {:?} scores {s} (>= 0) — it does not suppress \
+                     its own intent; pick a phrasing the examples don't also match",
+                    spec.key,
+                );
+            }
+        }
+    }
+
+    /// The dual of Guard 5: a spec's own `examples` must score *above zero*
+    /// for that spec (a positive example its counters then cancel would be a
+    /// self-contradicting row). Pins that the example/counter sets stay
+    /// coherent as the table grows.
+    #[test]
+    fn example_phrasings_score_above_zero_for_their_own_intent() {
+        for spec in INTENT_SPECS {
+            for e in spec.usage.examples {
+                let s = score_intent(e, spec);
+                assert!(
+                    s > 0.0,
+                    "example {e:?} on {:?} scores {s} (<= 0) — a counter is \
+                     cancelling a positive example; the row contradicts itself",
+                    spec.key,
+                );
+            }
+        }
+    }
+
+    /// The two retired phrasing-regexes, now data: the reachability /
+    /// remind-recall phrasings must be `counter_suppresses`-detected on their
+    /// keys, while genuine positives must NOT be. This is the regression that
+    /// used to live on `REACHABILITY_RE` / `REMIND_RECALL_RE`, re-asserted
+    /// against the table data that replaced them.
+    #[test]
+    fn counter_data_reproduces_the_retired_regex_guards() {
+        // web_search counters → suppressed (would route to chat → net.check).
+        for input in [
+            "Can you check whether github.com is reachable right now?",
+            "is api.example.com:443 reachable",
+            "can you reach api.github.com",
+            "ping github.com",
+            "is github.com up",
+            "is the server down",
+        ] {
+            assert!(
+                counter_suppresses(input, "web_search"),
+                "{input:?} should be a web_search counter (reachability → chat)",
+            );
+        }
+        // Genuine searches must NOT be suppressed.
+        for input in [
+            "search for rust async book",
+            "look up the latest tokio release",
+            "find information about AI",
+        ] {
+            assert!(
+                !counter_suppresses(input, "web_search"),
+                "{input:?} is a real search and must not be suppressed",
+            );
+        }
+        // schedule counters → suppressed (remind-me-what is recall → chat).
+        for input in [
+            "Remind me what I said was the risky part",
+            "remind me where I put the staging key",
+            "remind me who owns that service",
+            "Remind me when's that review",
+        ] {
+            assert!(
+                counter_suppresses(input, "schedule"),
+                "{input:?} should be a schedule counter (recall → chat)",
+            );
+        }
+        // Genuine reminders must NOT be suppressed.
+        for input in [
+            "Remind me to call mom",
+            "remind me in 5 minutes to check the build",
+            "set up a daily reminder at 9am to review my PRs",
+        ] {
+            assert!(
+                !counter_suppresses(input, "schedule"),
+                "{input:?} is a real reminder and must not be suppressed",
+            );
+        }
+    }
+
+    /// Every `LlmFallback` spec contributes exactly one generated `Rules:`
+    /// line, and every such spec carries non-empty `when_to_use` guidance
+    /// (the Phase-1 drift guard: a natural-language-routable verb without an
+    /// authored rule would silently ship a blank line to the classifier).
+    #[test]
+    fn every_llm_fallback_spec_has_a_rendered_rule() {
+        let prompt: &str = &super::CLASSIFIER_SYSTEM_PROMPT;
+        for spec in INTENT_SPECS
+            .iter()
+            .filter(|s| s.nl_routable == NlRouting::LlmFallback)
+        {
+            assert!(
+                !spec.usage.when_to_use.trim().is_empty(),
+                "LlmFallback spec {:?} has empty when_to_use",
+                spec.key,
+            );
+            assert!(
+                prompt.contains(&spec.render_prompt_rule()),
+                "generated prompt is missing the rule line for {:?}",
+                spec.key,
+            );
+        }
     }
 }
