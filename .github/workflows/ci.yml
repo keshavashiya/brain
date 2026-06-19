@@ -163,7 +163,7 @@ jobs:
   docker:
     name: Docker build
     runs-on: ubuntu-latest
-    # docker/setup-buildx-action@v3 still ships a Node 20 entrypoint, which the
+    # docker/setup-buildx-action@v4 still ships a Node 20 entrypoint, which the
     # runner deprecates (forced to Node 24 on 2026-06-16, removed 2026-09-16).
     # Opt its JS actions into the Node 24 runtime now so the warning is gone and
     # the job survives the forced cutover. Drop this once the action ships a
@@ -172,7 +172,7 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
       - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       # Build the linux/amd64 image so the Dockerfile can't rot (e.g. a
       # RUST_VERSION that drifts below the workspace MSRV). No registry push —
       # publishing multi-arch images is release-automation work (Issue 167).
