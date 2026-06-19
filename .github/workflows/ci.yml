@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
 
+# Minimal token scope: every job here only reads the repo. Jobs that need
+# more (pages deploy, releases) live in their own workflows with their own
+# permissions blocks.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
