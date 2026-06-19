@@ -36,7 +36,7 @@ ed25519-dalek = { version = "2", default-features = false, features = ["pkcs8", 
 [dev-dependencies]
 tempfile = "3"
 wiremock = "0.6"
-rand = "0.8"
+rand = "0.10"
 proptest = "1"
 bolero = "0.13"
 
