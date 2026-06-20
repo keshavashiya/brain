@@ -59,6 +59,7 @@ impl MCPHost for EchoMcpHost {
             mounted_at: Utc::now(),
             info: None,
             tools: vec![tool.clone()],
+            scopes: mcphost::ServerScopes::default(),
         };
         *self.mounted.write().await = Some(record);
         if let Some(reg) = &self.registry {
@@ -103,6 +104,7 @@ impl MCPHost for EchoMcpHost {
                     tool_count: m.tools.len(),
                     info: m.info.clone(),
                     quarantined: false,
+                    scopes: m.scopes.clone(),
                 }]
             })
             .unwrap_or_default()

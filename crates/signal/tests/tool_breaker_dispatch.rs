@@ -48,6 +48,7 @@ impl MCPHost for FailingMcpHost {
             mounted_at: Utc::now(),
             info: None,
             tools: vec![tool.clone()],
+            scopes: mcphost::ServerScopes::default(),
         });
         self.registry
             .register(intent::ToolDescriptor {
@@ -85,6 +86,7 @@ impl MCPHost for FailingMcpHost {
                     tool_count: m.tools.len(),
                     info: m.info.clone(),
                     quarantined: false,
+                    scopes: m.scopes.clone(),
                 }]
             })
             .unwrap_or_default()

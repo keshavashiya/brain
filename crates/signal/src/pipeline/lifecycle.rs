@@ -19,6 +19,32 @@ use super::dispatch::{HandlerContext, LifecycleAuth, LifecycleHandler, NudgeFn};
 use crate::types::*;
 use crate::SignalProcessor;
 
+/// Split the `/mcp-mount` payload into the bare command/URL and the declared
+/// egress [`mcphost::ServerScopes`]. Scope flags may appear anywhere in the
+/// tail:
+/// - `--allow-net` grants outbound network to a stdio child (default: denied).
+/// - `--allow-tool=<glob>` narrows the tool surface (repeatable; default: all
+///   advertised tools). `<glob>` supports the `*` wildcard.
+///
+/// Shared by the consent prompt (to *show* the scope) and the mount handler
+/// (to *apply* it), so the approved scope and the enforced scope can't drift.
+pub(crate) fn parse_mount_scopes(command_or_url: &str) -> (String, mcphost::ServerScopes) {
+    let mut scopes = mcphost::ServerScopes::default();
+    let mut rest: Vec<&str> = Vec::new();
+    for tok in command_or_url.split_whitespace() {
+        if tok == "--allow-net" {
+            scopes.network = true;
+        } else if let Some(glob) = tok.strip_prefix("--allow-tool=") {
+            if !glob.is_empty() {
+                scopes.allowed_tools.push(glob.to_string());
+            }
+        } else {
+            rest.push(tok);
+        }
+    }
+    (rest.join(" "), scopes)
+}
+
 impl LifecycleAuth for SignalProcessor {
     fn auth_lifecycle(intent: &thalamus::Intent) -> Option<(AuthorizationRequest, Tier)> {
         match intent {
@@ -406,6 +432,9 @@ impl SignalProcessor {
             ));
             return Ok(PipelineResult::Complete(resp));
         };
+        // Pull the egress-scope flags (`--allow-net`, `--allow-tool=<glob>`)
+        // out of the payload before interpreting the rest as the command/URL.
+        let (command_or_url, scopes) = parse_mount_scopes(&command_or_url);
         let cfg = match transport.as_str() {
             "stdio" => {
                 let parts: Vec<&str> = command_or_url.split_whitespace().collect();
@@ -448,8 +477,11 @@ impl SignalProcessor {
                 return Ok(PipelineResult::Complete(resp));
             }
         };
-        let message = match host.mount(name.clone(), cfg).await {
-            Ok(()) => format!("Mounted MCP server '{name}' over {transport}."),
+        let scope_summary = scopes.summary();
+        let message = match host.mount_with_scopes(name.clone(), cfg, scopes).await {
+            Ok(()) => {
+                format!("Mounted MCP server '{name}' over {transport} (scope — {scope_summary}).")
+            }
             Err(e) => format!("Failed to mount MCP server '{name}': {e}"),
         };
         let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
@@ -504,5 +536,42 @@ impl SignalProcessor {
         };
         let resp = prepend_nudges(SignalResponse::ok(signal_id, message));
         Ok(PipelineResult::Complete(resp))
+    }
+}
+
+#[cfg(test)]
+mod scope_parse_tests {
+    use super::parse_mount_scopes;
+
+    #[test]
+    fn no_flags_yields_default_fail_closed_scopes() {
+        let (cmd, scopes) = parse_mount_scopes("mcp-fs --root /tmp");
+        assert_eq!(cmd, "mcp-fs --root /tmp");
+        assert!(scopes.allowed_tools.is_empty());
+        assert!(!scopes.network);
+    }
+
+    #[test]
+    fn allow_net_flag_grants_network_and_is_stripped() {
+        let (cmd, scopes) = parse_mount_scopes("mcp-fetch --allow-net");
+        assert_eq!(cmd, "mcp-fetch");
+        assert!(scopes.network);
+    }
+
+    #[test]
+    fn allow_tool_flags_accumulate_and_are_stripped() {
+        let (cmd, scopes) =
+            parse_mount_scopes("mcp-fs --allow-tool=read_* --allow-tool=list_dir serve");
+        assert_eq!(cmd, "mcp-fs serve");
+        assert_eq!(scopes.allowed_tools, vec!["read_*", "list_dir"]);
+        assert!(!scopes.network);
+    }
+
+    #[test]
+    fn flags_may_appear_anywhere_in_the_tail() {
+        let (cmd, scopes) = parse_mount_scopes("--allow-net mcp-fs --allow-tool=fs_*");
+        assert_eq!(cmd, "mcp-fs");
+        assert!(scopes.network);
+        assert_eq!(scopes.allowed_tools, vec!["fs_*"]);
     }
 }

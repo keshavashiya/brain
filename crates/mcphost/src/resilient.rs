@@ -39,7 +39,7 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::error::McpHostError;
-use crate::types::{CallOutcome, ServerConfig, ServerStatus, ToolDescriptor};
+use crate::types::{CallOutcome, ServerConfig, ServerScopes, ServerStatus, ToolDescriptor};
 use crate::MCPHost;
 
 /// Resilience knobs that aren't already encoded in the layer
@@ -128,9 +128,9 @@ impl ResilientMcpHost {
         if let Some(breakers) = &self.breakers {
             match &result {
                 Ok(outcome) if !outcome.is_error => breakers.record_success(tool_id).await,
-                // A quarantine refusal is the host enforcing consent policy,
-                // not the tool failing — it must not poison the breaker.
-                Err(McpHostError::Quarantined(_)) => {}
+                // A quarantine or scope refusal is the host enforcing consent
+                // policy, not the tool failing — it must not poison the breaker.
+                Err(McpHostError::Quarantined(_)) | Err(McpHostError::ScopeDenied { .. }) => {}
                 _ => breakers.record_failure(tool_id).await,
             }
         }
@@ -163,6 +163,17 @@ impl ResilientMcpHost {
 impl MCPHost for ResilientMcpHost {
     async fn mount(&self, name: String, cfg: ServerConfig) -> Result<(), McpHostError> {
         self.inner.mount(name, cfg).await
+    }
+
+    async fn mount_with_scopes(
+        &self,
+        name: String,
+        cfg: ServerConfig,
+        scopes: ServerScopes,
+    ) -> Result<(), McpHostError> {
+        // Mount is a control-plane action: forward scopes verbatim so the
+        // inner host enforces them (the decorator must not silently drop them).
+        self.inner.mount_with_scopes(name, cfg, scopes).await
     }
 
     async fn unmount(&self, name: &str) -> Result<(), McpHostError> {
@@ -289,10 +300,12 @@ impl MCPHost for ResilientMcpHost {
                 }
                 Ok(outcome)
             }
-            // A quarantine refusal is a deliberate policy block — replaying
-            // it from the DLQ would re-attempt a call the user has not
-            // re-approved, so it never lands there.
-            Err(RetryOutcome::Exhausted(e @ McpHostError::Quarantined(_))) => Err(e),
+            // A quarantine or scope refusal is a deliberate policy block —
+            // replaying it from the DLQ would re-attempt a call the user has
+            // not consented to, so it never lands there.
+            Err(RetryOutcome::Exhausted(
+                e @ (McpHostError::Quarantined(_) | McpHostError::ScopeDenied { .. }),
+            )) => Err(e),
             Err(RetryOutcome::Exhausted(e)) => {
                 self.enqueue_dlq(
                     &tool_id,

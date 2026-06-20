@@ -37,4 +37,11 @@ pub enum McpHostError {
          or unmount it"
     )]
     Quarantined(String),
+
+    #[error(
+        "tool '{tool}' on server '{server}' is outside the egress scope you \
+         consented to for that server; the call is blocked. Re-mount the server \
+         with a wider scope if this tool should be allowed"
+    )]
+    ScopeDenied { server: String, tool: String },
 }

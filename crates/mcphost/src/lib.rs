@@ -41,7 +41,8 @@ pub use oauth::{manager_from_vault, VaultCredentialStore};
 pub use resilient::{ResilienceConfig, ResilientMcpHost};
 pub use rmcp_host::RmcpHost;
 pub use types::{
-    CallOutcome, MountedServer, OAuthConfig, ServerConfig, ServerInfo, ServerStatus, ToolDescriptor,
+    CallOutcome, MountedServer, OAuthConfig, ServerConfig, ServerInfo, ServerScopes, ServerStatus,
+    ToolDescriptor,
 };
 
 /// MCP protocol version Brain negotiates against. Per spec 2025-11-25.
@@ -51,8 +52,25 @@ pub const MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 #[async_trait]
 pub trait MCPHost: Send + Sync {
     /// Mount a new server under `name`. Idempotent: a name collision returns
-    /// [`McpHostError::AlreadyMounted`].
+    /// [`McpHostError::AlreadyMounted`]. Mounts with the default (fail-closed)
+    /// egress scopes — see [`mount_with_scopes`](MCPHost::mount_with_scopes).
     async fn mount(&self, name: String, cfg: ServerConfig) -> Result<(), McpHostError>;
+
+    /// Mount a server under `name` with explicit egress [`ServerScopes`]. The
+    /// host enforces these: out-of-scope tool calls fail closed with
+    /// [`McpHostError::ScopeDenied`], and stdio children honour the process
+    /// axis (network / paths). The default implementation drops `scopes` and
+    /// delegates to [`mount`](MCPHost::mount) — hosts that enforce scopes
+    /// (the real [`RmcpHost`]) override it.
+    async fn mount_with_scopes(
+        &self,
+        name: String,
+        cfg: ServerConfig,
+        scopes: ServerScopes,
+    ) -> Result<(), McpHostError> {
+        let _ = scopes;
+        self.mount(name, cfg).await
+    }
 
     /// Gracefully unmount a server (stdin EOF → SIGTERM ladder for stdio,
     /// DELETE `Mcp-Session-Id` for HTTP transports).
@@ -122,6 +140,16 @@ impl InMemoryMcpHost {
 #[async_trait]
 impl MCPHost for InMemoryMcpHost {
     async fn mount(&self, name: String, cfg: ServerConfig) -> Result<(), McpHostError> {
+        self.mount_with_scopes(name, cfg, ServerScopes::default())
+            .await
+    }
+
+    async fn mount_with_scopes(
+        &self,
+        name: String,
+        cfg: ServerConfig,
+        scopes: ServerScopes,
+    ) -> Result<(), McpHostError> {
         let mut guard = self.mounted.write().await;
         if guard.contains_key(&name) {
             return Err(McpHostError::AlreadyMounted(name));
@@ -134,6 +162,7 @@ impl MCPHost for InMemoryMcpHost {
                 mounted_at: Utc::now(),
                 info: None,
                 tools: Vec::new(),
+                scopes,
             },
         );
         Ok(())
@@ -159,6 +188,7 @@ impl MCPHost for InMemoryMcpHost {
                 tool_count: m.tools.len(),
                 info: m.info.clone(),
                 quarantined: false,
+                scopes: m.scopes.clone(),
             })
             .collect()
     }
@@ -175,12 +205,20 @@ impl MCPHost for InMemoryMcpHost {
     async fn call(
         &self,
         server: &str,
-        _tool: &str,
+        tool: &str,
         _args: serde_json::Value,
     ) -> Result<CallOutcome, McpHostError> {
         let guard = self.mounted.read().await;
-        if !guard.contains_key(server) {
-            return Err(McpHostError::NotMounted(server.to_string()));
+        let mounted = guard
+            .get(server)
+            .ok_or_else(|| McpHostError::NotMounted(server.to_string()))?;
+        // Scope enforcement runs before the transport stub so callers (and
+        // tests) can exercise the fail-closed path without a live server.
+        if !mounted.scopes.allows_tool(tool) {
+            return Err(McpHostError::ScopeDenied {
+                server: server.to_string(),
+                tool: tool.to_string(),
+            });
         }
         // The in-memory host has no real transport — `call` is a stub so
         // callers can detect the no-transport state and downstream wiring
@@ -258,5 +296,63 @@ mod tests {
     #[test]
     fn protocol_version_matches_spec() {
         assert_eq!(MCP_PROTOCOL_VERSION, "2025-11-25");
+    }
+
+    #[tokio::test]
+    async fn out_of_scope_tool_call_fails_closed() {
+        // A server mounted with an explicit tool scope blocks any tool outside
+        // it *before* reaching the transport — the fail-closed DoD.
+        let host = InMemoryMcpHost::new();
+        host.mount_with_scopes(
+            "fs".into(),
+            stdio_cfg("mcp-fs", vec![]),
+            ServerScopes {
+                allowed_tools: vec!["read_*".into()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // Out of scope → ScopeDenied (never reaches the transport stub).
+        let err = host
+            .call("fs", "write_text_file", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, McpHostError::ScopeDenied { server, tool }
+                if server == "fs" && tool == "write_text_file"),
+            "expected ScopeDenied, got {err:?}"
+        );
+
+        // In scope → passes the gate, hits the (no-)transport stub.
+        let err = host
+            .call("fs", "read_text_file", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, McpHostError::Transport(_)),
+            "in-scope tool should pass the scope gate"
+        );
+    }
+
+    #[tokio::test]
+    async fn scopeless_mount_allows_all_tools() {
+        // Back-compat: a plain `mount` (default scopes) lets every tool through
+        // the scope gate — only the network axis defaults fail-closed.
+        let host = InMemoryMcpHost::new();
+        host.mount("fs".into(), stdio_cfg("mcp-fs", vec![]))
+            .await
+            .unwrap();
+        let err = host
+            .call("fs", "anything_at_all", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, McpHostError::Transport(_)),
+            "scope-less mount must not block tools, got {err:?}"
+        );
+        let servers = host.list_servers().await;
+        assert!(!servers[0].scopes.network, "network defaults to denied");
     }
 }

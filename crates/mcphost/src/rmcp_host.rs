@@ -45,7 +45,10 @@ use crate::{
     capability_index::ToolCapabilityIndex,
     error::McpHostError,
     oauth,
-    types::{CallOutcome, MountedServer, ServerConfig, ServerInfo, ServerStatus, ToolDescriptor},
+    types::{
+        CallOutcome, MountedServer, ServerConfig, ServerInfo, ServerScopes, ServerStatus,
+        ToolDescriptor,
+    },
     MCPHost, MCP_PROTOCOL_VERSION,
 };
 
@@ -177,7 +180,12 @@ impl RmcpHost {
         descriptor
     }
 
-    async fn mount_stdio(&self, name: String, cfg: ServerConfig) -> Result<(), McpHostError> {
+    async fn mount_stdio(
+        &self,
+        name: String,
+        cfg: ServerConfig,
+        scopes: ServerScopes,
+    ) -> Result<(), McpHostError> {
         let ServerConfig::Stdio {
             command,
             args,
@@ -206,10 +214,15 @@ impl RmcpHost {
             .await
             .map_err(|e| McpHostError::Initialize(e.to_string()))?;
 
-        self.finalize_mount(name, cfg, svc).await
+        self.finalize_mount(name, cfg, scopes, svc).await
     }
 
-    async fn mount_http(&self, name: String, cfg: ServerConfig) -> Result<(), McpHostError> {
+    async fn mount_http(
+        &self,
+        name: String,
+        cfg: ServerConfig,
+        scopes: ServerScopes,
+    ) -> Result<(), McpHostError> {
         let (url, oauth_cfg) = match &cfg {
             ServerConfig::StreamableHttp { url, oauth } | ServerConfig::HttpSse { url, oauth } => {
                 (url.clone(), oauth.clone())
@@ -264,13 +277,14 @@ impl RmcpHost {
                 .map_err(|e| McpHostError::Initialize(e.to_string()))?
         };
 
-        self.finalize_mount(name, cfg, svc).await
+        self.finalize_mount(name, cfg, scopes, svc).await
     }
 
     async fn finalize_mount(
         &self,
         name: String,
         cfg: ServerConfig,
+        scopes: ServerScopes,
         svc: RunningService<RoleClient, ()>,
     ) -> Result<(), McpHostError> {
         let info = svc.peer_info().map(|init| ServerInfo {
@@ -282,7 +296,7 @@ impl RmcpHost {
             .list_all_tools()
             .await
             .map_err(|e| McpHostError::Initialize(format!("list_tools after initialize: {e}")))?;
-        let tools: Vec<ToolDescriptor> = tools_raw
+        let advertised: Vec<ToolDescriptor> = tools_raw
             .into_iter()
             .map(|t| ToolDescriptor {
                 server: name.clone(),
@@ -291,6 +305,28 @@ impl RmcpHost {
                 input_schema: serde_json::Value::Object((*t.input_schema).clone()),
             })
             .collect();
+
+        // Tool-scope enforcement at mount: tools the user didn't consent to
+        // never enter the routing surfaces. The call-time guard in `call` is
+        // defence-in-depth for callers holding a direct (server, tool) pair.
+        let dropped: Vec<String> = advertised
+            .iter()
+            .filter(|t| !scopes.allows_tool(&t.name))
+            .map(|t| t.name.clone())
+            .collect();
+        if !dropped.is_empty() {
+            warn!(
+                server = %name,
+                dropped = ?dropped,
+                "mount: dropping tools advertised outside the consented scope"
+            );
+        }
+        let tools: Vec<ToolDescriptor> = advertised
+            .into_iter()
+            .filter(|t| scopes.allows_tool(&t.name))
+            .collect();
+        // Hash the *consented* (filtered) shape so a later refresh compares
+        // against what the user actually approved.
         let tools_hash = hash_tools(&tools);
 
         let record = MountedServer {
@@ -299,6 +335,7 @@ impl RmcpHost {
             mounted_at: Utc::now(),
             info,
             tools: tools.clone(),
+            scopes,
         };
         let mut guard = self.mounted.write().await;
         if guard.contains_key(&name) {
@@ -576,10 +613,20 @@ fn tool_to_intent_descriptor(server: &str, t: &ToolDescriptor) -> intent::ToolDe
 #[async_trait]
 impl MCPHost for RmcpHost {
     async fn mount(&self, name: String, cfg: ServerConfig) -> Result<(), McpHostError> {
+        self.mount_with_scopes(name, cfg, ServerScopes::default())
+            .await
+    }
+
+    async fn mount_with_scopes(
+        &self,
+        name: String,
+        cfg: ServerConfig,
+        scopes: ServerScopes,
+    ) -> Result<(), McpHostError> {
         match &cfg {
-            ServerConfig::Stdio { .. } => self.mount_stdio(name, cfg).await,
+            ServerConfig::Stdio { .. } => self.mount_stdio(name, cfg, scopes).await,
             ServerConfig::StreamableHttp { .. } | ServerConfig::HttpSse { .. } => {
-                self.mount_http(name, cfg).await
+                self.mount_http(name, cfg, scopes).await
             }
         }
     }
@@ -625,6 +672,7 @@ impl MCPHost for RmcpHost {
                 tool_count: m.record.tools.len(),
                 info: m.record.info.clone(),
                 quarantined: m.quarantine.is_some(),
+                scopes: m.record.scopes.clone(),
             })
             .collect()
     }
@@ -654,6 +702,15 @@ impl MCPHost for RmcpHost {
         // and this guard covers callers holding a direct (server, tool) pair.
         if mounted.quarantine.is_some() {
             return Err(McpHostError::Quarantined(server.to_string()));
+        }
+        // Fail closed on a tool outside the consented egress scope. Mount-time
+        // filtering already drops these from routing; this guard covers a
+        // caller holding a direct (server, tool) pair.
+        if !mounted.record.scopes.allows_tool(tool) {
+            return Err(McpHostError::ScopeDenied {
+                server: server.to_string(),
+                tool: tool.to_string(),
+            });
         }
         let svc = mounted.service.as_ref().ok_or_else(|| {
             McpHostError::Transport(format!("server '{server}' has no live service"))

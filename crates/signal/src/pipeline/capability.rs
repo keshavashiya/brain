@@ -105,19 +105,36 @@ impl SignalProcessor {
                     };
                     let tool_id = format!("mcp:{server}:{tool}");
                     let outcome_result = host.call(&server, &tool, args).await;
-                    // A transport error or an `is_error: true` outcome both
-                    // count as failures; otherwise success.
-                    let healthy = matches!(&outcome_result, Ok(o) if !o.is_error);
-                    // Record into the per-tool breaker (resilience/failover)
-                    // and the learned capability-fitness store (self-model).
-                    if let Some(breakers) = self.breaker_registry() {
-                        if healthy {
-                            breakers.record_success(&tool_id).await;
-                        } else {
-                            breakers.record_failure(&tool_id).await;
-                        }
+                    // Policy refusals (scope / quarantine) are the host
+                    // enforcing consent, not the tool failing: they must not
+                    // feed the breaker or learned fitness. A scope denial is
+                    // additionally written to the audit trail (fail-closed +
+                    // audit row — the egress-scope DoD).
+                    let policy_refusal = matches!(
+                        &outcome_result,
+                        Err(mcphost::McpHostError::ScopeDenied { .. })
+                            | Err(mcphost::McpHostError::Quarantined(_))
+                    );
+                    if let Err(mcphost::McpHostError::ScopeDenied { server: s, tool: t }) =
+                        &outcome_result
+                    {
+                        self.audit_scope_denied(s, t).await;
                     }
-                    self.record_fitness(&tool_id, healthy);
+                    if !policy_refusal {
+                        // A transport error or an `is_error: true` outcome both
+                        // count as failures; otherwise success.
+                        let healthy = matches!(&outcome_result, Ok(o) if !o.is_error);
+                        // Record into the per-tool breaker (resilience/failover)
+                        // and the learned capability-fitness store (self-model).
+                        if let Some(breakers) = self.breaker_registry() {
+                            if healthy {
+                                breakers.record_success(&tool_id).await;
+                            } else {
+                                breakers.record_failure(&tool_id).await;
+                            }
+                        }
+                        self.record_fitness(&tool_id, healthy);
+                    }
                     match outcome_result {
                         Ok(outcome) => {
                             let status = if outcome.is_error { "error" } else { "ok" };
@@ -157,6 +174,28 @@ impl SignalProcessor {
     fn record_fitness(&self, tool_id: &str, success: bool) {
         if let Err(e) = self.fitness().record(tool_id, success) {
             tracing::debug!(tool_id, error = %e, "capability-fitness record failed");
+        }
+    }
+
+    /// Write an audit row for an MCP tool call blocked because the tool is
+    /// outside the server's consented egress scope. This is the visible,
+    /// queryable record the fail-closed scope enforcement leaves behind.
+    /// Best-effort: with no audit trail wired, the block still stands; only
+    /// the row is skipped.
+    async fn audit_scope_denied(&self, server: &str, tool: &str) {
+        let Some(trail) = self.audit_trail() else {
+            return;
+        };
+        let entry = audit::AuditEntry::new(
+            format!("mcp:{server}:{tool}"),
+            "blocked: tool outside the consented egress scope for this server",
+            format!("mcp.call {server}:{tool}"),
+            audit::ActionTier::External,
+        )
+        .with_source("system")
+        .with_outcome(audit::AuditOutcome::Failure);
+        if let Err(e) = trail.record(entry).await {
+            tracing::warn!(server, tool, error = %e, "failed to record scope-denied audit row");
         }
     }
 

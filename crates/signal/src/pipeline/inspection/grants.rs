@@ -82,6 +82,10 @@ impl SignalProcessor {
                                 s.mounted_at.format("%Y-%m-%d"),
                             ),
                         );
+                        // Egress scope is the consented limit on what this
+                        // server may do — the closer that makes the mount a
+                        // real grant, not just a registration.
+                        md.push_bullet(1, format!("scope — {}", s.scopes.summary()));
                     }
                     md.push_line("Revoke with `/mcp-unmount <name>`.");
                 }

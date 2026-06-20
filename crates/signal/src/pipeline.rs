@@ -616,7 +616,21 @@ impl SignalProcessor {
             return None;
         }
 
-        let description = format!("{}.{}", req.verb_ns, req.verb_action);
+        // For an MCP mount, surface the egress scope the user is approving
+        // right in the consent prompt — they consent to *what the server may
+        // do*, not just that one is being mounted.
+        let description = match intent {
+            thalamus::Intent::MountMcpServer { command_or_url, .. } => {
+                let (_, scopes) = crate::pipeline::lifecycle::parse_mount_scopes(command_or_url);
+                format!(
+                    "{}.{} (scope — {})",
+                    req.verb_ns,
+                    req.verb_action,
+                    scopes.summary()
+                )
+            }
+            _ => format!("{}.{}", req.verb_ns, req.verb_action),
+        };
         let timeout = self
             .safety
             .confirmation_timeout
