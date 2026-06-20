@@ -330,6 +330,27 @@ pub(crate) async fn cmd_serve(
         );
     }
     background::spawn_graph_compactor(processor.clone(), defer_on_battery, &mut set);
+    if config.backup.enabled {
+        // Empty `dir` → `<data_dir>/backups`; a configured path may use `~/`.
+        let backup_dir = match config.backup.dir.trim() {
+            "" => config.data_dir().join("backups"),
+            d => match d.strip_prefix("~/") {
+                Some(rest) => match std::env::var_os("HOME") {
+                    Some(home) => std::path::PathBuf::from(home).join(rest),
+                    None => std::path::PathBuf::from(d),
+                },
+                None => std::path::PathBuf::from(d),
+            },
+        };
+        background::spawn_backup(
+            processor.clone(),
+            backup_dir,
+            config.backup.interval_hours,
+            config.backup.retain,
+            defer_on_battery,
+            &mut set,
+        );
+    }
     dlq::spawn_dlq_drain(processor.clone(), &mut set);
 
     // Observation → graph mirror. Spawned before the monitor loops below so

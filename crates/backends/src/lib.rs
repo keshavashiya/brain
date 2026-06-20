@@ -2,6 +2,7 @@
 //!
 //! Extracted from the CLI crate so they can be reused by adapters and tests.
 
+pub mod backup;
 pub mod baseline;
 pub mod capabilities;
 pub mod error;

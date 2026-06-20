@@ -286,6 +286,32 @@ impl SqlitePool {
         Ok(())
     }
 
+    /// Write a consistent snapshot of this database to `target` using
+    /// `VACUUM INTO` (committed + WAL state captured as one atomic image — a
+    /// plain file copy could miss un-checkpointed WAL).
+    ///
+    /// Creates `target`'s parent directory if needed. `VACUUM INTO` refuses to
+    /// overwrite, so an existing file at `target` is removed first; callers
+    /// that want history should pass unique (e.g. timestamped) names.
+    pub fn backup_into(&self, target: &Path) -> Result<(), SqliteError> {
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| SqliteError::Backup(format!("{}: {e}", parent.display())))?;
+        }
+        if target.exists() {
+            std::fs::remove_file(target)
+                .map_err(|e| SqliteError::Backup(format!("{}: {e}", target.display())))?;
+        }
+        let target_str = target.to_string_lossy().to_string();
+        self.with_conn(|conn| {
+            conn.execute("VACUUM INTO ?1", rusqlite::params![target_str])?;
+            Ok(())
+        })
+        .map_err(|e| SqliteError::Backup(e.to_string()))?;
+        info!("Database snapshot written to {}", target.display());
+        Ok(())
+    }
+
     /// Open an in-memory database (for testing).
     ///
     /// Pool size is forced to 1 — multiple `Connection::open_in_memory`

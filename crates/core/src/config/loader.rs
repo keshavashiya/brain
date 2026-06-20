@@ -555,6 +555,7 @@ impl Default for BrainConfig {
             learning: crate::config::LearningConfig::default(),
             observability: crate::config::ObservabilityConfig::default(),
             monitoring: crate::config::MonitoringConfig::default(),
+            backup: crate::config::BackupConfig::default(),
         }
     }
 }

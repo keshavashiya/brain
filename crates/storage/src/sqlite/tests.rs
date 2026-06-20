@@ -20,6 +20,39 @@ fn test_open_memory() {
 }
 
 #[test]
+fn backup_into_writes_a_readable_snapshot() {
+    let pool = SqlitePool::open_memory().unwrap();
+    // A row to prove the snapshot carries committed state.
+    let id = pool
+        .insert_scheduled_intent("snapshot me", None, "work", None)
+        .unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("nested/snap.db");
+    pool.backup_into(&target).unwrap();
+    assert!(target.exists(), "snapshot file should be created");
+
+    // Re-open the snapshot and confirm the row survived.
+    let restored = SqlitePool::open(&target).unwrap();
+    let rows = restored.due_scheduled_intents().unwrap();
+    assert!(rows.iter().any(|i| i.id == id), "row missing from snapshot");
+}
+
+#[test]
+fn backup_into_overwrites_existing_target() {
+    let pool = SqlitePool::open_memory().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("snap.db");
+    std::fs::write(&target, b"stale").unwrap();
+    // VACUUM INTO refuses to overwrite; backup_into clears the stale file first.
+    pool.backup_into(&target).unwrap();
+    assert!(
+        SqlitePool::open(&target).is_ok(),
+        "snapshot should be valid"
+    );
+}
+
+#[test]
 fn open_connections_reports_pool_state() {
     let pool = SqlitePool::open_memory().unwrap();
     // The in-memory pool is built with max_size = 1; opening establishes at

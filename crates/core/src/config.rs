@@ -67,6 +67,10 @@ pub struct BrainConfig {
     /// so a fresh install probes nothing.
     #[serde(default)]
     pub monitoring: MonitoringConfig,
+    /// Scheduled database backups — cadence, retention, and target directory.
+    /// Default disabled, so a fresh install takes no snapshots until opted in.
+    #[serde(default)]
+    pub backup: BackupConfig,
 }
 
 /// Learned self-model configuration.
@@ -900,6 +904,45 @@ pub struct SecurityConfig {
 
 fn default_audit_encryption() -> bool {
     true
+}
+
+/// Scheduled database backups. A background maintenance loop writes a
+/// `VACUUM INTO` snapshot on a cadence and prunes to `retain` newest. Opt-in:
+/// disabled by default so a fresh install doesn't silently grow disk usage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupConfig {
+    /// Run scheduled snapshots. Default `false`.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Hours between snapshots. Default 24.
+    #[serde(default = "default_backup_interval_hours")]
+    pub interval_hours: u64,
+    /// Number of snapshots to keep (newest). Default 7. A run never deletes
+    /// the snapshot it just wrote, so the effective floor is 1.
+    #[serde(default = "default_backup_retain")]
+    pub retain: usize,
+    /// Directory for snapshot files. Empty → `<data_dir>/backups`.
+    #[serde(default)]
+    pub dir: String,
+}
+
+fn default_backup_interval_hours() -> u64 {
+    24
+}
+
+fn default_backup_retain() -> usize {
+    7
+}
+
+impl Default for BackupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_hours: default_backup_interval_hours(),
+            retain: default_backup_retain(),
+            dir: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

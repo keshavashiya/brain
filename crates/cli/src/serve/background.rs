@@ -269,6 +269,56 @@ pub(super) fn spawn_graph_compactor(
     tracing::info!("Graph compactor scheduled (every 24h, default half-life 7d)");
 }
 
+/// Scheduled database backups: a `VACUUM INTO` snapshot every `interval_hours`,
+/// pruned to `retain` newest, written into `dir`. Like the other maintenance
+/// loops it observes battery etiquette (a due snapshot holds until external
+/// power returns). The snapshot itself runs on a blocking thread because
+/// `VACUUM INTO` can take a while on a large database.
+pub(super) fn spawn_backup(
+    processor: Arc<signal::SignalProcessor>,
+    dir: std::path::PathBuf,
+    interval_hours: u64,
+    retain: usize,
+    defer_on_battery: bool,
+    set: &mut tokio::task::JoinSet<anyhow::Result<()>>,
+) {
+    let p = processor.clone();
+    let power = processor.power();
+    let dir_display = dir.display().to_string();
+    set.spawn(async move {
+        let period = tokio::time::Duration::from_secs(interval_hours.max(1) * 3600);
+        let mut ticker = tokio::time::interval(period);
+        // Skip the immediate first tick — the first backup lands one interval
+        // after boot, not synchronously at startup.
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            super::power::hold_while_on_battery(&power, defer_on_battery, "database backup").await;
+            let pool = p.episodic().pool().clone();
+            let dir = dir.clone();
+            let res = tokio::task::spawn_blocking(move || {
+                backends::backup::run_backup(&pool, &dir, retain, chrono::Utc::now())
+            })
+            .await;
+            match res {
+                Ok(Ok(report)) => tracing::info!(
+                    snapshot = %report.snapshot.display(),
+                    pruned = report.pruned.len(),
+                    "Database backup written"
+                ),
+                Ok(Err(e)) => tracing::warn!(error = %e, "Database backup failed"),
+                Err(e) => tracing::warn!(error = %e, "Database backup task panicked"),
+            }
+        }
+    });
+    tracing::info!(
+        interval_hours,
+        retain,
+        dir = %dir_display,
+        "Scheduled backups enabled"
+    );
+}
+
 /// Resource sampler: one bounded task that gauges process RSS, CPU, open
 /// SQLite connections, and `~/.brain` disk usage every `sample_secs`, writing
 /// the readings into the shared [`metrics::ResourceMetrics`] store.
