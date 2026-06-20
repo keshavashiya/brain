@@ -10,6 +10,7 @@
 //! demos where isolation is intentionally skipped.
 
 pub mod allowlist;
+pub mod harden;
 pub mod isolated;
 pub mod tier;
 
@@ -17,5 +18,6 @@ pub use allowlist::{
     CredentialRef, ResourceUsage, SandboxCommand, SandboxError, SandboxExecutor, SandboxOutcome,
     StubSandbox,
 };
+pub use harden::{hardened_stdio_command, StdioHardening};
 pub use isolated::{IsolatedSandbox, SandboxLimits};
 pub use tier::ActionTier;

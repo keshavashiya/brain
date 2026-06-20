@@ -1166,6 +1166,7 @@ dependencies = [
  "brainos-intent",
  "brainos-observe",
  "brainos-resilience",
+ "brainos-sandbox",
  "brainos-synapse",
  "brainos-vault",
  "chrono",

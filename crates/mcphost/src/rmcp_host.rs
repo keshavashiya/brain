@@ -198,8 +198,16 @@ impl RmcpHost {
             ));
         };
 
-        let mut cmd = tokio::process::Command::new(command);
-        cmd.args(args);
+        // Spawn the child under the sandbox: rlimit ceilings always, and
+        // outbound network denied unless the mount's scope granted it. The
+        // host owns this process for its lifetime, so we harden the long-lived
+        // `Command` (see `sandbox::harden`) rather than the one-shot
+        // `IsolatedSandbox::run` path.
+        let hardening = sandbox::StdioHardening {
+            network: scopes.network,
+            ..Default::default()
+        };
+        let mut cmd = sandbox::hardened_stdio_command(command, args, &hardening);
         for (k, v) in env {
             cmd.env(k, v);
         }

@@ -258,6 +258,13 @@ impl IsolatedSandbox {
         // Seatbelt profile: deny outbound network by default, let everything
         // else inherit macOS defaults. Keeps compatibility with git/cargo/etc.
         // which need to read system frameworks and write inside the workdir.
+        //
+        // NOTE: on recent macOS this `(allow default)` form does not actually
+        // deny outbound network (the trailing `(local ip)` allow matches every
+        // IP socket, re-permitting it). The long-lived stdio path in
+        // `crate::harden` uses a corrected `(deny default)` allowlist profile;
+        // tightening this one-shot profile is deferred because it must first be
+        // validated against the full `shell.exec` workload (git/cargo/etc.).
         let profile = r#"(version 1)
 (allow default)
 (deny network-outbound)
@@ -478,7 +485,7 @@ impl SandboxExecutor for IsolatedSandbox {
 }
 
 #[cfg(unix)]
-fn apply_rlimits(limits: &SandboxLimits) -> std::io::Result<()> {
+pub(crate) fn apply_rlimits(limits: &SandboxLimits) -> std::io::Result<()> {
     let cpu = libc::rlimit {
         rlim_cur: limits.cpu_seconds as libc::rlim_t,
         rlim_max: (limits.cpu_seconds + 1) as libc::rlim_t,

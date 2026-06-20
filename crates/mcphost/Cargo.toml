@@ -17,6 +17,7 @@ observe      = { workspace = true }
 identity     = { workspace = true }
 intent       = { workspace = true }
 resilience   = { workspace = true }
+sandbox      = { workspace = true }
 synapse      = { workspace = true }
 vault        = { workspace = true }
 async-trait  = { workspace = true }
