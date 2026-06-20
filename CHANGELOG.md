@@ -266,6 +266,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   to the model, so a "reachable?" query surfaces and selects `net.check` rather
   than the look-alike fetch tool.
 
+- **Streaming chat can finally use tools.** Every `brain chat` turn streams
+  (the CLI sends `stream: true`), and the streaming WebSocket path consumed the
+  prepared turn with a plain `generate_stream` call — no tools channel, no
+  consent gate, no connectivity-aware routing. The whole chat tool-loop was
+  reachable only on the non-streaming HTTP path, so the interactive client could
+  never invoke a capability: it suggested CLI commands or fabricated outcomes
+  (e.g. claiming a memory was saved when nothing ran). Generation is now funneled
+  through a single `SignalProcessor::generate_chat_response` entry point shared
+  by every adapter — budget gate, tool-loop, consent, and offline tier-routing
+  apply identically whether or not the answer is streamed.
+
+- **Tool calls emitted as JSON text are now honoured.** Some local models —
+  notably the default `qwen2.5-coder` — answer an offered tools channel by
+  writing the call as a JSON object in the message content rather than in
+  Ollama's structured `tool_calls` field, so the call was never dispatched and
+  the raw JSON leaked to the user. The Ollama provider now recovers such a call
+  from the content (fenced or bare object/array, `arguments`/`parameters`,
+  double-encoded args), accepting it only when the name matches an offered tool.
+
 ## [0.5.0] — 2026-06-10
 
 ### Added
