@@ -47,7 +47,7 @@ pub fn hardened_stdio_command(
     let (prog, full_args) = if opts.network {
         (program.to_string(), args.to_vec())
     } else {
-        match write_macos_stdio_deny_profile() {
+        match write_macos_deny_network_profile("brain-mcp-stdio") {
             Ok(profile) => {
                 let mut wrapped = vec![
                     "-f".to_string(),
@@ -100,7 +100,9 @@ pub fn hardened_stdio_command(
     cmd
 }
 
-/// Write the Seatbelt profile for a network-denied long-lived stdio child.
+/// Seatbelt profile that denies IP networking while permitting ordinary local
+/// work. Shared verbatim by the one-shot [`IsolatedSandbox`](crate::IsolatedSandbox)
+/// and this long-lived stdio host — both want exactly the same network posture.
 ///
 /// Uses `(deny default)` with an explicit allowlist rather than the
 /// `(allow default)(deny network-outbound)` form: on recent macOS the latter
@@ -110,12 +112,10 @@ pub fn hardened_stdio_command(
 /// network. The allowlist below blocks all IP networking while still letting
 /// interpreters and binaries do their non-network work (file/dyld reads,
 /// process/mach/ipc, sysctl) and talk over unix sockets. Validated to block
-/// outbound TCP from bash and python while running node/python/cat.
+/// outbound TCP from bash/python while running node/python/cat and the
+/// `shell.exec` toolchain (git/cargo and friends).
 #[cfg(target_os = "macos")]
-fn write_macos_stdio_deny_profile() -> std::io::Result<std::path::PathBuf> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    let profile = r#"(version 1)
+pub(crate) const MACOS_DENY_NETWORK_PROFILE: &str = r#"(version 1)
 (deny default)
 (allow process*)
 (allow file*)
@@ -128,13 +128,25 @@ fn write_macos_stdio_deny_profile() -> std::io::Result<std::path::PathBuf> {
 (allow pseudo-tty)
 (allow network* (remote unix-socket))
 "#;
-    // Unique suffix per call so concurrent writers don't truncate each
-    // other's profile mid-read (see IsolatedSandbox for the same rationale).
+
+/// Write [`MACOS_DENY_NETWORK_PROFILE`] to a uniquely-named temp file and return
+/// its path, ready to pass to `sandbox-exec -f`. The `prefix` only names the
+/// file (for debuggability); the policy is identical for every caller.
+///
+/// The filename carries a process-wide sequence suffix so concurrent writers
+/// (notably parallel tests sharing one process) don't truncate each other's
+/// profile mid-read — a reader would otherwise see an empty file and
+/// `sandbox-exec` fails with "no version specified".
+#[cfg(target_os = "macos")]
+pub(crate) fn write_macos_deny_network_profile(
+    prefix: &str,
+) -> std::io::Result<std::path::PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let path =
-        std::env::temp_dir().join(format!("brain-mcp-stdio-{}-{}.sb", std::process::id(), seq));
-    std::fs::write(&path, profile)?;
+    let path = std::env::temp_dir().join(format!("{prefix}-{}-{}.sb", std::process::id(), seq));
+    std::fs::write(&path, MACOS_DENY_NETWORK_PROFILE)?;
     Ok(path)
 }
 

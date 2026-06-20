@@ -253,37 +253,13 @@ impl IsolatedSandbox {
 
     #[cfg(target_os = "macos")]
     fn write_macos_profile() -> std::io::Result<PathBuf> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-
-        // Seatbelt profile: deny outbound network by default, let everything
-        // else inherit macOS defaults. Keeps compatibility with git/cargo/etc.
-        // which need to read system frameworks and write inside the workdir.
-        //
-        // NOTE: on recent macOS this `(allow default)` form does not actually
-        // deny outbound network (the trailing `(local ip)` allow matches every
-        // IP socket, re-permitting it). The long-lived stdio path in
-        // `crate::harden` uses a corrected `(deny default)` allowlist profile;
-        // tightening this one-shot profile is deferred because it must first be
-        // validated against the full `shell.exec` workload (git/cargo/etc.).
-        let profile = r#"(version 1)
-(allow default)
-(deny network-outbound)
-(allow network-outbound (local ip))
-(allow network-outbound (remote unix-socket))
-"#;
-        // Key the filename on a process-wide counter, not just the PID:
-        // many `IsolatedSandbox` instances (notably concurrent tests) share
-        // one process, and a PID-only path means one `std::fs::write`
-        // truncating the file races against another instance's
-        // `sandbox-exec` reading it — the reader then sees an empty profile
-        // and fails with "sandbox-exec: no version specified". A unique
-        // suffix per instance gives each its own file.
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        let path =
-            std::env::temp_dir().join(format!("brain-sandbox-{}-{}.sb", std::process::id(), seq));
-        std::fs::write(&path, profile)?;
-        Ok(path)
+        // Genuinely deny outbound IP networking while still letting the
+        // `shell.exec` toolchain (git/cargo/etc.) read system frameworks and
+        // write inside the workdir. Shares the corrected `(deny default)`
+        // allowlist with the long-lived stdio host in `crate::harden`; the old
+        // `(allow default)(deny network-outbound)(allow … (local ip))` form
+        // never blocked anything because `(local ip)` matches every IP socket.
+        crate::harden::write_macos_deny_network_profile("brain-sandbox")
     }
 }
 
@@ -734,6 +710,80 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
         assert_eq!(outcome.exit_code, 0, "stderr: {:?}", outcome.stderr);
         assert!(outcome.stdout.contains("shell-tilde-ok"));
+    }
+
+    // ── macOS Seatbelt profile validation ────────────────────────────
+    //
+    // The one-shot profile was historically `(allow default)(deny
+    // network-outbound)(allow … (local ip))`, which never blocked anything
+    // because `(local ip)` matches every IP socket. These tests pin the
+    // corrected `(deny default)` allowlist: outbound IP networking is genuinely
+    // denied, yet the `shell.exec` toolchain (file I/O, subprocess spawn, and
+    // git when installed) still runs. They only assert on macOS, where Seatbelt
+    // enforces denial without extra privileges.
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_profile_blocks_outbound_tcp() {
+        // bash's /dev/tcp triggers a real outbound connect; under the corrected
+        // profile it must fail closed. 1.1.1.1:80 is a stable public endpoint.
+        let sandbox = IsolatedSandbox::new(vec!["bash".into()], Duration::from_secs(10));
+        let script = "exec 3<>/dev/tcp/1.1.1.1/80 && echo CONNECTED || echo BLOCKED";
+        let cmd = SandboxCommand::new("bash", vec!["-c".into(), script.into()]);
+        let outcome = sandbox.run(cmd).await.unwrap();
+        assert!(
+            outcome.stdout.contains("BLOCKED"),
+            "expected outbound connect to be denied by Seatbelt, stdout: {:?} stderr: {:?}",
+            outcome.stdout,
+            outcome.stderr
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_profile_allows_local_shell_workload() {
+        // File write+read, a pipe, and a spawned subprocess — the non-network
+        // shape of every shell.exec plan. `(deny default)` must not break it.
+        let dir = std::env::temp_dir().join(format!("brain-sb-local-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sandbox = IsolatedSandbox::new(vec!["sh".into()], Duration::from_secs(10));
+        let cmd = SandboxCommand::shell("echo hello > f.txt && cat f.txt | wc -c")
+            .with_workdir(dir.clone());
+        let outcome = sandbox.run(cmd).await.unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(
+            outcome.exit_code, 0,
+            "local shell workload failed under deny-default profile: {:?}",
+            outcome.stderr
+        );
+        assert_eq!(outcome.stdout.trim(), "6", "stdout: {:?}", outcome.stdout);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn macos_profile_allows_git_when_present() {
+        // The motivating shell.exec workload: git must still read its config and
+        // touch the worktree under the corrected profile. Best-effort — skipped
+        // when git isn't installed so the suite stays dependency-free.
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .map(|o| !o.status.success())
+            .unwrap_or(true)
+        {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("brain-sb-git-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sandbox = IsolatedSandbox::new(vec!["git".into()], Duration::from_secs(20));
+        let cmd = SandboxCommand::new("git", vec!["init".into()]).with_workdir(dir.clone());
+        let outcome = sandbox.run(cmd).await.unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(
+            outcome.exit_code, 0,
+            "git init failed under deny-default profile: {:?}",
+            outcome.stderr
+        );
     }
 
     // ── Property tests ────────────────────────────────────────────────
