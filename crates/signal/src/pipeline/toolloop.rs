@@ -18,12 +18,25 @@
 //! manifest is empty, so a bare deployment behaves exactly as before.
 
 use chrono::Utc;
+use futures::StreamExt;
+use tokio::sync::mpsc;
 
 use cortex::llm::{Message, ProposedToolCall, Response, Role, ToolDef, Usage};
 use intent::QueryEmbedder;
 
+use crate::budget_guard::{self, BudgetGate};
 use crate::types::*;
 use crate::SignalProcessor;
+
+/// Sink for streaming a chat turn's final answer to a client as it is
+/// produced. The adapter forwards each `String` as a wire chunk while the
+/// turn runs. `None` buffers the whole answer and returns it in one piece.
+///
+/// One sink type serves every adapter, so there is no second generation flow:
+/// streaming and non-streaming callers both route through
+/// [`SignalProcessor::generate_chat_response`] and differ only in whether they
+/// pass a sink.
+pub type ChatChunkSink = mpsc::Sender<String>;
 
 /// Max model⇄tool round-trips before we stop looping and return the model's
 /// last text. Bounds cost and stops a model that keeps proposing calls from
@@ -35,15 +48,77 @@ const MAX_TOOL_ROUNDS: usize = 4;
 const TOOL_ADVERTISE_K: usize = 8;
 
 impl SignalProcessor {
+    /// The single chat-generation entry point shared by every adapter.
+    ///
+    /// Runs a fully-prepared chat turn end to end: a pre-flight budget gate,
+    /// the tool-loop (connectivity-aware [`active_llm`](SignalProcessor::active_llm),
+    /// consent gate, and dispatch), then post-flight usage recording. When
+    /// `chunk_sink` is `Some`, the final answer is streamed to it as it is
+    /// produced; when `None`, the whole answer is buffered into the returned
+    /// [`Response`] value.
+    ///
+    /// Streaming and non-streaming callers route through here identically, so
+    /// tools, the budget gate, and offline tier-routing are available on every
+    /// surface — there is no second LLM flow that can drift out of sync. A
+    /// budget block is returned as a plain-text [`Response`] carrying the
+    /// block message (and streamed, if a sink is wired) so the caller renders
+    /// it like any other answer.
+    pub async fn generate_chat_response(
+        &self,
+        signal: &Signal,
+        signal_id: uuid::Uuid,
+        messages: Vec<Message>,
+        chunk_sink: Option<&ChatChunkSink>,
+    ) -> Result<Response, SignalError> {
+        // Budget keys by the chain that will actually serve this turn (offline
+        // turns ride a local tier) — the same provider name the tool-loop uses.
+        let provider_name = self.active_llm().name().to_string();
+        let estimated_input = match budget_guard::check_llm_input(
+            self.cost_budget(),
+            &provider_name,
+            &messages,
+        )
+        .await
+        {
+            BudgetGate::Blocked { message } => {
+                if let Some(sink) = chunk_sink {
+                    let _ = sink.send(message.clone()).await;
+                }
+                return Ok(Response::text(message, None));
+            }
+            BudgetGate::Proceed {
+                estimated_input_tokens,
+            } => estimated_input_tokens,
+        };
+
+        let resp = self
+            .run_chat_turn(signal, signal_id, messages, chunk_sink)
+            .await?;
+
+        budget_guard::record_llm_usage(
+            self.cost_budget(),
+            &provider_name,
+            resp.usage.as_ref(),
+            estimated_input,
+        )
+        .await;
+
+        Ok(resp)
+    }
+
     /// Run one chat turn, using the tools channel when a manifest is wired.
     ///
     /// Returns the final assistant [`Response`]; its `usage` is summed across
     /// every round so the caller's budget accounting covers the whole turn.
+    /// When `chunk_sink` is `Some`, the answer text is streamed to it: token by
+    /// token on a no-tool turn (true streaming), and as one consolidated chunk
+    /// once a tool round has run, since a tool-call round can't be streamed.
     pub(super) async fn run_chat_turn(
         &self,
         signal: &Signal,
         signal_id: uuid::Uuid,
         mut messages: Vec<Message>,
+        chunk_sink: Option<&ChatChunkSink>,
     ) -> Result<Response, SignalError> {
         // Captured once per turn: offline turns ride the first local tier
         // chain instead of timing out against a dead remote (see
@@ -51,8 +126,9 @@ impl SignalProcessor {
         let llm = self.active_llm();
         let tools = self.advertised_tools(&messages, &signal.namespace).await;
         if tools.is_empty() {
-            // No manifest / no tools → unchanged plain-text behaviour.
-            return Ok(llm.generate(&messages).await?);
+            // No manifest / no tools → plain-text answer, streamed token by
+            // token when a sink is wired.
+            return self.generate_plain(&messages, chunk_sink).await;
         }
 
         // Nudge the model to actually *use* the tools. The default local 7b
@@ -89,7 +165,40 @@ impl SignalProcessor {
         }
 
         last.usage = total_usage;
+        // A tool round already blocked the turn, so the final text is in hand —
+        // hand it to the sink as a single chunk for live display.
+        if let Some(sink) = chunk_sink {
+            let _ = sink.send(last.content.clone()).await;
+        }
         Ok(last)
+    }
+
+    /// Plain (no-tool) generation. Streams token by token to `chunk_sink` when
+    /// one is wired (true streaming), otherwise buffers the whole answer.
+    async fn generate_plain(
+        &self,
+        messages: &[Message],
+        chunk_sink: Option<&ChatChunkSink>,
+    ) -> Result<Response, SignalError> {
+        let llm = self.active_llm();
+        let Some(sink) = chunk_sink else {
+            return Ok(llm.generate(messages).await?);
+        };
+        let mut stream = llm.generate_stream(messages).await?;
+        let mut content = String::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            content.push_str(&chunk.content);
+            // A closed receiver (client gone) just ends the stream early; the
+            // accumulated text is still returned for persistence.
+            if sink.send(chunk.content).await.is_err() {
+                break;
+            }
+            if chunk.is_done {
+                break;
+            }
+        }
+        Ok(Response::text(content, None))
     }
 
     /// Build the relevance-ranked [`ToolDef`] slice advertised to the model

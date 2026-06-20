@@ -120,47 +120,17 @@ impl SignalProcessor {
                 agent,
                 ..
             } => {
-                // Budget accounting keys by the chain that will actually
-                // serve this turn (offline turns ride a local tier).
-                let provider_name = self.active_llm().name().to_string();
-                let gate = crate::budget_guard::check_llm_input(
-                    self.cost_budget(),
-                    &provider_name,
-                    &messages,
-                )
-                .await;
-                let estimated_input = match gate {
-                    crate::budget_guard::BudgetGate::Blocked { message } => {
-                        let resp = SignalResponse {
-                            signal_id,
-                            status: ResponseStatus::Ok,
-                            response: ResponseContent::Text(message),
-                            memory_context,
-                            session_id,
-                        };
-                        self.publish_event(&signal, &resp);
-                        return Ok(resp);
-                    }
-                    crate::budget_guard::BudgetGate::Proceed {
-                        estimated_input_tokens,
-                    } => estimated_input_tokens,
-                };
-
+                // The non-streaming branch routes through the same single
+                // chat-generation entry point the streaming adapter uses
+                // (budget gate + tool-loop + usage recording), passing no
+                // chunk sink so the whole answer is buffered.
                 let llm_resp = tokio::select! {
                     biased;
                     _ = cancel.notified() => {
                         return Ok(self.cancelled_response(signal_id, &signal).await);
                     }
-                    r = self.run_chat_turn(&signal, signal_id, messages) => r?,
+                    r = self.generate_chat_response(&signal, signal_id, messages, None) => r?,
                 };
-
-                crate::budget_guard::record_llm_usage(
-                    self.cost_budget(),
-                    &provider_name,
-                    llm_resp.usage.as_ref(),
-                    estimated_input,
-                )
-                .await;
 
                 // Store assistant episode for Chat/Recall
                 if let Some(sid) = &session_id {

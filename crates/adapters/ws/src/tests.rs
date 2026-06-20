@@ -431,7 +431,10 @@ async fn test_streaming_chat_returns_chunks_then_complete() {
             Some("complete") => {
                 break;
             }
-            Some("proactive") => continue,
+            // Advisory frames interleaved with the answer — not part of the
+            // assertion. `status` ("routing…"/"thinking…") precedes the first
+            // chunk on every streaming turn.
+            Some("status") | Some("proactive") => continue,
             other => panic!("Unexpected frame type: {:?}", other),
         }
     }

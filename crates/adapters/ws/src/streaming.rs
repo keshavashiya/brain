@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use futures_util::StreamExt;
 use signal::{PipelineResult, Signal, SignalError, SignalResponse, SignalSource};
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
@@ -310,23 +309,12 @@ pub(crate) async fn handle_streaming_request(
             )
             .await;
 
-            let llm_stream = match processor.llm().generate_stream(&messages).await {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(conn_id = %conn_id, "LLM stream error: {e}");
-                    let _ = send_json_frame_to_sink(
-                        ws_tx,
-                        &serde_json::json!({
-                            "type": "error",
-                            "message": e.to_string()
-                        }),
-                        conn_id,
-                    )
-                    .await;
-                    return;
-                }
-            };
-
+            // Route through the same single chat-generation entry point the
+            // non-streaming pipeline uses — budget gate, tool-loop (consent +
+            // dispatch), connectivity-aware routing — so streaming chat is no
+            // longer a tool-blind second flow. The turn streams its answer to a
+            // chunk channel; we forward each chunk as a wire frame while the
+            // turn runs and accumulate it for persistence.
             let acc: Arc<std::sync::Mutex<String>> = Arc::new(std::sync::Mutex::new(String::new()));
             let finalizer = StreamFinalizer::new(
                 processor.clone(),
@@ -336,11 +324,13 @@ pub(crate) async fn handle_streaming_request(
                 Arc::clone(&acc),
             );
 
-            let mut stream = llm_stream;
-            let finalizer = finalizer;
+            let (chunk_tx, mut chunk_rx) = mpsc::channel::<String>(64);
+            let turn =
+                processor.generate_chat_response(&signal, signal_id, messages, Some(&chunk_tx));
+            tokio::pin!(turn);
 
-            loop {
-                let chunk_result = tokio::select! {
+            let turn_result = loop {
+                tokio::select! {
                     biased;
                     _ = cancel_notify.notified() => {
                         let _ = send_json_frame_to_sink(
@@ -355,75 +345,73 @@ pub(crate) async fn handle_streaming_request(
                         .await;
                         return;
                     }
-                    next = stream.next() => match next {
-                        Some(r) => r,
-                        None => break,
-                    },
-                };
-                let chunk = match chunk_result {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::warn!(conn_id = %conn_id, "Stream chunk error: {e}");
-                        let _ = send_json_frame_to_sink(
-                            ws_tx,
-                            &serde_json::json!({
-                                "type": "error",
-                                "message": e.to_string()
-                            }),
-                            conn_id,
-                        )
-                        .await;
-                        return;
+                    Some(chunk) = chunk_rx.recv() => {
+                        acc.lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .push_str(&chunk);
+                        let chunk_frame = serde_json::json!({"type": "chunk", "content": chunk});
+                        if send_json_frame_to_sink(ws_tx, &chunk_frame, conn_id)
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
                     }
-                };
+                    result = &mut turn => break result,
+                }
+            };
 
+            // The turn has finished producing; drain any chunks still buffered
+            // in the channel before we finalize so nothing is dropped.
+            while let Ok(chunk) = chunk_rx.try_recv() {
                 acc.lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .push_str(&chunk.content);
-
-                let chunk_frame = serde_json::json!({
-                    "type": "chunk",
-                    "content": chunk.content
-                });
+                    .push_str(&chunk);
+                let chunk_frame = serde_json::json!({"type": "chunk", "content": chunk});
                 if send_json_frame_to_sink(ws_tx, &chunk_frame, conn_id)
                     .await
                     .is_err()
                 {
                     return;
                 }
-
-                if chunk.is_done {
-                    break;
-                }
             }
 
-            {
-                let acc_content = acc
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone();
-                if let Err(e) = processor
-                    .finalize_streaming(
-                        session_id.as_deref().unwrap_or("unknown"),
-                        &acc_content,
-                        &namespace,
-                        agent.as_deref(),
+            let final_content = match turn_result {
+                Ok(resp) => resp.content,
+                Err(e) => {
+                    tracing::warn!(conn_id = %conn_id, "Chat turn error: {e}");
+                    let public = e.to_public();
+                    let _ = send_json_frame_to_sink(
+                        ws_tx,
+                        &serde_json::json!({
+                            "type": "error",
+                            "code": public.code,
+                            "message": public.message,
+                        }),
+                        conn_id,
                     )
-                    .await
-                {
-                    tracing::error!("finalize_streaming failed after successful stream: {e}");
+                    .await;
+                    return;
                 }
+            };
+
+            if let Err(e) = processor
+                .finalize_streaming(
+                    session_id.as_deref().unwrap_or("unknown"),
+                    &final_content,
+                    &namespace,
+                    agent.as_deref(),
+                )
+                .await
+            {
+                tracing::error!("finalize_streaming failed after successful stream: {e}");
             }
             finalizer.commit();
 
             let resp = signal::SignalResponse {
                 signal_id,
                 status: signal::ResponseStatus::Ok,
-                response: signal::ResponseContent::Text(
-                    acc.lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .clone(),
-                ),
+                response: signal::ResponseContent::Text(final_content),
                 memory_context,
                 session_id,
             };
