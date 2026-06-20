@@ -71,13 +71,7 @@ pub fn score_top_k(mut tools: Vec<ToolDescriptor>, query: &str, k: usize) -> Vec
     tools
 }
 
-/// Split text into lowercase alphanumeric terms, dropping empties.
-fn tokenize(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .map(|t| t.to_lowercase())
-        .collect()
-}
+use synapse::tokenize;
 
 /// Number of query `terms` that appear anywhere in the tool's name or
 /// description (each term counted once).

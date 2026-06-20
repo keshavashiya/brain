@@ -12,6 +12,10 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+# Shared lexical primitives (tokenize) so the config-section retrieval scorer
+# ranks by the same tokenizer as the intent router and capability index.
+synapse = { workspace = true }
+
 # Boot-time host probe (RAM/cores/disk class). GPU detection shells out to
 # platform tools (sysctl / nvidia-smi) — no extra dependency for that.
 sysinfo = { workspace = true }

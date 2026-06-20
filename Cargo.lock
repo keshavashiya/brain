@@ -1166,6 +1166,7 @@ dependencies = [
  "brainos-intent",
  "brainos-observe",
  "brainos-resilience",
+ "brainos-synapse",
  "brainos-vault",
  "chrono",
  "http",
@@ -1291,6 +1292,7 @@ name = "brainos-selfmodel"
 version = "0.5.0"
 dependencies = [
  "brainos-core",
+ "brainos-synapse",
  "sysinfo",
 ]
 
@@ -1406,6 +1408,7 @@ dependencies = [
  "bolero",
  "brainos-cortex",
  "brainos-intent",
+ "brainos-synapse",
  "chrono",
  "proptest",
  "regex",

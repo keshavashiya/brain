@@ -684,15 +684,11 @@ pub fn spec_for_key(key: &str) -> Option<&'static IntentSpec> {
 // disambiguation is a table edit guarded by a drift test, not a new
 // `LazyLock<Regex>` + a new branch in `classify_regex`.
 
-/// Split text into lowercase alphanumeric tokens, dropping empties. Mirrors
-/// the tokenizers in `mcphost::capability_index` and `signal`'s tool-loop so
-/// the two planes score phrasings the same way.
-pub fn tokenize(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .map(|t| t.to_lowercase())
-        .collect()
-}
+/// Split text into lowercase alphanumeric tokens, dropping empties. Re-exported
+/// from [`synapse`] — the one shared lexical primitive both the control plane
+/// (this table's scorer) and the capability plane (`mcphost`, `signal`'s
+/// tool-loop) tokenize with, so they score phrasings identically.
+pub use synapse::tokenize;
 
 /// True when every token of `phrase` appears among `terms` — i.e. the phrasing
 /// is fully present in the input. This is the deterministic, host-agnostic test

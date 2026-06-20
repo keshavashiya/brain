@@ -302,13 +302,8 @@ fn cap_body(body: &str) -> String {
     out
 }
 
-/// Lowercase alphanumeric terms — same tokenization the tool-loop ranker uses.
-fn tokenize(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .map(|t| t.to_lowercase())
-        .collect()
-}
+// Lowercase alphanumeric terms — same tokenization the tool-loop ranker uses.
+use synapse::tokenize;
 
 /// Count of distinct query terms that appear as a *whole word* in the section's
 /// label + key + body. Whole-word (not substring) so a short query term like
