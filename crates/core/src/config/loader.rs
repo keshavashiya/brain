@@ -474,6 +474,8 @@ impl Default for BrainConfig {
                 // `security.allowed_paths: ["~/code", "~/work"]` to
                 // restrict further.
                 allowed_paths: Vec::new(),
+                // At-rest audit encryption on by default (identity-keyed).
+                audit_encryption: true,
             },
             actions: ActionsConfig {
                 web_search: WebSearchActionConfig {

@@ -11,10 +11,14 @@
 //!   substrate for capability-scoped Skill Packs.
 //! - [`ConfigIdentityStore`] — default in-memory implementation backed by
 //!   the `identity:` section of `~/.brain/config.yaml`.
+//! - [`IdentityKey`] — the install's persistent root secret, from which other
+//!   at-rest keys (e.g. the audit-trail cipher) are derived.
 
+pub mod key;
 pub mod store;
 pub mod types;
 
+pub use key::{IdentityKey, IdentityKeyError, KEY_LEN};
 pub use store::{ConfigIdentityStore, IdentityConfig, PrincipalConfig};
 pub use types::{
     AgentHint, AgentId, AuthorizationRequest, CheckOutcome, IdentityError, IdentityStore,

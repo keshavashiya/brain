@@ -13,7 +13,8 @@ categories.workspace = true
 
 [dependencies]
 brain         = { workspace = true }
-storage = { workspace = true }
+# `encryption` brings storage::Encryptor for at-rest audit-column sealing.
+storage = { workspace = true, features = ["encryption"] }
 observe = { workspace = true }
 identity = { workspace = true }
 rusqlite = { workspace = true }

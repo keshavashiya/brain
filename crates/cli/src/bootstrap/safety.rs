@@ -30,6 +30,25 @@ pub(super) async fn wire_safety_infrastructure(
     if let Some(obs) = processor.observer() {
         audit_trail = audit_trail.with_observer(obs.clone());
     }
+    // At-rest encryption of the sensitive audit columns, keyed off the install
+    // identity key. Best-effort: if the key can't be loaded we log and fall
+    // back to plaintext rather than refusing to wire the audit trail (which
+    // every safety component below depends on).
+    if config.security.audit_encryption {
+        let key_path = config.data_dir().join("identity.key");
+        match identity::IdentityKey::load_or_create(&key_path) {
+            Ok(key) => {
+                audit_trail =
+                    audit_trail.with_encryptor(audit::SqliteAuditTrail::encryptor_for(&key));
+                tracing::info!("Audit trail at-rest encryption enabled (identity-keyed)");
+            }
+            Err(e) => tracing::error!(
+                error = %e,
+                path = %key_path.display(),
+                "failed to load identity key; audit trail will store plaintext"
+            ),
+        }
+    }
     audit_trail
         .ensure_tables()
         .map_err(|e| anyhow::anyhow!("Audit trail table init failed: {e}"))?;

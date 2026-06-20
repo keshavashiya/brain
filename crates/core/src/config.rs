@@ -889,6 +889,17 @@ pub struct SecurityConfig {
     /// `/etc` or `/Users/<other>/...`.
     #[serde(default)]
     pub allowed_paths: Vec<String>,
+    /// Encrypt the sensitive audit-trail columns (request/decision/action/
+    /// stdout/stderr/metadata/principal) at rest, using a key derived from
+    /// the install identity key (`<data_dir>/identity.key`). Structured
+    /// columns used for filtering stay plaintext. On by default; disabling it
+    /// only affects rows written afterwards (sealed rows remain readable).
+    #[serde(default = "default_audit_encryption")]
+    pub audit_encryption: bool,
+}
+
+fn default_audit_encryption() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

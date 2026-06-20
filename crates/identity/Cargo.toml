@@ -18,6 +18,9 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+# Root-secret minting + sub-key derivation for `IdentityKey`.
+blake3 = { workspace = true }
+getrandom = "0.3"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

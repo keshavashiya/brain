@@ -189,6 +189,70 @@ pub struct AuditSummary {
     pub avg_duration_ms: Option<f64>,
 }
 
+/// Stable BLAKE3-KDF context for the audit-trail column cipher. The
+/// [`identity::IdentityKey`] root secret is derived through this context into
+/// the AES-256 key. It must never change — doing so makes every previously
+/// encrypted row unreadable.
+pub const AUDIT_KDF_CONTEXT: &str = "brain-audit-trail-v1";
+
+/// Marker prefixed onto AES-256-GCM-sealed, base64-encoded column values so a
+/// read can tell a sealed cell from a legacy/plaintext one. This lets sealed
+/// and plaintext rows coexist in the same table with no migration: enabling
+/// (or disabling) encryption only affects rows written afterwards.
+const ENC_PREFIX: &str = "brnc1:";
+
+/// Sentinel returned when a sealed cell cannot be decrypted (wrong key or
+/// corruption). Surfacing it beats silently returning an empty string.
+const UNDECRYPTABLE: &str = "<undecryptable>";
+
+/// Seal a column value for storage. With no cipher configured the value is
+/// stored verbatim (backwards-compatible plaintext).
+///
+/// AES-256-GCM encryption is effectively infallible with a valid key; on the
+/// vanishingly unlikely error we log and fall back to plaintext rather than
+/// dropping the audit row, because losing the record is worse than storing it
+/// unsealed.
+fn seal(cipher: Option<&storage::Encryptor>, plain: &str) -> String {
+    match cipher {
+        Some(c) => match c.encrypt_string(plain) {
+            Ok(b64) => format!("{ENC_PREFIX}{b64}"),
+            Err(e) => {
+                tracing::error!(error = %e, "audit: column seal failed; storing plaintext");
+                plain.to_string()
+            }
+        },
+        None => plain.to_string(),
+    }
+}
+
+/// Seal an optional column value (`None` stays `None`).
+fn seal_opt(cipher: Option<&storage::Encryptor>, plain: Option<&String>) -> Option<String> {
+    plain.map(|p| seal(cipher, p))
+}
+
+/// Reverse of [`seal`]. A value without the [`ENC_PREFIX`] marker is returned
+/// as-is (plaintext / legacy row). A sealed value is decrypted; failure yields
+/// the [`UNDECRYPTABLE`] sentinel.
+fn unseal(cipher: Option<&storage::Encryptor>, stored: String) -> String {
+    let Some(b64) = stored.strip_prefix(ENC_PREFIX) else {
+        return stored; // plaintext / legacy
+    };
+    match cipher {
+        Some(c) => c.decrypt_string(b64).unwrap_or_else(|e| {
+            tracing::error!(error = %e, "audit: column unseal failed");
+            UNDECRYPTABLE.to_string()
+        }),
+        None => {
+            tracing::warn!("audit: encountered a sealed column but no key is configured");
+            UNDECRYPTABLE.to_string()
+        }
+    }
+}
+
+fn unseal_opt(cipher: Option<&storage::Encryptor>, stored: Option<String>) -> Option<String> {
+    stored.map(|s| unseal(cipher, s))
+}
+
 /// SQLite-backed audit trail implementation.
 pub struct SqliteAuditTrail {
     db: SqlitePool,
@@ -197,11 +261,21 @@ pub struct SqliteAuditTrail {
     /// the SQLite insert and the event publication share one ingestion path
     /// so the two cannot drift (audit-bus unity).
     observer: Option<Arc<dyn observe::Observer>>,
+    /// Optional at-rest column cipher. When set, the free-text/sensitive
+    /// columns (request, decision, action, stdout, stderr, metadata, rollback,
+    /// principal) are AES-256-GCM sealed on write and unsealed on read. The
+    /// structured columns used for filtering/grouping (timestamp, source, tier,
+    /// outcome, duration) stay plaintext so queries and summaries are unchanged.
+    cipher: Option<storage::Encryptor>,
 }
 
 impl SqliteAuditTrail {
     pub fn new(db: SqlitePool) -> Self {
-        Self { db, observer: None }
+        Self {
+            db,
+            observer: None,
+            cipher: None,
+        }
     }
 
     /// Attach an observability bus (builder pattern). When set, every
@@ -209,6 +283,20 @@ impl SqliteAuditTrail {
     pub fn with_observer(mut self, observer: Arc<dyn observe::Observer>) -> Self {
         self.observer = Some(observer);
         self
+    }
+
+    /// Enable at-rest encryption of the sensitive audit columns using `cipher`.
+    /// Build the cipher from the install root secret via [`Self::encryptor_for`].
+    pub fn with_encryptor(mut self, cipher: storage::Encryptor) -> Self {
+        self.cipher = Some(cipher);
+        self
+    }
+
+    /// Derive the audit-trail column cipher from the install
+    /// [`identity::IdentityKey`]. Centralises the KDF context so every caller
+    /// derives the same key.
+    pub fn encryptor_for(key: &identity::IdentityKey) -> storage::Encryptor {
+        storage::Encryptor::from_key(key.derive_subkey(AUDIT_KDF_CONTEXT))
     }
 
     pub fn ensure_tables(&self) -> Result<(), AuditError> {
@@ -259,7 +347,10 @@ impl SqliteAuditTrail {
         Ok(())
     }
 
-    fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<AuditEntry> {
+    fn row_to_entry(
+        cipher: Option<&storage::Encryptor>,
+        row: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<AuditEntry> {
         let tier_str: String = row.get(6)?;
         let tier = match tier_str.as_str() {
             "read" => ActionTier::Read,
@@ -290,11 +381,14 @@ impl SqliteAuditTrail {
         // Column 16 is principal_json. Legacy rows have NULL here →
         // AuditEntry.principal stays None, which the UI renders as
         // "<unknown principal>". The column may also be missing entirely
-        // from older SELECT shapes — guard with try_get + ok().
+        // from older SELECT shapes — guard with try_get + ok(). When sealed,
+        // unseal before parsing.
         let principal = row
             .get::<_, Option<String>>(16)
             .ok()
             .flatten()
+            .filter(|s| !s.is_empty())
+            .map(|s| unseal(cipher, s))
             .filter(|s| !s.is_empty())
             .and_then(|s| serde_json::from_str::<identity::Principal>(&s).ok());
 
@@ -302,19 +396,21 @@ impl SqliteAuditTrail {
             id: row.get(0)?,
             timestamp: row.get(1)?,
             source: row.get(2)?,
-            request: row.get(3)?,
-            decision: row.get(4)?,
-            action: row.get(5)?,
+            request: unseal(cipher, row.get(3)?),
+            decision: unseal(cipher, row.get(4)?),
+            action: unseal(cipher, row.get(5)?),
             tier,
             approved_by: row.get::<_, Option<String>>(7)?.filter(|s| !s.is_empty()),
             approval_nonce: row.get::<_, Option<String>>(8)?.filter(|s| !s.is_empty()),
-            stdout: row.get::<_, Option<String>>(9)?.filter(|s| !s.is_empty()),
-            stderr: row.get::<_, Option<String>>(10)?.filter(|s| !s.is_empty()),
+            stdout: unseal_opt(cipher, row.get::<_, Option<String>>(9)?).filter(|s| !s.is_empty()),
+            stderr: unseal_opt(cipher, row.get::<_, Option<String>>(10)?).filter(|s| !s.is_empty()),
             exit_code: row.get::<_, Option<i32>>(11)?,
             duration_ms: row.get::<_, Option<i64>>(12)?,
             outcome,
-            rollback: row.get::<_, Option<String>>(13)?.filter(|s| !s.is_empty()),
-            metadata: row.get::<_, Option<String>>(15)?.filter(|s| !s.is_empty()),
+            rollback: unseal_opt(cipher, row.get::<_, Option<String>>(13)?)
+                .filter(|s| !s.is_empty()),
+            metadata: unseal_opt(cipher, row.get::<_, Option<String>>(15)?)
+                .filter(|s| !s.is_empty()),
             principal,
         })
     }
@@ -330,6 +426,19 @@ impl AuditTrail for SqliteAuditTrail {
             .and_then(|p| serde_json::to_string(p).ok());
         let entry = Arc::new(entry);
 
+        // Seal the sensitive columns before insert. The structured columns
+        // (timestamp/source/tier/outcome/duration) stay plaintext so WHERE/
+        // GROUP BY in query() and summarize() keep working unchanged.
+        let cipher = self.cipher.as_ref();
+        let request = seal(cipher, &entry.request);
+        let decision = seal(cipher, &entry.decision);
+        let action = seal(cipher, &entry.action);
+        let stdout = seal_opt(cipher, entry.stdout.as_ref());
+        let stderr = seal_opt(cipher, entry.stderr.as_ref());
+        let rollback = seal_opt(cipher, entry.rollback.as_ref());
+        let metadata = seal_opt(cipher, entry.metadata.as_ref());
+        let principal_json = seal_opt(cipher, principal_json.as_ref());
+
         let entry_for_insert = Arc::clone(&entry);
         self.db.with_conn(|conn| {
             conn.execute(
@@ -342,19 +451,19 @@ impl AuditTrail for SqliteAuditTrail {
                     entry_for_insert.id,
                     entry_for_insert.timestamp,
                     entry_for_insert.source,
-                    entry_for_insert.request,
-                    entry_for_insert.decision,
-                    entry_for_insert.action,
+                    request,
+                    decision,
+                    action,
                     entry_for_insert.tier.to_string(),
                     entry_for_insert.approved_by,
                     entry_for_insert.approval_nonce,
-                    entry_for_insert.stdout,
-                    entry_for_insert.stderr,
+                    stdout,
+                    stderr,
                     entry_for_insert.exit_code,
                     entry_for_insert.duration_ms,
                     entry_for_insert.outcome.to_string(),
-                    entry_for_insert.rollback,
-                    entry_for_insert.metadata,
+                    rollback,
+                    metadata,
                     principal_json,
                 ],
             )?;
@@ -428,9 +537,10 @@ impl AuditTrail for SqliteAuditTrail {
                     .collect();
                 let mut rows = stmt.query(&param_refs[..])?;
 
+                let cipher = self.cipher.as_ref();
                 let mut entries = Vec::new();
                 while let Some(row) = rows.next()? {
-                    entries.push(Self::row_to_entry(row)?);
+                    entries.push(Self::row_to_entry(cipher, row)?);
                 }
                 Ok(entries)
             })
@@ -498,6 +608,7 @@ impl AuditTrail for SqliteAuditTrail {
     }
 
     async fn rollback(&self, entry_id: &str) -> Result<Option<RollbackPlan>, AuditError> {
+        let cipher = self.cipher.as_ref();
         self.db
             .with_conn(|conn| {
                 let rollback_json: Option<String> = conn.query_row(
@@ -505,6 +616,7 @@ impl AuditTrail for SqliteAuditTrail {
                     [entry_id],
                     |row| row.get(0),
                 )?;
+                let rollback_json = unseal_opt(cipher, rollback_json);
 
                 match rollback_json {
                     Some(json) => serde_json::from_str(&json).map_err(|e| {
@@ -541,6 +653,140 @@ mod tests {
         let trail = SqliteAuditTrail::new(pool);
         trail.ensure_tables().unwrap();
         trail
+    }
+
+    fn encrypted_trail() -> SqliteAuditTrail {
+        let key = identity::IdentityKey::from_bytes([9u8; identity::KEY_LEN]);
+        let pool = storage::SqlitePool::open_memory().unwrap();
+        let trail =
+            SqliteAuditTrail::new(pool).with_encryptor(SqliteAuditTrail::encryptor_for(&key));
+        trail.ensure_tables().unwrap();
+        trail
+    }
+
+    /// With a cipher configured, sensitive columns are sealed on disk but
+    /// round-trip back to plaintext through query(); structured columns stay
+    /// plaintext so filters keep working.
+    #[tokio::test]
+    async fn encrypted_columns_round_trip_but_are_sealed_at_rest() {
+        let trail = encrypted_trail();
+        let entry = AuditEntry::new(
+            "secret request",
+            "decision",
+            "rm -rf /tmp/x",
+            ActionTier::Execute,
+        )
+        .with_execution("sensitive stdout".into(), String::new(), 0, 5)
+        .with_principal(test_principal());
+        let id = trail.record(entry).await.unwrap();
+
+        // Read raw cells: request/action/stdout must be sealed (prefixed, not
+        // the plaintext), while source/tier/outcome stay plaintext.
+        trail
+            .db
+            .with_conn(|conn| {
+                let (req, action, stdout, source, tier): (
+                    String,
+                    String,
+                    Option<String>,
+                    String,
+                    String,
+                ) = conn.query_row(
+                    "SELECT request, action, stdout, source, tier FROM audit_entries WHERE id = ?",
+                    [&id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                )?;
+                assert!(req.starts_with(ENC_PREFIX), "request not sealed: {req}");
+                assert!(!req.contains("secret request"), "plaintext leaked: {req}");
+                assert!(action.starts_with(ENC_PREFIX), "action not sealed");
+                assert!(stdout.unwrap().starts_with(ENC_PREFIX), "stdout not sealed");
+                assert_eq!(source, "system", "source must stay plaintext");
+                assert_eq!(tier, "execute", "tier must stay plaintext");
+                Ok(())
+            })
+            .unwrap();
+
+        // query() transparently unseals.
+        let rows = trail.query(AuditQuerySpec::default()).await.unwrap();
+        let row = rows.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(row.request, "secret request");
+        assert_eq!(row.action, "rm -rf /tmp/x");
+        assert_eq!(row.stdout.as_deref(), Some("sensitive stdout"));
+        assert_eq!(
+            row.principal.as_ref().unwrap().agent_id,
+            identity::AgentId("claude-code".into())
+        );
+    }
+
+    /// Filtering by the structured columns still works against encrypted rows.
+    #[tokio::test]
+    async fn encrypted_trail_still_filters_by_tier() {
+        let trail = encrypted_trail();
+        trail
+            .record(AuditEntry::new("a", "d", "x", ActionTier::Read))
+            .await
+            .unwrap();
+        trail
+            .record(AuditEntry::new("b", "d", "y", ActionTier::Execute))
+            .await
+            .unwrap();
+        let spec = AuditQuerySpec {
+            tier: Some(ActionTier::Execute),
+            ..Default::default()
+        };
+        let rows = trail.query(spec).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].action, "y");
+    }
+
+    /// A plaintext (unencrypted) row written before encryption was enabled is
+    /// still readable by an encrypting trail — the ENC_PREFIX marker is what
+    /// distinguishes the two, so unmarked cells pass through untouched.
+    #[tokio::test]
+    async fn encrypting_trail_reads_legacy_plaintext_rows() {
+        let pool = storage::SqlitePool::open_memory().unwrap();
+        // Write with no cipher (legacy plaintext).
+        let plain = SqliteAuditTrail::new(pool.clone());
+        plain.ensure_tables().unwrap();
+        let id = plain
+            .record(AuditEntry::new(
+                "legacy req",
+                "d",
+                "legacy action",
+                ActionTier::Read,
+            ))
+            .await
+            .unwrap();
+
+        // Now read through a cipher-enabled trail over the same DB.
+        let key = identity::IdentityKey::from_bytes([3u8; identity::KEY_LEN]);
+        let enc = SqliteAuditTrail::new(pool).with_encryptor(SqliteAuditTrail::encryptor_for(&key));
+        let rows = enc.query(AuditQuerySpec::default()).await.unwrap();
+        let row = rows.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(row.request, "legacy req");
+        assert_eq!(row.action, "legacy action");
+    }
+
+    /// A sealed row read with the wrong key surfaces the UNDECRYPTABLE sentinel
+    /// rather than panicking or leaking ciphertext.
+    #[tokio::test]
+    async fn wrong_key_yields_undecryptable_sentinel() {
+        let pool = storage::SqlitePool::open_memory().unwrap();
+        let k1 = identity::IdentityKey::from_bytes([1u8; identity::KEY_LEN]);
+        let w = SqliteAuditTrail::new(pool.clone())
+            .with_encryptor(SqliteAuditTrail::encryptor_for(&k1));
+        w.ensure_tables().unwrap();
+        let id = w
+            .record(AuditEntry::new("topsecret", "d", "a", ActionTier::Read))
+            .await
+            .unwrap();
+
+        let k2 = identity::IdentityKey::from_bytes([2u8; identity::KEY_LEN]);
+        let r = SqliteAuditTrail::new(pool).with_encryptor(SqliteAuditTrail::encryptor_for(&k2));
+        let rows = r.query(AuditQuerySpec::default()).await.unwrap();
+        let row = rows.iter().find(|r| r.id == id).unwrap();
+        assert_eq!(row.request, UNDECRYPTABLE);
+        assert_ne!(row.request, "topsecret");
     }
 
     #[tokio::test]
