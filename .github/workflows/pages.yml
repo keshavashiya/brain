@@ -39,7 +39,7 @@ jobs:
       - name: Build retrieval engine (WASM)
         run: wasm-pack build docs/assistant --target web --out-dir ../src/assistant/pkg --release
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
 
