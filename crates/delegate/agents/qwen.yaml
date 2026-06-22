@@ -1,0 +1,12 @@
+# Qwen Code CLI. Discovered as the `qwen` binary; follows the `-p -`
+# piped-prompt convention. `qwen-code` kept as a routing alias.
+id: qwen
+alias: qwen-code
+binary_names: [qwen, qwen-code]
+version_args: ["--version"]
+args: ["-p", "-"]
+prompt_via_stdin: true
+capabilities:
+  tags: [code-edit]
+  max_concurrency: 1
+  needs_network: true

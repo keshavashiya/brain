@@ -4,9 +4,9 @@
 /// Build the agent delegation registry.
 ///
 /// Two population paths compose:
-/// 1. **Auto-discovery** — `$PATH` scan + version probe for known CLI
-///    agents using the fingerprints in `delegate::default_fingerprints`.
-///    Skipped when `agents.auto_discovery = false`.
+/// 1. **Auto-discovery** — `$PATH` scan + version probe for agents defined
+///    by the embedded seeds merged with user `<data_dir>/agents/*.yaml`
+///    overrides. Skipped when `agents.auto_discovery = false`.
 /// 2. **Manual `agents.delegates[]` entries** — advanced/custom agents
 ///    that aren't fingerprinted. These always run and overwrite any
 ///    auto-discovered entry on name collision.
@@ -45,12 +45,15 @@ pub(super) async fn build_agent_registry(
     };
 
     if overrides.auto_discovery {
-        let discovery = delegate::DelegateDiscovery::new();
+        // Embedded seeds merged with user `<data_dir>/agents/*.yaml` — new
+        // agent families can be added without a rebuild.
+        let definitions = delegate::load_definitions(Some(&config.override_dir("agents")));
+        let discovery = delegate::DelegateDiscovery::new().with_definitions(definitions);
         let discovered = discovery.discover().await;
         tracing::info!(found = discovered.len(), "Agent discovery scan complete");
         for d in &discovered {
             tracing::debug!(
-                agent = %d.agent_id,
+                agent = %d.agent_id(),
                 path = %d.path.display(),
                 version = ?d.version,
                 status = ?d.status,
@@ -71,9 +74,12 @@ pub(super) async fn build_agent_registry(
                         entry.name
                     );
                 }
-                let spec = delegate::CustomAgentSpec {
+                let spec = delegate::AgentDefinition {
                     id: entry.name.clone(),
-                    binary: std::path::PathBuf::from(&entry.binary),
+                    alias: entry.alias.clone(),
+                    binary_names: Vec::new(),
+                    binary: Some(std::path::PathBuf::from(&entry.binary)),
+                    version_args: vec!["--version".to_string()],
                     args: entry.args.clone(),
                     prompt_via_stdin: entry.prompt_via_stdin,
                     capabilities: delegate::AgentCapabilities {
@@ -83,7 +89,6 @@ pub(super) async fn build_agent_registry(
                         needs_network: true,
                     },
                     workdir: entry.workdir.as_ref().map(std::path::PathBuf::from),
-                    alias: entry.alias.clone(),
                 };
                 registry.register_subprocess_spec(&spec, delegate::AgentSource::Manual);
             }

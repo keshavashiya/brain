@@ -8,11 +8,14 @@
 //! preset at runtime.
 //!
 //! Presets ship embedded under `crates/channel/presets/*.yaml` and are
-//! loaded lazily. Users can drop overrides at `~/.brain/presets/<id>.yaml`
-//! which take precedence over the embedded copy.
+//! loaded lazily. Users can drop overrides into the `presets/` override
+//! directory (`config.override_dir("presets")`, i.e.
+//! `<data_dir>/presets/<id>.yaml`) which take precedence over the embedded
+//! copy. The override directory is passed in by the caller so it honors
+//! `brain.data_dir` rather than re-deriving `$HOME/.brain` here.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -273,10 +276,11 @@ impl PresetDefinition {
 }
 
 /// Look up the YAML source for a preset id — user override at
-/// `~/.brain/presets/<id>.yaml` first, then embedded fallback. Returns
-/// `None` if no preset is known by that id.
-pub fn load_yaml(id: &str) -> Option<String> {
-    if let Some(path) = user_override_path(id) {
+/// `<override_dir>/<id>.yaml` first (when `override_dir` is supplied), then
+/// embedded fallback. Returns `None` if no preset is known by that id.
+pub fn load_yaml(id: &str, override_dir: Option<&Path>) -> Option<String> {
+    if let Some(dir) = override_dir {
+        let path = dir.join(format!("{id}.yaml"));
         if let Ok(text) = std::fs::read_to_string(&path) {
             tracing::debug!(preset = %id, path = %path.display(), "loaded user preset override");
             return Some(text);
@@ -285,10 +289,12 @@ pub fn load_yaml(id: &str) -> Option<String> {
     embedded_yaml(id).map(String::from)
 }
 
-/// Parse a preset by id — same lookup order as [`load_yaml`].
-pub fn load(id: &str) -> Result<PresetDefinition, ChannelError> {
-    let yaml =
-        load_yaml(id).ok_or_else(|| ChannelError::Relay(format!("unknown preset id: {id}")))?;
+/// Parse a preset by id — same lookup order as [`load_yaml`]. Pass the
+/// resolved presets override directory (`config.override_dir("presets")`)
+/// or `None` to use embedded presets only.
+pub fn load(id: &str, override_dir: Option<&Path>) -> Result<PresetDefinition, ChannelError> {
+    let yaml = load_yaml(id, override_dir)
+        .ok_or_else(|| ChannelError::Relay(format!("unknown preset id: {id}")))?;
     PresetDefinition::from_yaml(&yaml)
         .map_err(|e| ChannelError::Relay(format!("preset '{id}' parse: {e}")))
 }
@@ -302,15 +308,6 @@ pub fn embedded_yaml(id: &str) -> Option<&'static str> {
         "slack" => Some(EMBEDDED_SLACK),
         _ => None,
     }
-}
-
-fn user_override_path(id: &str) -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let mut path = PathBuf::from(home);
-    path.push(".brain");
-    path.push("presets");
-    path.push(format!("{id}.yaml"));
-    Some(path)
 }
 
 /// Substitute `{var}` tokens in a template. Unknown variables are left in
@@ -355,7 +352,7 @@ mod tests {
 
     #[test]
     fn telegram_preset_parses() {
-        let p = load("telegram").unwrap();
+        let p = load("telegram", None).unwrap();
         assert_eq!(p.id, "telegram");
         assert_eq!(p.kind, PresetKind::HttpPolled);
         assert!(p.poll.is_some());
@@ -364,7 +361,7 @@ mod tests {
 
     #[test]
     fn discord_preset_parses() {
-        let p = load("discord").unwrap();
+        let p = load("discord", None).unwrap();
         assert_eq!(p.id, "discord");
         assert_eq!(p.kind, PresetKind::WebhookInbound);
         assert!(p.webhook.is_some());
@@ -374,7 +371,7 @@ mod tests {
 
     #[test]
     fn slack_preset_parses() {
-        let p = load("slack").unwrap();
+        let p = load("slack", None).unwrap();
         assert_eq!(p.id, "slack");
         assert_eq!(p.kind, PresetKind::WebhookOutbound);
         assert!(p.send.is_some());
@@ -382,7 +379,23 @@ mod tests {
 
     #[test]
     fn unknown_preset_errors() {
-        assert!(load("nope-no-preset").is_err());
+        assert!(load("nope-no-preset", None).is_err());
+    }
+
+    #[test]
+    fn user_override_dir_takes_precedence_over_embedded() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("telegram.yaml"),
+            "id: telegram\nkind: webhook_outbound\nsend:\n  url_template: \"https://example.test\"\n  method: POST\n  body_template: '{}'\n",
+        )
+        .unwrap();
+        // Override wins over the embedded http_polled telegram preset.
+        let p = load("telegram", Some(dir.path())).unwrap();
+        assert_eq!(p.kind, PresetKind::WebhookOutbound);
+        // With no override dir, the embedded preset is returned.
+        let embedded = load("telegram", None).unwrap();
+        assert_eq!(embedded.kind, PresetKind::HttpPolled);
     }
 
     #[test]

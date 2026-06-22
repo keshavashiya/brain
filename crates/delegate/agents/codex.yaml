@@ -1,0 +1,10 @@
+# OpenAI Codex CLI. `codex exec` reads the prompt from stdin.
+id: codex
+binary_names: [codex, codex-cli]
+version_args: ["--version"]
+args: ["exec", "-"]
+prompt_via_stdin: true
+capabilities:
+  tags: [code-edit]
+  max_concurrency: 1
+  needs_network: true

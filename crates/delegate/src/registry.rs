@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::discovery::{DiscoveredBinary, DiscoveryStatus, InvocationTemplate};
+use crate::definition::AgentDefinition;
+use crate::discovery::{DiscoveredBinary, DiscoveryStatus};
 use crate::subprocess::{SubprocessAgentConfig, SubprocessAgentDelegate};
 use crate::traits::{AgentCapabilities, AgentDelegate, AgentError};
 
@@ -28,29 +29,6 @@ pub struct AgentOverride {
     pub prompt_via_stdin: Option<bool>,
 }
 
-/// Declarative registration for an agent with no built-in fingerprint.
-/// Custom agents always go through `SubprocessAgentDelegate`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CustomAgentSpec {
-    pub id: String,
-    pub binary: PathBuf,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default = "default_true")]
-    pub prompt_via_stdin: bool,
-    #[serde(default)]
-    pub capabilities: AgentCapabilities,
-    /// Working directory the delegate cd's into before spawning the child.
-    /// Task-level workdir (set by the orchestrator on the `AgentTask`) wins
-    /// when present; this is the static default for the binary.
-    #[serde(default)]
-    pub workdir: Option<PathBuf>,
-    /// Optional alias registered alongside `id`. Lets one canonical agent
-    /// receive routing under a shorthand name too.
-    #[serde(default)]
-    pub alias: Option<String>,
-}
-
 fn default_true() -> bool {
     true
 }
@@ -59,14 +37,16 @@ fn default_true() -> bool {
 /// fine — pure discovery with no overrides.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DelegateOverrides {
-    /// Toggle fingerprinted auto-discovery; custom entries still register.
+    /// Toggle auto-discovery; custom entries still register.
     #[serde(default = "default_true")]
     pub auto_discovery: bool,
     /// Keyed by canonical agent id.
     #[serde(default)]
     pub overrides: HashMap<String, AgentOverride>,
+    /// Explicit-path agent definitions (the old `CustomAgentSpec` case):
+    /// registered directly, bypassing the `$PATH` scan.
     #[serde(default)]
-    pub custom: Vec<CustomAgentSpec>,
+    pub custom: Vec<AgentDefinition>,
 }
 
 impl DelegateOverrides {
@@ -147,46 +127,52 @@ impl AgentRegistry {
         self.delegates.insert(name, delegate);
     }
 
-    /// Build a `SubprocessAgentDelegate` from a [`CustomAgentSpec`] and
-    /// register it under `spec.id` with the given source attribution.
-    /// Returns the binary path so callers can reuse it for status/log
-    /// messages.
+    /// Build a `SubprocessAgentDelegate` from an explicit-path
+    /// [`AgentDefinition`] and register it under `def.id` with the given
+    /// source attribution. Returns the binary path so callers can reuse it
+    /// for status/log messages.
     ///
     /// This is the canonical entry point for both the YAML
     /// `agents.delegates[]` flow (source = [`AgentSource::Manual`]) and the
     /// programmatic [`DelegateOverrides::custom`] flow
     /// (source = [`AgentSource::Custom`]). Centralising the
     /// `SubprocessAgentConfig` construction here keeps the two paths from
-    /// drifting — every new field on [`CustomAgentSpec`] is honoured by
-    /// both.
+    /// drifting — every new field on [`AgentDefinition`] is honoured by both.
+    ///
+    /// The binary is `def.binary` when set, else the first `binary_names`
+    /// entry (resolved via `$PATH` at spawn), else `def.id` as a last resort.
     pub fn register_subprocess_spec(
         &mut self,
-        spec: &CustomAgentSpec,
+        def: &AgentDefinition,
         source: AgentSource,
     ) -> PathBuf {
+        let binary: PathBuf = def
+            .binary
+            .clone()
+            .or_else(|| def.binary_names.first().map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from(&def.id));
         let cfg = SubprocessAgentConfig {
-            name: spec.id.clone(),
-            binary: spec.binary.to_string_lossy().into_owned(),
-            args: spec.args.clone(),
-            workdir: spec.workdir.clone(),
-            capabilities: spec.capabilities.clone(),
-            prompt_via_stdin: spec.prompt_via_stdin,
-            version_args: vec!["--version".to_string()],
+            name: def.id.clone(),
+            binary: binary.to_string_lossy().into_owned(),
+            args: def.args.clone(),
+            workdir: def.workdir.clone(),
+            capabilities: def.capabilities.clone(),
+            prompt_via_stdin: def.prompt_via_stdin,
+            version_args: def.version_args.clone(),
         };
         let delegate: Arc<dyn AgentDelegate> = Arc::new(SubprocessAgentDelegate::new(cfg));
-        let binary = spec.binary.clone();
         self.agent_status.insert(
-            spec.id.clone(),
+            def.id.clone(),
             RegistryAgentStatus::Registered {
                 binary: binary.clone(),
                 version: None,
                 source,
             },
         );
-        if let Some(alias) = &spec.alias {
-            self.aliases.insert(alias.clone(), spec.id.clone());
+        if let Some(alias) = &def.alias {
+            self.aliases.insert(alias.clone(), def.id.clone());
         }
-        self.delegates.insert(spec.id.clone(), delegate);
+        self.delegates.insert(def.id.clone(), delegate);
         binary
     }
 
@@ -252,14 +238,15 @@ impl AgentRegistry {
     ) {
         if overrides.auto_discovery {
             for d in discovered {
+                let agent_id = d.definition.id.clone();
                 let ov = overrides
                     .overrides
-                    .get(&d.agent_id)
+                    .get(&agent_id)
                     .cloned()
                     .unwrap_or_default();
                 if ov.disabled {
                     self.agent_status
-                        .insert(d.agent_id.clone(), RegistryAgentStatus::DisabledByConfig);
+                        .insert(agent_id, RegistryAgentStatus::DisabledByConfig);
                     continue;
                 }
                 match &d.status {
@@ -268,28 +255,26 @@ impl AgentRegistry {
                         let caps = ov
                             .capabilities
                             .clone()
-                            .unwrap_or_else(|| d.capabilities.clone());
-                        let delegate = build_from_template(
-                            &d.agent_id,
-                            &binary,
-                            &d.invocation,
-                            &d.version_args,
-                            &ov,
-                            caps,
-                        );
+                            .unwrap_or_else(|| d.definition.capabilities.clone());
+                        let delegate = build_from_template(&binary, &d.definition, &ov, caps);
                         self.agent_status.insert(
-                            d.agent_id.clone(),
+                            agent_id.clone(),
                             RegistryAgentStatus::Registered {
                                 binary,
                                 version: d.version.clone(),
                                 source: AgentSource::Discovered,
                             },
                         );
+                        // Preserve legacy/shorthand routing names (e.g.
+                        // `claude-code` → `claude`) declared in the seed.
+                        if let Some(alias) = &d.definition.alias {
+                            self.aliases.insert(alias.clone(), agent_id.clone());
+                        }
                         self.register(delegate);
                     }
                     DiscoveryStatus::Unavailable(reason) => {
                         self.agent_status.insert(
-                            d.agent_id.clone(),
+                            agent_id,
                             RegistryAgentStatus::Unavailable {
                                 binary: d.path.clone(),
                                 reason: reason.clone(),
@@ -307,31 +292,21 @@ impl AgentRegistry {
 }
 
 fn build_from_template(
-    agent_id: &str,
     binary: &Path,
-    default_invocation: &InvocationTemplate,
-    version_args: &[String],
+    def: &AgentDefinition,
     ov: &AgentOverride,
     capabilities: AgentCapabilities,
 ) -> Arc<dyn AgentDelegate> {
-    let args = ov.args.clone().unwrap_or_else(|| {
-        default_invocation
-            .args
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect::<Vec<_>>()
-    });
-    let prompt_via_stdin = ov
-        .prompt_via_stdin
-        .unwrap_or(default_invocation.prompt_via_stdin);
+    let args = ov.args.clone().unwrap_or_else(|| def.args.clone());
+    let prompt_via_stdin = ov.prompt_via_stdin.unwrap_or(def.prompt_via_stdin);
     let cfg = SubprocessAgentConfig {
-        name: agent_id.to_string(),
+        name: def.id.clone(),
         binary: binary.to_string_lossy().into_owned(),
         args,
-        workdir: None,
+        workdir: def.workdir.clone(),
         capabilities,
         prompt_via_stdin,
-        version_args: version_args.to_vec(),
+        version_args: def.version_args.clone(),
     };
     Arc::new(SubprocessAgentDelegate::new(cfg))
 }
@@ -412,17 +387,36 @@ mod tests {
 
     fn discovered(agent_id: &str, status: DiscoveryStatus) -> DiscoveredBinary {
         DiscoveredBinary {
-            agent_id: agent_id.to_string(),
+            definition: AgentDefinition {
+                id: agent_id.to_string(),
+                alias: None,
+                binary_names: vec![agent_id.to_string()],
+                binary: None,
+                version_args: vec!["--version".to_string()],
+                args: Vec::new(),
+                prompt_via_stdin: true,
+                capabilities: AgentCapabilities::default(),
+                workdir: None,
+            },
             binary_name: agent_id.to_string(),
             path: PathBuf::from(format!("/usr/local/bin/{agent_id}")),
             version: Some(format!("{agent_id} 1.0")),
             status,
-            capabilities: AgentCapabilities::default(),
-            invocation: InvocationTemplate {
-                args: &[],
-                prompt_via_stdin: true,
-            },
+        }
+    }
+
+    /// Explicit-path definition for the custom/manual registration tests.
+    fn custom_def(id: &str, binary: &str) -> AgentDefinition {
+        AgentDefinition {
+            id: id.to_string(),
+            alias: None,
+            binary_names: Vec::new(),
+            binary: Some(PathBuf::from(binary)),
             version_args: vec!["--version".to_string()],
+            args: Vec::new(),
+            prompt_via_stdin: true,
+            capabilities: AgentCapabilities::default(),
+            workdir: None,
         }
     }
 
@@ -487,15 +481,7 @@ mod tests {
         let overrides = DelegateOverrides {
             auto_discovery: false,
             overrides: HashMap::new(),
-            custom: vec![CustomAgentSpec {
-                id: "mine".to_string(),
-                binary: PathBuf::from("/usr/bin/true"),
-                args: vec![],
-                prompt_via_stdin: true,
-                capabilities: AgentCapabilities::default(),
-                workdir: None,
-                alias: None,
-            }],
+            custom: vec![custom_def("mine", "/usr/bin/true")],
         };
         reg.populate_from_discovery(
             vec![discovered("aider", DiscoveryStatus::Available)],
@@ -562,9 +548,12 @@ mod tests {
     #[test]
     fn register_subprocess_spec_honours_alias_and_workdir() {
         let mut reg = AgentRegistry::new();
-        let spec = CustomAgentSpec {
+        let spec = AgentDefinition {
             id: "canon".to_string(),
-            binary: PathBuf::from("/usr/local/bin/canon"),
+            alias: Some("alt".to_string()),
+            binary_names: Vec::new(),
+            binary: Some(PathBuf::from("/usr/local/bin/canon")),
+            version_args: vec!["--version".to_string()],
             args: vec!["--task".to_string(), "{task_id}".to_string()],
             prompt_via_stdin: false,
             capabilities: AgentCapabilities {
@@ -574,7 +563,6 @@ mod tests {
                 needs_network: false,
             },
             workdir: Some(PathBuf::from("/var/work")),
-            alias: Some("alt".to_string()),
         };
 
         let binary = reg.register_subprocess_spec(&spec, AgentSource::Manual);
@@ -596,15 +584,7 @@ mod tests {
     #[test]
     fn register_subprocess_spec_can_record_custom_source() {
         let mut reg = AgentRegistry::new();
-        let spec = CustomAgentSpec {
-            id: "via_overrides".to_string(),
-            binary: PathBuf::from("/opt/x"),
-            args: vec![],
-            prompt_via_stdin: true,
-            capabilities: AgentCapabilities::default(),
-            workdir: None,
-            alias: None,
-        };
+        let spec = custom_def("via_overrides", "/opt/x");
         reg.register_subprocess_spec(&spec, AgentSource::Custom);
         match reg.agent_status("via_overrides") {
             Some(RegistryAgentStatus::Registered { source, .. }) => {

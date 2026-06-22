@@ -82,6 +82,11 @@ impl BrainConfig {
             data_dir.join("models"),
             data_dir.join("logs"),
             data_dir.join("exports"),
+            // User-extensible data overrides (channel presets, delegate agent
+            // definitions, model metadata). Created so users have a known place
+            // to drop files; see `override_dir`.
+            data_dir.join("presets"),
+            data_dir.join("agents"),
         ];
 
         for dir in &dirs {
@@ -104,6 +109,18 @@ impl BrainConfig {
     /// Path to the models directory.
     pub fn models_path(&self) -> PathBuf {
         self.data_dir().join("models")
+    }
+
+    /// Resolve a user-override directory under the data dir.
+    ///
+    /// This is the *one* canonical answer to "where do user overrides live"
+    /// — it honors `brain.data_dir`, unlike code that re-derives
+    /// `$HOME/.brain` directly. Used for channel presets (`"presets"`),
+    /// delegate agent definitions (`"agents"`), and model metadata
+    /// (`"models"`). Callers that need filesystem-free fallbacks (e.g.
+    /// embedded seeds) should treat a missing/empty dir as "no overrides".
+    pub fn override_dir(&self, kind: &str) -> PathBuf {
+        self.data_dir().join(kind)
     }
 
     /// Check whether Brain has been initialized (data dir exists).

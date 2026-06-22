@@ -1,0 +1,14 @@
+# Claude Code CLI (Anthropic). Discovered as the `claude` binary.
+# `claude-code` is kept as a routing alias for back-compat.
+id: claude
+alias: claude-code
+binary_names: [claude, claude-code]
+version_args: ["--version"]
+# `-p -` reads the prompt from stdin.
+args: ["-p", "-"]
+prompt_via_stdin: true
+capabilities:
+  tags: [code-edit, plan]
+  languages: [rust, typescript]
+  max_concurrency: 1
+  needs_network: true

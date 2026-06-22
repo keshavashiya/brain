@@ -1,0 +1,12 @@
+# Google Gemini CLI. Discovered as the `gemini` binary.
+# `gemini-cli` is kept as a routing alias for back-compat.
+id: gemini
+alias: gemini-cli
+binary_names: [gemini]
+version_args: ["--version"]
+args: ["-p", "-"]
+prompt_via_stdin: true
+capabilities:
+  tags: [code-edit]
+  max_concurrency: 1
+  needs_network: true

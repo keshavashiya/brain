@@ -1,0 +1,10 @@
+# aider. Takes its prompt via `--message`, runs non-interactive with `--yes`.
+id: aider
+binary_names: [aider]
+version_args: ["--version"]
+args: ["--yes", "--no-stream", "--message", "{prompt}"]
+prompt_via_stdin: false
+capabilities:
+  tags: [code-edit]
+  max_concurrency: 1
+  needs_network: true

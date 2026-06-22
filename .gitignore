@@ -19,6 +19,9 @@ data/
 
 # Models (downloaded at first run)
 models/
+# ...but the embedded model-metadata seed is source, not a downloaded weight.
+!crates/cortex/models/
+!crates/cortex/models/context_windows.yaml
 
 # OS
 .DS_Store

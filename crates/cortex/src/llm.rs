@@ -614,115 +614,106 @@ fn synthesise_entries(llm: &brain::LlmConfig) -> Vec<brain::ProviderEntry> {
     vec![entry]
 }
 
-/// Fallback context-window heuristics based on model name patterns.
-/// Used by providers whose API doesn't expose `context_length` (OpenAI,
-/// Groq, DeepSeek, Together, etc.) and as a second-chance fallback after
-/// API-based detection fails.
-pub(crate) fn known_context_window(model: &str) -> Option<usize> {
-    let lower = &model.to_ascii_lowercase();
+/// One context-window rule, matched against the lowercased model name.
+/// See `crates/cortex/models/context_windows.yaml` for the data and the
+/// match semantics.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct WindowRule {
+    /// AND of OR-groups: every group must have at least one substring present.
+    #[serde(default)]
+    contains_all_of: Vec<Vec<String>>,
+    /// When non-empty, the name must start with one of these prefixes.
+    #[serde(default)]
+    starts_with_any: Vec<String>,
+    /// Rule is rejected if any of these substrings is present.
+    #[serde(default)]
+    excludes: Vec<String>,
+    window: usize,
+}
 
-    // Gemini 1.5/2.0/2.5 — all have 1M token windows.
-    if lower.contains("gemini") && !lower.contains("gemini-2.0-flash-lite") {
-        return Some(1_000_000);
-    }
-
-    // Claude 3/4 — Opus, Sonnet, Haiku all share 200K.
-    if lower.contains("claude")
-        && (lower.contains("sonnet") || lower.contains("opus") || lower.contains("haiku"))
-    {
-        return Some(200_000);
-    }
-    // Generic Claude fallback (exact version unknown but definitely 200K).
-    if lower.contains("claude") {
-        return Some(200_000);
-    }
-
-    // GPT-4o / GPT-4.5 / GPT-4-turbo — all 128K. Must precede the generic
-    // gpt-4 branch below, which would otherwise swallow these.
-    if lower.contains("gpt-4o") || lower.contains("gpt-4.5") || lower.contains("gpt-4-turbo") {
-        return Some(128_000);
-    }
-    // GPT-3.5 — 16K.
-    if lower.contains("gpt-3.5") {
-        return Some(16_000);
-    }
-    // GPT-4 (non-4o, non-turbo) — 32K safe fallback (base gpt-4 is 8K, but
-    // 32K is the common denominator for modern gpt-4-* and the heuristic is
-    // generous).
-    if lower.contains("gpt-4") {
-        return Some(32_000);
-    }
-    // o1 / o3 reasoning models — 200K (o1) / 100K (o3-mini).
-    if lower.starts_with("o1") || lower.starts_with("o3") {
-        return Some(200_000);
-    }
-
-    // DeepSeek V2/V3/R1 — all 128K.
-    if lower.contains("deepseek") {
-        return Some(128_000);
-    }
-
-    // Qwen 2.5 — 128K default; smaller quantised variants keep it.
-    if lower.contains("qwen") {
-        return Some(128_000);
-    }
-
-    // Llama 3.x — 128K for 3.1+; fall back to 8K for older.
-    if lower.contains("llama") && lower.contains("3") {
-        return Some(128_000);
-    }
-    if lower.contains("llama") {
-        return Some(8_192);
-    }
-
-    // Mistral / Mixtral — Large/Nemo/Codestral = 128K; others = 32K.
-    if lower.contains("mistral") || lower.contains("mixtral") {
-        if lower.contains("large") || lower.contains("nemo") || lower.contains("codestral") {
-            return Some(128_000);
+impl WindowRule {
+    fn matches(&self, lower: &str) -> bool {
+        if self.excludes.iter().any(|e| lower.contains(e)) {
+            return false;
         }
-        return Some(32_000);
+        for group in &self.contains_all_of {
+            if !group.iter().any(|s| lower.contains(s)) {
+                return false;
+            }
+        }
+        if !self.starts_with_any.is_empty()
+            && !self.starts_with_any.iter().any(|p| lower.starts_with(p))
+        {
+            return false;
+        }
+        // Guard against an empty rule becoming an accidental catch-all.
+        !self.contains_all_of.is_empty() || !self.starts_with_any.is_empty()
     }
+}
 
-    // Command R / R+ (Cohere) — 128K.
-    if lower.contains("command-r") || lower.contains("command-r+") {
-        return Some(128_000);
-    }
+#[derive(Debug, Clone, serde::Deserialize)]
+struct WindowRuleSet {
+    #[serde(default)]
+    rules: Vec<WindowRule>,
+}
 
-    // DBRX / MPT — 32K.
-    if lower.contains("dbrx") || lower.contains("mpt") {
-        return Some(32_000);
-    }
+const EMBEDDED_WINDOW_RULES: &str = include_str!("../models/context_windows.yaml");
 
-    // OpenRouter community / open-source models — typically 128K.
-    // Model IDs like "openai/gpt-oss-120b:free" contain "oss", "120b", etc.
-    // These don't match the commercial model patterns above, so catch
-    // them by looking for explicit context indicators in the name.
-    if lower.contains("128k") || lower.contains("131k") || lower.contains("131072") {
-        return Some(131_072);
+/// Parsed embedded rules, loaded once. A malformed embedded file is a build
+/// artifact bug — log and fall back to an empty set rather than panic.
+static EMBEDDED_RULES: std::sync::LazyLock<Vec<WindowRule>> = std::sync::LazyLock::new(|| {
+    match serde_yaml::from_str::<WindowRuleSet>(EMBEDDED_WINDOW_RULES) {
+        Ok(s) => s.rules,
+        Err(e) => {
+            tracing::error!(error = %e, "embedded context_windows.yaml failed to parse");
+            Vec::new()
+        }
     }
-    if lower.contains("200k") {
-        return Some(200_000);
-    }
-    if lower.contains("1m") || lower.contains("1000k") {
-        return Some(1_000_000);
-    }
+});
 
-    // Models with "70b", "120b", "180b", "240b" in the name are large
-    // open-source models that almost always use 128K context windows.
-    if lower.contains("70b")
-        || lower.contains("120b")
-        || lower.contains("180b")
-        || lower.contains("240b")
-    {
-        return Some(131_072);
-    }
+/// User-supplied rules from `<data_dir>/models/context_windows.yaml`,
+/// installed once at startup via [`init_user_window_rules`]. Consulted
+/// before the embedded rules so a user can pin or extend a model.
+static USER_RULES: std::sync::OnceLock<Vec<WindowRule>> = std::sync::OnceLock::new();
 
-    // "oss" (open-source) models on OpenRouter — 128K.
-    if lower.contains("/oss") || lower.contains("oss-") || lower.contains("-oss") {
-        return Some(131_072);
+/// Load user context-window overrides from `dir/context_windows.yaml`, if
+/// present, and install them. Idempotent (first call wins). Called from the
+/// CLI bootstrap with `config.override_dir("models")`. A missing or invalid
+/// file is logged and ignored — the embedded rules still apply.
+pub fn init_user_window_rules(dir: &std::path::Path) {
+    let path = dir.join("context_windows.yaml");
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(r) => r,
+        Err(_) => return, // no override file — embedded rules only
+    };
+    match serde_yaml::from_str::<WindowRuleSet>(&raw) {
+        Ok(s) => {
+            tracing::debug!(path = %path.display(), count = s.rules.len(), "loaded user context-window rules");
+            let _ = USER_RULES.set(s.rules);
+        }
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "user context_windows.yaml parse failed — ignored")
+        }
     }
+}
 
-    None
+/// Fallback context-window detection from the model name. Used by providers
+/// whose API doesn't expose `context_length` (OpenAI, Groq, DeepSeek,
+/// Together, etc.) and as a second-chance fallback after API-based
+/// detection fails.
+///
+/// Rules are data, not code: see `crates/cortex/models/context_windows.yaml`
+/// (embedded) plus an optional `<data_dir>/models/context_windows.yaml`
+/// user override. User rules are checked first; the first match wins.
+pub(crate) fn known_context_window(model: &str) -> Option<usize> {
+    let lower = model.to_ascii_lowercase();
+    USER_RULES
+        .get()
+        .into_iter()
+        .flatten()
+        .chain(EMBEDDED_RULES.iter())
+        .find(|r| r.matches(&lower))
+        .map(|r| r.window)
 }
 
 fn pick_model(preferred: &[String], available: &[String], fallback: &str) -> String {

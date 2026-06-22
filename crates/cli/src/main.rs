@@ -423,6 +423,10 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
     // non-blocking file appender on drop — hold it for the whole process.
     let _log_guard = logging::init(&cli, &config);
 
+    // Install user context-window overrides (data-driven model metadata)
+    // before any LLM provider is constructed.
+    cortex::llm::init_user_window_rules(&config.override_dir("models"));
+
     match cli.command {
         Commands::Init {
             force,

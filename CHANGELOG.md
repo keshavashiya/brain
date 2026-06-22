@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Data-driven delegate agents.** Built-in CLI-agent definitions moved out of
+  a hardcoded Rust table into embedded YAML seeds
+  (`crates/delegate/agents/*.yaml`), merged at startup with any `*.yaml` a user
+  drops into `<data_dir>/agents/`. A new agent family can now be discovered
+  with **no rebuild** — drop a file describing its binary, version probe, and
+  invocation shape. The old `AgentFingerprint` (static) and `CustomAgentSpec`
+  (config) shapes are unified into one serde `AgentDefinition`. As part of the
+  move the discovered ids were corrected to match the actual binaries —
+  `claude` (was `claude-code`), `gemini` (was `gemini-cli`), `qwen` (was
+  `qwen-code`); the previous ids keep working as routing aliases.
+
+- **User-overridable model context windows.** The fallback context-window
+  table (`known_context_window`) is now an embedded data file
+  (`crates/cortex/models/context_windows.yaml`) plus an optional
+  `<data_dir>/models/context_windows.yaml` override, so a new or pinned model's
+  window can be set without a release. Behaviour for known models is unchanged.
+
+### Fixed
+
+- **Preset overrides honor `brain.data_dir`.** Channel-preset user overrides
+  were read from a hardcoded `$HOME/.brain/presets/`, ignoring a configured
+  `brain.data_dir` — so users with a custom data dir silently lost their
+  overrides. Preset loading now resolves through the one canonical
+  `Config::override_dir(...)`, the same accessor every other data path uses.
+
 ### Changed
 
 - **Dependency bumps.** `termimad` 0.31 → 0.34 (terminal markdown rendering)

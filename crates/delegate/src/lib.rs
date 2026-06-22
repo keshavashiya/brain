@@ -10,20 +10,20 @@
 //! - [`AgentRegistry`] — looks up delegates by name, with aliasing
 //! - [`SubprocessAgentDelegate`] — generic subprocess-backed adapter
 
+pub mod definition;
 pub mod discovery;
 pub mod escalate;
 pub mod registry;
 pub mod subprocess;
 pub mod traits;
 
+pub use definition::{embedded_definitions, load_definitions, AgentDefinition};
 pub use discovery::{
-    default_fingerprints, AgentFingerprint, DelegateDiscovery, DiscoveredBinary, DiscoveryStatus,
-    PathScanner, DEFAULT_PROBE_TIMEOUT,
+    DelegateDiscovery, DiscoveredBinary, DiscoveryStatus, PathScanner, DEFAULT_PROBE_TIMEOUT,
 };
 pub use escalate::{run_with_escalation, EscalationOutcome, EscalationPolicy};
 pub use registry::{
-    AgentOverride, AgentRegistry, AgentSource, CustomAgentSpec, DelegateOverrides,
-    RegistryAgentStatus,
+    AgentOverride, AgentRegistry, AgentSource, DelegateOverrides, RegistryAgentStatus,
 };
 pub use subprocess::{SubprocessAgentConfig, SubprocessAgentDelegate};
 pub use traits::{

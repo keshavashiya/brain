@@ -453,6 +453,38 @@ fn known_context_window_returns_none_for_unknown() {
 }
 
 #[test]
+fn window_rule_match_semantics() {
+    // foo AND (bar OR baz), rejected by `nope`.
+    let yaml =
+        "rules:\n  - contains_all_of: [[foo], [bar, baz]]\n    excludes: [nope]\n    window: 999\n";
+    let set: super::WindowRuleSet = serde_yaml::from_str(yaml).unwrap();
+    let r = &set.rules[0];
+    assert!(r.matches("foo-bar"));
+    assert!(r.matches("foo-baz-x"));
+    assert!(!r.matches("foo"), "missing bar/baz group");
+    assert!(!r.matches("bar"), "missing foo group");
+    assert!(!r.matches("foo-bar-nope"), "excluded substring");
+}
+
+#[test]
+fn user_rules_take_precedence_over_embedded() {
+    // Mirror the chain `known_context_window` builds: user rules first,
+    // then embedded. A user rule for qwen should beat the embedded 128K.
+    let user = serde_yaml::from_str::<super::WindowRuleSet>(
+        "rules:\n  - contains_all_of: [[qwen]]\n    window: 42\n",
+    )
+    .unwrap()
+    .rules;
+    let lower = "qwen2.5-coder:7b".to_string();
+    let hit = user
+        .iter()
+        .chain(super::EMBEDDED_RULES.iter())
+        .find(|r| r.matches(&lower))
+        .map(|r| r.window);
+    assert_eq!(hit, Some(42));
+}
+
+#[test]
 fn provider_locality_follows_endpoint_host() {
     let local_ollama = OllamaProvider::new("http://localhost:11434", "m", 0.7, 64).unwrap();
     assert!(local_ollama.is_local());

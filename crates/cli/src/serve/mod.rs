@@ -147,6 +147,7 @@ pub(crate) async fn cmd_serve(
             (Some(dispatcher), Some(correlator)) => {
                 transports::wire_preset_transports(
                     &config.channel.transports,
+                    config.override_dir("presets"),
                     processor.clone(),
                     dispatcher,
                     correlator,

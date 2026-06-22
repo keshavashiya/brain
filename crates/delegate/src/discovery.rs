@@ -15,46 +15,12 @@ use tokio::process::Command;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
 
-use crate::traits::AgentCapabilities;
+use crate::definition::AgentDefinition;
 
 /// Per-binary version probe deadline. 3s gives Node-based CLIs
-/// (gemini-cli, qwen-code, opencode) enough time to cold-start and
-/// print --version; faster CLIs still return well under the cap.
+/// (gemini, qwen, opencode) enough time to cold-start and print
+/// --version; faster CLIs still return well under the cap.
 pub const DEFAULT_PROBE_TIMEOUT: Duration = Duration::from_millis(3000);
-
-/// How a discovered agent should be wired into a runnable delegate.
-///
-/// Defaults here are best-effort from public CLI conventions — users
-/// with unusual flags can override args/stdin through config.
-#[derive(Debug, Clone)]
-pub struct InvocationTemplate {
-    /// Args passed to the binary. `{prompt}` and `{task_id}` are
-    /// substituted at spawn time.
-    pub args: &'static [&'static str],
-    /// Whether the rendered prompt is written to the child's stdin
-    /// instead of being templated into `args`.
-    pub prompt_via_stdin: bool,
-}
-
-/// A static description of one known agent family. The discovery pass
-/// tries each `binary_names` entry on `$PATH`; the first hit is probed
-/// and the result becomes a [`DiscoveredBinary`].
-#[derive(Debug, Clone)]
-pub struct AgentFingerprint {
-    /// Canonical id used by the registry (e.g. `"aider"`).
-    pub id: &'static str,
-    /// Candidate binary names, in priority order.
-    pub binary_names: &'static [&'static str],
-    /// Args passed to the binary to extract a version banner. Reused as
-    /// the default `version_args` on the resulting delegate.
-    pub version_args: &'static [&'static str],
-    /// Default capabilities attached to a discovered agent. The
-    /// registry is free to override these from config.
-    pub capabilities: AgentCapabilities,
-    /// Default invocation shape used when the registry constructs a
-    /// runnable delegate from this fingerprint.
-    pub invocation: InvocationTemplate,
-}
 
 /// Why a candidate binary isn't usable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,27 +32,29 @@ pub enum DiscoveryStatus {
     Unavailable(String),
 }
 
-/// Outcome of discovery for one fingerprinted agent.
+/// Outcome of discovery for one agent definition.
 #[derive(Debug, Clone)]
 pub struct DiscoveredBinary {
-    pub agent_id: String,
-    /// The name actually found on `$PATH` (e.g. when the fingerprint
-    /// listed several aliases for the same binary, the one that matched).
+    /// The full definition that matched — carries id, args, capabilities,
+    /// version_args and alias forward to the registry.
+    pub definition: AgentDefinition,
+    /// The name actually found on `$PATH` (e.g. when the definition listed
+    /// several aliases for the same binary, the one that matched).
     pub binary_name: String,
     pub path: PathBuf,
     /// First non-empty line of the version probe's stdout, trimmed.
     pub version: Option<String>,
     pub status: DiscoveryStatus,
-    pub capabilities: AgentCapabilities,
-    pub invocation: InvocationTemplate,
-    /// Args used to probe the binary's version. Reused as the default
-    /// `version_args` on the resulting delegate's health probe.
-    pub version_args: Vec<String>,
 }
 
 impl DiscoveredBinary {
     pub fn is_available(&self) -> bool {
         matches!(self.status, DiscoveryStatus::Available)
+    }
+
+    /// Canonical id of the matched definition.
+    pub fn agent_id(&self) -> &str {
+        &self.definition.id
     }
 }
 
@@ -145,22 +113,25 @@ fn is_executable(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Top-level discovery coordinator. Holds the fingerprint table and
+/// Top-level discovery coordinator. Holds the agent-definition table and
 /// probe budget; one instance can be reused across SIGHUP refreshes.
 #[derive(Debug, Clone)]
 pub struct DelegateDiscovery {
     scanner: PathScanner,
-    fingerprints: Vec<AgentFingerprint>,
+    definitions: Vec<AgentDefinition>,
     probe_timeout: Duration,
 }
 
 impl DelegateDiscovery {
-    /// Default: scan `$PATH`, use the built-in fingerprints, 500ms probe
-    /// budget per binary.
+    /// Default: scan `$PATH`, use the embedded built-in definitions, with
+    /// the default per-binary probe budget. Use [`with_definitions`] to
+    /// supply seeds merged with user `<data_dir>/agents/` overrides.
+    ///
+    /// [`with_definitions`]: Self::with_definitions
     pub fn new() -> Self {
         Self {
             scanner: PathScanner::from_env(),
-            fingerprints: default_fingerprints(),
+            definitions: crate::definition::embedded_definitions(),
             probe_timeout: DEFAULT_PROBE_TIMEOUT,
         }
     }
@@ -170,8 +141,8 @@ impl DelegateDiscovery {
         self
     }
 
-    pub fn with_fingerprints(mut self, fps: Vec<AgentFingerprint>) -> Self {
-        self.fingerprints = fps;
+    pub fn with_definitions(mut self, defs: Vec<AgentDefinition>) -> Self {
+        self.definitions = defs;
         self
     }
 
@@ -180,27 +151,31 @@ impl DelegateDiscovery {
         self
     }
 
-    pub fn fingerprints(&self) -> &[AgentFingerprint] {
-        &self.fingerprints
+    pub fn definitions(&self) -> &[AgentDefinition] {
+        &self.definitions
     }
 
-    /// Run the discovery pass. Returns one entry per fingerprint whose
-    /// binary was found on `$PATH` — fingerprints with no hit are
-    /// omitted (callers treat absence as "not installed"). Unavailable
-    /// entries *are* included so the operator can see "installed but
-    /// broken" in doctor reports.
+    /// Run the discovery pass. Returns one entry per *discoverable*
+    /// definition whose binary was found on `$PATH` — definitions with no
+    /// hit are omitted (callers treat absence as "not installed").
+    /// Explicit-binary definitions are skipped here (they're registered
+    /// directly). Unavailable entries *are* included so the operator can
+    /// see "installed but broken" in doctor reports.
     pub async fn discover(&self) -> Vec<DiscoveredBinary> {
-        let mut found: Vec<(AgentFingerprint, String, PathBuf)> = Vec::new();
+        let mut found: Vec<(AgentDefinition, String, PathBuf)> = Vec::new();
         let mut seen_paths: HashSet<PathBuf> = HashSet::new();
 
-        for fp in &self.fingerprints {
-            for name in fp.binary_names {
+        for def in &self.definitions {
+            if !def.is_discoverable() {
+                continue;
+            }
+            for name in &def.binary_names {
                 if let Some(path) = self.scanner.find_first(name) {
                     // Same binary matched twice (e.g. `claude` and
                     // `claude-code` both pointing at the same file) —
                     // keep the first hit only.
                     if seen_paths.insert(path.clone()) {
-                        found.push((fp.clone(), (*name).to_string(), path));
+                        found.push((def.clone(), name.clone(), path));
                     }
                     break;
                 }
@@ -209,19 +184,16 @@ impl DelegateDiscovery {
 
         let mut set: JoinSet<DiscoveredBinary> = JoinSet::new();
         let probe_timeout = self.probe_timeout;
-        for (fp, binary_name, path) in found {
-            let version_args: Vec<String> = fp.version_args.iter().map(|s| s.to_string()).collect();
+        for (definition, binary_name, path) in found {
+            let version_args = definition.version_args.clone();
             set.spawn(async move {
                 let (status, version) = probe(&path, &version_args, probe_timeout).await;
                 DiscoveredBinary {
-                    agent_id: fp.id.to_string(),
+                    definition,
                     binary_name,
                     path,
                     version,
                     status,
-                    capabilities: fp.capabilities,
-                    invocation: fp.invocation,
-                    version_args,
                 }
             });
         }
@@ -233,7 +205,7 @@ impl DelegateDiscovery {
                 Err(e) => tracing::warn!(error = %e, "discovery probe task panicked"),
             }
         }
-        out.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+        out.sort_by(|a, b| a.definition.id.cmp(&b.definition.id));
         out
     }
 }
@@ -306,110 +278,24 @@ async fn probe(
     }
 }
 
-/// Built-in fingerprints shipped with Brain. Extend this list when a new
-/// CLI agent becomes common enough to warrant zero-config wiring.
-pub fn default_fingerprints() -> Vec<AgentFingerprint> {
-    vec![
-        AgentFingerprint {
-            id: "claude-code",
-            binary_names: &["claude", "claude-code"],
-            version_args: &["--version"],
-            capabilities: AgentCapabilities {
-                tags: vec!["code-edit".to_string(), "plan".to_string()],
-                languages: vec!["rust".to_string(), "typescript".to_string()],
-                max_concurrency: 1,
-                needs_network: true,
-            },
-            // `-p -` reads the prompt from stdin.
-            invocation: InvocationTemplate {
-                args: &["-p", "-"],
-                prompt_via_stdin: true,
-            },
-        },
-        AgentFingerprint {
-            id: "codex",
-            binary_names: &["codex", "codex-cli"],
-            version_args: &["--version"],
-            capabilities: AgentCapabilities {
-                tags: vec!["code-edit".to_string()],
-                languages: vec![],
-                max_concurrency: 1,
-                needs_network: true,
-            },
-            // `codex exec` reads the prompt from stdin.
-            invocation: InvocationTemplate {
-                args: &["exec", "-"],
-                prompt_via_stdin: true,
-            },
-        },
-        AgentFingerprint {
-            id: "aider",
-            binary_names: &["aider"],
-            version_args: &["--version"],
-            capabilities: AgentCapabilities {
-                tags: vec!["code-edit".to_string()],
-                languages: vec![],
-                max_concurrency: 1,
-                needs_network: true,
-            },
-            // aider takes its prompt via `--message`, runs non-interactive with `--yes`.
-            invocation: InvocationTemplate {
-                args: &["--yes", "--no-stream", "--message", "{prompt}"],
-                prompt_via_stdin: false,
-            },
-        },
-        AgentFingerprint {
-            id: "qwen-code",
-            binary_names: &["qwen", "qwen-code"],
-            version_args: &["--version"],
-            capabilities: AgentCapabilities {
-                tags: vec!["code-edit".to_string()],
-                languages: vec![],
-                max_concurrency: 1,
-                needs_network: true,
-            },
-            // qwen-code follows the `-p -` convention for piped prompts.
-            invocation: InvocationTemplate {
-                args: &["-p", "-"],
-                prompt_via_stdin: true,
-            },
-        },
-        AgentFingerprint {
-            id: "gemini-cli",
-            binary_names: &["gemini"],
-            version_args: &["--version"],
-            capabilities: AgentCapabilities {
-                tags: vec!["code-edit".to_string()],
-                languages: vec![],
-                max_concurrency: 1,
-                needs_network: true,
-            },
-            invocation: InvocationTemplate {
-                args: &["-p", "-"],
-                prompt_via_stdin: true,
-            },
-        },
-        AgentFingerprint {
-            id: "opencode",
-            binary_names: &["opencode"],
-            version_args: &["--version"],
-            capabilities: AgentCapabilities {
-                tags: vec!["code-edit".to_string()],
-                languages: vec![],
-                max_concurrency: 1,
-                needs_network: true,
-            },
-            invocation: InvocationTemplate {
-                args: &["run", "-"],
-                prompt_via_stdin: true,
-            },
-        },
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Minimal discoverable definition for tests.
+    fn def(id: &str, binary_names: &[&str]) -> AgentDefinition {
+        AgentDefinition {
+            id: id.to_string(),
+            alias: None,
+            binary_names: binary_names.iter().map(|s| s.to_string()).collect(),
+            binary: None,
+            version_args: vec!["--version".to_string()],
+            args: Vec::new(),
+            prompt_via_stdin: true,
+            capabilities: crate::traits::AgentCapabilities::default(),
+            workdir: None,
+        }
+    }
 
     #[test]
     fn path_scanner_finds_executable() {
@@ -441,14 +327,13 @@ mod tests {
     }
 
     #[test]
-    fn default_fingerprints_are_non_empty_and_unique() {
-        let fps = default_fingerprints();
-        assert!(!fps.is_empty());
-        let ids: HashSet<_> = fps.iter().map(|f| f.id).collect();
-        assert_eq!(ids.len(), fps.len(), "fingerprint ids must be unique");
-        for fp in &fps {
-            assert!(!fp.binary_names.is_empty(), "{} has no binary names", fp.id);
-            assert!(!fp.version_args.is_empty(), "{} has no version args", fp.id);
+    fn default_definitions_are_non_empty_and_unique() {
+        let defs = DelegateDiscovery::new().definitions().to_vec();
+        assert!(!defs.is_empty());
+        let ids: HashSet<_> = defs.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids.len(), defs.len(), "definition ids must be unique");
+        for d in &defs {
+            d.validate().unwrap_or_else(|e| panic!("{}: {e}", d.id));
         }
     }
 
@@ -463,23 +348,13 @@ mod tests {
         p.set_mode(0o755);
         std::fs::set_permissions(&bin, p).unwrap();
 
-        let fp = AgentFingerprint {
-            id: "faux",
-            binary_names: &["faux-claude"],
-            version_args: &["--version"],
-            capabilities: AgentCapabilities::default(),
-            invocation: InvocationTemplate {
-                args: &[],
-                prompt_via_stdin: true,
-            },
-        };
         let discovery = DelegateDiscovery::new()
             .with_scanner(PathScanner::from_dirs(vec![dir.path().to_path_buf()]))
-            .with_fingerprints(vec![fp])
-            .with_probe_timeout(Duration::from_secs(2));
+            .with_definitions(vec![def("faux", &["faux-claude"])])
+            .with_probe_timeout(Duration::from_secs(5));
         let results = discovery.discover().await;
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].agent_id, "faux");
+        assert_eq!(results[0].agent_id(), "faux");
         assert_eq!(results[0].status, DiscoveryStatus::Available);
         assert_eq!(results[0].version.as_deref(), Some("faux-claude 1.2.3"));
     }
@@ -495,20 +370,10 @@ mod tests {
         p.set_mode(0o755);
         std::fs::set_permissions(&bin, p).unwrap();
 
-        let fp = AgentFingerprint {
-            id: "broken",
-            binary_names: &["broken-agent"],
-            version_args: &["--version"],
-            capabilities: AgentCapabilities::default(),
-            invocation: InvocationTemplate {
-                args: &[],
-                prompt_via_stdin: true,
-            },
-        };
         let discovery = DelegateDiscovery::new()
             .with_scanner(PathScanner::from_dirs(vec![dir.path().to_path_buf()]))
-            .with_fingerprints(vec![fp])
-            .with_probe_timeout(Duration::from_secs(2));
+            .with_definitions(vec![def("broken", &["broken-agent"])])
+            .with_probe_timeout(Duration::from_secs(5));
         let results = discovery.discover().await;
         assert_eq!(results.len(), 1);
         match &results[0].status {
@@ -531,19 +396,9 @@ mod tests {
         p.set_mode(0o755);
         std::fs::set_permissions(&bin, p).unwrap();
 
-        let fp = AgentFingerprint {
-            id: "hang",
-            binary_names: &["hang-agent"],
-            version_args: &["--version"],
-            capabilities: AgentCapabilities::default(),
-            invocation: InvocationTemplate {
-                args: &[],
-                prompt_via_stdin: true,
-            },
-        };
         let discovery = DelegateDiscovery::new()
             .with_scanner(PathScanner::from_dirs(vec![dir.path().to_path_buf()]))
-            .with_fingerprints(vec![fp])
+            .with_definitions(vec![def("hang", &["hang-agent"])])
             .with_probe_timeout(Duration::from_millis(100));
         let results = discovery.discover().await;
         assert_eq!(results.len(), 1);
@@ -557,9 +412,9 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn discover_dedupes_when_two_fingerprints_hit_same_file() {
+    async fn discover_dedupes_when_two_definitions_hit_same_file() {
         // Set up two names pointing at the same executable; only the first
-        // fingerprint that matches should register it.
+        // definition that matches should register it.
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("shared");
         std::fs::write(&bin, "#!/bin/sh\necho 'shared 1.0'\n").unwrap();
@@ -568,32 +423,12 @@ mod tests {
         p.set_mode(0o755);
         std::fs::set_permissions(&bin, p).unwrap();
 
-        let fp_a = AgentFingerprint {
-            id: "alpha",
-            binary_names: &["shared"],
-            version_args: &["--version"],
-            capabilities: AgentCapabilities::default(),
-            invocation: InvocationTemplate {
-                args: &[],
-                prompt_via_stdin: true,
-            },
-        };
-        let fp_b = AgentFingerprint {
-            id: "beta",
-            binary_names: &["shared"],
-            version_args: &["--version"],
-            capabilities: AgentCapabilities::default(),
-            invocation: InvocationTemplate {
-                args: &[],
-                prompt_via_stdin: true,
-            },
-        };
         let discovery = DelegateDiscovery::new()
             .with_scanner(PathScanner::from_dirs(vec![dir.path().to_path_buf()]))
-            .with_fingerprints(vec![fp_a, fp_b])
-            .with_probe_timeout(Duration::from_secs(2));
+            .with_definitions(vec![def("alpha", &["shared"]), def("beta", &["shared"])])
+            .with_probe_timeout(Duration::from_secs(5));
         let results = discovery.discover().await;
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].agent_id, "alpha");
+        assert_eq!(results[0].agent_id(), "alpha");
     }
 }

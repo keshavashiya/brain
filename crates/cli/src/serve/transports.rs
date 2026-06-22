@@ -103,6 +103,7 @@ async fn forward_inbound_to_signal(
 /// correlator has had a chance to claim them).
 pub(super) async fn wire_preset_transports(
     entries: &[brain::config::TransportEntry],
+    presets_dir: std::path::PathBuf,
     processor: Arc<signal::SignalProcessor>,
     dispatcher: Arc<channel::ChannelDispatcher>,
     correlator: Arc<channel::ConfirmationCorrelator>,
@@ -122,11 +123,13 @@ pub(super) async fn wire_preset_transports(
 
     for entry in entries {
         // `preset::load` does a blocking `std::fs::read_to_string` for the
-        // user-override file at `~/.brain/presets/<id>.yaml`. Off-load so a
-        // slow filesystem doesn't stall the reactor while we wire each
+        // user-override file at `<data_dir>/presets/<id>.yaml`. Off-load so
+        // a slow filesystem doesn't stall the reactor while we wire each
         // transport at startup.
         let preset_id = entry.preset.clone();
-        let load_result = tokio::task::spawn_blocking(move || preset::load(&preset_id)).await;
+        let presets_dir = presets_dir.clone();
+        let load_result =
+            tokio::task::spawn_blocking(move || preset::load(&preset_id, Some(&presets_dir))).await;
         let preset = match load_result {
             Ok(Ok(p)) => p,
             Ok(Err(e)) => {
