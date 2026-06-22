@@ -35,7 +35,7 @@ jobs:
         # gates its gRPC build on a non-Windows target.
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace
@@ -44,7 +44,7 @@ jobs:
     name: Check (no default features)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Smoke check that the workspace still compiles without default
@@ -58,7 +58,7 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -69,7 +69,7 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -79,21 +79,21 @@ jobs:
     name: Crate Names
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - run: ./scripts/check-crate-names.sh
 
   boundaries:
     name: Module boundaries
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - run: ./scripts/check-boundaries.sh
 
   changelog:
     name: Changelog
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # PR diff check needs the merge-base; fetch full history.
           fetch-depth: 0
@@ -106,7 +106,7 @@ jobs:
     name: MSRV (Rust 1.91)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       # Pin to the declared MSRV. Bumps here must move workspace
       # rust-version + README + CHANGELOG together.
       - uses: dtolnay/rust-toolchain@1.91
@@ -125,7 +125,7 @@ jobs:
         # where the PTY paths actually exercise.
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # PTY-spawning integration tests (terminal bridge) intermittently hit
@@ -142,7 +142,7 @@ jobs:
     name: Security
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-audit
@@ -154,7 +154,7 @@ jobs:
     name: cargo-deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           # Run all checks: advisories, bans, licenses, sources.
@@ -171,7 +171,7 @@ jobs:
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
       # Build the linux/amd64 image so the Dockerfile can't rot (e.g. a
       # RUST_VERSION that drifts below the workspace MSRV). No registry push —
@@ -188,7 +188,7 @@ jobs:
     name: Coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-tarpaulin
