@@ -1361,6 +1361,44 @@ pub struct ProactivityConfig {
     pub delivery: DeliveryConfig,
     #[serde(default)]
     pub open_loop: OpenLoopDetectionConfig,
+    #[serde(default)]
+    pub discovery: DiscoveryConfig,
+}
+
+/// Capability discovery: a gentle "did you know Brain can…" nudge for a
+/// capability the user has never used. On a slow cadence the daemon scans the
+/// unified capability manifest, finds an authored, user-facing capability with
+/// no recorded use (learned fitness), and surfaces one as a proactive
+/// suggestion — so a faculty the user never knew about doesn't stay invisible.
+/// Gated by the same proactivity toggle and quiet hours as every other nudge;
+/// each capability is suggested at most once.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveryConfig {
+    /// Suggest unused capabilities at all.
+    #[serde(default = "DiscoveryConfig::default_enabled")]
+    pub enabled: bool,
+    /// Hours between discovery scans. A day by default — discovery is a slow,
+    /// low-volume companion behaviour, not a monitor.
+    #[serde(default = "DiscoveryConfig::default_interval_hours")]
+    pub interval_hours: u64,
+}
+
+impl DiscoveryConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_interval_hours() -> u64 {
+        24
+    }
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            interval_hours: Self::default_interval_hours(),
+        }
+    }
 }
 
 /// Configuration for open-loop (unresolved commitment) detection.

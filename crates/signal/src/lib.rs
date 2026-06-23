@@ -13,6 +13,7 @@
 pub mod approval;
 pub mod authz;
 pub mod capability_embed;
+pub mod discovery;
 pub mod notification;
 pub mod observation_graph_mirror;
 pub mod reflex_runner;

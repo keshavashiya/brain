@@ -199,6 +199,13 @@ proactivity:
     scan_window_hours: 72
     resolution_window_hours: 24
     check_interval_minutes: 120
+  # Capability discovery — a gentle "did you know Brain can…" nudge for a
+  # capability you've never used. On a slow cadence the daemon finds an authored,
+  # user-facing capability with no recorded use and suggests one. Gated by the
+  # proactivity toggle + quiet hours above; each capability is suggested once.
+  discovery:
+    enabled: true
+    interval_hours: 24
 
 # ── Adapters ───────────────────────────────────────────────────────────────────
 adapters:

@@ -26,6 +26,7 @@
 mod adapters;
 mod background;
 mod connectivity;
+mod discovery;
 mod dlq;
 mod health;
 mod manifest_health;
@@ -301,6 +302,16 @@ pub(crate) async fn cmd_serve(
         background::spawn_open_loop_detector(
             processor.clone(),
             config.proactivity.open_loop.clone(),
+            &mut set,
+        );
+    }
+    // Capability discovery rides the proactivity toggle but not the `ganglia`
+    // feature — it surfaces unused capabilities from the manifest + fitness, no
+    // habit/open-loop machinery involved.
+    if config.proactivity.enabled && config.proactivity.discovery.enabled {
+        discovery::spawn_capability_discovery(
+            processor.clone(),
+            config.proactivity.discovery.clone(),
             &mut set,
         );
     }

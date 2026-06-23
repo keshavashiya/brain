@@ -531,6 +531,7 @@ impl Default for BrainConfig {
                 },
                 delivery: DeliveryConfig::default(),
                 open_loop: OpenLoopDetectionConfig::default(),
+                discovery: DiscoveryConfig::default(),
             },
             adapters: AdaptersConfig {
                 http: HttpAdapterConfig {
