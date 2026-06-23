@@ -119,9 +119,92 @@ impl EwmaBaseline {
     }
 }
 
+/// A reading that has *just* moved outside its learned band — the edge that
+/// warrants exactly one alert.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Anomaly {
+    /// The value that tripped the band, in the stream's natural unit.
+    pub value: f64,
+    /// The learned baseline (EWMA mean) it was judged against.
+    pub expected: f64,
+    /// Signed deviation in learned standard deviations: positive = above
+    /// normal, negative = below.
+    pub z_score: f64,
+}
+
+/// One metric stream's learned baseline plus edge-triggered anomaly detection.
+///
+/// Feed every sample through [`observe`](StreamMonitor::observe): it returns an
+/// [`Anomaly`] only on a *fresh* move outside `sensitivity` learned standard
+/// deviations, then stays silent while the stream remains out, re-arming once it
+/// returns inside the band. The baseline keeps learning on every sample, so a
+/// sustained shift is absorbed as the new normal. This is the reusable detector
+/// behind both the resource-gauge tracker and the per-turn telemetry monitor.
+#[derive(Debug, Clone)]
+pub struct StreamMonitor {
+    baseline: EwmaBaseline,
+    sensitivity: f64,
+    in_anomaly: bool,
+}
+
+impl StreamMonitor {
+    /// A monitor with the given EWMA `alpha`, `warmup` count, and anomaly
+    /// `sensitivity` (learned standard deviations out before a reading counts).
+    pub fn new(alpha: f64, warmup: u64, sensitivity: f64) -> Self {
+        Self {
+            baseline: EwmaBaseline::new(alpha, warmup),
+            sensitivity,
+            in_anomaly: false,
+        }
+    }
+
+    /// Fold one sample in and report a fresh band excursion, if any. `None`
+    /// during warmup, while the reading is within the band, or while the stream
+    /// is already known to be out (edge discipline — one alert per excursion).
+    pub fn observe(&mut self, value: f64) -> Option<Anomaly> {
+        let reading = self.baseline.observe(value)?;
+        if reading.z_score.abs() >= self.sensitivity {
+            if self.in_anomaly {
+                None // already reported on the way out
+            } else {
+                self.in_anomaly = true;
+                Some(Anomaly {
+                    value,
+                    expected: reading.mean,
+                    z_score: reading.z_score,
+                })
+            }
+        } else {
+            self.in_anomaly = false;
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn monitor_silent_while_stable_then_fires_once() {
+        let mut m = StreamMonitor::new(0.3, 5, 4.0);
+        for x in [98.0, 102.0, 99.0, 101.0, 100.0, 103.0, 97.0, 100.0] {
+            assert!(m.observe(x).is_none(), "stable readings never flag");
+        }
+        let a = m.observe(1000.0).expect("fresh excursion");
+        assert!(a.z_score > 4.0);
+        assert!(a.expected > 90.0 && a.expected < 130.0);
+        // Edge discipline: still out → silent.
+        assert!(m.observe(1000.0).is_none());
+    }
+
+    #[test]
+    fn monitor_warmup_suppresses_early_swings() {
+        let mut m = StreamMonitor::new(0.3, 5, 4.0);
+        for x in [10.0, 5000.0, 10.0, 9000.0] {
+            assert!(m.observe(x).is_none(), "no alert before warmup");
+        }
+    }
 
     #[test]
     fn silent_during_warmup() {

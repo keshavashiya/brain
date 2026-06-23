@@ -35,6 +35,7 @@ mod reflex;
 pub(crate) mod resource;
 mod sys_sampler;
 mod transports;
+mod turn_baseline;
 
 use std::sync::Arc;
 
@@ -360,6 +361,15 @@ pub(crate) async fn cmd_serve(
     background::spawn_observation_mirror(
         processor.clone(),
         config.memory.residency_policy(),
+        &mut set,
+    );
+
+    // Per-turn telemetry → learned-normal monitor. Subscribed here, before any
+    // turn runs, so it sees every `TurnCompleted` and learns what a normal turn
+    // costs (latency / tokens), flagging the ones that fall far outside.
+    turn_baseline::spawn_turn_baseline(
+        processor.clone(),
+        config.monitoring.learned_normal.clone(),
         &mut set,
     );
 

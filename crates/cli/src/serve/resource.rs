@@ -315,42 +315,26 @@ impl Deviation {
 }
 
 /// Per-gauge learned baselines with edge-triggered anomaly detection. Each gauge
-/// keeps an [`EwmaBaseline`](brain::EwmaBaseline) of its own normal range; a
+/// keeps a [`StreamMonitor`](brain::StreamMonitor) of its own normal range; a
 /// reading more than `sensitivity` learned standard deviations out yields one
 /// [`Deviation`], and — like [`PressureTracker`] — nothing more while it stays
 /// out, re-arming only once it returns inside the band. The baseline keeps
 /// learning on every sample, so a sustained shift is absorbed as the new normal.
 pub(crate) struct LearnedNormalTracker {
-    rss: GaugeBaseline,
-    cpu: GaugeBaseline,
-    disk: GaugeBaseline,
-    fds: GaugeBaseline,
-    sensitivity: f64,
-}
-
-/// One gauge's learned baseline plus its in/out-of-band edge state.
-struct GaugeBaseline {
-    baseline: brain::EwmaBaseline,
-    in_anomaly: bool,
-}
-
-impl GaugeBaseline {
-    fn new(cfg: &brain::config::LearnedNormalConfig) -> Self {
-        Self {
-            baseline: brain::EwmaBaseline::new(cfg.alpha, cfg.warmup_samples),
-            in_anomaly: false,
-        }
-    }
+    rss: brain::StreamMonitor,
+    cpu: brain::StreamMonitor,
+    disk: brain::StreamMonitor,
+    fds: brain::StreamMonitor,
 }
 
 impl LearnedNormalTracker {
     pub(crate) fn new(cfg: &brain::config::LearnedNormalConfig) -> Self {
+        let monitor = || brain::StreamMonitor::new(cfg.alpha, cfg.warmup_samples, cfg.sensitivity);
         Self {
-            rss: GaugeBaseline::new(cfg),
-            cpu: GaugeBaseline::new(cfg),
-            disk: GaugeBaseline::new(cfg),
-            fds: GaugeBaseline::new(cfg),
-            sensitivity: cfg.sensitivity,
+            rss: monitor(),
+            cpu: monitor(),
+            disk: monitor(),
+            fds: monitor(),
         }
     }
 
@@ -359,9 +343,8 @@ impl LearnedNormalTracker {
     /// gauge (`None`) is skipped without disturbing its baseline or edge state,
     /// the same contract as [`PressureTracker::evaluate`].
     pub(crate) fn evaluate(&mut self, snap: &metrics::ResourceSnapshot) -> Vec<Deviation> {
-        let sensitivity = self.sensitivity;
         let mut out = Vec::new();
-        let checks: [(&mut GaugeBaseline, Option<f64>, &'static str); 4] = [
+        let checks: [(&mut brain::StreamMonitor, Option<f64>, &'static str); 4] = [
             (&mut self.rss, snap.rss_bytes.map(|b| b as f64 / MIB), "rss"),
             (&mut self.cpu, snap.cpu_pct, "cpu"),
             (
@@ -371,44 +354,19 @@ impl LearnedNormalTracker {
             ),
             (&mut self.fds, snap.open_fds.map(|n| n as f64), "fds"),
         ];
-        for (state, value, gauge) in checks {
-            if let Some(dev) = learned_edge(state, value, sensitivity, gauge) {
-                out.push(dev);
+        for (monitor, value, gauge) in checks {
+            // Unavailable reading skips the gauge without disturbing its state.
+            let Some(value) = value else { continue };
+            if let Some(a) = monitor.observe(value) {
+                out.push(Deviation {
+                    gauge,
+                    value: a.value,
+                    expected: a.expected,
+                    z_score: a.z_score,
+                });
             }
         }
         out
-    }
-}
-
-/// Edge detector for one gauge's learned band: folds `value` into the baseline
-/// (always, so learning continues) and returns a [`Deviation`] only on a fresh
-/// move outside `sensitivity` standard deviations.
-fn learned_edge(
-    state: &mut GaugeBaseline,
-    value: Option<f64>,
-    sensitivity: f64,
-    gauge: &'static str,
-) -> Option<Deviation> {
-    // Unavailable reading: no edge, baseline and state untouched.
-    let value = value?;
-    // `observe` updates the baseline and returns a z-score only once the stream
-    // is evaluable (past warmup, non-zero learned variance).
-    let reading = state.baseline.observe(value)?;
-    if reading.z_score.abs() >= sensitivity {
-        if state.in_anomaly {
-            None // already reported on the way out
-        } else {
-            state.in_anomaly = true;
-            Some(Deviation {
-                gauge,
-                value,
-                expected: reading.mean,
-                z_score: reading.z_score,
-            })
-        }
-    } else {
-        state.in_anomaly = false;
-        None
     }
 }
 

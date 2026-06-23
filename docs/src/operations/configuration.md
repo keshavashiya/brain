@@ -464,6 +464,12 @@ edge-triggered (one alert per excursion) and silent until it has seen
 `warmup_samples` readings, so the minutes after boot never alarm. Read the
 signal with `brain events --kind metric_anomaly`.
 
+The same detector also watches the per-turn telemetry stream (see *Per-turn
+telemetry* above): it learns a normal turn's latency and token cost and raises a
+`metric_anomaly` (`turn.latency_ms` / `turn.tokens`) when a turn falls far
+outside that learned band — catching "your turns are suddenly much slower than
+usual" or a one-off token blowout. The same `learned_normal` settings govern it.
+
 ```yaml
 monitoring:
   learned_normal:

@@ -26,7 +26,7 @@ pub use config::{
 };
 pub use connectivity::{Connectivity, ConnectivityState};
 pub use health::{CapabilityHealth, HealthTransition, ManifestHealth};
-pub use learned_normal::{EwmaBaseline, Reading};
+pub use learned_normal::{Anomaly, EwmaBaseline, Reading, StreamMonitor};
 pub use power::{Power, PowerState};
 pub use residency::{url_is_loopback, NamespaceConfig, Residency, ResidencyPolicy};
 pub use security::ActionTier;

@@ -20,7 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   gauge returns to its band) and silent until it has seen `warmup_samples`
   readings, so the minutes after boot never alarm; the baseline keeps learning
   through anomalies, so a sustained shift is absorbed as the new normal. On by
-  default; read the signal with `brain events --kind metric_anomaly`.
+  default; read the signal with `brain events --kind metric_anomaly`. The same
+  detector also watches the **per-turn telemetry stream**: a subscriber learns a
+  normal turn's *latency* and *token cost* from the `turn_completed` events and
+  raises a `metric_anomaly` (`turn.latency_ms` / `turn.tokens`) when a turn lands
+  far outside it — surfacing "your turns are suddenly much slower than usual" or a
+  one-off token blowout without any fixed threshold to tune.
 
 - **Per-turn telemetry (`monitoring.telemetry`).** Each completed chat turn now
   publishes one `turn_completed` event on the observability bus, summarising what
