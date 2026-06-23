@@ -347,6 +347,16 @@ monitoring:
     enabled: true
     interval_secs: 120               # seconds between sweeps
 
+  # Per-turn telemetry — after each chat turn, publish one `turn_completed`
+  # event on the observability bus summarising what the turn cost: the serving
+  # model and locality, connectivity at the time, prompt/completion tokens, the
+  # number of model⇄tool rounds and calls, and wall-clock latency. Pure
+  # observation (no behaviour change); read it with `brain events --kind
+  # turn_completed`. With no observability bus (CLI one-shots) nothing is
+  # emitted.
+  telemetry:
+    enabled: true
+
 
 # ── Channel Relays ─────────────────────────────────────────────────────────────
 # Bidirectional WebSocket gateways. Unlike webhooks these are long-lived

@@ -436,6 +436,22 @@ monitoring:
     interval_secs: 120
 ```
 
+### Per-turn telemetry
+
+After each chat turn the pipeline publishes one `turn_completed` event on the
+observability bus, summarising what the turn cost: the serving model and its
+locality, the kernel's connectivity at the time, prompt/completion token usage,
+the number of model⇄tool rounds and calls dispatched, and wall-clock latency.
+It is pure observation — nothing about how a turn runs changes — and makes each
+turn legible to `brain events --kind turn_completed` and the trust console. With
+no observability bus wired (CLI one-shots) nothing is emitted.
+
+```yaml
+monitoring:
+  telemetry:
+    enabled: true
+```
+
 ---
 
 ## Channel (relays & transports)

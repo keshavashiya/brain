@@ -253,6 +253,41 @@ pub struct MonitoringConfig {
     /// See [`ManifestHealthConfig`].
     #[serde(default)]
     pub manifest_health: ManifestHealthConfig,
+    /// Per-turn telemetry — emit a `turn_completed` event summarising each
+    /// chat turn's cost (tokens, latency, model, tool rounds) on the
+    /// observability bus. See [`TelemetryConfig`].
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
+}
+
+/// Per-turn telemetry: after each chat turn the pipeline publishes one
+/// `BrainEvent::TurnCompleted` on the observability bus, summarising what the
+/// turn actually cost — the serving model and its locality, the kernel's
+/// connectivity at the time, prompt/completion token usage, the number of
+/// model⇄tool rounds and calls dispatched, and wall-clock latency. Pure
+/// observation: it changes nothing about how a turn runs, only makes the turn
+/// legible to `brain events --kind turn_completed` and the trust console.
+/// Disabled, or with no observability bus wired (CLI one-shots), nothing is
+/// emitted and behaviour is unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryConfig {
+    /// Emit the per-turn event at all.
+    #[serde(default = "TelemetryConfig::default_enabled")]
+    pub enabled: bool,
+}
+
+impl TelemetryConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+        }
+    }
 }
 
 /// Manifest-health sweep: periodically probes the subsystems registered

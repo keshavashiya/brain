@@ -47,6 +47,17 @@ const MAX_TOOL_ROUNDS: usize = 4;
 /// manifest, never the whole catalogue (keeps the prompt small and focused).
 const TOOL_ADVERTISE_K: usize = 8;
 
+/// Per-turn tool-use tallies, accumulated by [`run_chat_turn`] and surfaced in
+/// the [`observe::BrainEvent::TurnCompleted`] telemetry event. Both stay `0` for
+/// a plain answer with no tool use.
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct ChatTurnStats {
+    /// Model⇄tool round-trips that actually executed a tool.
+    pub tool_rounds: u32,
+    /// Tool calls dispatched across all rounds.
+    pub tools_invoked: u32,
+}
+
 impl SignalProcessor {
     /// The single chat-generation entry point shared by every adapter.
     ///
@@ -91,9 +102,12 @@ impl SignalProcessor {
             } => estimated_input_tokens,
         };
 
+        let started = std::time::Instant::now();
+        let mut stats = ChatTurnStats::default();
         let resp = self
-            .run_chat_turn(signal, signal_id, messages, chunk_sink)
+            .run_chat_turn(signal, signal_id, messages, chunk_sink, &mut stats)
             .await?;
+        let duration_ms = started.elapsed().as_millis() as u64;
 
         budget_guard::record_llm_usage(
             self.cost_budget(),
@@ -103,7 +117,53 @@ impl SignalProcessor {
         )
         .await;
 
+        self.publish_turn_completed(signal_id, &resp, &stats, duration_ms, chunk_sink.is_some())
+            .await;
+
         Ok(resp)
+    }
+
+    /// Publish one [`observe::BrainEvent::TurnCompleted`] summarising the turn
+    /// that just ran. Best-effort observability: a no-op when telemetry is
+    /// disabled or no observer is wired (CLI one-shots), and a closed bus is
+    /// informational, never fatal. The serving chain is read from
+    /// [`active_llm`](SignalProcessor::active_llm) so the reported model and
+    /// locality reflect what actually ran (offline turns ride a local tier).
+    async fn publish_turn_completed(
+        &self,
+        signal_id: uuid::Uuid,
+        resp: &Response,
+        stats: &ChatTurnStats,
+        duration_ms: u64,
+        streamed: bool,
+    ) {
+        if !self.config().monitoring.telemetry.enabled {
+            return;
+        }
+        let Some(observer) = self.observer() else {
+            return;
+        };
+        let llm = self.active_llm();
+        let (input_tokens, output_tokens) = resp
+            .usage
+            .as_ref()
+            .map(|u| (u.prompt_tokens as u64, u.completion_tokens as u64))
+            .unwrap_or((0, 0));
+        let ev = ::observe::BrainEvent::TurnCompleted {
+            id: signal_id,
+            provider: llm.name().to_string(),
+            model: llm.model().to_string(),
+            local: llm.is_local(),
+            connectivity: self.connectivity().state().as_str().to_string(),
+            input_tokens,
+            output_tokens,
+            tool_rounds: stats.tool_rounds,
+            tools_invoked: stats.tools_invoked,
+            duration_ms,
+            streamed,
+            ts: Utc::now(),
+        };
+        let _ = observer.publish(ev).await;
     }
 
     /// Run one chat turn, using the tools channel when a manifest is wired.
@@ -119,6 +179,7 @@ impl SignalProcessor {
         signal_id: uuid::Uuid,
         mut messages: Vec<Message>,
         chunk_sink: Option<&ChatChunkSink>,
+        stats: &mut ChatTurnStats,
     ) -> Result<Response, SignalError> {
         // Captured once per turn: offline turns ride the first local tier
         // chain instead of timing out against a dead remote (see
@@ -152,6 +213,8 @@ impl SignalProcessor {
             // Replay the assistant tool-call turn, then resolve each proposed
             // call through consent + dispatch and append its result.
             let calls = resp.tool_calls.clone();
+            stats.tool_rounds += 1;
+            stats.tools_invoked += calls.len() as u32;
             messages.push(Message::assistant_with_tool_calls(
                 resp.content.clone(),
                 calls.clone(),

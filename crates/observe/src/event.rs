@@ -217,6 +217,47 @@ pub enum BrainEvent {
         detail: String,
         ts: DateTime<Utc>,
     },
+    /// Emitted once per completed chat turn by the unified generation entry
+    /// point ([`generate_chat_response`]), summarising what the turn cost. Not
+    /// edge-triggered — one per turn — since each turn is itself the event.
+    /// Numeric/string fields keep `observe` free of a `cortex`/`core`
+    /// dependency, exactly as the probe events do. `id` is the turn's signal id,
+    /// so this correlates with the `signal_received`/`intent_classified` events
+    /// from the same flow.
+    ///
+    /// [`generate_chat_response`]: https://docs.rs/brainos-signal
+    TurnCompleted {
+        id: Uuid,
+        /// The provider chain that served the turn (e.g. `"ollama"`), as named
+        /// by the active LLM — the offline-aware chain, so this reflects what
+        /// actually ran, not just the configured default.
+        provider: String,
+        /// The model the serving chain used (e.g. `"qwen2.5-coder"`).
+        model: String,
+        /// Whether the serving chain is fully local (loopback / on-device). A
+        /// remote turn is `false`.
+        local: bool,
+        /// The kernel's connectivity at turn time: `"online" | "degraded" |
+        /// "offline"`.
+        connectivity: String,
+        /// Prompt tokens summed across every round of the turn; `0` when the
+        /// provider reports no usage.
+        input_tokens: u64,
+        /// Completion tokens summed across every round of the turn; `0` when
+        /// the provider reports no usage.
+        output_tokens: u64,
+        /// Model⇄tool round-trips that actually executed a tool (`0` for a
+        /// plain answer with no tool use).
+        tool_rounds: u32,
+        /// Tool calls dispatched across all rounds (`0` for a plain answer).
+        tools_invoked: u32,
+        /// Wall-clock duration of the whole turn in milliseconds.
+        duration_ms: u64,
+        /// `true` when the answer was streamed to the client, `false` when it
+        /// was buffered and returned in one piece.
+        streamed: bool,
+        ts: DateTime<Utc>,
+    },
     /// Emitted by the baseline backend when a `baseline.diff` run detects
     /// drift (a no-drift diff emits nothing). Labels are the same
     /// human-readable strings the rendered diff uses, so `observe` stays free
@@ -267,6 +308,7 @@ impl BrainEvent {
             BrainEvent::PowerStateChanged { .. } => "power_state_changed",
             BrainEvent::ServiceHealthChanged { .. } => "service_health_changed",
             BrainEvent::CapabilityHealthChanged { .. } => "capability_health_changed",
+            BrainEvent::TurnCompleted { .. } => "turn_completed",
             BrainEvent::BaselineDrift { .. } => "baseline_drift",
         }
     }
@@ -294,6 +336,7 @@ impl BrainEvent {
             | BrainEvent::PowerStateChanged { id, .. }
             | BrainEvent::ServiceHealthChanged { id, .. }
             | BrainEvent::CapabilityHealthChanged { id, .. }
+            | BrainEvent::TurnCompleted { id, .. }
             | BrainEvent::BaselineDrift { id, .. } => *id,
         }
     }
@@ -525,6 +568,59 @@ mod tests {
             } => {
                 assert_eq!((added, removed, changed), (2, 0, 1));
                 assert_eq!(keys.len(), 2);
+            }
+            other => panic!("decoded to the wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_turn_completed_through_json() {
+        let id = Uuid::new_v4();
+        let original = BrainEvent::TurnCompleted {
+            id,
+            provider: "ollama".into(),
+            model: "qwen2.5-coder".into(),
+            local: true,
+            connectivity: "online".into(),
+            input_tokens: 1240,
+            output_tokens: 380,
+            tool_rounds: 2,
+            tools_invoked: 3,
+            duration_ms: 820,
+            streamed: true,
+            ts: Utc::now(),
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: BrainEvent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.kind(), "turn_completed");
+        assert_eq!(decoded.id(), id);
+        // Not tool-scoped: a turn spans many tools, so it never matches a
+        // single `?tool_id=` filter.
+        assert_eq!(decoded.tool_id(), None);
+        match decoded {
+            BrainEvent::TurnCompleted {
+                provider,
+                model,
+                local,
+                connectivity,
+                input_tokens,
+                output_tokens,
+                tool_rounds,
+                tools_invoked,
+                duration_ms,
+                streamed,
+                ..
+            } => {
+                assert_eq!(provider, "ollama");
+                assert_eq!(model, "qwen2.5-coder");
+                assert!(local);
+                assert_eq!(connectivity, "online");
+                assert_eq!((input_tokens, output_tokens), (1240, 380));
+                assert_eq!((tool_rounds, tools_invoked), (2, 3));
+                assert_eq!(duration_ms, 820);
+                assert!(streamed);
             }
             other => panic!("decoded to the wrong variant: {other:?}"),
         }

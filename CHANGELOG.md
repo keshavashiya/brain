@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Per-turn telemetry (`monitoring.telemetry`).** Each completed chat turn now
+  publishes one `turn_completed` event on the observability bus, summarising what
+  the turn actually cost: the serving provider/model and whether it was local,
+  the kernel's connectivity at the time, prompt/completion token usage, the
+  number of model⇄tool rounds and calls dispatched, and wall-clock latency.
+  Captured at the single unified generation entry point so it covers streaming
+  and non-streaming turns identically, and correlates by signal id with the
+  `signal_received`/`intent_classified` events from the same flow. Pure
+  observation — nothing about how a turn runs changes — surfaced via
+  `brain events --kind turn_completed` and (later) the trust console. On by
+  default; with no observability bus wired (CLI one-shots) nothing is emitted.
+
 - **Data-driven delegate agents.** Built-in CLI-agent definitions moved out of
   a hardcoded Rust table into embedded YAML seeds
   (`crates/delegate/agents/*.yaml`), merged at startup with any `*.yaml` a user
