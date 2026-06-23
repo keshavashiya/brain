@@ -452,6 +452,27 @@ monitoring:
     enabled: true
 ```
 
+### Learned-normal monitoring
+
+Alongside the static resource ceilings, the daemon learns each runtime gauge's
+normal range — an exponentially-weighted moving baseline of its mean and
+variance — and emits a `metric_anomaly` event when a reading lands far outside
+that learned band. This catches a gauge climbing abnormally fast while still
+under its configured ceiling (an early warning a fixed threshold can't give),
+and stays quiet on a machine whose normal load is simply high. It is
+edge-triggered (one alert per excursion) and silent until it has seen
+`warmup_samples` readings, so the minutes after boot never alarm. Read the
+signal with `brain events --kind metric_anomaly`.
+
+```yaml
+monitoring:
+  learned_normal:
+    enabled: true
+    sensitivity: 4.0      # learned standard deviations out before it's an anomaly
+    warmup_samples: 30    # samples observed before any anomaly can fire
+    alpha: 0.1            # EWMA smoothing factor — larger adapts faster to recent readings
+```
+
 ---
 
 ## Channel (relays & transports)

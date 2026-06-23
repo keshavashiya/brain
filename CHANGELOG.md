@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Learned-normal monitoring (`monitoring.learned_normal`).** Alongside the
+  static resource ceilings, the daemon now learns each runtime gauge's normal
+  range — an exponentially-weighted moving baseline of its mean and variance —
+  and emits a `metric_anomaly` event (plus a proactive notification) when a
+  reading lands far outside that learned band. This catches a gauge climbing
+  abnormally fast while still under its configured ceiling — an early warning a
+  fixed threshold can't give — and stays quiet on a machine whose normal load is
+  simply high. Edge-triggered (one alert per excursion, re-arming only after the
+  gauge returns to its band) and silent until it has seen `warmup_samples`
+  readings, so the minutes after boot never alarm; the baseline keeps learning
+  through anomalies, so a sustained shift is absorbed as the new normal. On by
+  default; read the signal with `brain events --kind metric_anomaly`.
+
 - **Per-turn telemetry (`monitoring.telemetry`).** Each completed chat turn now
   publishes one `turn_completed` event on the observability bus, summarising what
   the turn actually cost: the serving provider/model and whether it was local,

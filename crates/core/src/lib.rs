@@ -13,6 +13,7 @@ pub mod config;
 pub mod connectivity;
 pub mod cors;
 pub mod health;
+pub mod learned_normal;
 pub mod power;
 pub mod residency;
 pub mod security;
@@ -25,6 +26,7 @@ pub use config::{
 };
 pub use connectivity::{Connectivity, ConnectivityState};
 pub use health::{CapabilityHealth, HealthTransition, ManifestHealth};
+pub use learned_normal::{EwmaBaseline, Reading};
 pub use power::{Power, PowerState};
 pub use residency::{url_is_loopback, NamespaceConfig, Residency, ResidencyPolicy};
 pub use security::ActionTier;

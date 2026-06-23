@@ -258,6 +258,64 @@ pub struct MonitoringConfig {
     /// observability bus. See [`TelemetryConfig`].
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+    /// Learned-normal monitoring — flag a resource gauge that deviates far from
+    /// its own learned baseline, complementing the static thresholds. See
+    /// [`LearnedNormalConfig`].
+    #[serde(default)]
+    pub learned_normal: LearnedNormalConfig,
+}
+
+/// Learned-normal monitoring: alongside the static resource ceilings, the daemon
+/// learns each gauge's normal range (an exponentially-weighted moving baseline)
+/// and emits a `metric_anomaly` event when a reading lands far outside that
+/// learned band — an early-warning signal a fixed threshold can't give (a gauge
+/// climbing abnormally fast while still under its ceiling) that also stays quiet
+/// on a machine whose normal load is simply high. Edge-triggered (one alert per
+/// excursion) and silent until it has learned the machine (`warmup_samples`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearnedNormalConfig {
+    /// Learn baselines and emit anomalies at all. Disabled leaves only the
+    /// static threshold pressure events.
+    #[serde(default = "LearnedNormalConfig::default_enabled")]
+    pub enabled: bool,
+    /// How many learned standard deviations a reading must sit from the learned
+    /// mean to count as an anomaly. Higher = quieter (fewer, stronger signals).
+    #[serde(default = "LearnedNormalConfig::default_sensitivity")]
+    pub sensitivity: f64,
+    /// Samples observed before any anomaly can fire, so the minutes after boot
+    /// never alarm while the baseline is still forming.
+    #[serde(default = "LearnedNormalConfig::default_warmup_samples")]
+    pub warmup_samples: u64,
+    /// EWMA smoothing factor in `(0, 1]`: larger adapts faster to recent
+    /// readings, smaller keeps a longer memory of normal.
+    #[serde(default = "LearnedNormalConfig::default_alpha")]
+    pub alpha: f64,
+}
+
+impl LearnedNormalConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_sensitivity() -> f64 {
+        4.0
+    }
+    fn default_warmup_samples() -> u64 {
+        30
+    }
+    fn default_alpha() -> f64 {
+        0.1
+    }
+}
+
+impl Default for LearnedNormalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            sensitivity: Self::default_sensitivity(),
+            warmup_samples: Self::default_warmup_samples(),
+            alpha: Self::default_alpha(),
+        }
+    }
 }
 
 /// Per-turn telemetry: after each chat turn the pipeline publishes one

@@ -373,6 +373,7 @@ pub(crate) async fn cmd_serve(
         config.data_dir(),
         config.observability.resource_sample_secs,
         config.observability.thresholds.clone(),
+        config.monitoring.learned_normal.clone(),
         config.observability.log_sampling.high_volume_1_in_n,
         &mut set,
     );

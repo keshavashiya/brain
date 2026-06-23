@@ -52,6 +52,7 @@ pub(crate) fn brain_event_ts(ev: &observe::BrainEvent) -> chrono::DateTime<chron
         | ServiceHealthChanged { ts, .. }
         | CapabilityHealthChanged { ts, .. }
         | TurnCompleted { ts, .. }
+        | MetricAnomaly { ts, .. }
         | BaselineDrift { ts, .. } => *ts,
     }
 }

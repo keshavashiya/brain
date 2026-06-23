@@ -258,6 +258,28 @@ pub enum BrainEvent {
         streamed: bool,
         ts: DateTime<Utc>,
     },
+    /// Emitted by the learned-normal monitor when a runtime gauge lands far
+    /// outside its own learned baseline (not a configured ceiling — that is
+    /// `ResourcePressure`). Edge-triggered: once when a stream enters its
+    /// anomalous band, not once per sample while it stays out. `stream` is a
+    /// string so `observe` stays free of a `core`/config dependency, exactly as
+    /// `ResourcePressure` keeps it free of one.
+    MetricAnomaly {
+        id: Uuid,
+        /// The metric stream that deviated, e.g. `"rss" | "cpu" | "disk" |
+        /// "fds"`. Same vocabulary as `ResourcePressure.gauge`.
+        stream: String,
+        /// The sampled value in the stream's natural unit — MiB for `rss`/`disk`,
+        /// percent for `cpu`, a count for `fds`.
+        value: f64,
+        /// The learned baseline (EWMA mean) the value was judged against, same
+        /// unit as `value`.
+        expected: f64,
+        /// Signed deviation in learned standard deviations: positive = above
+        /// normal, negative = below.
+        z_score: f64,
+        ts: DateTime<Utc>,
+    },
     /// Emitted by the baseline backend when a `baseline.diff` run detects
     /// drift (a no-drift diff emits nothing). Labels are the same
     /// human-readable strings the rendered diff uses, so `observe` stays free
@@ -309,6 +331,7 @@ impl BrainEvent {
             BrainEvent::ServiceHealthChanged { .. } => "service_health_changed",
             BrainEvent::CapabilityHealthChanged { .. } => "capability_health_changed",
             BrainEvent::TurnCompleted { .. } => "turn_completed",
+            BrainEvent::MetricAnomaly { .. } => "metric_anomaly",
             BrainEvent::BaselineDrift { .. } => "baseline_drift",
         }
     }
@@ -337,6 +360,7 @@ impl BrainEvent {
             | BrainEvent::ServiceHealthChanged { id, .. }
             | BrainEvent::CapabilityHealthChanged { id, .. }
             | BrainEvent::TurnCompleted { id, .. }
+            | BrainEvent::MetricAnomaly { id, .. }
             | BrainEvent::BaselineDrift { id, .. } => *id,
         }
     }
@@ -568,6 +592,41 @@ mod tests {
             } => {
                 assert_eq!((added, removed, changed), (2, 0, 1));
                 assert_eq!(keys.len(), 2);
+            }
+            other => panic!("decoded to the wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn roundtrip_metric_anomaly_through_json() {
+        let id = Uuid::new_v4();
+        let original = BrainEvent::MetricAnomaly {
+            id,
+            stream: "rss".into(),
+            value: 980.0,
+            expected: 210.0,
+            z_score: 7.4,
+            ts: Utc::now(),
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: BrainEvent = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.kind(), "metric_anomaly");
+        assert_eq!(decoded.id(), id);
+        assert_eq!(decoded.tool_id(), None);
+        match decoded {
+            BrainEvent::MetricAnomaly {
+                stream,
+                value,
+                expected,
+                z_score,
+                ..
+            } => {
+                assert_eq!(stream, "rss");
+                assert_eq!(value, 980.0);
+                assert_eq!(expected, 210.0);
+                assert_eq!(z_score, 7.4);
             }
             other => panic!("decoded to the wrong variant: {other:?}"),
         }

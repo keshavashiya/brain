@@ -357,6 +357,18 @@ monitoring:
   telemetry:
     enabled: true
 
+  # Learned-normal monitoring — alongside the static resource ceilings above,
+  # learn each gauge's normal range (an exponentially-weighted baseline) and
+  # emit a `metric_anomaly` event when a reading lands far outside it. Catches a
+  # gauge climbing abnormally fast while still under its ceiling, and stays quiet
+  # on a machine whose normal load is simply high. Edge-triggered (one alert per
+  # excursion) and silent until it has learned the machine (warmup_samples).
+  learned_normal:
+    enabled: true
+    sensitivity: 4.0                 # learned std-devs out before it's an anomaly
+    warmup_samples: 30               # samples observed before any anomaly fires
+    alpha: 0.1                       # EWMA smoothing — larger adapts faster
+
 
 # ── Channel Relays ─────────────────────────────────────────────────────────────
 # Bidirectional WebSocket gateways. Unlike webhooks these are long-lived
