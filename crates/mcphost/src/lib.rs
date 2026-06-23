@@ -28,6 +28,7 @@ use tokio::sync::RwLock;
 
 pub mod aud_check;
 pub mod capability_index;
+pub mod discovery;
 pub mod error;
 pub mod oauth;
 pub mod resilient;
@@ -36,6 +37,7 @@ pub mod types;
 
 pub use aud_check::{validate_token_aud, AudCheckOutcome};
 pub use capability_index::{InMemoryToolCapabilityIndex, ToolCapabilityIndex};
+pub use discovery::{parse_mcp_servers, DiscoveredServer, DiscoveredTransport};
 pub use error::McpHostError;
 pub use oauth::{manager_from_vault, VaultCredentialStore};
 pub use resilient::{ResilienceConfig, ResilientMcpHost};

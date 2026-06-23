@@ -249,19 +249,28 @@ proactivity:
     scan_window_hours: 72
     resolution_window_hours: 24
     check_interval_minutes: 120
-  discovery:                       # "did you know Brain can…" for unused capabilities
+  discovery:                       # gentle, slow-cadence suggestions
     enabled: true
     interval_hours: 24
+    unused_capabilities: true      # "did you know Brain can…" for unused capabilities
+    mcp_servers: true              # propose MCP servers from other tools' configs
 ```
 
-**Capability discovery** is a gentle companion behaviour: on a slow cadence Brain
-finds an authored, user-facing capability with no recorded use yet (learned
-fitness) and surfaces one as a "did you know Brain can…" suggestion, so a
-faculty you never knew about doesn't stay invisible. Each capability is suggested
-at most once, gated by the proactivity toggle and quiet hours above, and
-delivered as an ordinary low-priority nudge. It declines to suggest anything when
-learned fitness is disabled (without that signal "unused" can't be told from
-"untracked").
+**Discovery** is a gentle companion behaviour with two independent loops, both on
+a slow cadence (a day by default), gated by the proactivity toggle and quiet
+hours, delivered as ordinary low-priority nudges, each item suggested at most
+once:
+
+- **`unused_capabilities`** — finds an authored, user-facing capability with no
+  recorded use yet (learned fitness) and surfaces one as a "did you know Brain
+  can…" suggestion, so a faculty you never knew about doesn't stay invisible. It
+  declines to suggest anything when learned fitness is disabled (without that
+  signal "unused" can't be told from "untracked").
+- **`mcp_servers`** — reads *other* MCP clients' config files on this machine
+  (Claude Desktop, Cursor, Windsurf) and proposes mounting any MCP server Brain
+  doesn't already run, as a copy-paste `/mcp-mount` command. The scan is
+  read-only and local; mounting stays a consented action with its own egress
+  scopes.
 
 ---
 

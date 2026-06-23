@@ -1374,13 +1374,21 @@ pub struct ProactivityConfig {
 /// each capability is suggested at most once.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveryConfig {
-    /// Suggest unused capabilities at all.
+    /// Master switch for all discovery behaviours.
     #[serde(default = "DiscoveryConfig::default_enabled")]
     pub enabled: bool,
     /// Hours between discovery scans. A day by default — discovery is a slow,
     /// low-volume companion behaviour, not a monitor.
     #[serde(default = "DiscoveryConfig::default_interval_hours")]
     pub interval_hours: u64,
+    /// Suggest capabilities Brain already has but the user has never used.
+    #[serde(default = "DiscoveryConfig::default_on")]
+    pub unused_capabilities: bool,
+    /// Scan *other* MCP clients' config files (Claude Desktop, Cursor, …) and
+    /// propose mounting servers Brain doesn't have yet. Read-only scan; mounting
+    /// stays a consented user action.
+    #[serde(default = "DiscoveryConfig::default_on")]
+    pub mcp_servers: bool,
 }
 
 impl DiscoveryConfig {
@@ -1390,6 +1398,9 @@ impl DiscoveryConfig {
     fn default_interval_hours() -> u64 {
         24
     }
+    fn default_on() -> bool {
+        true
+    }
 }
 
 impl Default for DiscoveryConfig {
@@ -1397,6 +1408,8 @@ impl Default for DiscoveryConfig {
         Self {
             enabled: Self::default_enabled(),
             interval_hours: Self::default_interval_hours(),
+            unused_capabilities: Self::default_on(),
+            mcp_servers: Self::default_on(),
         }
     }
 }

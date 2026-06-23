@@ -199,13 +199,18 @@ proactivity:
     scan_window_hours: 72
     resolution_window_hours: 24
     check_interval_minutes: 120
-  # Capability discovery — a gentle "did you know Brain can…" nudge for a
-  # capability you've never used. On a slow cadence the daemon finds an authored,
-  # user-facing capability with no recorded use and suggests one. Gated by the
-  # proactivity toggle + quiet hours above; each capability is suggested once.
+  # Discovery — gentle, slow-cadence suggestions. Two independent loops:
+  #   unused_capabilities: "did you know Brain can…" for a capability you've
+  #     never used (authored, user-facing, no recorded fitness).
+  #   mcp_servers: scan OTHER MCP clients' configs on this machine (Claude
+  #     Desktop, Cursor, Windsurf) and propose mounting servers Brain lacks.
+  #     Read-only scan; mounting stays a consented `/mcp-mount` action.
+  # Gated by the proactivity toggle + quiet hours above; each item suggested once.
   discovery:
     enabled: true
     interval_hours: 24
+    unused_capabilities: true
+    mcp_servers: true
 
 # ── Adapters ───────────────────────────────────────────────────────────────────
 adapters:

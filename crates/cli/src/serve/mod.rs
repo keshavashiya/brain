@@ -305,15 +305,24 @@ pub(crate) async fn cmd_serve(
             &mut set,
         );
     }
-    // Capability discovery rides the proactivity toggle but not the `ganglia`
-    // feature — it surfaces unused capabilities from the manifest + fitness, no
-    // habit/open-loop machinery involved.
+    // Discovery rides the proactivity toggle but not the `ganglia` feature.
+    // Two independent loops: surfacing unused capabilities Brain already has,
+    // and scanning other tools' MCP configs to propose new servers.
     if config.proactivity.enabled && config.proactivity.discovery.enabled {
-        discovery::spawn_capability_discovery(
-            processor.clone(),
-            config.proactivity.discovery.clone(),
-            &mut set,
-        );
+        if config.proactivity.discovery.unused_capabilities {
+            discovery::spawn_capability_discovery(
+                processor.clone(),
+                config.proactivity.discovery.clone(),
+                &mut set,
+            );
+        }
+        if config.proactivity.discovery.mcp_servers {
+            discovery::spawn_mcp_discovery(
+                processor.clone(),
+                config.proactivity.discovery.clone(),
+                &mut set,
+            );
+        }
     }
     // Scheduled intents *fire* exclusively through the cron reflex now
     // (the historical direct-execution poller was retired in favour of
