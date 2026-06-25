@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Answer-quality fitness (`learning.answer_fitness`).** The conversational
+  complement to capability fitness: instead of learning whether *tools* succeed,
+  Brain learns whether its *answers* helped. After each chat turn it classifies
+  the request into a coarse task kind (coding, factual-qa, reasoning,
+  summarization, chitchat) and — off the hot path — judges how your *next*
+  message reacted to the previous answer (gratitude is a strong positive, an
+  immediate rephrase or an explicit correction a negative), reinforcing a
+  per-`(task-kind, model)` quality score that decays under the same forgetting
+  curve as capability fitness. When you run more than one model across the
+  `llm.tiers`, that learned signal gently biases tier selection: a model that
+  measurably answers a given kind worse than a cheaper tier *which has its own
+  evidence* loses that kind's turns to the cheaper tier — bounded by an evidence
+  floor and a minimum margin, and never escaping your configured tiers. A
+  single-model install is byte-identical to today (nothing to compare against),
+  and any shift is named honestly in the capability digest. On by default; set
+  `learning.answer_fitness.enabled: false` to opt out.
+
 - **Discovery nudges (`proactivity.discovery`).** Two gentle, slow-cadence
   companion behaviours that surface things you might be missing, each suggested
   at most once and gated by the same proactivity toggle and quiet hours as every

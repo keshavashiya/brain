@@ -364,6 +364,24 @@ learning:
     half_life_days: 30             # how long an observation keeps half its weight
 ```
 
+Brain also learns whether its *answers* helped. It classifies each turn into a
+coarse task kind, judges how your next message reacted to the previous answer
+(off the hot path), and reinforces a per-`(task-kind, model)` quality score on
+the same forgetting curve. When more than one model is configured across
+`llm.tiers`, a model that measurably answers a kind worse than a cheaper tier
+*with its own evidence* loses that kind's turns to it — bounded by an evidence
+floor and a margin, and never escaping your configured tiers. A single-model
+install is unaffected.
+
+```yaml
+learning:
+  answer_fitness:
+    enabled: true
+    half_life_days: 30             # how long a judged outcome keeps half its weight
+    min_judged_turns: 8            # evidence (per tier) required before routing shifts
+    margin: 0.15                   # success-ratio lead a cheaper tier needs to win a kind
+```
+
 ---
 
 ## Observability

@@ -82,6 +82,19 @@ impl SignalProcessor {
             tracing::warn!("CapabilityFitnessStore table init failed (non-fatal): {e}");
         }
 
+        // Create the learned answer-quality store (cerebellum) — the
+        // conversational complement to capability fitness. Same SQLite home,
+        // same forgetting curve, separate table (`answer_fitness`).
+        let answer_cfg = &config.learning.answer_fitness;
+        let answer_fitness = cerebellum::AnswerFitnessStore::new(
+            db.clone(),
+            answer_cfg.enabled,
+            answer_cfg.half_life_hours(),
+        );
+        if let Err(e) = answer_fitness.ensure_tables() {
+            tracing::warn!("AnswerFitnessStore table init failed (non-fatal): {e}");
+        }
+
         // Probe configured providers (multi-entry if `llm.providers` is set;
         // otherwise synthesised from the legacy single-provider fields) and
         // select the first reachable one. Env-var API key stays backfilled
@@ -259,6 +272,9 @@ impl SignalProcessor {
             )),
             procedures,
             fitness,
+            answer_fitness,
+            answer_pending: std::sync::Mutex::new(std::collections::HashMap::new()),
+            answer_anchors: tokio::sync::OnceCell::new(),
             metrics: Arc::new(metrics::SubsystemMetrics::new()),
             proactivity_enabled,
             connectivity: brain::Connectivity::default(),

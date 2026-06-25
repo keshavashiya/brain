@@ -288,6 +288,16 @@ learning:
   capability_fitness:
     enabled: true                   # record outcomes + boost ranking + surface
     half_life_days: 30              # how long an observation keeps half its weight
+  # Answer-quality fitness: score each turn's follow-up (a satisfied "thanks" vs
+  # an immediate rephrase or correction) per (task-kind, model), and bias tier
+  # selection so a model that answers a kind badly loses that kind's turns to a
+  # cheaper tier that does better. Inert (and routing byte-identical to the
+  # static default) unless you run more than one distinct model across tiers.
+  answer_fitness:
+    enabled: true                   # judge follow-ups + record quality + bias routing
+    half_life_days: 30              # how long a judged outcome keeps half its weight
+    min_judged_turns: 8             # evidence (per tier) required before routing shifts
+    margin: 0.15                    # success-ratio lead a cheaper tier needs to win a kind
 
 # ── Observability ──────────────────────────────────────────────────────────────
 # [advanced] Self-monitoring gauges with generous, fail-safe defaults. Tune the

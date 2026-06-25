@@ -2,15 +2,20 @@
 //!
 //! Procedural memory — learned workflows and learned capability fitness.
 //!
-//! Two stores share this crate's SQLite-backed procedural-memory home:
+//! Three stores share this crate's SQLite-backed procedural-memory home:
 //! - [`ProcedureStore`] keeps `(trigger_pattern, steps)` tuples; incoming
 //!   signals are matched against known triggers and matching procedures
 //!   contribute context steps to the LLM prompt.
-//! - [`CapabilityFitnessStore`] (module [`fitness`]) keeps the *learned* half
+//! - [`CapabilityFitnessStore`] (module `fitness`) keeps the *learned* half
 //!   of the capability self-model: per-tool success/failure mass the kernel
 //!   reinforces after each dispatch and decays under the forgetting curve.
+//! - [`AnswerFitnessStore`] (module `answer_fitness`) keeps the conversational
+//!   complement: per-`(task-kind, model)` answer-quality mass scored from the
+//!   user's follow-up, decayed under the same curve, biasing tier selection.
 
+mod answer_fitness;
 mod fitness;
+pub use answer_fitness::{AnswerFitnessStore, AnswerOutcome, AnswerQuality};
 pub use fitness::{
     fitness_bonus, CapabilityFitnessStore, Fitness, MIN_RATIO_TO_SURFACE, MIN_USES_TO_SURFACE,
 };

@@ -78,6 +78,8 @@ pub struct BrainConfig {
 pub struct LearningConfig {
     #[serde(default)]
     pub capability_fitness: CapabilityFitnessConfig,
+    #[serde(default)]
+    pub answer_fitness: AnswerFitnessConfig,
 }
 
 /// Capability-fitness learning: per-tool success/failure mass that decays
@@ -113,6 +115,63 @@ impl Default for CapabilityFitnessConfig {
         Self {
             enabled: Self::default_enabled(),
             half_life_days: Self::default_half_life_days(),
+        }
+    }
+}
+
+/// Answer-quality learning: per-`(task-kind, model)` success/failure mass
+/// scored from each turn's follow-up and decayed under the forgetting curve.
+/// Biases tier selection so a model that answers a task kind badly loses that
+/// kind's turns to a cheaper tier that does better. See
+/// `cerebellum::AnswerFitnessStore` and `signal::answer_fitness`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnswerFitnessConfig {
+    /// Judge follow-ups, record per-`(kind, model)` quality, and bias tier
+    /// selection. When false the store is inert (nothing judged, recorded, or
+    /// routed) and tier selection is byte-identical to the static default.
+    #[serde(default = "AnswerFitnessConfig::default_enabled")]
+    pub enabled: bool,
+    /// Decay half-life in days for a recorded outcome's weight. Longer =
+    /// slower forgetting.
+    #[serde(default = "AnswerFitnessConfig::default_half_life_days")]
+    pub half_life_days: f64,
+    /// Minimum judged turns a `(kind, model)` pair needs — on *both* the deep
+    /// tier and a cheaper tier — before learned quality may shift routing.
+    /// Guards against acting on a handful of noisy judgements.
+    #[serde(default = "AnswerFitnessConfig::default_min_judged_turns")]
+    pub min_judged_turns: i64,
+    /// How much better (decayed success ratio) a cheaper tier must be than the
+    /// deep tier for a task kind before that kind is downgraded to it.
+    #[serde(default = "AnswerFitnessConfig::default_margin")]
+    pub margin: f32,
+}
+
+impl AnswerFitnessConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_half_life_days() -> f64 {
+        30.0
+    }
+    fn default_min_judged_turns() -> i64 {
+        8
+    }
+    fn default_margin() -> f32 {
+        0.15
+    }
+    /// Half-life expressed in hours, as the fitness store consumes it.
+    pub fn half_life_hours(&self) -> f64 {
+        self.half_life_days * 24.0
+    }
+}
+
+impl Default for AnswerFitnessConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            half_life_days: Self::default_half_life_days(),
+            min_judged_turns: Self::default_min_judged_turns(),
+            margin: Self::default_margin(),
         }
     }
 }

@@ -10,6 +10,7 @@
 //! - Cortex (LLM reasoning + context assembly)
 //! - NotificationRouter (proactive delivery)
 
+pub mod answer_fitness;
 pub mod approval;
 pub mod authz;
 pub mod capability_embed;
@@ -88,6 +89,22 @@ pub struct SignalProcessor {
     /// "proven tools" line in the capability digest. Inert when
     /// `learning.capability_fitness.enabled = false`.
     fitness: cerebellum::CapabilityFitnessStore,
+    /// Learned answer-quality self-model: per-`(task-kind, model)` mass scored
+    /// from each turn's follow-up (see [`answer_fitness`]), biasing tier
+    /// selection so a model that answers badly for a kind loses that kind's
+    /// turns to a cheaper tier that does better. Inert when
+    /// `learning.answer_fitness.enabled = false`.
+    answer_fitness: cerebellum::AnswerFitnessStore,
+    /// One pending answer per conversation, awaiting judgement by the next
+    /// turn. Keyed by [`answer_fitness::session_key`]. In-memory and
+    /// best-effort — a restart drops pending judgements.
+    answer_pending:
+        std::sync::Mutex<std::collections::HashMap<String, answer_fitness::PendingAnswer>>,
+    /// Per-kind anchor embeddings for semantic [`answer_fitness::classify_kind`],
+    /// embedded once on first use from [`answer_fitness::TaskKind::anchor_corpus`]
+    /// via the capability embedder. Empty when no embedder is wired → keyword
+    /// classification.
+    answer_anchors: tokio::sync::OnceCell<Vec<(answer_fitness::TaskKind, Vec<f32>)>>,
     /// Cross-subsystem metrics (embedding, consolidation, circuit breaker, intent).
     metrics: std::sync::Arc<metrics::SubsystemMetrics>,
     /// Runtime proactivity toggle. Initialised from
