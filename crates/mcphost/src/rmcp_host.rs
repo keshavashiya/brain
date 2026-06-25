@@ -794,7 +794,15 @@ fn hash_tools(tools: &[ToolDescriptor]) -> String {
     let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
-    format!("{:x}", hasher.finalize())
+    // sha2 0.11's digest output no longer implements `LowerHex`, so render the
+    // bytes to a lowercase hex string by hand.
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(digest.len() * 2);
+    for b in digest.iter() {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{b:02x}");
+    }
+    out
 }
 
 /// Canonicalize JSON: sort object keys recursively so insertion order doesn't

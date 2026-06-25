@@ -110,6 +110,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`sha2` 0.10 → 0.11 with `hmac` 0.12 → 0.13.** A coordinated bump onto the
+  RustCrypto `digest` 0.11 line — sha2 0.11 alone is incompatible with hmac
+  0.12. Migrated the two API breaks: webhook HMAC verification now sources
+  `new_from_slice` from the `KeyInit` trait (it left `Mac` in digest 0.11), and
+  the MCP tool-set fingerprint renders its digest to hex by hand (the output
+  type dropped its `LowerHex` impl). HMAC sign/verify and tool-hash behaviour
+  are unchanged.
+
 - **Dependency bumps.** `termimad` 0.31 → 0.34 (terminal markdown rendering)
   and `tower-http` 0.5 → 0.6 (HTTP middleware; also dedupes the lockfile to a
   single version). No API changes required; behaviour is unaffected.

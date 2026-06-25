@@ -16,6 +16,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use hmac::digest::KeyInit;
 use hmac::{Hmac, Mac};
 use reqwest::header::HeaderMap;
 use serde_json::Value;
@@ -374,8 +375,8 @@ impl WebhookInboundTransport {
                     .as_deref()
                     .and_then(|p| sig_header.strip_prefix(p))
                     .unwrap_or(sig_header);
-                let mut mac =
-                    <HmacSha256 as Mac>::new_from_slice(key).map_err(|e| format!("hmac: {e}"))?;
+                let mut mac = <HmacSha256 as KeyInit>::new_from_slice(key)
+                    .map_err(|e| format!("hmac: {e}"))?;
                 mac.update(body);
                 let expected = hex::encode(mac.finalize().into_bytes());
                 if !constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
@@ -651,7 +652,7 @@ mod tests {
         let mut rx = t.inbound();
 
         let body = br#"{"id":"m1","text":"hi","user":"u1"}"#;
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(b"topsecret").unwrap();
+        let mut mac = <HmacSha256 as KeyInit>::new_from_slice(b"topsecret").unwrap();
         mac.update(body);
         let sig = hex::encode(mac.finalize().into_bytes());
 
@@ -778,7 +779,7 @@ mod tests {
         let t = WebhookInboundTransport::new(cfg).unwrap();
 
         let body = br#"{"id":"m1","text":"hi","user":"u1"}"#;
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(b"topsecret").unwrap();
+        let mut mac = <HmacSha256 as KeyInit>::new_from_slice(b"topsecret").unwrap();
         mac.update(body);
         let sig = hex::encode(mac.finalize().into_bytes());
 
@@ -813,7 +814,7 @@ mod tests {
         let t = WebhookInboundTransport::new(cfg).unwrap();
 
         let body = br#"{"id":"m1","text":"hi","user":"u1"}"#;
-        let mut mac = <HmacSha256 as Mac>::new_from_slice(b"topsecret").unwrap();
+        let mut mac = <HmacSha256 as KeyInit>::new_from_slice(b"topsecret").unwrap();
         mac.update(body);
         let sig = hex::encode(mac.finalize().into_bytes());
 
