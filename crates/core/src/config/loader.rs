@@ -516,6 +516,8 @@ impl Default for BrainConfig {
                     channels: HashMap::new(),
                 },
                 resilience: ResilienceConfig::default(),
+                // Synced to `default.yaml`: 4 independent ready steps per wave.
+                max_parallel_steps: 4,
             },
             proactivity: ProactivityConfig {
                 // Synced to `default.yaml`: programmatic `BrainConfig::default()`
@@ -531,6 +533,12 @@ impl Default for BrainConfig {
                 },
                 delivery: DeliveryConfig::default(),
                 open_loop: OpenLoopDetectionConfig::default(),
+                discovery: DiscoveryConfig {
+                    enabled: true,
+                    interval_hours: 24,
+                    unused_capabilities: true,
+                    mcp_servers: true,
+                },
             },
             adapters: AdaptersConfig {
                 http: HttpAdapterConfig {

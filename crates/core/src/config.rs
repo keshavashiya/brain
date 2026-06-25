@@ -78,6 +78,8 @@ pub struct BrainConfig {
 pub struct LearningConfig {
     #[serde(default)]
     pub capability_fitness: CapabilityFitnessConfig,
+    #[serde(default)]
+    pub answer_fitness: AnswerFitnessConfig,
 }
 
 /// Capability-fitness learning: per-tool success/failure mass that decays
@@ -113,6 +115,63 @@ impl Default for CapabilityFitnessConfig {
         Self {
             enabled: Self::default_enabled(),
             half_life_days: Self::default_half_life_days(),
+        }
+    }
+}
+
+/// Answer-quality learning: per-`(task-kind, model)` success/failure mass
+/// scored from each turn's follow-up and decayed under the forgetting curve.
+/// Biases tier selection so a model that answers a task kind badly loses that
+/// kind's turns to a cheaper tier that does better. See
+/// `cerebellum::AnswerFitnessStore` and `signal::answer_fitness`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnswerFitnessConfig {
+    /// Judge follow-ups, record per-`(kind, model)` quality, and bias tier
+    /// selection. When false the store is inert (nothing judged, recorded, or
+    /// routed) and tier selection is byte-identical to the static default.
+    #[serde(default = "AnswerFitnessConfig::default_enabled")]
+    pub enabled: bool,
+    /// Decay half-life in days for a recorded outcome's weight. Longer =
+    /// slower forgetting.
+    #[serde(default = "AnswerFitnessConfig::default_half_life_days")]
+    pub half_life_days: f64,
+    /// Minimum judged turns a `(kind, model)` pair needs — on *both* the deep
+    /// tier and a cheaper tier — before learned quality may shift routing.
+    /// Guards against acting on a handful of noisy judgements.
+    #[serde(default = "AnswerFitnessConfig::default_min_judged_turns")]
+    pub min_judged_turns: i64,
+    /// How much better (decayed success ratio) a cheaper tier must be than the
+    /// deep tier for a task kind before that kind is downgraded to it.
+    #[serde(default = "AnswerFitnessConfig::default_margin")]
+    pub margin: f32,
+}
+
+impl AnswerFitnessConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_half_life_days() -> f64 {
+        30.0
+    }
+    fn default_min_judged_turns() -> i64 {
+        8
+    }
+    fn default_margin() -> f32 {
+        0.15
+    }
+    /// Half-life expressed in hours, as the fitness store consumes it.
+    pub fn half_life_hours(&self) -> f64 {
+        self.half_life_days * 24.0
+    }
+}
+
+impl Default for AnswerFitnessConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            half_life_days: Self::default_half_life_days(),
+            min_judged_turns: Self::default_min_judged_turns(),
+            margin: Self::default_margin(),
         }
     }
 }
@@ -253,6 +312,99 @@ pub struct MonitoringConfig {
     /// See [`ManifestHealthConfig`].
     #[serde(default)]
     pub manifest_health: ManifestHealthConfig,
+    /// Per-turn telemetry — emit a `turn_completed` event summarising each
+    /// chat turn's cost (tokens, latency, model, tool rounds) on the
+    /// observability bus. See [`TelemetryConfig`].
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
+    /// Learned-normal monitoring — flag a resource gauge that deviates far from
+    /// its own learned baseline, complementing the static thresholds. See
+    /// [`LearnedNormalConfig`].
+    #[serde(default)]
+    pub learned_normal: LearnedNormalConfig,
+}
+
+/// Learned-normal monitoring: alongside the static resource ceilings, the daemon
+/// learns each gauge's normal range (an exponentially-weighted moving baseline)
+/// and emits a `metric_anomaly` event when a reading lands far outside that
+/// learned band — an early-warning signal a fixed threshold can't give (a gauge
+/// climbing abnormally fast while still under its ceiling) that also stays quiet
+/// on a machine whose normal load is simply high. Edge-triggered (one alert per
+/// excursion) and silent until it has learned the machine (`warmup_samples`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearnedNormalConfig {
+    /// Learn baselines and emit anomalies at all. Disabled leaves only the
+    /// static threshold pressure events.
+    #[serde(default = "LearnedNormalConfig::default_enabled")]
+    pub enabled: bool,
+    /// How many learned standard deviations a reading must sit from the learned
+    /// mean to count as an anomaly. Higher = quieter (fewer, stronger signals).
+    #[serde(default = "LearnedNormalConfig::default_sensitivity")]
+    pub sensitivity: f64,
+    /// Samples observed before any anomaly can fire, so the minutes after boot
+    /// never alarm while the baseline is still forming.
+    #[serde(default = "LearnedNormalConfig::default_warmup_samples")]
+    pub warmup_samples: u64,
+    /// EWMA smoothing factor in `(0, 1]`: larger adapts faster to recent
+    /// readings, smaller keeps a longer memory of normal.
+    #[serde(default = "LearnedNormalConfig::default_alpha")]
+    pub alpha: f64,
+}
+
+impl LearnedNormalConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_sensitivity() -> f64 {
+        4.0
+    }
+    fn default_warmup_samples() -> u64 {
+        30
+    }
+    fn default_alpha() -> f64 {
+        0.1
+    }
+}
+
+impl Default for LearnedNormalConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            sensitivity: Self::default_sensitivity(),
+            warmup_samples: Self::default_warmup_samples(),
+            alpha: Self::default_alpha(),
+        }
+    }
+}
+
+/// Per-turn telemetry: after each chat turn the pipeline publishes one
+/// `BrainEvent::TurnCompleted` on the observability bus, summarising what the
+/// turn actually cost — the serving model and its locality, the kernel's
+/// connectivity at the time, prompt/completion token usage, the number of
+/// model⇄tool rounds and calls dispatched, and wall-clock latency. Pure
+/// observation: it changes nothing about how a turn runs, only makes the turn
+/// legible to `brain events --kind turn_completed` and the trust console.
+/// Disabled, or with no observability bus wired (CLI one-shots), nothing is
+/// emitted and behaviour is unchanged.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TelemetryConfig {
+    /// Emit the per-turn event at all.
+    #[serde(default = "TelemetryConfig::default_enabled")]
+    pub enabled: bool,
+}
+
+impl TelemetryConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+        }
+    }
 }
 
 /// Manifest-health sweep: periodically probes the subsystems registered
@@ -952,6 +1104,19 @@ pub struct ActionsConfig {
     pub messaging: MessagingActionConfig,
     #[serde(default)]
     pub resilience: ResilienceConfig,
+    /// Maximum number of a task plan's independent ready steps the
+    /// orchestrator runs concurrently within one execution wave. `1` is
+    /// strictly sequential; higher values exploit parallel branches in the
+    /// dependency graph. Confirmation prompts are always resolved one at a
+    /// time regardless — only approved actions run concurrently.
+    #[serde(default = "ActionsConfig::default_max_parallel_steps")]
+    pub max_parallel_steps: usize,
+}
+
+impl ActionsConfig {
+    fn default_max_parallel_steps() -> usize {
+        4
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1268,6 +1433,57 @@ pub struct ProactivityConfig {
     pub delivery: DeliveryConfig,
     #[serde(default)]
     pub open_loop: OpenLoopDetectionConfig,
+    #[serde(default)]
+    pub discovery: DiscoveryConfig,
+}
+
+/// Capability discovery: a gentle "did you know Brain can…" nudge for a
+/// capability the user has never used. On a slow cadence the daemon scans the
+/// unified capability manifest, finds an authored, user-facing capability with
+/// no recorded use (learned fitness), and surfaces one as a proactive
+/// suggestion — so a faculty the user never knew about doesn't stay invisible.
+/// Gated by the same proactivity toggle and quiet hours as every other nudge;
+/// each capability is suggested at most once.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveryConfig {
+    /// Master switch for all discovery behaviours.
+    #[serde(default = "DiscoveryConfig::default_enabled")]
+    pub enabled: bool,
+    /// Hours between discovery scans. A day by default — discovery is a slow,
+    /// low-volume companion behaviour, not a monitor.
+    #[serde(default = "DiscoveryConfig::default_interval_hours")]
+    pub interval_hours: u64,
+    /// Suggest capabilities Brain already has but the user has never used.
+    #[serde(default = "DiscoveryConfig::default_on")]
+    pub unused_capabilities: bool,
+    /// Scan *other* MCP clients' config files (Claude Desktop, Cursor, …) and
+    /// propose mounting servers Brain doesn't have yet. Read-only scan; mounting
+    /// stays a consented user action.
+    #[serde(default = "DiscoveryConfig::default_on")]
+    pub mcp_servers: bool,
+}
+
+impl DiscoveryConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_interval_hours() -> u64 {
+        24
+    }
+    fn default_on() -> bool {
+        true
+    }
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: Self::default_enabled(),
+            interval_hours: Self::default_interval_hours(),
+            unused_capabilities: Self::default_on(),
+            mcp_servers: Self::default_on(),
+        }
+    }
 }
 
 /// Configuration for open-loop (unresolved commitment) detection.

@@ -334,6 +334,7 @@ pub(super) fn spawn_resource_sampler(
     data_dir: std::path::PathBuf,
     sample_secs: u64,
     thresholds: brain::config::ResourceThresholds,
+    learned_normal: brain::config::LearnedNormalConfig,
     log_sample_1_in_n: u32,
     set: &mut tokio::task::JoinSet<anyhow::Result<()>>,
 ) {
@@ -346,6 +347,12 @@ pub(super) fn spawn_resource_sampler(
         let heartbeat_sampler = observe::LogSampler::one_in(log_sample_1_in_n);
         let mut probe = super::resource::ResourceProbe::new(data_dir);
         let mut tracker = super::resource::PressureTracker::default();
+        // Learned-normal baselines run alongside the static ceilings: they flag a
+        // gauge that is anomalous *for this machine* even while under its
+        // threshold. Built only when enabled, so a disabled config adds nothing.
+        let mut learned = learned_normal
+            .enabled
+            .then(|| super::resource::LearnedNormalTracker::new(&learned_normal));
         // No leading `tick()` skip here (unlike consolidation): we want gauges
         // populated as soon as the daemon comes up, not one interval later.
         let mut ticker =
@@ -408,6 +415,44 @@ pub(super) fn spawn_resource_sampler(
                             agent: None,
                         })
                         .await;
+                }
+            }
+
+            // Learned-normal: a gauge that has jumped far outside its own learned
+            // baseline (even while under its static ceiling). Edge-triggered like
+            // the pressure crossings above, and feeding the same two surfaces —
+            // the bus (for the Live tab / metrics) and a proactive notification.
+            if let Some(learned) = learned.as_mut() {
+                for d in learned.evaluate(&snap) {
+                    tracing::warn!(
+                        gauge = d.gauge,
+                        value = d.value,
+                        expected = d.expected,
+                        z_score = d.z_score,
+                        "Metric anomaly: {} far outside its learned baseline",
+                        d.gauge
+                    );
+                    if let Some(observer) = p.observer() {
+                        let ev = observe::BrainEvent::MetricAnomaly {
+                            id: uuid::Uuid::new_v4(),
+                            stream: d.gauge.to_string(),
+                            value: d.value,
+                            expected: d.expected,
+                            z_score: d.z_score,
+                            ts: chrono::Utc::now(),
+                        };
+                        let _ = observer.publish(ev).await;
+                    }
+                    if let Some(router) = p.notification_router() {
+                        router
+                            .deliver(signal::notification::ProactiveNotification {
+                                content: d.advisory(),
+                                triggered_by: format!("metric_anomaly:{}", d.gauge),
+                                priority: 2,
+                                agent: None,
+                            })
+                            .await;
+                    }
                 }
             }
         }

@@ -264,7 +264,7 @@ fn decayed_fitness(
 /// A row whose timestamp doesn't parse is treated as just-used (no decay) —
 /// the only writer ([`CapabilityFitnessStore::record`]) always stores RFC3339,
 /// so this only guards against hand-edited rows.
-fn hours_between(last: &str, now: DateTime<Utc>) -> f64 {
+pub(crate) fn hours_between(last: &str, now: DateTime<Utc>) -> f64 {
     match DateTime::parse_from_rfc3339(last) {
         Ok(t) => {
             let secs = (now - t.with_timezone(&Utc)).num_seconds();

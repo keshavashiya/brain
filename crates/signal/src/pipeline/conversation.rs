@@ -405,6 +405,14 @@ impl SignalProcessor {
             active.name(),
             active.model(),
         ));
+        // Learned answer-quality (L1): name any task kinds whose routing has
+        // shifted to a better-fitting tier. Silent (the common case) until the
+        // store has enough evidence to move a kind off the deep tier.
+        if let Some(line) = self.answer_quality_digest_line() {
+            digest.push('\n');
+            digest.push_str(&line);
+            digest.push('\n');
+        }
         // Situated grounding: when the network view is anything but Online,
         // say so — the reasoner must not promise web search or remote tools
         // it cannot reach, and offline turns are already riding a local tier.

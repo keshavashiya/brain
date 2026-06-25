@@ -26,6 +26,7 @@
 mod adapters;
 mod background;
 mod connectivity;
+mod discovery;
 mod dlq;
 mod health;
 mod manifest_health;
@@ -35,6 +36,7 @@ mod reflex;
 pub(crate) mod resource;
 mod sys_sampler;
 mod transports;
+mod turn_baseline;
 
 use std::sync::Arc;
 
@@ -303,6 +305,25 @@ pub(crate) async fn cmd_serve(
             &mut set,
         );
     }
+    // Discovery rides the proactivity toggle but not the `ganglia` feature.
+    // Two independent loops: surfacing unused capabilities Brain already has,
+    // and scanning other tools' MCP configs to propose new servers.
+    if config.proactivity.enabled && config.proactivity.discovery.enabled {
+        if config.proactivity.discovery.unused_capabilities {
+            discovery::spawn_capability_discovery(
+                processor.clone(),
+                config.proactivity.discovery.clone(),
+                &mut set,
+            );
+        }
+        if config.proactivity.discovery.mcp_servers {
+            discovery::spawn_mcp_discovery(
+                processor.clone(),
+                config.proactivity.discovery.clone(),
+                &mut set,
+            );
+        }
+    }
     // Scheduled intents *fire* exclusively through the cron reflex now
     // (the historical direct-execution poller was retired in favour of
     // the reflex pipeline — see `reflex::CronReflex`). `actions.scheduling`
@@ -363,6 +384,15 @@ pub(crate) async fn cmd_serve(
         &mut set,
     );
 
+    // Per-turn telemetry → learned-normal monitor. Subscribed here, before any
+    // turn runs, so it sees every `TurnCompleted` and learns what a normal turn
+    // costs (latency / tokens), flagging the ones that fall far outside.
+    turn_baseline::spawn_turn_baseline(
+        processor.clone(),
+        config.monitoring.learned_normal.clone(),
+        &mut set,
+    );
+
     // Runtime resource gauges (RSS/CPU/connections/disk). The shared store is
     // updated by the sampler each tick; later surfaces (doctor/status/tail and
     // the pressure-event emitter) read from it.
@@ -373,6 +403,7 @@ pub(crate) async fn cmd_serve(
         config.data_dir(),
         config.observability.resource_sample_secs,
         config.observability.thresholds.clone(),
+        config.monitoring.learned_normal.clone(),
         config.observability.log_sampling.high_volume_1_in_n,
         &mut set,
     );

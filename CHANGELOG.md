@@ -9,6 +9,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Parallel task-step execution (`actions.max_parallel_steps`).** The
+  orchestrator now runs a task plan's independent ready steps concurrently
+  instead of strictly one at a time. Each execution wave resolves the plan's
+  current dependency layer: confirmation prompts are still presented one at a
+  time (so two approvals never collide), then the approved actions run
+  concurrently up to `max_parallel_steps` (default 4). A failure in a wave no
+  longer blocks its siblings — they finish, only the failed step's dependents
+  are skipped, and corrective replanning runs once the wave settles. Set
+  `actions.max_parallel_steps: 1` to restore strictly sequential execution.
+
+- **Answer-quality fitness (`learning.answer_fitness`).** The conversational
+  complement to capability fitness: instead of learning whether *tools* succeed,
+  Brain learns whether its *answers* helped. After each chat turn it classifies
+  the request into a coarse task kind (coding, factual-qa, reasoning,
+  summarization, chitchat) and — off the hot path — judges how your *next*
+  message reacted to the previous answer (gratitude is a strong positive, an
+  immediate rephrase or an explicit correction a negative), reinforcing a
+  per-`(task-kind, model)` quality score that decays under the same forgetting
+  curve as capability fitness. When you run more than one model across the
+  `llm.tiers`, that learned signal gently biases tier selection: a model that
+  measurably answers a given kind worse than a cheaper tier *which has its own
+  evidence* loses that kind's turns to the cheaper tier — bounded by an evidence
+  floor and a minimum margin, and never escaping your configured tiers. A
+  single-model install is byte-identical to today (nothing to compare against),
+  and any shift is named honestly in the capability digest. On by default; set
+  `learning.answer_fitness.enabled: false` to opt out.
+
+- **Discovery nudges (`proactivity.discovery`).** Two gentle, slow-cadence
+  companion behaviours that surface things you might be missing, each suggested
+  at most once and gated by the same proactivity toggle and quiet hours as every
+  other nudge:
+  - **Unused capabilities** (`unused_capabilities`) — finds a capability with
+    authored, user-facing guidance that has no recorded use yet (the mirror image
+    of the learned-fitness store, which knows what's *proven*) and surfaces one as
+    a "did you know Brain can…" suggestion, so a faculty you never knew about
+    doesn't stay invisible. Declines to suggest anything when learned fitness is
+    disabled, since without that signal "unused" can't be told from "untracked".
+  - **MCP servers from other tools** (`mcp_servers`) — scans *other* MCP clients'
+    config files on this machine (Claude Desktop, Cursor, Windsurf) and proposes
+    mounting any MCP server Brain doesn't already run, as a copy-paste
+    `/mcp-mount` command. The scan is read-only and local; mounting stays a
+    consented action with its own egress scopes — nothing is mounted
+    automatically.
+
+- **Learned-normal monitoring (`monitoring.learned_normal`).** Alongside the
+  static resource ceilings, the daemon now learns each runtime gauge's normal
+  range — an exponentially-weighted moving baseline of its mean and variance —
+  and emits a `metric_anomaly` event (plus a proactive notification) when a
+  reading lands far outside that learned band. This catches a gauge climbing
+  abnormally fast while still under its configured ceiling — an early warning a
+  fixed threshold can't give — and stays quiet on a machine whose normal load is
+  simply high. Edge-triggered (one alert per excursion, re-arming only after the
+  gauge returns to its band) and silent until it has seen `warmup_samples`
+  readings, so the minutes after boot never alarm; the baseline keeps learning
+  through anomalies, so a sustained shift is absorbed as the new normal. On by
+  default; read the signal with `brain events --kind metric_anomaly`. The same
+  detector also watches the **per-turn telemetry stream**: a subscriber learns a
+  normal turn's *latency* and *token cost* from the `turn_completed` events and
+  raises a `metric_anomaly` (`turn.latency_ms` / `turn.tokens`) when a turn lands
+  far outside it — surfacing "your turns are suddenly much slower than usual" or a
+  one-off token blowout without any fixed threshold to tune.
+
+- **Per-turn telemetry (`monitoring.telemetry`).** Each completed chat turn now
+  publishes one `turn_completed` event on the observability bus, summarising what
+  the turn actually cost: the serving provider/model and whether it was local,
+  the kernel's connectivity at the time, prompt/completion token usage, the
+  number of model⇄tool rounds and calls dispatched, and wall-clock latency.
+  Captured at the single unified generation entry point so it covers streaming
+  and non-streaming turns identically, and correlates by signal id with the
+  `signal_received`/`intent_classified` events from the same flow. Pure
+  observation — nothing about how a turn runs changes — surfaced via
+  `brain events --kind turn_completed` and (later) the trust console. On by
+  default; with no observability bus wired (CLI one-shots) nothing is emitted.
+
 - **Data-driven delegate agents.** Built-in CLI-agent definitions moved out of
   a hardcoded Rust table into embedded YAML seeds
   (`crates/delegate/agents/*.yaml`), merged at startup with any `*.yaml` a user

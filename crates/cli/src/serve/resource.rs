@@ -268,6 +268,108 @@ fn edge(
     }
 }
 
+/// One gauge that has *just* moved far outside its learned baseline — the edge
+/// that warrants exactly one `MetricAnomaly` event. Units match [`Crossing`]:
+/// MiB for `rss`/`disk`, percent for `cpu`, a count for `fds`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Deviation {
+    pub(crate) gauge: &'static str,
+    pub(crate) value: f64,
+    /// The learned baseline (EWMA mean) the value was judged against.
+    pub(crate) expected: f64,
+    /// Signed deviation in learned standard deviations.
+    pub(crate) z_score: f64,
+}
+
+impl Deviation {
+    /// A human-readable advisory for the proactive notification, naming the
+    /// learned norm rather than a fixed ceiling — the value, where it normally
+    /// sits, and how far out it has jumped.
+    pub(crate) fn advisory(&self) -> String {
+        let dir = if self.z_score >= 0.0 {
+            "above"
+        } else {
+            "below"
+        };
+        let unit = match self.gauge {
+            "rss" | "disk" => " MiB",
+            "cpu" => "%",
+            _ => "",
+        };
+        let what = match self.gauge {
+            "rss" => "memory use",
+            "cpu" => "CPU use",
+            "disk" => "data-directory size (~/.brain)",
+            "fds" => "open file descriptors",
+            other => other,
+        };
+        format!(
+            "Brain's {what} is {:.0}{unit}, well {dir} its usual ~{:.0}{unit} \
+             ({:.1}σ out). This is unusual for this machine — worth a look at \
+             `brain status` if it persists.",
+            self.value,
+            self.expected,
+            self.z_score.abs(),
+        )
+    }
+}
+
+/// Per-gauge learned baselines with edge-triggered anomaly detection. Each gauge
+/// keeps a [`StreamMonitor`](brain::StreamMonitor) of its own normal range; a
+/// reading more than `sensitivity` learned standard deviations out yields one
+/// [`Deviation`], and — like [`PressureTracker`] — nothing more while it stays
+/// out, re-arming only once it returns inside the band. The baseline keeps
+/// learning on every sample, so a sustained shift is absorbed as the new normal.
+pub(crate) struct LearnedNormalTracker {
+    rss: brain::StreamMonitor,
+    cpu: brain::StreamMonitor,
+    disk: brain::StreamMonitor,
+    fds: brain::StreamMonitor,
+}
+
+impl LearnedNormalTracker {
+    pub(crate) fn new(cfg: &brain::config::LearnedNormalConfig) -> Self {
+        let monitor = || brain::StreamMonitor::new(cfg.alpha, cfg.warmup_samples, cfg.sensitivity);
+        Self {
+            rss: monitor(),
+            cpu: monitor(),
+            disk: monitor(),
+            fds: monitor(),
+        }
+    }
+
+    /// Feed one snapshot into every gauge's baseline, returning a deviation for
+    /// each gauge that has *just* moved outside its learned band. An unavailable
+    /// gauge (`None`) is skipped without disturbing its baseline or edge state,
+    /// the same contract as [`PressureTracker::evaluate`].
+    pub(crate) fn evaluate(&mut self, snap: &metrics::ResourceSnapshot) -> Vec<Deviation> {
+        let mut out = Vec::new();
+        let checks: [(&mut brain::StreamMonitor, Option<f64>, &'static str); 4] = [
+            (&mut self.rss, snap.rss_bytes.map(|b| b as f64 / MIB), "rss"),
+            (&mut self.cpu, snap.cpu_pct, "cpu"),
+            (
+                &mut self.disk,
+                snap.disk_bytes.map(|b| b as f64 / MIB),
+                "disk",
+            ),
+            (&mut self.fds, snap.open_fds.map(|n| n as f64), "fds"),
+        ];
+        for (monitor, value, gauge) in checks {
+            // Unavailable reading skips the gauge without disturbing its state.
+            let Some(value) = value else { continue };
+            if let Some(a) = monitor.observe(value) {
+                out.push(Deviation {
+                    gauge,
+                    value: a.value,
+                    expected: a.expected,
+                    z_score: a.z_score,
+                });
+            }
+        }
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,6 +554,101 @@ mod tests {
         let msg = c.advisory();
         assert!(msg.contains("future_gauge"));
         assert!(msg.contains('9') && msg.contains('5'));
+    }
+
+    /// A sensitive, fast-warming config so tests learn a baseline in a few
+    /// samples and trip on a clear spike.
+    fn test_learned_cfg() -> brain::config::LearnedNormalConfig {
+        brain::config::LearnedNormalConfig {
+            enabled: true,
+            sensitivity: 4.0,
+            warmup_samples: 5,
+            alpha: 0.3,
+        }
+    }
+
+    #[test]
+    fn learned_normal_silent_while_stable_then_fires_once_on_spike() {
+        let mut tracker = LearnedNormalTracker::new(&test_learned_cfg());
+        // A noisy-but-stable RSS baseline around ~100 MiB — never an anomaly.
+        for mb in [98u64, 102, 99, 101, 100, 103, 97, 100] {
+            assert!(
+                tracker.evaluate(&snap_rss_mb(mb)).is_empty(),
+                "stable readings must not flag"
+            );
+        }
+        // A 10x spike, well under any reasonable ceiling but far outside the
+        // learned band → exactly one deviation.
+        let devs = tracker.evaluate(&snap_rss_mb(1000));
+        assert_eq!(devs.len(), 1);
+        assert_eq!(devs[0].gauge, "rss");
+        assert_eq!(devs[0].value, 1000.0);
+        assert!(
+            devs[0].z_score > 4.0,
+            "positive anomaly, got {}",
+            devs[0].z_score
+        );
+        assert!(
+            devs[0].expected > 90.0 && devs[0].expected < 130.0,
+            "expected tracks the learned ~100, got {}",
+            devs[0].expected
+        );
+
+        // Still spiking on the next sample → no spam (edge discipline).
+        assert!(tracker.evaluate(&snap_rss_mb(1000)).is_empty());
+    }
+
+    #[test]
+    fn learned_normal_warmup_suppresses_early_swings() {
+        let mut tracker = LearnedNormalTracker::new(&test_learned_cfg());
+        // Wild swings during warmup (< 5 samples) are never flagged.
+        for mb in [10u64, 5000, 10, 9000] {
+            assert!(tracker.evaluate(&snap_rss_mb(mb)).is_empty());
+        }
+    }
+
+    #[test]
+    fn learned_normal_re_arms_after_returning_to_band() {
+        let mut tracker = LearnedNormalTracker::new(&test_learned_cfg());
+        for mb in [98u64, 102, 99, 101, 100, 103, 97, 100] {
+            tracker.evaluate(&snap_rss_mb(mb));
+        }
+        assert_eq!(
+            tracker.evaluate(&snap_rss_mb(1000)).len(),
+            1,
+            "first spike fires"
+        );
+        // A long, stable recovery re-arms the edge (no event on the way back in)
+        // and lets the EWMA variance inflated by the spike settle back down, so
+        // the band returns to ~its learned width.
+        for _ in 0..40 {
+            assert!(
+                tracker.evaluate(&snap_rss_mb(100)).is_empty(),
+                "stable recovery must not flag"
+            );
+        }
+        // …so a later spike fires again.
+        assert_eq!(
+            tracker.evaluate(&snap_rss_mb(1000)).len(),
+            1,
+            "re-armed spike fires"
+        );
+    }
+
+    #[test]
+    fn learned_normal_advisory_names_the_learned_norm() {
+        let dev = Deviation {
+            gauge: "rss",
+            value: 1000.0,
+            expected: 100.0,
+            z_score: 9.2,
+        };
+        let msg = dev.advisory();
+        assert!(msg.contains("memory use"), "names the gauge: {msg}");
+        assert!(msg.contains("1000"), "names the value: {msg}");
+        assert!(msg.contains("100"), "names the learned norm: {msg}");
+        assert!(msg.contains("above"), "names the direction: {msg}");
+        assert!(msg.contains('σ'), "names the deviation magnitude: {msg}");
     }
 
     #[test]

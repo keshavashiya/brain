@@ -468,6 +468,29 @@ impl SqlitePool {
                     ON memory_quarantine(agent);
             ",
             ),
+            (
+                26,
+                "create_answer_fitness",
+                "
+                -- Learned answer-quality self-model: per (task-kind, model)
+                -- success/failure mass scored from in-band conversational
+                -- signals (a satisfied follow-up vs an immediate rephrase or
+                -- correction) and decayed under the same forgetting curve as
+                -- capability_fitness (lazy, computed on read/write). `model` is
+                -- \"provider/model\" exactly as the L2 telemetry reports it, so a
+                -- degraded model can be isolated per task kind. Feeds a bounded
+                -- tier-selection bias and an honest digest line.
+                CREATE TABLE IF NOT EXISTS answer_fitness (
+                    kind         TEXT    NOT NULL,
+                    model        TEXT    NOT NULL,
+                    success_mass REAL    NOT NULL DEFAULT 0,
+                    failure_mass REAL    NOT NULL DEFAULT 0,
+                    uses         INTEGER NOT NULL DEFAULT 0,
+                    last_used_at TEXT    NOT NULL DEFAULT (datetime('now')),
+                    PRIMARY KEY (kind, model)
+                );
+            ",
+            ),
         ]
     }
 

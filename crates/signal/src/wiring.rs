@@ -72,6 +72,16 @@ impl SignalProcessor {
     /// unchanged — it fails honestly at call time rather than silently
     /// degrading to nothing.
     pub fn active_llm(&self) -> Arc<dyn cortex::LlmProvider> {
+        self.active_llm_for(cortex::llm::TaskTier::Deep)
+    }
+
+    /// Like [`active_llm`](Self::active_llm) but for a specific task tier — the
+    /// seam answer-quality fitness (L1) routes through. Online (or no probe
+    /// wired) returns the requested tier's chain. Offline overrides the
+    /// request and rides the first fully-local tier chain (deep → balanced →
+    /// fast), exactly as [`active_llm`](Self::active_llm) does, so a learned
+    /// downgrade never strands a turn against a dead remote.
+    pub fn active_llm_for(&self, tier: cortex::llm::TaskTier) -> Arc<dyn cortex::LlmProvider> {
         if self.connectivity.is_offline() {
             for chain in [&self.llm, &self.llm_balanced, &self.llm_fast] {
                 if chain.is_local() {
@@ -81,8 +91,9 @@ impl SignalProcessor {
             tracing::warn!(
                 "offline with no local model tier configured — remote generation will fail"
             );
+            return self.llm.clone();
         }
-        self.llm.clone()
+        self.llm_tier(tier)
     }
 
     /// Expose the context assembler (for adapter use).
@@ -158,6 +169,13 @@ impl SignalProcessor {
     /// line), and written to by `dispatch_tool_route` after each dispatch.
     pub(crate) fn fitness(&self) -> &cerebellum::CapabilityFitnessStore {
         &self.fitness
+    }
+
+    /// Expose the learned answer-quality store. Read by the tier selector
+    /// ([`SignalProcessor::answer_tier_for`]) and the capability digest, and
+    /// written by the off-hot-path follow-up judge in `generate_chat_response`.
+    pub(crate) fn answer_fitness(&self) -> &cerebellum::AnswerFitnessStore {
+        &self.answer_fitness
     }
 
     // ── Safety infrastructure builder methods ───────────────────────────

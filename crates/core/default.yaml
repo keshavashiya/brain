@@ -179,6 +179,11 @@ actions:
     retry_base_ms: 500
     circuit_breaker_threshold: 5
     circuit_breaker_cooldown_secs: 60
+  # How many of a task plan's independent ready steps the orchestrator runs at
+  # once within one execution wave. 1 = strictly sequential; higher exploits
+  # parallel branches in the plan's dependency graph. Approval prompts are
+  # always resolved one at a time — only auto-approved/approved actions overlap.
+  max_parallel_steps: 4
 
 # ── Proactivity ────────────────────────────────────────────────────────────────
 proactivity:
@@ -199,6 +204,18 @@ proactivity:
     scan_window_hours: 72
     resolution_window_hours: 24
     check_interval_minutes: 120
+  # Discovery — gentle, slow-cadence suggestions. Two independent loops:
+  #   unused_capabilities: "did you know Brain can…" for a capability you've
+  #     never used (authored, user-facing, no recorded fitness).
+  #   mcp_servers: scan OTHER MCP clients' configs on this machine (Claude
+  #     Desktop, Cursor, Windsurf) and propose mounting servers Brain lacks.
+  #     Read-only scan; mounting stays a consented `/mcp-mount` action.
+  # Gated by the proactivity toggle + quiet hours above; each item suggested once.
+  discovery:
+    enabled: true
+    interval_hours: 24
+    unused_capabilities: true
+    mcp_servers: true
 
 # ── Adapters ───────────────────────────────────────────────────────────────────
 adapters:
@@ -276,6 +293,16 @@ learning:
   capability_fitness:
     enabled: true                   # record outcomes + boost ranking + surface
     half_life_days: 30              # how long an observation keeps half its weight
+  # Answer-quality fitness: score each turn's follow-up (a satisfied "thanks" vs
+  # an immediate rephrase or correction) per (task-kind, model), and bias tier
+  # selection so a model that answers a kind badly loses that kind's turns to a
+  # cheaper tier that does better. Inert (and routing byte-identical to the
+  # static default) unless you run more than one distinct model across tiers.
+  answer_fitness:
+    enabled: true                   # judge follow-ups + record quality + bias routing
+    half_life_days: 30              # how long a judged outcome keeps half its weight
+    min_judged_turns: 8             # evidence (per tier) required before routing shifts
+    margin: 0.15                    # success-ratio lead a cheaper tier needs to win a kind
 
 # ── Observability ──────────────────────────────────────────────────────────────
 # [advanced] Self-monitoring gauges with generous, fail-safe defaults. Tune the
@@ -346,6 +373,28 @@ monitoring:
   manifest_health:
     enabled: true
     interval_secs: 120               # seconds between sweeps
+
+  # Per-turn telemetry — after each chat turn, publish one `turn_completed`
+  # event on the observability bus summarising what the turn cost: the serving
+  # model and locality, connectivity at the time, prompt/completion tokens, the
+  # number of model⇄tool rounds and calls, and wall-clock latency. Pure
+  # observation (no behaviour change); read it with `brain events --kind
+  # turn_completed`. With no observability bus (CLI one-shots) nothing is
+  # emitted.
+  telemetry:
+    enabled: true
+
+  # Learned-normal monitoring — alongside the static resource ceilings above,
+  # learn each gauge's normal range (an exponentially-weighted baseline) and
+  # emit a `metric_anomaly` event when a reading lands far outside it. Catches a
+  # gauge climbing abnormally fast while still under its ceiling, and stays quiet
+  # on a machine whose normal load is simply high. Edge-triggered (one alert per
+  # excursion) and silent until it has learned the machine (warmup_samples).
+  learned_normal:
+    enabled: true
+    sensitivity: 4.0                 # learned std-devs out before it's an anomaly
+    warmup_samples: 30               # samples observed before any anomaly fires
+    alpha: 0.1                       # EWMA smoothing — larger adapts faster
 
 
 # ── Channel Relays ─────────────────────────────────────────────────────────────

@@ -34,10 +34,10 @@ uuid = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { version = "0.7" }
+futures = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
-futures = { workspace = true }
 
 [lints]
 workspace = true

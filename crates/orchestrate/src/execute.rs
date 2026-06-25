@@ -1,19 +1,38 @@
 //! Task execution loop for [`TaskOrchestrator`].
 //!
 //! Holds `execute` (drive a planned task to a terminal phase) and the
-//! per-step `execute_step` dispatcher. Split out of `orchestrator.rs` to
-//! keep the construction/state-machine core small; the per-`StepAction`
-//! handlers live in `crate::actions`.
+//! wave scheduler: `run_wave` runs a DAG layer of independent ready steps —
+//! `prepare_step` resolves confirmations sequentially, then `run_action`
+//! dispatches the approved actions concurrently (bounded by
+//! `max_parallel_steps`). Split out of `orchestrator.rs` to keep the
+//! construction/state-machine core small; the per-`StepAction` handlers live
+//! in `crate::actions`.
 
 use std::collections::HashSet;
 
 use chrono::Utc;
+use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
+
+use audit::ActionTier;
 
 use crate::orchestrator::{OrchestrateError, TaskOrchestrator};
 use crate::state::{StepOutcome, StepState, TaskPhase};
 use crate::step::StepAction;
 use crate::synthesize;
+
+/// Outcome of one step's sequential pre-flight (mark `Running` + resolve any
+/// confirmation). Either the step is cleared to run its action concurrently,
+/// or it was already settled (user-cancelled, denied, or a confirmation
+/// error) and needs no further work this wave.
+enum Prepared {
+    Run {
+        action: StepAction,
+        tier: ActionTier,
+        description: String,
+    },
+    Settled,
+}
 
 impl TaskOrchestrator {
     /// Execute a previously planned task (after user approval).
@@ -98,13 +117,17 @@ impl TaskOrchestrator {
                 break;
             }
 
-            // Execute ready steps (sequentially for now; parallel in future)
-            for step_id in &ready_steps {
-                if token.is_cancelled() {
-                    break;
-                }
-                self.execute_step(task_id, step_id, &token).await?;
+            // Run one wave of the DAG's independent ready steps: resolve any
+            // confirmations sequentially (two approval prompts never overlap),
+            // then run the approved actions concurrently up to
+            // `max_parallel_steps`. Replan any failures in order (so the shared
+            // replan budget is honoured), then check for completion once.
+            let failures = self.run_wave(task_id, ready_steps, &token).await;
+            for (step_id, description, error) in failures {
+                self.try_replan_after_failure(task_id, &step_id, &description, &error, &token)
+                    .await;
             }
+            self.finalize_if_complete(task_id).await;
         }
 
         // Generate summary
@@ -117,19 +140,70 @@ impl TaskOrchestrator {
         Ok(summary)
     }
 
-    /// Execute a single step.
-    async fn execute_step(
+    /// Run one execution wave: clear each ready step through pre-flight
+    /// ([`prepare_step`](Self::prepare_step)) sequentially — so confirmation
+    /// prompts never overlap — then run the approved actions concurrently,
+    /// bounded by `max_parallel_steps`. Returns the
+    /// `(step_id, description, error)` of every step that failed, in no
+    /// particular order, for the caller to replan in sequence.
+    async fn run_wave(
+        &self,
+        task_id: &str,
+        ready_steps: Vec<String>,
+        token: &CancellationToken,
+    ) -> Vec<(String, String, String)> {
+        // Phase 1 — pre-flight, strictly sequential: mark each step `Running`
+        // and resolve any confirmation. Steps the user declines (or whose
+        // confirmation errors) settle here and never reach phase 2.
+        let mut runnable: Vec<(String, StepAction, ActionTier, String)> = Vec::new();
+        for step_id in ready_steps {
+            if token.is_cancelled() {
+                break;
+            }
+            if let Prepared::Run {
+                action,
+                tier,
+                description,
+            } = self.prepare_step(task_id, &step_id, token).await
+            {
+                runnable.push((step_id, action, tier, description));
+            }
+        }
+
+        // Phase 2 — run the approved actions concurrently. Each future borrows
+        // `&self` (and `task_id`) and only takes the `tasks` lock for the brief
+        // state flips; the slow action work happens lock-free, so concurrency
+        // is real. `buffer_unordered(1)` collapses to sequential execution.
+        futures::stream::iter(runnable)
+            .map(|(step_id, action, tier, description)| async move {
+                self.run_action(task_id, &step_id, action, tier, &description, token)
+                    .await
+                    .map(|error| (step_id, description, error))
+            })
+            .buffer_unordered(self.max_parallel_steps.max(1))
+            .filter_map(|r| async move { r })
+            .collect::<Vec<_>>()
+            .await
+    }
+
+    /// Pre-flight a single ready step: mark it `Running` and, for tiers that
+    /// require confirmation, resolve the approval prompt. Callers run this
+    /// sequentially across a wave so two prompts never overlap. Returns
+    /// [`Prepared::Run`] with the action to execute, or [`Prepared::Settled`]
+    /// when the step is already terminal (user-cancelled, denied, or a
+    /// confirmation error) and needs no action.
+    async fn prepare_step(
         &self,
         task_id: &str,
         step_id: &str,
         token: &CancellationToken,
-    ) -> Result<(), OrchestrateError> {
+    ) -> Prepared {
         // Pre-flight: if cancellation already fired (e.g. between the
-        // outer loop's check and us entering this fn), mark the step
+        // outer loop's check and entering this fn), mark the step
         // cancelled and bail without touching the action handlers.
         if token.is_cancelled() {
             self.mark_step_cancelled(task_id, step_id).await;
-            return Ok(());
+            return Prepared::Settled;
         }
         let (action, tier, description) = {
             let tasks = self.tasks.read().await;
@@ -189,7 +263,7 @@ impl TaskOrchestrator {
                     biased;
                     _ = token.cancelled() => {
                         self.mark_step_cancelled(task_id, step_id).await;
-                        return Ok(());
+                        return Prepared::Settled;
                     }
                     r = confirm.request(spec) => r,
                 };
@@ -205,7 +279,7 @@ impl TaskOrchestrator {
                             .expect("invariant: task_id always corresponds to a planned task");
                         task.set_step_state(step_id, StepState::Cancelled);
                         tracing::info!(step = %description, reason = %reason, "Step cancelled");
-                        return Ok(());
+                        return Prepared::Settled;
                     }
                     Err(e) => {
                         let mut tasks = self.tasks.write().await;
@@ -220,12 +294,34 @@ impl TaskOrchestrator {
                                 failed_at: Utc::now(),
                             },
                         );
-                        return Ok(());
+                        return Prepared::Settled;
                     }
                 }
             }
         }
 
+        Prepared::Run {
+            action,
+            tier,
+            description,
+        }
+    }
+
+    /// Run one prepared step's action and record its terminal state. On
+    /// failure, marks transitive dependents `Skipped` and returns the error
+    /// string for the wave driver to replan; on success/cancellation returns
+    /// `None`. Deliberately does NOT replan or transition the task phase —
+    /// the wave driver does both once per wave, so this is safe to run
+    /// concurrently with sibling steps.
+    async fn run_action(
+        &self,
+        task_id: &str,
+        step_id: &str,
+        action: StepAction,
+        tier: ActionTier,
+        description: &str,
+        token: &CancellationToken,
+    ) -> Option<String> {
         // Execute the action. PR-6b: race against `token.cancelled()`
         // so an in-flight sandbox/LLM/delegate call aborts mid-flight.
         // Dropping the action future is cancel-safe — none of the
@@ -234,7 +330,7 @@ impl TaskOrchestrator {
             biased;
             _ = token.cancelled() => {
                 self.mark_step_cancelled(task_id, step_id).await;
-                return Ok(());
+                return None;
             }
             r = async { match &action {
             StepAction::Execute { command, workdir } | StepAction::Test { command, workdir } => {
@@ -289,7 +385,7 @@ impl TaskOrchestrator {
                 // Record in audit trail
                 if let Some(audit) = &self.audit {
                     let entry = audit::AuditEntry::new(
-                        &description,
+                        description,
                         "step executed",
                         &outcome.summary,
                         tier,
@@ -313,6 +409,7 @@ impl TaskOrchestrator {
                         completed_at: Utc::now(),
                     },
                 );
+                None
             }
             Err(error) => {
                 // Mirror the success-path audit write so failed steps
@@ -320,7 +417,7 @@ impl TaskOrchestrator {
                 // sandbox exit-1 disappears from history once we lifted
                 // it out of the Ok arm.
                 if let Some(audit) = &self.audit {
-                    let entry = audit::AuditEntry::new(&description, "step failed", &error, tier)
+                    let entry = audit::AuditEntry::new(description, "step failed", &error, tier)
                         .with_source("orchestrator")
                         .with_outcome(audit::AuditOutcome::Failure);
                     if let Err(e) = audit.record(entry).await {
@@ -355,46 +452,15 @@ impl TaskOrchestrator {
                     }
                 }
 
-                // Drop the write lock before the (potentially slow) LLM
-                // replan call below. We still own a snapshot of the
-                // fields the replan needs.
-                drop(tasks);
-
-                // Try to repair the plan if we still have replan budget.
-                // Best-effort: a replan failure leaves the task in the
-                // standard "failed step + skipped dependents" state.
-                self.try_replan_after_failure(task_id, step_id, &description, &error, token)
-                    .await;
-
-                // Re-check completion + drive the canonical
-                // Reconciling → (Completed | Failed) shape under the
-                // state-machine helper.
-                let (done, all_succeeded) = {
-                    let tasks = self.tasks.read().await;
-                    let task = tasks
-                        .get(task_id)
-                        .expect("invariant: task_id always corresponds to a planned task");
-                    (task.is_complete(), task.all_succeeded())
-                };
-                if done {
-                    self.transition_phase(task_id, TaskPhase::Reconciling).await;
-                    let terminal = if all_succeeded {
-                        TaskPhase::Completed
-                    } else {
-                        TaskPhase::Failed
-                    };
-                    self.transition_phase(task_id, terminal).await;
-                    tracing::info!(task_id = %task_id, terminal = %terminal.as_str(), "Task complete");
-                }
-                return Ok(());
+                Some(error)
             }
         }
+    }
 
-        // Drop the write lock before the I/O-bound transition_phase
-        // calls below — they take their own lock for the brief in-mem
-        // flip and we don't want to hold the executor's lock through
-        // the audit-row write and observer publish.
-        drop(tasks);
+    /// After a wave (and any replans), drive the task to a terminal phase if
+    /// every step is now terminal. Idempotent — a no-op while steps remain, so
+    /// it is safe to call once per wave.
+    async fn finalize_if_complete(&self, task_id: &str) {
         let (done, all_succeeded) = {
             let tasks = self.tasks.read().await;
             let task = tasks
@@ -412,8 +478,6 @@ impl TaskOrchestrator {
             self.transition_phase(task_id, terminal).await;
             tracing::info!(task_id = %task_id, terminal = %terminal.as_str(), "Task complete");
         }
-
-        Ok(())
     }
 }
 

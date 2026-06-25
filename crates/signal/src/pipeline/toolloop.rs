@@ -21,7 +21,11 @@ use chrono::Utc;
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
-use cortex::llm::{Message, ProposedToolCall, Response, Role, ToolDef, Usage};
+use std::sync::Arc;
+
+use cortex::llm::{
+    LlmProvider, Message, ProposedToolCall, Response, Role, TaskTier, ToolDef, Usage,
+};
 use intent::QueryEmbedder;
 
 use crate::budget_guard::{self, BudgetGate};
@@ -47,6 +51,17 @@ const MAX_TOOL_ROUNDS: usize = 4;
 /// manifest, never the whole catalogue (keeps the prompt small and focused).
 const TOOL_ADVERTISE_K: usize = 8;
 
+/// Per-turn tool-use tallies, accumulated by [`run_chat_turn`] and surfaced in
+/// the [`observe::BrainEvent::TurnCompleted`] telemetry event. Both stay `0` for
+/// a plain answer with no tool use.
+#[derive(Debug, Default, Clone, Copy)]
+pub(super) struct ChatTurnStats {
+    /// Model⇄tool round-trips that actually executed a tool.
+    pub tool_rounds: u32,
+    /// Tool calls dispatched across all rounds.
+    pub tools_invoked: u32,
+}
+
 impl SignalProcessor {
     /// The single chat-generation entry point shared by every adapter.
     ///
@@ -70,9 +85,38 @@ impl SignalProcessor {
         messages: Vec<Message>,
         chunk_sink: Option<&ChatChunkSink>,
     ) -> Result<Response, SignalError> {
-        // Budget keys by the chain that will actually serve this turn (offline
-        // turns ride a local tier) — the same provider name the tool-loop uses.
-        let provider_name = self.active_llm().name().to_string();
+        // Answer-quality fitness (L1): classify this turn's kind, score the
+        // *previous* answer in this conversation off the hot path, and let
+        // learned quality bias which tier serves this turn. The query embedding
+        // is computed once here and reused by the tool advertiser, so the turn
+        // embeds only once.
+        let query = latest_user_text(&messages);
+        let query_embedding = match self.capability_embedder() {
+            Some(e) if !query.trim().is_empty() => e.embed_query(&query, &signal.namespace).await,
+            _ => None,
+        };
+        let af_enabled = self.config().learning.answer_fitness.enabled;
+        let session_key =
+            crate::answer_fitness::session_key(signal.session_id.as_deref(), &signal.namespace);
+        let kind = if af_enabled {
+            let anchors = self.answer_anchors().await;
+            crate::answer_fitness::classify_kind(&query, query_embedding.as_deref(), anchors)
+        } else {
+            crate::answer_fitness::TaskKind::Other
+        };
+        if af_enabled {
+            self.score_pending_answer(&session_key, &query);
+        }
+        let tier = if af_enabled {
+            self.answer_tier_for(kind)
+        } else {
+            TaskTier::Deep
+        };
+        // The chain that will actually serve this turn (offline still overrides
+        // to a local tier). Budget, tool-loop, and telemetry all key off it.
+        let llm = self.active_llm_for(tier);
+
+        let provider_name = llm.name().to_string();
         let estimated_input = match budget_guard::check_llm_input(
             self.cost_budget(),
             &provider_name,
@@ -91,9 +135,21 @@ impl SignalProcessor {
             } => estimated_input_tokens,
         };
 
+        let started = std::time::Instant::now();
+        let mut stats = ChatTurnStats::default();
         let resp = self
-            .run_chat_turn(signal, signal_id, messages, chunk_sink)
+            .run_chat_turn(
+                signal,
+                signal_id,
+                messages,
+                chunk_sink,
+                &mut stats,
+                &llm,
+                &query,
+                query_embedding.as_deref(),
+            )
             .await?;
+        let duration_ms = started.elapsed().as_millis() as u64;
 
         budget_guard::record_llm_usage(
             self.cost_budget(),
@@ -103,7 +159,73 @@ impl SignalProcessor {
         )
         .await;
 
+        // Remember this answer so the next turn in this conversation judges it.
+        if af_enabled {
+            self.remember_pending_answer(
+                session_key,
+                crate::answer_fitness::PendingAnswer {
+                    kind,
+                    model: crate::answer_fitness::model_key(llm.name(), llm.model()),
+                    prev_user: query,
+                    prev_answer: resp.content.clone(),
+                },
+            );
+        }
+
+        self.publish_turn_completed(
+            signal_id,
+            &llm,
+            &resp,
+            &stats,
+            duration_ms,
+            chunk_sink.is_some(),
+        )
+        .await;
+
         Ok(resp)
+    }
+
+    /// Publish one [`observe::BrainEvent::TurnCompleted`] summarising the turn
+    /// that just ran. Best-effort observability: a no-op when telemetry is
+    /// disabled or no observer is wired (CLI one-shots), and a closed bus is
+    /// informational, never fatal. `llm` is the chain that actually served the
+    /// turn (offline fallback and the L1 tier bias already applied), so the
+    /// reported model and locality reflect what ran.
+    async fn publish_turn_completed(
+        &self,
+        signal_id: uuid::Uuid,
+        llm: &Arc<dyn LlmProvider>,
+        resp: &Response,
+        stats: &ChatTurnStats,
+        duration_ms: u64,
+        streamed: bool,
+    ) {
+        if !self.config().monitoring.telemetry.enabled {
+            return;
+        }
+        let Some(observer) = self.observer() else {
+            return;
+        };
+        let (input_tokens, output_tokens) = resp
+            .usage
+            .as_ref()
+            .map(|u| (u.prompt_tokens as u64, u.completion_tokens as u64))
+            .unwrap_or((0, 0));
+        let ev = ::observe::BrainEvent::TurnCompleted {
+            id: signal_id,
+            provider: llm.name().to_string(),
+            model: llm.model().to_string(),
+            local: llm.is_local(),
+            connectivity: self.connectivity().state().as_str().to_string(),
+            input_tokens,
+            output_tokens,
+            tool_rounds: stats.tool_rounds,
+            tools_invoked: stats.tools_invoked,
+            duration_ms,
+            streamed,
+            ts: Utc::now(),
+        };
+        let _ = observer.publish(ev).await;
     }
 
     /// Run one chat turn, using the tools channel when a manifest is wired.
@@ -119,16 +241,16 @@ impl SignalProcessor {
         signal_id: uuid::Uuid,
         mut messages: Vec<Message>,
         chunk_sink: Option<&ChatChunkSink>,
+        stats: &mut ChatTurnStats,
+        llm: &Arc<dyn LlmProvider>,
+        query: &str,
+        query_embedding: Option<&[f32]>,
     ) -> Result<Response, SignalError> {
-        // Captured once per turn: offline turns ride the first local tier
-        // chain instead of timing out against a dead remote (see
-        // `SignalProcessor::active_llm`).
-        let llm = self.active_llm();
-        let tools = self.advertised_tools(&messages, &signal.namespace).await;
+        let tools = self.advertised_tools(query, query_embedding).await;
         if tools.is_empty() {
             // No manifest / no tools → plain-text answer, streamed token by
             // token when a sink is wired.
-            return self.generate_plain(&messages, chunk_sink).await;
+            return self.generate_plain(llm, &messages, chunk_sink).await;
         }
 
         // Nudge the model to actually *use* the tools. The default local 7b
@@ -152,6 +274,8 @@ impl SignalProcessor {
             // Replay the assistant tool-call turn, then resolve each proposed
             // call through consent + dispatch and append its result.
             let calls = resp.tool_calls.clone();
+            stats.tool_rounds += 1;
+            stats.tools_invoked += calls.len() as u32;
             messages.push(Message::assistant_with_tool_calls(
                 resp.content.clone(),
                 calls.clone(),
@@ -177,10 +301,10 @@ impl SignalProcessor {
     /// one is wired (true streaming), otherwise buffers the whole answer.
     async fn generate_plain(
         &self,
+        llm: &Arc<dyn LlmProvider>,
         messages: &[Message],
         chunk_sink: Option<&ChatChunkSink>,
     ) -> Result<Response, SignalError> {
-        let llm = self.active_llm();
         let Some(sink) = chunk_sink else {
             return Ok(llm.generate(messages).await?);
         };
@@ -209,7 +333,12 @@ impl SignalProcessor {
     /// Each description is routed through
     /// [`intent::sanitization::render_tool_description_for_prompt`] before it
     /// reaches a provider — an MCP server's description is untrusted text.
-    async fn advertised_tools(&self, messages: &[Message], namespace: &str) -> Vec<ToolDef> {
+    ///
+    /// `query` and `query_embedding` are computed once per turn by
+    /// [`generate_chat_response`](SignalProcessor::generate_chat_response) (the
+    /// embedding is residency-aware and shared with kind classification), so
+    /// the turn embeds only once.
+    async fn advertised_tools(&self, query: &str, query_embedding: Option<&[f32]>) -> Vec<ToolDef> {
         let Some(registry) = self.tool_registry() else {
             return Vec::new();
         };
@@ -230,27 +359,12 @@ impl SignalProcessor {
         if manifest.is_empty() {
             return Vec::new();
         }
-        let query = latest_user_text(messages);
         // Learned tie-breaker: proven tools earn a small bounded bonus so they
         // edge out unproven peers with equal keyword overlap (never overtaking
         // a stronger keyword match). Empty when learning is off / nothing
         // proven yet, in which case ranking is byte-identical to keyword-only.
         let bonuses = self.fitness_bonuses(&manifest);
-        // Semantic capability retrieval: embed the turn's query once and
-        // add a cosine term over each tool's embedding. Residency-aware (a
-        // local-only namespace never reaches a remote embedder). Absent
-        // embedder / empty query → `None` → ranking stays keyword + fitness.
-        let query_embedding = match (self.capability_embedder(), query.trim().is_empty()) {
-            (Some(embedder), false) => embedder.embed_query(&query, namespace).await,
-            _ => None,
-        };
-        let ranked = score_top_k(
-            manifest,
-            &query,
-            TOOL_ADVERTISE_K,
-            &bonuses,
-            query_embedding.as_deref(),
-        );
+        let ranked = score_top_k(manifest, query, TOOL_ADVERTISE_K, &bonuses, query_embedding);
         ranked
             .into_iter()
             .map(|t| ToolDef {

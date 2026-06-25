@@ -222,6 +222,12 @@ actions:
     retry_base_ms: 500
     circuit_breaker_threshold: 5
     circuit_breaker_cooldown_secs: 60
+
+  # How many of a task plan's independent ready steps the orchestrator runs at
+  # once. 1 = strictly sequential; higher exploits parallel branches in the
+  # plan's dependency graph. Approval prompts are always resolved one at a time
+  # — only auto-approved/approved actions overlap.
+  max_parallel_steps: 4
 ```
 
 ---
@@ -249,7 +255,28 @@ proactivity:
     scan_window_hours: 72
     resolution_window_hours: 24
     check_interval_minutes: 120
+  discovery:                       # gentle, slow-cadence suggestions
+    enabled: true
+    interval_hours: 24
+    unused_capabilities: true      # "did you know Brain can…" for unused capabilities
+    mcp_servers: true              # propose MCP servers from other tools' configs
 ```
+
+**Discovery** is a gentle companion behaviour with two independent loops, both on
+a slow cadence (a day by default), gated by the proactivity toggle and quiet
+hours, delivered as ordinary low-priority nudges, each item suggested at most
+once:
+
+- **`unused_capabilities`** — finds an authored, user-facing capability with no
+  recorded use yet (learned fitness) and surfaces one as a "did you know Brain
+  can…" suggestion, so a faculty you never knew about doesn't stay invisible. It
+  declines to suggest anything when learned fitness is disabled (without that
+  signal "unused" can't be told from "untracked").
+- **`mcp_servers`** — reads *other* MCP clients' config files on this machine
+  (Claude Desktop, Cursor, Windsurf) and proposes mounting any MCP server Brain
+  doesn't already run, as a copy-paste `/mcp-mount` command. The scan is
+  read-only and local; mounting stays a consented action with its own egress
+  scopes.
 
 ---
 
@@ -343,6 +370,24 @@ learning:
     half_life_days: 30             # how long an observation keeps half its weight
 ```
 
+Brain also learns whether its *answers* helped. It classifies each turn into a
+coarse task kind, judges how your next message reacted to the previous answer
+(off the hot path), and reinforces a per-`(task-kind, model)` quality score on
+the same forgetting curve. When more than one model is configured across
+`llm.tiers`, a model that measurably answers a kind worse than a cheaper tier
+*with its own evidence* loses that kind's turns to it — bounded by an evidence
+floor and a margin, and never escaping your configured tiers. A single-model
+install is unaffected.
+
+```yaml
+learning:
+  answer_fitness:
+    enabled: true
+    half_life_days: 30             # how long a judged outcome keeps half its weight
+    min_judged_turns: 8            # evidence (per tier) required before routing shifts
+    margin: 0.15                   # success-ratio lead a cheaper tier needs to win a kind
+```
+
 ---
 
 ## Observability
@@ -434,6 +479,49 @@ monitoring:
   manifest_health:
     enabled: true
     interval_secs: 120
+```
+
+### Per-turn telemetry
+
+After each chat turn the pipeline publishes one `turn_completed` event on the
+observability bus, summarising what the turn cost: the serving model and its
+locality, the kernel's connectivity at the time, prompt/completion token usage,
+the number of model⇄tool rounds and calls dispatched, and wall-clock latency.
+It is pure observation — nothing about how a turn runs changes — and makes each
+turn legible to `brain events --kind turn_completed` and the trust console. With
+no observability bus wired (CLI one-shots) nothing is emitted.
+
+```yaml
+monitoring:
+  telemetry:
+    enabled: true
+```
+
+### Learned-normal monitoring
+
+Alongside the static resource ceilings, the daemon learns each runtime gauge's
+normal range — an exponentially-weighted moving baseline of its mean and
+variance — and emits a `metric_anomaly` event when a reading lands far outside
+that learned band. This catches a gauge climbing abnormally fast while still
+under its configured ceiling (an early warning a fixed threshold can't give),
+and stays quiet on a machine whose normal load is simply high. It is
+edge-triggered (one alert per excursion) and silent until it has seen
+`warmup_samples` readings, so the minutes after boot never alarm. Read the
+signal with `brain events --kind metric_anomaly`.
+
+The same detector also watches the per-turn telemetry stream (see *Per-turn
+telemetry* above): it learns a normal turn's latency and token cost and raises a
+`metric_anomaly` (`turn.latency_ms` / `turn.tokens`) when a turn falls far
+outside that learned band — catching "your turns are suddenly much slower than
+usual" or a one-off token blowout. The same `learned_normal` settings govern it.
+
+```yaml
+monitoring:
+  learned_normal:
+    enabled: true
+    sensitivity: 4.0      # learned standard deviations out before it's an anomaly
+    warmup_samples: 30    # samples observed before any anomaly can fire
+    alpha: 0.1            # EWMA smoothing factor — larger adapts faster to recent readings
 ```
 
 ---
