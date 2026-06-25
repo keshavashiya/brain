@@ -131,7 +131,7 @@ aes-gcm = "0.10"
 argon2 = "0.5"
 
 # Hashing (audit log, PKCE)
-sha2 = "0.10"
+sha2 = "0.11"
 blake3 = "1"
 
 # Base64 (encryption blobs, JWT decode)
