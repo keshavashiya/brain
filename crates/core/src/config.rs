@@ -1104,6 +1104,19 @@ pub struct ActionsConfig {
     pub messaging: MessagingActionConfig,
     #[serde(default)]
     pub resilience: ResilienceConfig,
+    /// Maximum number of a task plan's independent ready steps the
+    /// orchestrator runs concurrently within one execution wave. `1` is
+    /// strictly sequential; higher values exploit parallel branches in the
+    /// dependency graph. Confirmation prompts are always resolved one at a
+    /// time regardless — only approved actions run concurrently.
+    #[serde(default = "ActionsConfig::default_max_parallel_steps")]
+    pub max_parallel_steps: usize,
+}
+
+impl ActionsConfig {
+    fn default_max_parallel_steps() -> usize {
+        4
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

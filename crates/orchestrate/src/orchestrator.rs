@@ -83,6 +83,13 @@ pub struct TaskOrchestrator {
     /// one polling cycle instead of waiting for the current step to
     /// finish.
     pub(crate) cancel_tokens: RwLock<HashMap<String, CancellationToken>>,
+    /// Maximum number of independent ready steps the execute loop runs
+    /// concurrently within one wave. `1` (the default) preserves strictly
+    /// sequential execution — the wiring layer raises it from config so
+    /// production exploits the DAG's parallel branches. Confirmation
+    /// prompts within a wave are always resolved sequentially regardless
+    /// of this value; only the approved actions run concurrently.
+    pub(crate) max_parallel_steps: usize,
 }
 
 /// Maximum number of replan-on-failure attempts per task. Bounds LLM
@@ -107,6 +114,7 @@ impl TaskOrchestrator {
             observer: None,
             state_pool: None,
             cancel_tokens: RwLock::new(HashMap::new()),
+            max_parallel_steps: 1,
         }
     }
 
@@ -211,6 +219,14 @@ impl TaskOrchestrator {
     /// Override the default delegation escalation policy.
     pub fn with_delegation_policy(mut self, policy: delegate::EscalationPolicy) -> Self {
         self.delegation_policy = policy;
+        self
+    }
+
+    /// Set the maximum number of independent ready steps to run
+    /// concurrently per wave. Clamped to at least `1` so `0` can never
+    /// stall the loop; `1` keeps execution strictly sequential.
+    pub fn with_max_parallel_steps(mut self, max: usize) -> Self {
+        self.max_parallel_steps = max.max(1);
         self
     }
 }

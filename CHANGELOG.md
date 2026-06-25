@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **Parallel task-step execution (`actions.max_parallel_steps`).** The
+  orchestrator now runs a task plan's independent ready steps concurrently
+  instead of strictly one at a time. Each execution wave resolves the plan's
+  current dependency layer: confirmation prompts are still presented one at a
+  time (so two approvals never collide), then the approved actions run
+  concurrently up to `max_parallel_steps` (default 4). A failure in a wave no
+  longer blocks its siblings — they finish, only the failed step's dependents
+  are skipped, and corrective replanning runs once the wave settles. Set
+  `actions.max_parallel_steps: 1` to restore strictly sequential execution.
+
 - **Answer-quality fitness (`learning.answer_fitness`).** The conversational
   complement to capability fitness: instead of learning whether *tools* succeed,
   Brain learns whether its *answers* helped. After each chat turn it classifies

@@ -805,3 +805,176 @@ async fn notify_with_no_channels_is_soft_success() {
     assert!(outcome.summary.contains("no external channel"));
     assert!(outcome.summary.contains("pdftotext missing"));
 }
+
+// ── Parallel wave execution ─────────────────────────────────────────
+
+/// A `Research`-step LLM stub that measures how many `generate` calls are
+/// in flight at once. Each call bumps an in-flight counter, records the
+/// running peak, sleeps briefly so concurrent calls actually overlap in
+/// time, then decrements. The recorded peak is the observable proof of
+/// (non-)parallel execution.
+struct ConcurrencyProbeLlm {
+    in_flight: Arc<std::sync::atomic::AtomicUsize>,
+    peak: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl cortex::llm::LlmProvider for ConcurrencyProbeLlm {
+    async fn generate(
+        &self,
+        _messages: &[cortex::llm::Message],
+    ) -> Result<cortex::llm::Response, cortex::llm::LlmError> {
+        use std::sync::atomic::Ordering;
+        let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(now, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        Ok(cortex::llm::Response::text("done", None))
+    }
+    async fn generate_stream(
+        &self,
+        _messages: &[cortex::llm::Message],
+    ) -> Result<
+        std::pin::Pin<
+            Box<
+                dyn futures::Stream<
+                        Item = Result<cortex::llm::ResponseChunk, cortex::llm::LlmError>,
+                    > + Send,
+            >,
+        >,
+        cortex::llm::LlmError,
+    > {
+        unreachable!("probe provider: research steps never stream")
+    }
+    async fn health_check(&self) -> bool {
+        true
+    }
+    fn name(&self) -> &str {
+        "probe"
+    }
+    fn model(&self) -> &str {
+        "probe-model"
+    }
+    async fn list_models(&self) -> Result<Vec<String>, cortex::llm::LlmError> {
+        Ok(vec!["probe-model".into()])
+    }
+}
+
+/// A diamond DAG: `a → {b, c} → d`. `b` and `c` are independent and become
+/// ready in the same wave, so they are the steps that may overlap.
+fn diamond_research_steps() -> Vec<TaskStep> {
+    let research = |id: &str, deps: &[&str]| TaskStep {
+        id: id.to_string(),
+        description: format!("research {id}"),
+        action: StepAction::Research {
+            query: id.to_string(),
+        },
+        depends_on: deps.iter().map(|d| d.to_string()).collect(),
+        tier: audit::ActionTier::Read,
+        estimated_tokens: 0,
+    };
+    vec![
+        research("a", &[]),
+        research("b", &["a"]),
+        research("c", &["a"]),
+        research("d", &["b", "c"]),
+    ]
+}
+
+async fn run_diamond_with_parallelism(max_parallel: usize) -> (usize, TaskPhase) {
+    use std::sync::atomic::Ordering;
+    let in_flight = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let llm = Arc::new(ConcurrencyProbeLlm {
+        in_flight: in_flight.clone(),
+        peak: peak.clone(),
+    });
+    let decomposer = Arc::new(MockDecomposer {
+        steps: diamond_research_steps(),
+    });
+    let orchestrator = TaskOrchestrator::new(decomposer)
+        .with_llm(llm)
+        .with_max_parallel_steps(max_parallel);
+    let (task_id, _plan) = orchestrator
+        .plan("diamond", DecompositionContext::default())
+        .await
+        .unwrap();
+    orchestrator.execute(&task_id).await.unwrap();
+    let phase = orchestrator.get_task(&task_id).await.unwrap().phase;
+    (peak.load(Ordering::SeqCst), phase)
+}
+
+#[tokio::test]
+async fn parallel_wave_runs_independent_steps_concurrently() {
+    // With headroom, the diamond's two independent middle steps run in the
+    // same wave → at least two generate calls overlap in time.
+    let (peak, phase) = run_diamond_with_parallelism(4).await;
+    assert!(
+        peak >= 2,
+        "independent ready steps should overlap; observed peak {peak}"
+    );
+    assert_eq!(phase, TaskPhase::Completed, "all four steps should succeed");
+}
+
+#[tokio::test]
+async fn max_parallel_one_keeps_execution_sequential() {
+    // The same diamond with a width-1 limit must never overlap two steps,
+    // proving the knob fully serialises execution (the pre-refactor default).
+    let (peak, phase) = run_diamond_with_parallelism(1).await;
+    assert_eq!(peak, 1, "max_parallel_steps=1 must never overlap steps");
+    assert_eq!(phase, TaskPhase::Completed);
+}
+
+#[tokio::test]
+async fn failure_in_a_parallel_wave_skips_dependents_but_lets_siblings_finish() {
+    // Diamond a → {b, c} → d, but b is a no-output Plan step (deterministic
+    // failure, no LLM needed). In the {b, c} wave, b fails while c still
+    // completes; d depends on the failed b and is skipped. The default
+    // decomposer declines to replan, so the failure stands.
+    let plan = |id: &str, output: &str, deps: &[&str]| TaskStep {
+        id: id.to_string(),
+        description: format!("plan {id}"),
+        action: StepAction::Plan {
+            output: output.to_string(),
+        },
+        depends_on: deps.iter().map(|d| d.to_string()).collect(),
+        tier: audit::ActionTier::Read,
+        estimated_tokens: 0,
+    };
+    let steps = vec![
+        plan("a", "root ok", &[]),
+        plan("b", "", &["a"]),           // empty output → deterministic failure
+        plan("c", "sibling ok", &["a"]), // independent of b, must still complete
+        plan("d", "leaf", &["b", "c"]),  // depends on failed b → skipped
+    ];
+    let decomposer = Arc::new(MockDecomposer { steps });
+    let orchestrator = TaskOrchestrator::new(decomposer).with_max_parallel_steps(4);
+    let (task_id, _plan) = orchestrator
+        .plan("failure wave", DecompositionContext::default())
+        .await
+        .unwrap();
+    orchestrator.execute(&task_id).await.unwrap();
+
+    let task = orchestrator.get_task(&task_id).await.unwrap();
+    assert!(
+        matches!(task.step_states.get("a"), Some(StepState::Completed { .. })),
+        "root should complete"
+    );
+    assert!(
+        matches!(task.step_states.get("b"), Some(StepState::Failed { .. })),
+        "the empty Plan step should fail"
+    );
+    assert!(
+        matches!(task.step_states.get("c"), Some(StepState::Completed { .. })),
+        "the independent sibling should still complete despite b failing"
+    );
+    assert!(
+        matches!(task.step_states.get("d"), Some(StepState::Skipped { .. })),
+        "the dependent of the failed step should be skipped"
+    );
+    assert_eq!(
+        task.phase,
+        TaskPhase::Failed,
+        "task with a failed step ends Failed"
+    );
+}

@@ -173,6 +173,9 @@ pub(super) async fn wire_safety_infrastructure(
         .with_llm(processor.llm_arc())
         .with_episodic(Arc::new(hippocampus::EpisodicStore::new(db.clone())))
         .with_delegation_policy(escalation_policy)
+        // Run independent ready steps concurrently per wave (the graph is a
+        // DAG); 1 keeps execution sequential.
+        .with_max_parallel_steps(config.actions.max_parallel_steps)
         // Cache the sandbox allowlist so the replan-on-failure loop can
         // include it in its corrective LLM call.
         .with_available_tools(config.security.exec_allowlist.clone());

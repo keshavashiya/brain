@@ -516,6 +516,8 @@ impl Default for BrainConfig {
                     channels: HashMap::new(),
                 },
                 resilience: ResilienceConfig::default(),
+                // Synced to `default.yaml`: 4 independent ready steps per wave.
+                max_parallel_steps: 4,
             },
             proactivity: ProactivityConfig {
                 // Synced to `default.yaml`: programmatic `BrainConfig::default()`

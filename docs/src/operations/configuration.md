@@ -222,6 +222,12 @@ actions:
     retry_base_ms: 500
     circuit_breaker_threshold: 5
     circuit_breaker_cooldown_secs: 60
+
+  # How many of a task plan's independent ready steps the orchestrator runs at
+  # once. 1 = strictly sequential; higher exploits parallel branches in the
+  # plan's dependency graph. Approval prompts are always resolved one at a time
+  # — only auto-approved/approved actions overlap.
+  max_parallel_steps: 4
 ```
 
 ---
