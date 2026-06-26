@@ -376,22 +376,6 @@ pub enum PipelineResult {
     },
 }
 
-// ─── Signal Adapter Trait ─────────────────────────────────────────────────────
-
-/// Trait implemented by all protocol adapters (HTTP, WebSocket, MCP, gRPC, CLI).
-///
-/// Each adapter converts protocol-specific messages into Signal values,
-/// submits them to SignalProcessor, and delivers the SignalResponse back
-/// to the originating client via `send()`.
-#[async_trait::async_trait]
-pub trait SignalAdapter: Send + Sync {
-    /// Return the source type for this adapter.
-    fn source(&self) -> SignalSource;
-
-    /// Send a response back to the adapter's client.
-    async fn send(&self, response: SignalResponse) -> Result<(), SignalError>;
-}
-
 /// Extract text content from a ResponseContent variant.
 pub fn response_to_text(content: &ResponseContent) -> String {
     match content {

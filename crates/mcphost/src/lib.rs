@@ -10,8 +10,8 @@
 //! - **Streamable HTTP** — current spec transport
 //! - **HTTP+SSE** — legacy transport, still spec-required for compatibility
 //!
-//! This crate currently provides the trait surfaces ([`MCPHost`],
-//! [`MCPClient`]), the [`ServerConfig`] / [`OAuthConfig`] / [`ToolDescriptor`]
+//! This crate currently provides the [`MCPHost`] trait surface, the
+//! [`ServerConfig`] / [`OAuthConfig`] / [`ToolDescriptor`]
 //! / [`CallOutcome`] types, the [`McpHostError`] taxonomy, and an
 //! [`InMemoryMcpHost`] no-transport stub so downstream wiring can be built
 //! against the trait before transports are implemented.
@@ -103,20 +103,6 @@ pub trait MCPHost: Send + Sync {
             "this MCP host does not track catalog consent (server '{server}')"
         )))
     }
-}
-
-/// A single transport-bound MCP client (one per mounted server).
-#[async_trait]
-pub trait MCPClient: Send + Sync {
-    async fn initialize(&self) -> Result<ServerInfo, McpHostError>;
-    async fn list_tools(&self) -> Result<Vec<ToolDescriptor>, McpHostError>;
-    async fn call_tool(
-        &self,
-        name: &str,
-        args: serde_json::Value,
-    ) -> Result<CallOutcome, McpHostError>;
-    async fn shutdown(&self) -> Result<(), McpHostError>;
-    fn server_info(&self) -> Option<ServerInfo>;
 }
 
 /// In-memory `MCPHost` with no transport — records mounts so downstream

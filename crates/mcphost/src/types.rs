@@ -189,9 +189,9 @@ pub struct CallOutcome {
     pub elapsed_ms: u64,
 }
 
-/// In-memory record of a mounted server. The transport-bound `MCPClient`
-/// is attached when a real transport is configured; the bare record
-/// tracks config + handshake data.
+/// In-memory record of a mounted server. A transport-bound client is
+/// attached when a real transport is configured; the bare record tracks
+/// config + handshake data.
 #[derive(Debug, Clone)]
 pub struct MountedServer {
     pub name: String,

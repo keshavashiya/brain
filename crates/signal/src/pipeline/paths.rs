@@ -333,14 +333,6 @@ fn read_truncated(path: &std::path::Path, cap: usize) -> String {
 
 // ── Auto-context expansion for decompose ───────────────────────────────────
 
-/// Maximum number of distinct paths we'll attach to a single decompose
-/// request. Caps the prompt size so a request that pastes a dozen files
-/// can't blow the LLM context window.
-const MAX_DECOMPOSE_PATHS: usize = 4;
-/// Per-file content cap when building the decomposer's relevant_facts.
-/// Tighter than `read_truncated`'s 12 KB because the decomposer needs a
-/// nudge, not a full code-review-quality excerpt.
-const DECOMPOSE_FILE_BYTES: usize = 3 * 1024;
 /// Bare filenames that are recognised as path tokens even without a
 /// directory separator. Common manifests + CI files only — the goal is
 /// to surface real grounding, not to scoop arbitrary identifiers.
@@ -428,75 +420,6 @@ fn is_pathlike(s: &str) -> bool {
 #[allow(dead_code, unused_imports)]
 pub(crate) fn collect_path_excerpts(_request: &str) -> Vec<String> {
     Vec::new()
-}
-
-/// Old free-text scanner kept private for tests / `attach` callers. NOT
-/// called from decompose anymore (Issue 130).
-#[allow(dead_code)]
-fn collect_path_excerpts_legacy(request: &str) -> Vec<String> {
-    let cwd = std::env::current_dir().ok();
-    extract_path_tokens(request)
-        .into_iter()
-        .take(MAX_DECOMPOSE_PATHS)
-        .filter_map(|tok| {
-            let expanded = expand_user_path(&tok);
-            let mut pb = std::path::PathBuf::from(&expanded);
-            if pb.is_relative() {
-                if let Some(base) = &cwd {
-                    pb = base.join(&pb);
-                }
-            }
-            build_decompose_excerpt(&tok, &pb)
-        })
-        .collect()
-}
-
-fn build_decompose_excerpt(token: &str, pb: &std::path::Path) -> Option<String> {
-    let meta = std::fs::metadata(pb).ok()?;
-    if meta.is_file() {
-        // Route through the extractor so PDFs (and any other binary
-        // formats we add later) come back as real text, not a refusal
-        // that pushes the planner into `grep -a` workarounds.
-        match crate::extract::read_path_as_text(pb, DECOMPOSE_FILE_BYTES) {
-            Ok(body) => Some(format!("File `{token}`:\n```\n{body}\n```")),
-            Err(e) => {
-                tracing::debug!(path = %pb.display(), error = %e, "decompose excerpt skipped");
-                None
-            }
-        }
-    } else if meta.is_dir() {
-        let mut entries: Vec<String> = std::fs::read_dir(pb)
-            .ok()?
-            .filter_map(|e| e.ok())
-            .filter_map(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                if SKIP_DIRS.contains(&name.as_str()) {
-                    return None;
-                }
-                let suffix = if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                    "/"
-                } else {
-                    ""
-                };
-                Some(format!("{name}{suffix}"))
-            })
-            .collect();
-        entries.sort();
-        let shown: Vec<String> = entries.iter().take(20).cloned().collect();
-        let extra = entries.len().saturating_sub(shown.len());
-        let extra_line = if extra > 0 {
-            format!(", +{extra} more")
-        } else {
-            String::new()
-        };
-        Some(format!(
-            "Directory `{token}` ({} entries{extra_line}):\n  {}",
-            entries.len(),
-            shown.join("\n  ")
-        ))
-    } else {
-        None
-    }
 }
 
 #[cfg(test)]

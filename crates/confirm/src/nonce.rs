@@ -194,17 +194,6 @@ pub trait ConfirmationEngine: Send + Sync {
     async fn pending(&self) -> Result<Vec<ApprovalSpec>, ConfirmError>;
 }
 
-/// Pending approval request stored in SQLite.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
-struct PendingApproval {
-    nonce: String,
-    spec: ApprovalSpec,
-    created_at: String,
-    resolved: bool,
-    outcome: Option<String>, // JSON-encoded ApprovalOutcome
-}
-
 /// SQLite-backed confirmation engine.
 pub struct SqliteConfirmationEngine {
     db: SqlitePool,

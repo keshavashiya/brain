@@ -43,8 +43,8 @@ pub enum ThalamusError {
 /// new variants get a compile-error until their category is declared).
 ///
 /// The taxonomy mirrors the auth tiers in `signal::authz::intent_to_auth`
-/// so future trait-dispatch refactors (`IntentHandler`, Issue 111) and
-/// tier resolution (Issue 112) converge on the same cut of the enum.
+/// so trait-dispatch and tier resolution (Issue 112) converge on the
+/// same cut of the enum.
 ///
 /// JSON / serde shape is unaffected by the grouping — variant *names* are
 /// the wire identifiers and remain unchanged.

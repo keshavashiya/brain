@@ -8,11 +8,9 @@
 //!
 //! Each category exposes one trait — [`InspectionHandler`],
 //! [`MemoryHandler`], etc. — that owns the dispatch logic for that
-//! category's variants. The [`IntentHandler`] super-trait bundles them
-//! so a single bound on the processor is enough to express "can
-//! dispatch every intent variant". Adding a new category grows the
-//! super-trait bounds — every call site fails to compile until the new
-//! sub-trait is implemented for the processor.
+//! category's variants. The call site imports the sub-traits directly,
+//! so adding a new category means implementing its handler trait for the
+//! processor and wiring its match arm.
 //!
 //! Per-category match arms are exhaustive over the variants
 //! [`thalamus::Intent::category`] routes to them; the catch-all is
@@ -119,39 +117,6 @@ pub(crate) trait ConversationHandler {
         intent: thalamus::Intent,
         prepend_nudges: &NudgeFn<'_>,
     ) -> Result<PipelineResult, SignalError>;
-}
-
-/// Bundles all seven per-category handler traits. A single bound on the
-/// processor type is enough to express "can dispatch every intent
-/// variant". Adding a new category grows this list — every site that
-/// requires `IntentHandler` fails to compile until the new sub-trait is
-/// implemented for the processor.
-///
-/// Currently unused as a bound (the call site in `pipeline.rs` imports
-/// the sub-traits directly so each method resolves), but kept as the
-/// canonical "fully wired processor" contract for future test mocks and
-/// feature-flagged variants.
-#[allow(dead_code)]
-pub(crate) trait IntentHandler:
-    InspectionHandler
-    + MemoryHandler
-    + ActionHandler
-    + LifecycleHandler
-    + GovernanceHandler
-    + CapabilityHandler
-    + ConversationHandler
-{
-}
-
-impl<T> IntentHandler for T where
-    T: InspectionHandler
-        + MemoryHandler
-        + ActionHandler
-        + LifecycleHandler
-        + GovernanceHandler
-        + CapabilityHandler
-        + ConversationHandler
-{
 }
 
 // ── Per-category authorization traits (Issue 112) ──────────────────────
