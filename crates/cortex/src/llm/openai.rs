@@ -216,7 +216,7 @@ impl OpenAiProvider {
             .map(|t| OpenAiTool {
                 kind: "function",
                 function: OpenAiFunctionDef {
-                    name: t.name.clone(),
+                    name: sanitize_tool_name(&t.name),
                     description: t.description.clone(),
                     parameters: t.parameters.clone(),
                 },
@@ -235,7 +235,7 @@ impl OpenAiProvider {
             .flatten()
             .map(|tc| ProposedToolCall {
                 id: tc.id.clone(),
-                name: tc.function.name.clone(),
+                name: desanitize_tool_name(&tc.function.name),
                 arguments: parse_arguments(&tc.function.arguments),
             })
             .collect()
@@ -512,10 +512,28 @@ fn convert_proposed_call(call: &ProposedToolCall) -> OpenAiToolCall {
         id: call.id.clone(),
         kind: function_kind(),
         function: OpenAiFunctionCall {
-            name: call.name.clone(),
+            name: sanitize_tool_name(&call.name),
             arguments: serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".to_string()),
         },
     }
+}
+
+/// OpenAI's function-name grammar is `^[a-zA-Z0-9_-]+$` — no dots. Strict
+/// gateways (DeepSeek via OpenCode Zen, OpenAI itself) reject anything else
+/// with a `400 invalid_request_error`, while lenient ones (Ollama) accept it.
+/// Brain's native tools are dotted namespaces (`net.http`, `memory.store`), so
+/// we map `.`→`__` on the wire and reverse it when reading a proposed call
+/// back. The pair is a clean inverse as long as a tool name never legitimately
+/// contains `__` — which holds for every native verb and the common MCP shape
+/// (`create_issue`, single underscores).
+fn sanitize_tool_name(name: &str) -> String {
+    name.replace('.', "__")
+}
+
+/// Inverse of [`sanitize_tool_name`]: restore the kernel's dotted tool name
+/// from the wire form so the route resolver matches the advertised descriptor.
+fn desanitize_tool_name(name: &str) -> String {
+    name.replace("__", ".")
 }
 
 /// Parse a tool call's JSON-string `arguments` into a [`serde_json::Value`].
@@ -527,4 +545,62 @@ fn parse_arguments(raw: &str) -> serde_json::Value {
         return serde_json::json!({});
     }
     serde_json::from_str(trimmed).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_name_sanitize_round_trips_dotted_names() {
+        // Dotted native names become OpenAI-legal (`^[a-zA-Z0-9_-]+$`) and map
+        // back exactly. Single underscores and hyphens (the common MCP shape)
+        // are preserved across the round trip.
+        for name in [
+            "net.http",
+            "memory.store",
+            "fs.read",
+            "create_issue",
+            "do-thing",
+        ] {
+            let wire = sanitize_tool_name(name);
+            assert!(
+                wire.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+                "sanitized name {wire:?} must satisfy OpenAI's function-name grammar"
+            );
+            assert_eq!(desanitize_tool_name(&wire), name, "round trip for {name:?}");
+        }
+        assert!(!sanitize_tool_name("net.http").contains('.'));
+    }
+
+    #[test]
+    fn convert_tools_emits_dot_free_function_names() {
+        let tools = vec![ToolDef {
+            name: "net.http".to_string(),
+            description: "fetch a url".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let out = OpenAiProvider::convert_tools(&tools);
+        assert_eq!(out[0].function.name, "net__http");
+    }
+
+    #[test]
+    fn extract_tool_calls_restores_dotted_name() {
+        let msg = OpenAiMessage {
+            role: "assistant".to_string(),
+            content: None,
+            tool_calls: Some(vec![OpenAiToolCall {
+                id: Some("call_1".to_string()),
+                kind: function_kind(),
+                function: OpenAiFunctionCall {
+                    name: "net__http".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }]),
+            tool_call_id: None,
+        };
+        let calls = OpenAiProvider::extract_tool_calls(&msg);
+        assert_eq!(calls[0].name, "net.http");
+    }
 }
