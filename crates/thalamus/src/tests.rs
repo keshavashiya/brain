@@ -240,6 +240,20 @@ fn normalize_command_strips_filler_and_wrappers() {
     assert_eq!(normalize_command("cmd /c dir"), "cmd /c dir");
     // …but the explicit `cmd:` preamble is filler.
     assert_eq!(normalize_command("cmd: dir"), "dir");
+    // A quoted command followed by natural-language prose: the quoted span is
+    // lifted out and the prose tail dropped, so the binary token is clean
+    // (`git`, not `'git`) and passes the allowlist. Regression: "Run 'git
+    // status --porcelain' in my project and summarize what's dirty" used to
+    // leave `command = "'git"` and get a perfectly-allowlisted binary rejected.
+    assert_eq!(
+        normalize_command("'git status --porcelain' in my project and summarize what's dirty"),
+        "git status --porcelain"
+    );
+    assert_eq!(normalize_command("`echo hi` for me"), "echo hi");
+    assert_eq!(
+        normalize_command("\"cargo build\" then tell me"),
+        "cargo build"
+    );
 }
 
 // ── Property tests ────────────────────────────────────────────────

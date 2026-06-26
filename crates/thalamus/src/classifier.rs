@@ -73,6 +73,15 @@ pub(crate) fn normalize_command(raw: &str) -> String {
             .find_map(|&q| s.strip_prefix(q).and_then(|x| x.strip_suffix(q)))
         {
             inner.trim()
+        } else if let Some(inner) = extract_leading_quoted(s) {
+            // A leading quote with a matching close but trailing natural-language
+            // prose after it (e.g. `'git status --porcelain' in my project and
+            // summarize what's dirty`). The whole-wrap branch above can't peel
+            // this because the string doesn't *end* in the quote, which would
+            // otherwise leave the stray quote on the binary token (`'git`) and
+            // get a perfectly-allowlisted command wrongly rejected. Take the
+            // quoted command span and drop the prose tail.
+            inner
         } else {
             break;
         };
@@ -89,6 +98,21 @@ pub(crate) fn normalize_command(raw: &str) -> String {
         }
     }
     tokens.collect::<Vec<_>>().join(" ")
+}
+
+/// If `s` opens with a quote (`'`, `"`, or `` ` ``) that has a matching closing
+/// quote later in the string, return the trimmed span between them. Used to lift
+/// a quoted command out of a sentence that wraps it (`'git status' in my repo`)
+/// without dragging the prose tail onto the binary token. Returns `None` when
+/// the string doesn't start with a quote or the quote is never closed.
+fn extract_leading_quoted(s: &str) -> Option<&str> {
+    let q = s.chars().next()?;
+    if !matches!(q, '\'' | '"' | '`') {
+        return None;
+    }
+    let rest = &s[q.len_utf8()..];
+    let close = rest.find(q)?;
+    Some(rest[..close].trim())
 }
 
 /// True if `tok` is a leading filler word. `cmd:` is filler; bare `cmd` is not.
