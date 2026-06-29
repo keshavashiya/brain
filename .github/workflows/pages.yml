@@ -44,7 +44,7 @@ jobs:
           node-version: 22
 
       - name: Cache embedding model
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: docs/tools/.cache
           key: hf-minilm-${{ hashFiles('docs/tools/index.mjs') }}
