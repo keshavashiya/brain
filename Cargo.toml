@@ -149,7 +149,7 @@ rustyline = "18"
 rpassword = "7"
 
 # Terminal UI
-crossterm = "0.28"
+crossterm = "0.29"
 termimad = "0.34"
 
 # LRU cache
