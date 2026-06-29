@@ -162,7 +162,7 @@ async-stream = "0.3"
 futures-core = "0.3"
 
 # WebSocket
-tokio-tungstenite = "0.26"
+tokio-tungstenite = "0.29"
 
 # Internal crates
 brain = { package = "brainos-core", path = "crates/core", version = "0.5.0" }
